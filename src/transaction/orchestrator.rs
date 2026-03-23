@@ -72,10 +72,12 @@ impl TxOrchestrator {
     if !replay.is_new {
       gc.release_orphand(disk_len)?;
       logger.info("orphand block has released successfully.");
+      run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
       replay
         .segments
         .into_iter()
-        .for_each(|seg| wal.wait_checkpoint(seg));
+        .map(|seg| seg.truncate())
+        .collect::<Result>()?;
     }
     gc.ready();
 
@@ -216,7 +218,7 @@ fn run_checkpoint(
   logger.debug(format!("checkpoint garbage collected id {log_id}"));
 
   buffer_pool.flush()?;
-  wal.checkpoint_and_flush(log_id, version.min_version())?;
+  wal.checkpoint_and_flush(log_id, min_version)?;
   logger.debug(format!("checkpoint complete id {log_id}"));
   Ok(())
 }
