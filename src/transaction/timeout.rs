@@ -1,6 +1,6 @@
 use std::{
   cell::UnsafeCell,
-  ops::Index,
+  mem::replace,
   sync::{Arc, Weak},
   thread::{Builder, JoinHandle},
   time::{Duration, Instant},
@@ -17,11 +17,11 @@ use super::{TxState, VersionVisibility};
 
 const TICK_SIZE: Duration = Duration::from_millis(1);
 
-const LAYER_PER_BUCKET_BIT: usize = 6;
-const LAYER_PER_BUCKET: usize = 1 << LAYER_PER_BUCKET_BIT;
-const LAYER_PER_BUCKET_MASK: usize = LAYER_PER_BUCKET - 1;
+const LAYER_PER_BUCKET_BIT: u64 = 6;
+const LAYER_PER_BUCKET: usize = 1 << LAYER_PER_BUCKET_BIT as usize;
+const LAYER_PER_BUCKET_MASK: u64 = LAYER_PER_BUCKET as u64 - 1;
 const MAX_LAYER_PER_BUCKET: usize =
-  (usize::MAX.checked_ilog2().unwrap() as usize).div_ceil(LAYER_PER_BUCKET_BIT);
+  (usize::MAX.ilog2() as usize).div_ceil(LAYER_PER_BUCKET_BIT as usize);
 
 struct SystemTimer(Instant);
 impl SystemTimer {
@@ -31,8 +31,8 @@ impl SystemTimer {
   }
 
   #[inline]
-  fn now(&self) -> Duration {
-    self.0.elapsed()
+  fn now(&self) -> u64 {
+    self.0.elapsed().as_millis() as u64
   }
 
   #[inline]
@@ -41,112 +41,21 @@ impl SystemTimer {
   }
 }
 
-#[inline]
-fn init_hands(hands: &mut [u8; MAX_LAYER_PER_BUCKET], timestamp: usize) -> usize {
-  let mut current = timestamp;
-  for len in 0..MAX_LAYER_PER_BUCKET {
-    if current == 0 {
-      return len;
-    }
-    hands[len] = (current & LAYER_PER_BUCKET_MASK) as u8;
-    current >>= LAYER_PER_BUCKET_BIT;
-  }
-  MAX_LAYER_PER_BUCKET
-}
-
-struct ClockHands {
-  hands: [u8; MAX_LAYER_PER_BUCKET],
-  len: usize,
-  timestamp: Duration,
-}
-impl ClockHands {
-  #[inline]
-  pub fn new(timestamp: Duration) -> Self {
-    let mut hands = [0; MAX_LAYER_PER_BUCKET];
-    let len = init_hands(&mut hands, timestamp.as_millis() as usize);
-    Self {
-      hands,
-      len,
-      timestamp,
-    }
-  }
-
-  #[inline]
-  fn reset(&mut self) {
-    self.len = 0;
-    self.timestamp = Duration::ZERO;
-  }
-
-  #[inline]
-  fn len(&self) -> usize {
-    self.len
-  }
-
-  #[inline]
-  fn advance_until(&mut self, timestamp: Duration) -> bool {
-    if self.timestamp >= timestamp {
-      return false;
-    }
-
-    self.timestamp += TICK_SIZE;
-    for i in self.hands.iter_mut().take(self.len) {
-      if *i < LAYER_PER_BUCKET_MASK as u8 {
-        *i += 1;
-        return true;
-      }
-
-      *i = 0;
-    }
-
-    self.hands[self.len] = 1;
-    self.len += 1;
-    true
-  }
-
-  #[inline]
-  fn get(&self, index: usize) -> Option<usize> {
-    if index >= self.len {
-      return None;
-    }
-
-    Some(self.hands[index] as usize)
-  }
-}
-
-impl Index<usize> for ClockHands {
-  type Output = u8;
-
-  #[inline]
-  fn index(&self, index: usize) -> &Self::Output {
-    &self.hands[index]
-  }
-}
-
-impl Default for ClockHands {
-  #[inline]
-  fn default() -> Self {
-    Self::new(Duration::ZERO)
-  }
-}
-
 struct Task<T> {
-  clock_hands: ClockHands,
+  execute_at: u64,
   data: T,
 }
 impl<T> Task<T> {
-  fn new(data: T, scheduled_at: Duration, delay: Duration) -> Self {
-    Self {
-      clock_hands: ClockHands::new(scheduled_at + delay),
-      data,
-    }
+  fn new(data: T, execute_at: u64) -> Self {
+    Self { execute_at, data }
   }
   #[inline]
-  fn get_bucket_index(&self, layer_index: usize) -> usize {
-    self.clock_hands[layer_index] as usize
+  fn get_bucket_index(&self, layer_index: u64) -> u64 {
+    (self.execute_at >> (layer_index * LAYER_PER_BUCKET_BIT)) & LAYER_PER_BUCKET_MASK
   }
   #[inline]
   fn layer_size(&self) -> usize {
-    self.clock_hands.len()
+    (64 - self.execute_at.leading_zeros() as u64).div_ceil(LAYER_PER_BUCKET_BIT) as usize
   }
   fn take(self) -> T {
     self.data
@@ -157,12 +66,12 @@ type Bucket<T> = Vec<Task<T>>;
 
 struct BucketLayer<T> {
   buckets: [Option<Bucket<T>>; LAYER_PER_BUCKET],
-  layer_index: usize,
+  layer_index: u64,
   size: usize,
 }
 impl<T> BucketLayer<T> {
   #[inline]
-  fn new(layer_index: usize) -> Self {
+  fn new(layer_index: u64) -> Self {
     Self {
       buckets: [const { None }; LAYER_PER_BUCKET],
       layer_index,
@@ -172,7 +81,7 @@ impl<T> BucketLayer<T> {
 
   #[inline]
   fn insert(&mut self, task: Task<T>) {
-    let bucket = task.get_bucket_index(self.layer_index);
+    let bucket = task.get_bucket_index(self.layer_index) as usize;
     self.buckets[bucket].get_or_insert_default().push(task);
     self.size += 1;
   }
@@ -192,7 +101,7 @@ impl<T> BucketLayer<T> {
 
 struct TimingWheel<T, F> {
   layers: Vec<BucketLayer<T>>,
-  clock_hands: ClockHands,
+  current: u64,
   timer: SystemTimer,
   tasks: usize,
   handle: F,
@@ -204,7 +113,7 @@ where
   fn new(handle: F) -> Self {
     Self {
       layers: Vec::with_capacity(MAX_LAYER_PER_BUCKET),
-      clock_hands: Default::default(),
+      current: 0,
       timer: SystemTimer::new(),
       tasks: 0,
       handle,
@@ -213,18 +122,22 @@ where
   #[inline]
   fn reset(&mut self) {
     self.timer.reset();
-    self.clock_hands.reset();
+    self.current = 0;
   }
   fn register(&mut self, data: T, delay: Duration) {
     if self.tasks == 0 {
       self.reset();
     }
 
-    let task = Task::new(data, self.timer.now(), delay);
+    let execute_at = self.timer.now() + delay.as_millis() as u64;
+    if execute_at == 0 {
+      return (self.handle)(data);
+    }
 
+    let task = Task::new(data, execute_at);
     let layer_size = task.layer_size();
     for len in self.layers.len()..layer_size {
-      self.layers.push(BucketLayer::new(len));
+      self.layers.push(BucketLayer::new(len as u64));
     }
 
     self.layers[layer_size - 1].insert(task);
@@ -233,9 +146,26 @@ where
 
   fn tick(&mut self) {
     let now = self.timer.now();
+    let mut dropdown: Option<Bucket<T>> = None;
 
-    while self.clock_hands.advance_until(now) {
-      match self.dropdown() {
+    for current in replace(&mut self.current, now)..now {
+      for (i, layer) in self.layers.iter_mut().enumerate().rev() {
+        match (layer.is_empty(), dropdown.take()) {
+          (true, None) => continue,
+          (_, Some(tasks)) => tasks.into_iter().for_each(|task| layer.insert(task)),
+          _ => {}
+        }
+
+        let index =
+          (current >> (i as u64 * LAYER_PER_BUCKET_BIT)) & LAYER_PER_BUCKET_MASK;
+        dropdown = layer.dropdown(index as usize);
+      }
+
+      while let Some(true) = self.layers.last().map(|l| l.is_empty()) {
+        self.layers.pop();
+      }
+
+      match dropdown.take() {
         Some(tasks) => self.handle_tasks(tasks),
         None => continue,
       }
@@ -245,26 +175,6 @@ where
         break;
       }
     }
-  }
-
-  #[inline]
-  fn dropdown(&mut self) -> Option<Bucket<T>> {
-    let mut dropdown: Option<Bucket<T>> = None;
-
-    for (i, layer) in self.layers.iter_mut().enumerate().rev() {
-      match (layer.is_empty(), dropdown.take()) {
-        (true, None) => continue,
-        (_, Some(tasks)) => tasks.into_iter().for_each(|task| layer.insert(task)),
-        _ => {}
-      }
-
-      dropdown = self.clock_hands.get(i).and_then(|i| layer.dropdown(i));
-    }
-
-    while let Some(true) = self.layers.last().map(|l| l.is_empty()) {
-      self.layers.pop();
-    }
-    dropdown
   }
 
   fn handle_tasks(&mut self, tasks: Bucket<T>) {
