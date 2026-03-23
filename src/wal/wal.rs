@@ -362,10 +362,6 @@ impl WAL {
       }
     }
   }
-
-  pub fn wait_checkpoint(&self, segment: WALSegment) {
-    let _ = self.wait_checkpoint.send(segment);
-  }
 }
 unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
