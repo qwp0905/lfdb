@@ -42,20 +42,20 @@ impl SystemTimer {
 }
 
 #[inline]
-fn init_hands(hands: &mut [usize; MAX_LAYER_PER_BUCKET], timestamp: usize) -> usize {
+fn init_hands(hands: &mut [u8; MAX_LAYER_PER_BUCKET], timestamp: usize) -> usize {
   let mut current = timestamp;
   for len in 0..MAX_LAYER_PER_BUCKET {
     if current == 0 {
       return len;
     }
-    hands[len] = current & LAYER_PER_BUCKET_MASK;
+    hands[len] = (current & LAYER_PER_BUCKET_MASK) as u8;
     current >>= LAYER_PER_BUCKET_BIT;
   }
   MAX_LAYER_PER_BUCKET
 }
 
 struct ClockHands {
-  hands: [usize; MAX_LAYER_PER_BUCKET],
+  hands: [u8; MAX_LAYER_PER_BUCKET],
   len: usize,
   timestamp: Duration,
 }
@@ -90,7 +90,7 @@ impl ClockHands {
 
     self.timestamp += TICK_SIZE;
     for i in self.hands.iter_mut().take(self.len) {
-      if *i < LAYER_PER_BUCKET_MASK {
+      if *i < LAYER_PER_BUCKET_MASK as u8 {
         *i += 1;
         return true;
       }
@@ -109,12 +109,12 @@ impl ClockHands {
       return None;
     }
 
-    Some(self.hands[index])
+    Some(self.hands[index] as usize)
   }
 }
 
 impl Index<usize> for ClockHands {
-  type Output = usize;
+  type Output = u8;
 
   #[inline]
   fn index(&self, index: usize) -> &Self::Output {
@@ -142,7 +142,7 @@ impl<T> Task<T> {
   }
   #[inline]
   fn get_bucket_index(&self, layer_index: usize) -> usize {
-    self.clock_hands[layer_index]
+    self.clock_hands[layer_index] as usize
   }
   #[inline]
   fn layer_size(&self) -> usize {
@@ -310,6 +310,7 @@ impl TimeoutThread {
           logger_c.debug(format!("tx {} timeout reached", state.get_id()));
           version_visibility.move_to_abort(state.get_id())
         });
+        let ticker = tick(TICK_SIZE);
 
         while let Ok(ctx) = rx.recv() {
           match ctx {
@@ -318,7 +319,6 @@ impl TimeoutThread {
           }
           logger.debug("timeout thread wake up.");
 
-          let ticker = tick(TICK_SIZE);
           while !wheel.is_empty() {
             select! {
               recv(ticker) -> _ => wheel.tick(),
