@@ -188,6 +188,37 @@ impl DirectIO for OpenOptions {
   }
 }
 
+pub trait Fallocate {
+  fn fallocate(&self, len: u64) -> Result<()>;
+}
+impl Fallocate for File {
+  #[cfg(target_os = "linux")]
+  fn fallocate(&self, len: u64) -> Result<()> {
+    let ret = unsafe { libc::fallocate(self.as_raw_fd(), 0, 0, len as libc::off_t) };
+    if ret == -1 {
+      return Err(Error::last_os_error());
+    }
+    Ok(())
+  }
+  #[cfg(target_vendor = "apple")]
+  fn fallocate(&self, len: u64) -> Result<()> {
+    let mut fstore = libc::fstore_t {
+      fst_flags: libc::F_ALLOCATEALL,
+      fst_posmode: libc::F_PEOFPOSMODE,
+      fst_offset: 0,
+      fst_length: len as libc::off_t,
+      fst_bytesalloc: 0,
+    };
+    let ret = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore) };
+    if ret == -1 {
+      return Err(Error::last_os_error());
+    }
+    Ok(())
+  }
+  #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+  fn fallocate(&self, _len: u64) {}
+}
+
 #[cfg(test)]
 #[path = "tests/io.rs"]
 mod tests;
