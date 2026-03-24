@@ -19,7 +19,6 @@ fn main() {
       .buffer_pool_shard_count(1 << 8)
       .wal_file_size(32 << 20)
       .gc_thread_count(5)
-      .io_thread_count(5)
       .logger(DebugLogger)
       .log_level(LogLevel::Trace)
       .build()

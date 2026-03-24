@@ -34,7 +34,6 @@ where
   pub gc_thread_count: usize,
   pub buffer_pool_shard_count: usize,
   pub buffer_pool_memory_capacity: usize,
-  pub io_thread_count: usize,
   pub transaction_timeout: Duration,
   pub logger: Arc<dyn Logger>,
   pub log_level: LogLevel,
@@ -70,7 +69,6 @@ impl Engine {
         .base_path
         .as_ref()
         .join(format!("{}{}", DATA_PATH, FILE_SUFFIX)),
-      io_thread_count: config.io_thread_count,
     };
     let gc_config = GarbageCollectionConfig {
       interval: config.gc_trigger_interval,
