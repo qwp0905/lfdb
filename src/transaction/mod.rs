@@ -9,3 +9,6 @@ pub use version::*;
 
 mod recorder;
 pub use recorder::*;
+
+mod timeout;
+use timeout::*;

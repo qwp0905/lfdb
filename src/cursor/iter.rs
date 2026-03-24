@@ -3,34 +3,31 @@ use std::mem::replace;
 use super::{CursorNode, DataEntry, Key, LeafNode, Pointer};
 use crate::{
   error::{Error, Result},
-  transaction::TxOrchestrator,
+  transaction::{TxOrchestrator, TxState},
 };
 
 pub struct CursorIterator<'a> {
-  tx_id: usize,
+  state: &'a TxState<'a>,
   orchestrator: &'a TxOrchestrator,
   leaf: LeafNode,
   pos: usize,
   end: Option<Key>,
   closed: bool,
-  committed: &'a bool,
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(
-    tx_id: usize,
+    state: &'a TxState,
     orchestrator: &'a TxOrchestrator,
     leaf: LeafNode,
     pos: usize,
-    committed: &'a bool,
     end: Option<Key>,
   ) -> Self {
     Self {
-      tx_id,
+      state,
       orchestrator,
       leaf,
       pos,
       end,
-      committed,
       closed: false,
     }
   }
@@ -39,7 +36,9 @@ impl<'a> CursorIterator<'a> {
     let mut slot = self.orchestrator.fetch(ptr)?.for_read();
     loop {
       let entry = slot.as_ref().deserialize::<DataEntry>()?;
-      if let Some(v) = entry.find_value(self.tx_id, |i| self.orchestrator.is_visible(i)) {
+      if let Some(v) =
+        entry.find_value(self.state.get_id(), |i| self.orchestrator.is_visible(i))
+      {
         return Ok(Some(v));
       }
 
@@ -51,13 +50,14 @@ impl<'a> CursorIterator<'a> {
   }
 
   pub fn try_next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    if *self.committed {
-      return Err(Error::TransactionClosed);
-    }
-
     if self.closed {
       return Ok(None);
     }
+
+    if !self.state.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+
     loop {
       for i in self.pos..self.leaf.len() {
         let (key, ptr) = self.leaf.at(i);

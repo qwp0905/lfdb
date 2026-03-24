@@ -26,6 +26,7 @@ where
       buffer_pool_shard_count: DEFAULT_BUFFER_POOL_SHARD_COUNT,
       buffer_pool_memory_capacity: DEFAULT_BUFFER_POOL_MEMORY_CAPACITY,
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
+      transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
       log_level: DEFAULT_LOG_LEVEL,
       logger: DEFAULT_LOGGER.to_arc(),
     })
@@ -71,6 +72,10 @@ where
     self.0.io_thread_count = count;
     self
   }
+  pub fn transaction_timeout(mut self, timeout: Duration) -> Self {
+    self.0.transaction_timeout = timeout;
+    self
+  }
   pub fn logger<L: Logger + 'static>(mut self, logger: L) -> Self {
     self.0.logger = logger.to_arc();
     self
@@ -95,5 +100,6 @@ const DEFAULT_GC_THREAD_COUNT: usize = 3;
 const DEFAULT_BUFFER_POOL_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BUFFER_POOL_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_IO_THREAD_COUNT: usize = 3;
+const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_LOGGER: NoneLogger = NoneLogger;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;

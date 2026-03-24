@@ -37,7 +37,7 @@ fn test_basic_crud() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
 
   // read within same tx
@@ -60,11 +60,11 @@ fn test_commit_visibility() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx1 = engine.new_transaction().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   tx1.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
   tx1.commit().unwrap();
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let val = tx2.get(&b"hello".to_vec()).unwrap();
   assert_eq!(val, Some(b"world".to_vec()));
 }
@@ -77,11 +77,11 @@ fn test_abort_invisibility() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx1 = engine.new_transaction().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   tx1.insert(b"ghost".to_vec(), b"data".to_vec()).unwrap();
   tx1.abort().unwrap();
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let val = tx2.get(&b"ghost".to_vec()).unwrap();
   assert_eq!(val, None);
 }
@@ -95,12 +95,12 @@ fn test_drop_abort() {
   let engine = build_engine(&dir);
 
   {
-    let tx1 = engine.new_transaction().unwrap();
+    let tx1 = engine.new_tx().unwrap();
     tx1.insert(b"vanish".to_vec(), b"poof".to_vec()).unwrap();
     // no commit, no abort — just drop
   }
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let val = tx2.get(&b"vanish".to_vec()).unwrap();
   assert_eq!(val, None);
 }
@@ -113,11 +113,11 @@ fn test_write_conflict() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx1 = engine.new_transaction().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   tx1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
   // tx1 NOT committed — still active
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let result = tx2.insert(b"contested".to_vec(), b"v2".to_vec());
   assert!(result.is_err());
   if let Err(Error::WriteConflict) = result {
@@ -137,7 +137,7 @@ fn test_transaction_closed_after_commit() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
   tx.commit().unwrap();
 
@@ -163,7 +163,7 @@ fn test_transaction_closed_after_abort() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
   tx.abort().unwrap();
 
@@ -185,13 +185,13 @@ fn test_scan_range() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   for i in 0u8..10 {
     tx.insert(vec![i], vec![i * 10]).unwrap();
   }
   tx.commit().unwrap();
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
 
   // scan [3, 7)
   let mut iter = tx2.scan(&vec![3], &vec![7]).unwrap();
@@ -209,13 +209,13 @@ fn test_scan_all() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   for i in 0u8..5 {
     tx.insert(vec![i], vec![i]).unwrap();
   }
   tx.commit().unwrap();
 
-  let tx2 = engine.new_transaction().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let mut iter = tx2.scan_all().unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
@@ -235,15 +235,15 @@ fn test_overwrite() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx1 = engine.new_transaction().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   tx1.insert(b"key".to_vec(), b"v1".to_vec()).unwrap();
   tx1.commit().unwrap();
 
-  let mut tx2 = engine.new_transaction().unwrap();
+  let mut tx2 = engine.new_tx().unwrap();
   tx2.insert(b"key".to_vec(), b"v2".to_vec()).unwrap();
   tx2.commit().unwrap();
 
-  let tx3 = engine.new_transaction().unwrap();
+  let tx3 = engine.new_tx().unwrap();
   let val = tx3.get(&b"key".to_vec()).unwrap();
   assert_eq!(val, Some(b"v2".to_vec()));
 }
@@ -274,7 +274,7 @@ fn test_crash_recovery() {
           }
           let key = vec![t, i];
           let value = vec![t, i, 0xFF];
-          let mut tx = match engine.new_transaction() {
+          let mut tx = match engine.new_tx() {
             Ok(tx) => tx,
             Err(_) => break,
           };
@@ -299,7 +299,7 @@ fn test_crash_recovery() {
 
   // Phase 2: restart and verify
   let engine = build_engine(&dir);
-  let tx = engine.new_transaction().unwrap();
+  let tx = engine.new_tx().unwrap();
   let keys = committed_keys.lock().unwrap();
 
   assert!(!keys.is_empty(), "should have committed at least some keys");
@@ -327,8 +327,8 @@ fn test_snapshot_isolation() {
   let engine = build_engine(&dir);
 
   // tx1 and tx2 both start
-  let mut tx1 = engine.new_transaction().unwrap();
-  let tx2 = engine.new_transaction().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
+  let tx2 = engine.new_tx().unwrap();
 
   // tx1 inserts and commits AFTER tx2 started
   tx1
@@ -342,7 +342,7 @@ fn test_snapshot_isolation() {
   drop(tx2);
 
   // tx3 starts AFTER tx1 committed — should see it
-  let tx3 = engine.new_transaction().unwrap();
+  let tx3 = engine.new_tx().unwrap();
   let val = tx3.get(&b"after".to_vec()).unwrap();
   assert_eq!(val, Some(b"should-not-see".to_vec()));
 }
@@ -360,14 +360,14 @@ fn test_entry_split() {
   let iterations = 50;
 
   for i in 0..iterations {
-    let mut tx = engine.new_transaction().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let value = vec![i as u8; 100];
     tx.insert(key.clone(), value).unwrap();
     tx.commit().unwrap();
   }
 
   // verify latest value is readable
-  let tx = engine.new_transaction().unwrap();
+  let tx = engine.new_tx().unwrap();
   let val = tx.get(&key).unwrap();
   assert!(
     val.is_some(),
@@ -399,7 +399,7 @@ fn test_btree_node_split_and_recovery() {
       let e = engine.clone();
       workers.push(thread::spawn(move || {
         while let Ok((i, done)) = rx.recv() {
-          let mut cursor = e.new_transaction().unwrap();
+          let mut cursor = e.new_tx().unwrap();
           let key = format!("key-{:06}", i).into_bytes();
           let value = format!("val-{:06}", i).into_bytes();
           cursor.insert(key, value).unwrap();
@@ -423,7 +423,7 @@ fn test_btree_node_split_and_recovery() {
     }
 
     // scan all and verify order + completeness
-    let tx = engine.new_transaction().unwrap();
+    let tx = engine.new_tx().unwrap();
     let mut iter = tx.scan_all().unwrap();
     let mut count = 0;
     let mut prev_key: Option<Vec<u8>> = None;
@@ -468,7 +468,7 @@ fn test_btree_node_split_and_recovery() {
   // Phase 2: restart engine and verify persistence
   {
     let engine = build_engine(&dir);
-    let tx = engine.new_transaction().unwrap();
+    let tx = engine.new_tx().unwrap();
 
     let mut iter = tx.scan_all().unwrap();
     let mut count = 0;
@@ -523,7 +523,7 @@ fn crash_writer() {
     let e = engine.clone();
     thread::spawn(move || {
       while let Ok((i, done)) = rx.recv() {
-        let mut cursor = e.new_transaction().unwrap();
+        let mut cursor = e.new_tx().unwrap();
         let key = format!("key-{:06}", i).into_bytes();
         let value = format!("val-{:06}", i).into_bytes();
         cursor.insert(key, value).unwrap();
@@ -597,7 +597,7 @@ fn test_process_crash_recovery() {
   // Phase 2: reopen engine and verify all committed keys survived
   {
     let engine = build_engine(&dir);
-    let mut tx = engine.new_transaction().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let mut c = 0;
     let mut iter = tx.scan_all().unwrap();
     while let Ok(Some(_)) = iter.try_next() {
@@ -652,7 +652,7 @@ fn test_hard_workload() {
     let rx = rx.clone();
     let th = std::thread::spawn(move || {
       while let Ok((vec, t)) = rx.recv() {
-        let mut r = e.new_transaction().expect("start error");
+        let mut r = e.new_tx().expect("start error");
         r.insert(vec.clone(), vec).expect("insert error");
         r.commit().expect("commit error");
         t.send(()).unwrap();
@@ -674,7 +674,7 @@ fn test_hard_workload() {
 
   keys.sort();
   let mut count = 0;
-  let mut t = engine.new_transaction().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
 
   let mut iter = t.scan_all().expect("scan start error");
   while let Ok(Some((k, _))) = iter.try_next() {
@@ -720,7 +720,7 @@ fn test_heavy_gc_single_key() {
       if writer_stop.load(Ordering::Acquire) {
         break;
       }
-      let mut tx = writer_engine.new_transaction().unwrap();
+      let mut tx = writer_engine.new_tx().unwrap();
       let value = (i as u32).to_le_bytes().to_vec();
       tx.insert(writer_key.clone(), value).unwrap();
       tx.commit().unwrap();
@@ -735,7 +735,7 @@ fn test_heavy_gc_single_key() {
   let reader = thread::spawn(move || {
     let mut read_count = 0u64;
     while !reader_stop.load(Ordering::Acquire) {
-      let tx = reader_engine.new_transaction().unwrap();
+      let tx = reader_engine.new_tx().unwrap();
       let _ = tx.get(&reader_key);
       read_count += 1;
     }
@@ -748,7 +748,7 @@ fn test_heavy_gc_single_key() {
 
   // phase 1: verify final value
   let final_val = *last_value.lock().unwrap();
-  let tx = engine.new_transaction().unwrap();
+  let tx = engine.new_tx().unwrap();
   let val = tx.get(&key).unwrap();
   assert!(val.is_some(), "key should exist after heavy writes");
   let bytes = val.unwrap();
@@ -764,7 +764,7 @@ fn test_heavy_gc_single_key() {
   // phase 2: restart and verify persistence
   drop(engine);
   let engine = build_engine(&dir);
-  let tx = engine.new_transaction().unwrap();
+  let tx = engine.new_tx().unwrap();
   let val = tx.get(&key).unwrap();
   assert!(val.is_some(), "key should survive restart");
   let bytes = val.unwrap();
@@ -782,14 +782,14 @@ fn insert_and_remove_and_gc() {
 
   let count: usize = 1000;
   for i in 0..count {
-    let mut t = engine.new_transaction().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     t.insert(bytes.clone(), bytes).expect("insert error");
     t.commit().expect("commit error")
   }
 
   for i in 0..count {
-    let mut t = engine.new_transaction().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     t.remove(&bytes).expect("insert error");
     t.commit().expect("commit error")
@@ -797,7 +797,7 @@ fn insert_and_remove_and_gc() {
   let e = engine.clone();
   let th = std::thread::spawn(move || {
     for _ in 0..count {
-      let tx = e.new_transaction().expect("tx start error");
+      let tx = e.new_tx().expect("tx start error");
       let mut iter = tx.scan_all().expect("scan error");
       while let Ok(Some(_)) = iter.try_next() {}
     }
@@ -805,7 +805,7 @@ fn insert_and_remove_and_gc() {
   std::thread::sleep(Duration::from_secs(60));
 
   for i in count..count << 1 {
-    let mut t = engine.new_transaction().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     t.insert(bytes.clone(), bytes).expect("insert error");
     t.commit().expect("commit error")
@@ -814,7 +814,7 @@ fn insert_and_remove_and_gc() {
 
   let engine = build_engine(&dir);
 
-  let mut t = engine.new_transaction().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let mut iter = t.scan_all().expect("scan start error");
 
   let mut c = 0;
@@ -830,7 +830,7 @@ fn insert_and_remove_and_gc() {
 
   t.commit().expect("commit error");
 
-  let mut t = engine.new_transaction().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let mut iter = t.scan_all().expect("scan start error");
 
   let mut c = 0;
@@ -851,11 +851,11 @@ fn write_not_commit() {
     .build()
     .expect("engine bootstrap failed");
 
-  let t = engine.new_transaction().expect("start failed.");
+  let t = engine.new_tx().expect("start failed.");
   t.insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
     .expect("insert failed");
 
-  let mut t2 = engine.new_transaction().expect("start failed.");
+  let mut t2 = engine.new_tx().expect("start failed.");
   t2.insert(vec![1, 2, 3], vec![1, 2, 3])
     .expect("insert failed");
   t2.commit().expect("commit failed");
@@ -890,7 +890,30 @@ fn test_start_not_commit() {
 
   let engine = build_engine(&dir);
 
-  let mut t = engine.new_transaction().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   assert_eq!(t.get(&key.into_bytes()).expect("find error"), None);
   t.commit().expect("commit error")
+}
+
+#[test]
+fn test_timeout() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = EngineBuilder::new(dir.path())
+    .transaction_timeout(Duration::from_millis(500))
+    .logger(TestLogger)
+    .log_level(LogLevel::Trace)
+    .build()
+    .unwrap();
+
+  let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+
+  std::thread::sleep(Duration::from_secs(5));
+
+  match tx.get(b"123") {
+    Err(lfkv_db::Error::TransactionClosed) => {}
+    _ => panic!("must timeout"),
+  }
+
+  let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+  let _ = tx.get(b"123123");
 }

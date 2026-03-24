@@ -38,7 +38,7 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 
 fn pre_write_keys<P: AsRef<std::path::Path> + ?Sized>(dir: &P, count: usize) {
   let engine = build(dir).build().unwrap();
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
     .for_each(|(k, v)| tx.insert(k, v).unwrap());
@@ -61,7 +61,7 @@ fn bench_sequential_get(c: &mut Criterion) {
     .bench_function("bench", |b| {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
-          let mut tx = engine.new_transaction().expect("start error");
+          let mut tx = engine.new_tx().expect("start error");
           tx.get(&keys[i]).expect("get error");
           tx.commit().expect("commit error");
         }
@@ -88,7 +88,7 @@ fn bench_sequential_insert(c: &mut Criterion) {
         },
         |(_, engine)| {
           for i in 0..SEQ_SIZE {
-            let mut tx = engine.new_transaction().expect("start error");
+            let mut tx = engine.new_tx().expect("start error");
             tx.insert(keys[i].clone(), values[i].clone())
               .expect("insert error");
             tx.commit().expect("commit error");
@@ -117,7 +117,7 @@ fn bench_sequential_update(c: &mut Criterion) {
     .bench_function("bench", |b| {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
-          let mut tx = engine.new_transaction().expect("start error");
+          let mut tx = engine.new_tx().expect("start error");
           tx.insert(keys[i].clone(), values[i].clone())
             .expect("update error");
           tx.commit().expect("commit error");
@@ -140,7 +140,7 @@ fn bench_concurrent_get(c: &mut Criterion) {
       let e = engine.clone();
       std::thread::spawn(move || {
         while let Ok((k, done)) = rx.recv() {
-          let mut tx = e.new_transaction().expect("start error");
+          let mut tx = e.new_tx().expect("start error");
           tx.get(&k).expect("get error");
           tx.commit().expect("commit error");
           done.send(()).unwrap();
@@ -192,7 +192,7 @@ fn bench_concurrent_insert(c: &mut Criterion) {
               let e = engine.clone();
               std::thread::spawn(move || {
                 while let Ok((k, v, done)) = rx.recv() {
-                  let mut tx = e.new_transaction().expect("start error");
+                  let mut tx = e.new_tx().expect("start error");
                   tx.insert(k, v).expect("insert error");
                   tx.commit().expect("commit error");
                   done.send(()).unwrap();
@@ -231,7 +231,7 @@ fn bench_concurrent_update(c: &mut Criterion) {
       let e = engine.clone();
       std::thread::spawn(move || {
         while let Ok((k, v, done)) = rx.recv() {
-          let mut tx = e.new_transaction().expect("start error");
+          let mut tx = e.new_tx().expect("start error");
           tx.insert(k, v).expect("update error");
           tx.commit().expect("commit error");
           done.send(()).unwrap();

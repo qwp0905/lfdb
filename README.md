@@ -26,7 +26,7 @@ let engine = EngineBuilder::new("./data")
     .build()?;
 
 // Start a transaction
-let mut tx = engine.new_transaction()?;
+let mut tx = engine.new_tx()?;
 
 // Insert
 tx.insert(b"key1".to_vec(), b"value1".to_vec())?;
@@ -102,7 +102,7 @@ tx.commit()?;
 
 ### Transaction Lifecycle
 
-1. `Engine::new_transaction()` allocates a transaction ID and registers it as active
+1. `Engine::new_tx()` allocates a transaction ID and registers it as active
 2. All reads check MVCC visibility - only committed versions are visible to other transactions
 3. Writes append version records to data entries; write-write conflicts return `WriteConflict` error
 4. `commit()` writes a commit record to WAL and calls `fsync` via group commit

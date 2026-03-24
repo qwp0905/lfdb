@@ -1,5 +1,6 @@
 use std::{
   fs,
+  panic::{RefUnwindSafe, UnwindSafe},
   path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -14,7 +15,7 @@ use crate::{
   cursor::{Cursor, GarbageCollectionConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
-  transaction::TxOrchestrator,
+  transaction::{TransactionConfig, TxOrchestrator},
   utils::{LogFilter, LogLevel, Logger, ToArc},
   wal::WALConfig,
 };
@@ -34,6 +35,7 @@ where
   pub buffer_pool_shard_count: usize,
   pub buffer_pool_memory_capacity: usize,
   pub io_thread_count: usize,
+  pub transaction_timeout: Duration,
   pub logger: Arc<dyn Logger>,
   pub log_level: LogLevel,
 }
@@ -74,8 +76,16 @@ impl Engine {
       interval: config.gc_trigger_interval,
       thread_count: config.gc_thread_count,
     };
-    let (orchestrator, initial_state) =
-      TxOrchestrator::new(buffer_pool_config, wal_config, gc_config, logger.clone())?;
+    let tx_config = TransactionConfig {
+      timeout: config.transaction_timeout,
+    };
+    let (orchestrator, initial_state) = TxOrchestrator::new(
+      tx_config,
+      buffer_pool_config,
+      wal_config,
+      gc_config,
+      logger.clone(),
+    )?;
 
     let engine = Self {
       orchestrator: orchestrator.to_arc(),
@@ -84,19 +94,27 @@ impl Engine {
     };
     if initial_state {
       engine.logger.info("engine has initial state.");
-      let cursor = engine.new_transaction()?;
+      let cursor = engine.new_tx()?;
       cursor.initialize()?;
     }
 
     Ok(engine)
   }
 
-  pub fn new_transaction(&self) -> Result<Cursor> {
+  pub fn new_tx(&self) -> Result<Cursor<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let tx_id = self.orchestrator.start_tx()?;
-    Ok(Cursor::new(self.orchestrator.clone(), tx_id))
+    let state = self.orchestrator.start_tx(None)?;
+    Ok(Cursor::new(self.orchestrator.clone(), state))
+  }
+
+  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Cursor<'_>> {
+    if !self.available.load(Ordering::Acquire) {
+      return Err(Error::EngineUnavailable);
+    }
+    let state = self.orchestrator.start_tx(Some(timeout))?;
+    Ok(Cursor::new(self.orchestrator.clone(), state))
   }
 }
 
@@ -114,3 +132,8 @@ impl Drop for Engine {
     }
   }
 }
+
+unsafe impl Send for Engine {}
+unsafe impl Sync for Engine {}
+impl UnwindSafe for Engine {}
+impl RefUnwindSafe for Engine {}

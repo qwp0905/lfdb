@@ -62,7 +62,7 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 
 fn pre_load(dir: &std::path::Path, count: usize) {
   let engine = build(dir).build().unwrap();
-  let mut tx = engine.new_transaction().unwrap();
+  let mut tx = engine.new_tx_timeout(Duration::from_mins(10)).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
     .for_each(|(k, v)| tx.insert(k, v).unwrap());
@@ -96,7 +96,7 @@ fn spawn_workers(
       std::thread::spawn(move || {
         while let Ok(op) = rx.recv() {
           loop {
-            let mut tx = e.new_transaction().expect("start error");
+            let mut tx = e.new_tx().expect("start error");
             let conflict = match &op {
               Op::Get(k) => {
                 tx.get(k).expect("get error");
