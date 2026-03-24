@@ -1,145 +1,105 @@
 use std::{
-  fs::{File, Metadata, OpenOptions},
+  fs::{File, OpenOptions},
+  io::IoSlice,
   path::PathBuf,
   sync::Arc,
 };
 
-use super::{DirectIO, PagePool, PageRef, Pread, Pwrite};
+use super::{max_iov, DirectIO, PageRef, Pread, Pwrite, Pwritev};
 use crate::{
+  disk::PagePool,
   error::{Error, Result},
   thread::{BackgroundThread, WorkBuilder, WorkResult},
-  utils::ToBox,
+  utils::{ToArc, ToBox},
 };
 
-enum DiskOperation<const N: usize> {
-  Read(u64, PageRef<N>),
-  Write(u64, PageRef<N>),
-  Flush,
-  Metadata,
-}
-enum OperationResult<const N: usize> {
-  Read(PageRef<N>),
-  Write,
-  Flush,
-  Metadata(Metadata),
-}
-impl<const N: usize> OperationResult<N> {
-  fn as_read(self) -> PageRef<N> {
-    match self {
-      OperationResult::Read(page) => page,
-      _ => unreachable!(),
+fn handle_write<const N: usize>(
+  file: Arc<File>,
+) -> impl FnMut(Vec<(usize, PageRef<N>)>) -> Result {
+  move |mut buffered| {
+    if buffered.len() == 1 {
+      let (i, slice) = &buffered[0];
+      return file
+        .pwrite(slice.as_ref().as_ref(), (i * N) as u64)
+        .map_err(Error::IO)
+        .map(drop);
     }
-  }
-  fn as_meta(self) -> Metadata {
-    match self {
-      OperationResult::Metadata(meta) => meta,
-      _ => unreachable!(),
-    }
+
+    buffered.sort_by_key(|(i, _)| *i);
+    buffered
+      .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
+      .map(|g| {
+        g.into_iter()
+          .map(|(i, s)| (*i, IoSlice::new(s.as_ref().as_ref())))
+          .unzip()
+      })
+      .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * N), bufs))
+      .map(|(offset, bufs)| file.pwritev(&bufs, offset as u64))
+      .fold(Ok(()), |a, c| a.and_then(|_| c.map(drop)))
+      .map_err(Error::IO)
   }
 }
 
-pub struct DiskControllerConfig {
-  pub path: PathBuf,
-  pub thread_count: usize,
-}
-
-pub struct WriteAsync<const N: usize>(WorkResult<std::io::Result<OperationResult<N>>>);
+pub struct WriteAsync<const N: usize>(WorkResult<Result>);
 impl<const N: usize> WriteAsync<N> {
   pub fn wait(self) -> Result {
-    self.0.wait()?.map_err(Error::IO)?;
-    Ok(())
-  }
-}
-
-fn handle_disk<const N: usize>(
-  file: File,
-) -> impl Fn(DiskOperation<N>) -> std::io::Result<OperationResult<N>> {
-  move |operation: DiskOperation<N>| match operation {
-    DiskOperation::Read(offset, mut page) => file
-      .pread(page.as_mut().as_mut(), offset)
-      .map(|_| OperationResult::Read(page)),
-    DiskOperation::Write(offset, page) => file
-      .pwrite(page.as_ref().as_ref(), offset)
-      .map(|_| OperationResult::Write),
-    DiskOperation::Flush => file.sync_all().map(|_| OperationResult::Flush),
-    DiskOperation::Metadata => Ok(OperationResult::Metadata(file.metadata()?)),
+    self.0.wait()?
   }
 }
 
 pub struct DiskController<const N: usize> {
-  background:
-    Box<dyn BackgroundThread<DiskOperation<N>, std::io::Result<OperationResult<N>>>>,
+  file: Arc<File>,
+  writer: Box<dyn BackgroundThread<(usize, PageRef<N>), Result>>,
   page_pool: Arc<PagePool<N>>,
 }
 impl<const N: usize> DiskController<N> {
-  pub fn open(config: DiskControllerConfig, page_pool: Arc<PagePool<N>>) -> Result<Self> {
+  pub fn open(path: PathBuf, page_pool: Arc<PagePool<N>>) -> Result<Self> {
     let file = OpenOptions::new()
       .read(true)
       .write(true)
       .create(true)
-      .direct_io(&config.path)
-      .map_err(Error::IO)?;
-
-    let background = WorkBuilder::new()
-      .name(format!("disk {}", config.path.to_string_lossy()))
-      .stack_size(N * 500)
-      .multi(config.thread_count)
-      .stealing(handle_disk(file))
+      .direct_io(&path)
+      .map_err(Error::IO)?
+      .to_arc();
+    let writer = WorkBuilder::new()
+      .name(format!("{} write buffering", path.to_string_lossy()))
+      .stack_size(2 << 20)
+      .single()
+      .eager_buffering(max_iov(), handle_write::<N>(file.clone()))
       .to_box();
 
     Ok(Self {
-      background,
+      file,
+      writer,
       page_pool,
     })
   }
-
-  pub fn read(&self, index: usize) -> Result<PageRef<N>> {
-    Ok(
-      self
-        .background
-        .send_await(DiskOperation::Read(
-          (index * N) as u64,
-          self.page_pool.acquire(),
-        ))?
-        .map_err(Error::IO)?
-        .as_read(),
-    )
-  }
-
-  pub fn write<'a>(&self, index: usize, page: &'a PageRef<N>) -> Result {
-    self.write_async(index, page).wait()
+  pub fn read<'a>(&self, index: usize, page: &'a mut PageRef<N>) -> Result {
+    self
+      .file
+      .pread(page.as_mut().as_mut(), (index * N) as u64)
+      .map(|_| ())
+      .map_err(Error::IO)
   }
   pub fn write_async<'a>(&self, index: usize, page: &'a PageRef<N>) -> WriteAsync<N> {
     let mut pooled = self.page_pool.acquire();
     pooled.as_mut().copy_from(page.as_ref());
-    let o = self
-      .background
-      .send(DiskOperation::Write((index * N) as u64, pooled));
-    WriteAsync(o)
+    WriteAsync(self.writer.send((index, pooled)))
+  }
+  pub fn write<'a>(&self, index: usize, page: &'a PageRef<N>) -> Result {
+    self.write_async(index, page).wait()
   }
 
   pub fn fsync(&self) -> Result {
-    self
-      .background
-      .send_await(DiskOperation::Flush)?
-      .map_err(Error::IO)?;
-    Ok(())
-  }
-
-  pub fn close(&self) {
-    self.background.close();
+    self.file.sync_all().map_err(Error::IO)
   }
 
   pub fn len(&self) -> Result<usize> {
-    let meta = self
-      .background
-      .send_await(DiskOperation::Metadata)?
-      .map_err(Error::IO)?
-      .as_meta();
+    let meta = self.file.metadata().map_err(Error::IO)?;
     Ok((meta.len() as usize) / N)
   }
-}
 
-#[cfg(test)]
-#[path = "tests/controller.rs"]
-mod tests;
+  pub fn close(&self) {
+    self.writer.close();
+  }
+}
