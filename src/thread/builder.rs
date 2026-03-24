@@ -7,7 +7,7 @@ use crate::Result;
 
 use super::{
   BackgroundThread, EagerBufferingThread, IntervalWorkThread, LazyBufferingThread,
-  SharedWorkThread, SingleFn, StealingWorkThread, WorkInput,
+  SharedWorkThread, SingleFn, WorkInput,
 };
 
 pub struct WorkBuilder {
@@ -51,20 +51,6 @@ impl MultiThreadBuilder {
     F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
   {
     SharedWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      self.count,
-      build,
-    )
-  }
-
-  pub fn stealing<T, R, F>(self, build: F) -> impl BackgroundThread<T, R>
-  where
-    T: Send + UnwindSafe + 'static,
-    R: Send + 'static,
-    F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
-  {
-    StealingWorkThread::new(
       self.builder.name,
       self.builder.stack_size,
       self.count,
