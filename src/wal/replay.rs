@@ -5,6 +5,7 @@ use std::{
 
 use super::{Operation, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
+  constant::RESERVED_TX,
   disk::PagePool,
   error::{Error, Result},
 };
@@ -22,7 +23,7 @@ impl ReplayResult {
   fn empty() -> Self {
     Self {
       last_log_id: 0,
-      last_tx_id: 0,
+      last_tx_id: RESERVED_TX + 1,
       generation: 0,
       aborted: Default::default(),
       redo: Default::default(),

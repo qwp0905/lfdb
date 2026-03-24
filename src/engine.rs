@@ -12,7 +12,7 @@ use std::{
 use super::constant::{DATA_PATH, FILE_SUFFIX};
 use crate::{
   buffer_pool::BufferPoolConfig,
-  cursor::{initialize, Cursor, GarbageCollectionConfig},
+  cursor::{Cursor, GarbageCollectionConfig, TreeManagerConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
   transaction::{TransactionConfig, TxOrchestrator},
@@ -73,32 +73,28 @@ impl Engine {
       io_thread_count: config.io_thread_count,
     };
     let gc_config = GarbageCollectionConfig {
-      interval: config.gc_trigger_interval,
       thread_count: config.gc_thread_count,
+    };
+    let tree_config = TreeManagerConfig {
+      merge_interval: config.gc_trigger_interval,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
     };
-    let (orchestrator, initial_state) = TxOrchestrator::new(
+    let orchestrator = TxOrchestrator::new(
       tx_config,
       buffer_pool_config,
       wal_config,
       gc_config,
+      tree_config,
       logger.clone(),
     )?;
 
-    let engine = Self {
+    Ok(Self {
       orchestrator: orchestrator.to_arc(),
       available: AtomicBool::new(true),
       logger,
-    };
-    if initial_state {
-      engine.logger.info("engine has initial state.");
-      let mut cursor = engine.new_tx()?;
-      initialize(&mut cursor)?;
-    }
-
-    Ok(engine)
+    })
   }
 
   /**

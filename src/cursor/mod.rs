@@ -18,3 +18,6 @@ use types::*;
 
 mod iter;
 pub use iter::*;
+
+mod tree;
+pub use tree::*;

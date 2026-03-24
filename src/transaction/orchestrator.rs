@@ -4,7 +4,9 @@ use super::{FreeList, PageRecorder, TimeoutThread, TxState, VersionVisibility};
 
 use crate::{
   buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
-  cursor::{GarbageCollectionConfig, GarbageCollector},
+  cursor::{
+    GarbageCollectionConfig, GarbageCollector, SplitTask, TreeManager, TreeManagerConfig,
+  },
   error::Result,
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
@@ -27,6 +29,7 @@ pub struct TxOrchestrator {
   logger: LogFilter,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
+  tree_manager: TreeManager,
 }
 impl TxOrchestrator {
   pub fn new(
@@ -34,8 +37,9 @@ impl TxOrchestrator {
     buffer_pool_config: BufferPoolConfig,
     wal_config: WALConfig,
     gc_config: GarbageCollectionConfig,
+    tree_config: TreeManagerConfig,
     logger: LogFilter,
-  ) -> Result<(Self, bool)> {
+  ) -> Result<Self> {
     let buffer_pool = BufferPool::open(buffer_pool_config, logger.clone())?.to_arc();
     let checkpoint_interval = wal_config.checkpoint_interval;
     let checkpoint_ch = WorkInput::new();
@@ -69,17 +73,33 @@ impl TxOrchestrator {
     )
     .to_arc();
 
-    if !replay.is_new {
-      gc.release_orphand(disk_len)?;
-      logger.info("orphand block has released successfully.");
-      run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
-      replay
-        .segments
-        .into_iter()
-        .map(|seg| seg.truncate())
-        .collect::<Result>()?;
-    }
-    gc.ready();
+    let tree_manager = if replay.is_new {
+      TreeManager::initial_state(
+        free_list.clone(),
+        buffer_pool.clone(),
+        recorder.clone(),
+        gc.clone(),
+        logger.clone(),
+        tree_config,
+      )
+    } else {
+      TreeManager::clean_and_start(
+        free_list.clone(),
+        buffer_pool.clone(),
+        recorder.clone(),
+        gc.clone(),
+        logger.clone(),
+        tree_config,
+        disk_len,
+      )
+    }?;
+
+    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
+    replay
+      .segments
+      .into_iter()
+      .map(|seg| seg.truncate())
+      .collect::<Result>()?;
 
     let checkpoint = WorkBuilder::new()
       .name("checkpoint")
@@ -100,21 +120,19 @@ impl TxOrchestrator {
 
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
 
-    Ok((
-      Self {
-        checkpoint,
-        wal,
-        free_list,
-        buffer_pool,
-        version_visibility,
-        gc,
-        recorder,
-        logger,
-        timeout_thread,
-        tx_timeout: transaction_config.timeout,
-      },
-      replay.is_new,
-    ))
+    Ok(Self {
+      checkpoint,
+      wal,
+      free_list,
+      buffer_pool,
+      version_visibility,
+      gc,
+      recorder,
+      logger,
+      timeout_thread,
+      tx_timeout: transaction_config.timeout,
+      tree_manager,
+    })
   }
   pub fn fetch(&self, index: usize) -> Result<Slot<'_>> {
     self.buffer_pool.read(index)
@@ -174,7 +192,12 @@ impl TxOrchestrator {
     self.version_visibility.current_version()
   }
 
+  pub fn split(&self, task: SplitTask) {
+    self.tree_manager.split(task);
+  }
+
   pub fn close(&self) -> Result {
+    self.tree_manager.close();
     self.timeout_thread.close();
     let wal_close = self.wal.twostep_close();
     self.checkpoint.close();
