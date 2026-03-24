@@ -57,7 +57,6 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
     .buffer_pool_shard_count(1 << 3)
     .wal_file_size(512 << 20)
     .gc_thread_count(5)
-    .io_thread_count(5)
 }
 
 fn pre_load(dir: &std::path::Path, count: usize) {
