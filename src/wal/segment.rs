@@ -71,7 +71,7 @@ impl WALSegment {
 
     let file_len = (WAL_BLOCK_SIZE * max_len) as u64;
     file
-      .fallocate(file_len)
+      .fallocate(0, file_len)
       .and_then(|_| file.set_len(file_len))
       .and_then(|_| file.sync_all()) // sync metadata for replay at once
       .map_err(Error::IO)?;
