@@ -1,25 +1,19 @@
 use std::{
   collections::{HashSet, VecDeque},
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
-  time::Duration,
+  sync::Arc,
 };
 
-use super::{
-  CursorNode, DataEntry, Pointer, RecordData, TreeHeader, VersionRecord, HEADER_INDEX,
-};
+use super::{DataEntry, Pointer, RecordData, VersionRecord};
 use crate::{
   buffer_pool::BufferPool,
+  constant::RESERVED_TX,
   error::Result,
-  thread::{BackgroundThread, WorkBuilder},
+  thread::{BackgroundThread, BatchWorkResult, WorkBuilder, WorkResult},
   transaction::{FreeList, PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, LogFilter, ToArc, ToBox},
+  utils::{DoubleBuffer, LogFilter, ToArc},
 };
 
 pub struct GarbageCollectionConfig {
-  pub interval: Duration,
   pub thread_count: usize,
 }
 
@@ -29,12 +23,9 @@ enum GcPointer {
 }
 
 pub struct GarbageCollector {
-  clean_leaf: Box<dyn BackgroundThread<(), Result>>,
   check: Arc<dyn BackgroundThread<Pointer, Result<bool>>>,
   entry: Arc<dyn BackgroundThread<Pointer, Result>>,
-  buffer_pool: Arc<BufferPool>,
   free_list: Arc<FreeList>,
-  initialized: Arc<AtomicBool>,
   queue: Arc<DoubleBuffer<GcPointer>>,
   logger: LogFilter,
 }
@@ -76,6 +67,19 @@ impl GarbageCollector {
   pub fn mark(&self, pointer: Pointer) {
     self.queue.push(GcPointer::Trim(pointer))
   }
+  pub fn release(&self, pointer: Pointer) {
+    self.queue.push(GcPointer::Release(pointer))
+  }
+
+  pub fn batch_check_empty(
+    &self,
+    pointers: Vec<Pointer>,
+  ) -> BatchWorkResult<Result<bool>> {
+    self.check.send_batch(pointers)
+  }
+  pub fn check_empty(&self, pointer: Pointer) -> WorkResult<Result<bool>> {
+    self.check.send(pointer)
+  }
 
   pub fn start(
     buffer_pool: Arc<BufferPool>,
@@ -85,7 +89,6 @@ impl GarbageCollector {
     logger: LogFilter,
     config: GarbageCollectionConfig,
   ) -> Self {
-    let initialized = AtomicBool::new(false).to_arc();
     let queue = DoubleBuffer::new().to_arc();
 
     let entry = WorkBuilder::new()
@@ -105,215 +108,19 @@ impl GarbageCollector {
       .multi(config.thread_count)
       .shared(run_check(buffer_pool.clone()))
       .to_arc();
-    let clean_leaf = WorkBuilder::new()
-      .name("gc clean leaf")
-      .stack_size(2 << 20)
-      .single()
-      .interval(
-        config.interval,
-        run_clean_leaf(
-          buffer_pool.clone(),
-          recorder.clone(),
-          check.clone(),
-          queue.clone(),
-          initialized.clone(),
-          logger.clone(),
-        ),
-      )
-      .to_box();
 
     Self {
-      clean_leaf,
       check,
       entry,
-      buffer_pool,
       free_list,
-      initialized,
       queue,
       logger,
     }
   }
-  pub fn ready(&self) {
-    self.initialized.store(true, Ordering::Release);
-  }
-
-  pub fn release_orphand(&self, end: usize) -> Result {
-    let mut visited: HashSet<usize> = HashSet::from_iter(vec![HEADER_INDEX]);
-
-    let root = self
-      .buffer_pool
-      .read(HEADER_INDEX)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-    let mut node_stack = vec![root];
-    let mut entry_stack = vec![];
-
-    while let Some(index) = node_stack.pop() {
-      visited.insert(index);
-      match self
-        .buffer_pool
-        .read(index)?
-        .for_read()
-        .as_ref()
-        .deserialize::<CursorNode>()?
-      {
-        CursorNode::Internal(internal) => node_stack.extend(internal.get_all_child()),
-        CursorNode::Leaf(leaf) => entry_stack.extend(leaf.get_entry_pointers()),
-      };
-    }
-
-    // push to queue for initial checkpoint
-    for &pointer in entry_stack.iter() {
-      self.queue.push(GcPointer::Trim(pointer));
-    }
-    self.logger.debug(format!(
-      "{} entry queued for initial gc.",
-      entry_stack.len()
-    ));
-
-    while let Some(index) = entry_stack.pop() {
-      visited.insert(index);
-      let entry: DataEntry = self
-        .buffer_pool
-        .read(index)?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-      entry.get_next().map(|i| entry_stack.push(i));
-    }
-
-    for index in 0..end {
-      if visited.remove(&index) {
-        continue;
-      }
-      self.free_list.dealloc(index);
-    }
-
-    Ok(())
-  }
 
   pub fn close(&self) {
-    self.clean_leaf.close();
     self.check.close();
     self.entry.close();
-  }
-}
-
-fn run_clean_leaf(
-  buffer_pool: Arc<BufferPool>,
-  recorder: Arc<PageRecorder>,
-  check_c: Arc<dyn BackgroundThread<Pointer, Result<bool>>>,
-  queue: Arc<DoubleBuffer<GcPointer>>,
-  initialized: Arc<AtomicBool>,
-  logger: LogFilter,
-) -> impl Fn(Option<()>) -> Result {
-  move |_| {
-    if !initialized.load(Ordering::Acquire) {
-      logger.debug("gc not ready for clean leaf nodes.");
-      return Ok(());
-    }
-
-    logger.debug("clean leaf collect start.");
-
-    let mut index = buffer_pool
-      .peek(HEADER_INDEX)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
-    while let CursorNode::Internal(node) = buffer_pool
-      .peek(index)?
-      .for_read()
-      .as_ref()
-      .deserialize::<CursorNode>()?
-    {
-      index = node.first_child()
-    }
-
-    let mut index = Some(index);
-    while let Some(i) = index.take() {
-      {
-        let leaf = buffer_pool
-          .peek(i)?
-          .for_read()
-          .as_ref()
-          .deserialize::<CursorNode>()?
-          .as_leaf()?;
-        if !check_c
-          .send_batch(leaf.get_entry_pointers().collect())
-          .wait()?
-          .into_iter()
-          .fold(Ok(false), |a, c| a.and_then(|a| c.map(|c| a || c)))?
-        {
-          index = leaf.get_next();
-          continue;
-        }
-      }
-
-      let mut slot = buffer_pool.peek(i)?.for_write();
-      let mut leaf = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
-      index = leaf.get_next();
-
-      let prev_len = leaf.len();
-      let mut new_entries = vec![];
-      let mut orphand = vec![];
-
-      let found = leaf
-        .drain()
-        .map(|(key, ptr)| (key, ptr, check_c.send(ptr)))
-        .collect::<Vec<_>>();
-      for (key, ptr, r) in found.into_iter() {
-        if r.wait_flatten()? {
-          orphand.push(ptr);
-        } else {
-          new_entries.push((key, ptr));
-        }
-      }
-
-      let next = match (new_entries.len(), index) {
-        (0, Some(next)) => next,
-        (len, _) if len == prev_len => continue,
-        _ => {
-          leaf.set_entries(new_entries);
-          recorder.serialize_and_log(0, &mut slot, &leaf.to_node())?;
-          drop(slot);
-
-          orphand
-            .into_iter()
-            .map(GcPointer::Release)
-            .for_each(|p| queue.push(p));
-          continue;
-        }
-      };
-
-      // merge start
-      logger.debug(format!(
-        "trying to start merge {} with {}",
-        slot.get_index(),
-        next
-      ));
-
-      let mut next_slot = buffer_pool.peek(next)?.for_write();
-      let next_leaf = next_slot.as_ref().deserialize::<CursorNode>()?;
-      leaf.set_next(slot.get_index());
-
-      recorder.log_multi(0, &mut slot, &next_leaf, &mut next_slot, &leaf.to_node())?;
-      index = Some(slot.get_index());
-
-      drop(slot);
-      drop(next_slot);
-
-      orphand
-        .into_iter()
-        .map(GcPointer::Release)
-        .for_each(|p| queue.push(p));
-    }
-
-    logger.debug("clean leaf collect end.");
-    Ok(())
   }
 }
 
@@ -371,7 +178,7 @@ fn run_entry(
 
       if new_versions.len() > 0 {
         entry.set_versions(new_versions);
-        recorder.serialize_and_log(0, &mut slot, &entry)?;
+        recorder.serialize_and_log(RESERVED_TX, &mut slot, &entry)?;
         index = entry.get_next();
         continue;
       }
@@ -383,7 +190,7 @@ fn run_entry(
 
       let next_entry: DataEntry =
         buffer_pool.peek(next)?.for_read().as_ref().deserialize()?;
-      recorder.serialize_and_log(0, &mut slot, &next_entry)?;
+      recorder.serialize_and_log(RESERVED_TX, &mut slot, &next_entry)?;
       index = Some(i);
 
       free_list.dealloc(next);
