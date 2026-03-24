@@ -124,7 +124,7 @@ pub fn replay(
           redo = redo.split_off(&last_log_id);
           aborted = aborted.split_off(&last_log_id);
 
-          last_min_active = Some(last_checkpoint.unwrap_or(0).max(min_active));
+          last_min_active = Some(last_min_active.unwrap_or(0).max(min_active));
           started = started.split_off(&min_active)
         }
       };
