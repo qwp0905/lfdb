@@ -11,6 +11,17 @@ use crate::{
   Error, Result,
 };
 
+pub fn initialize(cursor: &mut Cursor) -> Result {
+  {
+    let node_index = cursor.alloc_and_log(&CursorNode::initial_state())?;
+    let root = TreeHeader::new(node_index);
+    let mut root_slot = cursor.orchestrator.fetch(HEADER_INDEX)?.for_write();
+    cursor.serialize_and_log(&mut root_slot, &root)?;
+  };
+
+  cursor.commit()
+}
+
 pub struct Cursor<'a> {
   orchestrator: Arc<TxOrchestrator>,
   state: TxState<'a>,
@@ -34,16 +45,6 @@ impl<'a> Cursor<'a> {
       .serialize_and_log(self.state.get_id(), slot, data)
   }
 
-  pub fn initialize(mut self) -> Result {
-    {
-      let node_index = self.alloc_and_log(&CursorNode::initial_state())?;
-      let root = TreeHeader::new(node_index);
-      let mut root_slot = self.orchestrator.fetch(HEADER_INDEX)?.for_write();
-      self.serialize_and_log(&mut root_slot, &root)?;
-    };
-
-    self.commit()
-  }
   pub fn new(orchestrator: Arc<TxOrchestrator>, state: TxState<'a>) -> Self {
     Self {
       orchestrator,

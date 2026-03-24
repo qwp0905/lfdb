@@ -12,7 +12,7 @@ use std::{
 use super::constant::{DATA_PATH, FILE_SUFFIX};
 use crate::{
   buffer_pool::BufferPoolConfig,
-  cursor::{Cursor, GarbageCollectionConfig},
+  cursor::{initialize, Cursor, GarbageCollectionConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
   transaction::{TransactionConfig, TxOrchestrator},
@@ -94,13 +94,16 @@ impl Engine {
     };
     if initial_state {
       engine.logger.info("engine has initial state.");
-      let cursor = engine.new_tx()?;
-      cursor.initialize()?;
+      let mut cursor = engine.new_tx()?;
+      initialize(&mut cursor)?;
     }
 
     Ok(engine)
   }
 
+  /**
+   * create tranaction cursor with default timeout.
+   */
   pub fn new_tx(&self) -> Result<Cursor<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
@@ -109,6 +112,9 @@ impl Engine {
     Ok(Cursor::new(self.orchestrator.clone(), state))
   }
 
+  /**
+   * create tranaction cursor with specified timeout.
+   */
   pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Cursor<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
