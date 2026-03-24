@@ -11,12 +11,12 @@ use crate::{
   Error, Result,
 };
 
-pub struct Cursor {
+pub struct Cursor<'a> {
   orchestrator: Arc<TxOrchestrator>,
-  state: Arc<TxState>,
+  state: TxState<'a>,
   _marker: PhantomData<*const ()>, // do not send to another thread!!!.
 }
-impl Cursor {
+impl<'a> Cursor<'a> {
   #[inline]
   fn alloc_and_log<T: Serializable>(&self, data: &T) -> Result<usize> {
     let slot = &mut self.orchestrator.alloc()?;
@@ -35,8 +35,8 @@ impl Cursor {
   }
 
   pub fn initialize(mut self) -> Result {
-    let node_index = self.alloc_and_log(&CursorNode::initial_state())?;
     {
+      let node_index = self.alloc_and_log(&CursorNode::initial_state())?;
       let root = TreeHeader::new(node_index);
       let mut root_slot = self.orchestrator.fetch(HEADER_INDEX)?.for_write();
       self.serialize_and_log(&mut root_slot, &root)?;
@@ -44,7 +44,7 @@ impl Cursor {
 
     self.commit()
   }
-  pub fn new(orchestrator: Arc<TxOrchestrator>, state: Arc<TxState>) -> Self {
+  pub fn new(orchestrator: Arc<TxOrchestrator>, state: TxState<'a>) -> Self {
     Self {
       orchestrator,
       state,
@@ -62,6 +62,7 @@ impl Cursor {
     }
 
     self.state.complete_commit();
+    self.state.deactive();
     Ok(())
   }
 
@@ -70,6 +71,7 @@ impl Cursor {
       return Err(Error::TransactionClosed);
     }
     self.orchestrator.abort_tx(self.state.get_id())?;
+    self.state.deactive();
     Ok(())
   }
 
@@ -400,7 +402,7 @@ impl Cursor {
     ))
   }
 }
-impl Drop for Cursor {
+impl<'a> Drop for Cursor<'a> {
   fn drop(&mut self) {
     let _ = self.abort();
   }

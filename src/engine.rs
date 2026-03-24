@@ -101,7 +101,7 @@ impl Engine {
     Ok(engine)
   }
 
-  pub fn new_tx(&self) -> Result<Cursor> {
+  pub fn new_tx(&self) -> Result<Cursor<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
@@ -109,7 +109,7 @@ impl Engine {
     Ok(Cursor::new(self.orchestrator.clone(), state))
   }
 
-  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Cursor> {
+  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Cursor<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }

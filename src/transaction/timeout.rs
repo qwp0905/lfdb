@@ -1,7 +1,7 @@
 use std::{
   cell::UnsafeCell,
   mem::replace,
-  sync::{Arc, Weak},
+  sync::Arc,
   thread::{Builder, JoinHandle},
   time::{Duration, Instant},
 };
@@ -13,7 +13,7 @@ use crossbeam::{
 
 use crate::utils::{LogFilter, UnsafeBorrowMut};
 
-use super::{TxState, VersionVisibility};
+use super::VersionVisibility;
 
 const TICK_SIZE: Duration = Duration::from_millis(1);
 
@@ -189,7 +189,7 @@ where
 }
 
 enum Msg {
-  Register(Weak<TxState>, Duration),
+  Register(usize, Duration),
   Term,
 }
 
@@ -209,8 +209,8 @@ impl TimeoutThread {
       .stack_size(2 << 20)
       .spawn(move || {
         let logger_c = logger.clone();
-        let mut wheel = TimingWheel::new(move |weak: Weak<TxState>| {
-          let state = match weak.upgrade() {
+        let mut wheel = TimingWheel::new(move |tx_id: usize| {
+          let state = match version_visibility.get_active_state(tx_id) {
             Some(s) => s,
             None => return,
           };
@@ -218,13 +218,15 @@ impl TimeoutThread {
             return;
           }
           logger_c.debug(format!("tx {} timeout reached", state.get_id()));
-          version_visibility.move_to_abort(state.get_id())
+
+          version_visibility.set_abort(state.get_id());
+          state.deactive();
         });
         let ticker = tick(TICK_SIZE);
 
         while let Ok(ctx) = rx.recv() {
           match ctx {
-            Msg::Register(state, timeout) => wheel.register(state, timeout),
+            Msg::Register(id, timeout) => wheel.register(id, timeout),
             Msg::Term => return,
           }
           logger.debug("timeout thread wake up.");
@@ -233,7 +235,7 @@ impl TimeoutThread {
             select! {
               recv(ticker) -> _ => wheel.tick(),
               recv(rx) -> msg => match msg {
-                Ok(Msg::Register(state,timeout)) => wheel.register(state, timeout),
+                Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
                 Err(_) | Ok(Msg::Term) => return,
               }
             }
@@ -249,8 +251,8 @@ impl TimeoutThread {
     }
   }
 
-  pub fn register(&self, state: Weak<TxState>, timeout: Duration) {
-    self.channel.send(Msg::Register(state, timeout)).unwrap();
+  pub fn register(&self, id: usize, timeout: Duration) {
+    self.channel.send(Msg::Register(id, timeout)).unwrap();
   }
 
   pub fn close(&self) {

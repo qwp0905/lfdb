@@ -7,7 +7,7 @@ use crate::{
 };
 
 pub struct CursorIterator<'a> {
-  state: &'a TxState,
+  state: &'a TxState<'a>,
   orchestrator: &'a TxOrchestrator,
   leaf: LeafNode,
   pos: usize,
@@ -50,13 +50,14 @@ impl<'a> CursorIterator<'a> {
   }
 
   pub fn try_next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    if self.closed {
+      return Ok(None);
+    }
+
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
 
-    if self.closed {
-      return Ok(None);
-    }
     loop {
       for i in self.pos..self.leaf.len() {
         let (key, ptr) = self.leaf.at(i);
