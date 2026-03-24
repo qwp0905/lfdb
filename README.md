@@ -2,7 +2,7 @@
 
 Lock-Free Key-Value Storage Engine implemented in Rust.
 
-A persistent, ACID-compliant key-value store that supports concurrent reads and writes from multiple threads, built on a Blink tree index with MVCC (Multi-Version Concurrency Control) for snapshot isolation.
+A persistent, ACID-compliant embedded key-value store built for **high-concurrency workloads**. Unlike single-writer embedded databases (e.g. BoltDB, LMDB), it supports **concurrent reads and writes from multiple threads simultaneously** — with no writer lock and no reader starvation — through a combination of B-link tree indexing, MVCC snapshot isolation, and a lock-free WAL.
 
 ## Features
 
