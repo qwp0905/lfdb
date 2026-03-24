@@ -57,20 +57,6 @@ impl MultiThreadBuilder {
       build,
     )
   }
-
-  // pub fn stealing<T, R, F>(self, build: F) -> impl BackgroundThread<T, R>
-  // where
-  //   T: Send + UnwindSafe + 'static,
-  //   R: Send + 'static,
-  //   F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
-  // {
-  //   StealingWorkThread::new(
-  //     self.builder.name,
-  //     self.builder.stack_size,
-  //     self.count,
-  //     build,
-  //   )
-  // }
 }
 
 pub struct SingleThreadBuilder {
