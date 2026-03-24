@@ -70,34 +70,34 @@ fn main() {
   );
   drop(tx);
   threads.into_iter().for_each(|th| th.join().unwrap());
+  {
+    let mut total = 0;
+    let mut found_eq = 0;
+    let mut found_ne = 0;
+    let mut not_found = 0;
+    let mut t = engine.new_tx().expect("scan start error");
 
-  let mut total = 0;
-  let mut found_eq = 0;
-  let mut found_ne = 0;
-  let mut not_found = 0;
-  let mut t = engine.new_tx().expect("scan start error");
-
-  let mut iter = t.scan_all().expect("scan create error");
-  while let Ok(Some(_)) = iter.try_next() {
-    total += 1;
-  }
-  println!("total {}", total);
-  for key in keys {
-    match t.get(&key).unwrap() {
-      Some(v) if v == key => found_eq += 1,
-      Some(_) => found_ne += 1,
-      None => not_found += 1,
+    let mut iter = t.scan_all().expect("scan create error");
+    while let Ok(Some(_)) = iter.try_next() {
+      total += 1;
     }
+    println!("total {}", total);
+    for key in keys {
+      match t.get(&key).unwrap() {
+        Some(v) if v == key => found_eq += 1,
+        Some(_) => found_ne += 1,
+        None => not_found += 1,
+      }
+    }
+
+    t.commit().expect("scan commit error");
+    println!(
+      "
+found and key equal: {found_eq}
+found and key not equal: {found_ne}
+not found: {not_found}"
+    );
   }
-
-  t.commit().expect("scan commit error");
-  println!(
-    "
-  found and key equal: {found_eq}
-  found and key not equal: {found_ne}
-  not found: {not_found}"
-  );
-
   drop(engine);
   println!("done");
 }

@@ -62,7 +62,7 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 
 fn pre_load(dir: &std::path::Path, count: usize) {
   let engine = build(dir).build().unwrap();
-  let mut tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx_timeout(Duration::from_mins(10)).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
     .for_each(|(k, v)| tx.insert(k, v).unwrap());
