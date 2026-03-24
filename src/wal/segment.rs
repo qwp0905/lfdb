@@ -9,7 +9,7 @@ use std::{
 use super::WAL_BLOCK_SIZE;
 use crate::{
   constant::FILE_SUFFIX,
-  disk::{max_iov, DirectIO, Page, Pread, Pwrite, Pwritev},
+  disk::{max_iov, DirectIO, Fallocate, Page, Pread, Pwrite, Pwritev},
   error::Result,
   thread::{BackgroundThread, WorkBuilder, WorkResult},
   utils::{ShortenedMutex, ToArc, ToBox},
@@ -69,10 +69,12 @@ impl WALSegment {
       .map_err(Error::IO)?
       .to_arc();
 
+    let file_len = (WAL_BLOCK_SIZE * max_len) as u64;
     file
-      .set_len((WAL_BLOCK_SIZE * max_len) as u64)
+      .fallocate(file_len)
+      .and_then(|_| file.set_len(file_len))
+      .and_then(|_| file.sync_all()) // sync metadata for replay at once
       .map_err(Error::IO)?;
-    file.sync_all().map_err(Error::IO)?; // sync metadata for replay at once
     Ok(Self::new(file, path.into(), flush_count))
   }
   pub fn open_exists<P: AsRef<Path>>(path: P, flush_count: usize) -> Result<Self> {
