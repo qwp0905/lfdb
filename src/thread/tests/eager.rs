@@ -42,7 +42,7 @@ fn test_try_recv_drains_pending() {
   );
 
   // trigger first recv (blocking) and wait
-  thread.send_await(1).unwrap();
+  thread.send(1).wait().unwrap();
 
   // now worker is back to blocking recv
   // send many rapidly — they should be batched by try_recv

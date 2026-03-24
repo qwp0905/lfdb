@@ -2,7 +2,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 
 use crossbeam::channel::{unbounded, Receiver, Sender, TrySendError};
 
-use crate::{Error, Result};
+use crate::Error;
 
 use super::{oneshot, BatchWorkResult, Context, WorkResult};
 
@@ -24,9 +24,6 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe 
     let (done_r, done_t) = oneshot();
     done_t.fulfill(Err(Error::WorkerClosed));
     WorkResult::from(done_r)
-  }
-  fn send_await(&self, v: T) -> Result<R> {
-    self.send(v).wait()
   }
 
   fn send_batch(&self, v: Vec<T>) -> BatchWorkResult<R> {
