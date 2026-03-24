@@ -141,25 +141,24 @@ impl TxOrchestrator {
     self.gc.mark(index);
   }
 
-  pub fn start_tx(&self, timeout: Option<Duration>) -> Result<Arc<TxState>> {
-    let tx_id = self.version_visibility.new_transaction();
-    self.wal.append_start(tx_id)?;
-    let state = TxState::new(tx_id).to_arc();
+  pub fn start_tx(&self, timeout: Option<Duration>) -> Result<TxState<'_>> {
+    let state = self.version_visibility.new_transaction();
+    let tx_id = state.get_id();
+    self.wal.append_start(state.get_id())?;
     self
       .timeout_thread
-      .register(Arc::downgrade(&state), timeout.unwrap_or(self.tx_timeout));
+      .register(tx_id, timeout.unwrap_or(self.tx_timeout));
     Ok(state)
   }
 
   pub fn commit_tx(&self, tx_id: usize) -> Result {
     self.wal.commit_and_flush(tx_id)?;
-    self.version_visibility.deactive(&tx_id);
     Ok(())
   }
 
   pub fn abort_tx(&self, tx_id: usize) -> Result {
     self.wal.append_abort(tx_id)?;
-    self.version_visibility.move_to_abort(tx_id);
+    self.version_visibility.set_abort(tx_id);
     Ok(())
   }
 
