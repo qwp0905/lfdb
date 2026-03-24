@@ -10,9 +10,6 @@ pub use oneshot::*;
 mod shared;
 use shared::*;
 
-mod stealing;
-use stealing::*;
-
 mod eager;
 use eager::*;
 
