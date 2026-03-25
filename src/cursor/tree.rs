@@ -69,7 +69,7 @@ impl TreeManager {
     let split_internal = WorkBuilder::new()
       .name("split internal nodes")
       .stack_size(2 << 20)
-      .multi(1)
+      .multi(3)
       .shared(run_split_internal(buffer_pool, recorder, free_list))
       .to_box();
 
