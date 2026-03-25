@@ -185,7 +185,7 @@ fn run_entry(
 
       let next = match entry.get_next() {
         Some(i) => i,
-        None => return recorder.serialize_and_log(0, &mut slot, &entry),
+        None => return recorder.serialize_and_log(RESERVED_TX, &mut slot, &entry),
       };
 
       let next_entry: DataEntry =

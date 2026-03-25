@@ -91,11 +91,11 @@ impl TreeManager {
 
       let node_index = free_list.alloc();
       let mut slot = buffer_pool.read(node_index)?.for_write();
-      recorder.serialize_and_log(0, &mut slot, &CursorNode::initial_state())?;
+      recorder.serialize_and_log(RESERVED_TX, &mut slot, &CursorNode::initial_state())?;
 
       let root = TreeHeader::new(node_index);
       let mut root_slot = buffer_pool.read(HEADER_INDEX)?.for_write();
-      recorder.serialize_and_log(0, &mut root_slot, &root)?;
+      recorder.serialize_and_log(RESERVED_TX, &mut root_slot, &root)?;
     }
     Ok(Self::new(
       free_list,
@@ -253,7 +253,7 @@ fn run_merge_leaf(
         (len, _) if len == prev_len => continue,
         _ => {
           leaf.set_entries(new_entries);
-          recorder.serialize_and_log(0, &mut slot, &leaf.to_node())?;
+          recorder.serialize_and_log(RESERVED_TX, &mut slot, &leaf.to_node())?;
           drop(slot);
 
           orphand.into_iter().for_each(|ptr| gc.release(ptr));
