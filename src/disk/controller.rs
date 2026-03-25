@@ -28,15 +28,13 @@ fn handle_write<const N: usize>(
     buffered.sort_by_key(|(i, _)| *i);
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
-      .map(|g| {
-        g.into_iter()
-          .map(|(i, s)| (*i, IoSlice::new(s.as_ref().as_ref())))
-          .unzip()
-      })
+      .map(|g| g.into_iter())
+      .map(|g| g.map(|(i, s)| (*i, IoSlice::new(s.as_ref().as_ref()))))
+      .map(|g| g.unzip())
       .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * N), bufs))
       .map(|(offset, bufs)| file.pwritev(&bufs, offset as u64))
-      .fold(Ok(()), |a, c| a.and_then(|_| c.map(drop)))
-      .map_err(Error::IO)
+      .map(|r| r.map(drop).map_err(Error::IO))
+      .collect()
   }
 }
 

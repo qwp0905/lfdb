@@ -186,7 +186,8 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(usize, &[u8])>) -> Result {
 
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
-      .map(|g| g.into_iter().map(|(i, s)| (*i, IoSlice::new(*s))).unzip())
+      .map(|g| g.into_iter())
+      .map(|g| g.map(|(i, s)| (*i, IoSlice::new(*s))).unzip())
       .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * WAL_BLOCK_SIZE), bufs))
       .map(|(offset, bufs)| file.pwritev(&bufs, offset as u64))
       .fold(Ok(()), |a, c| a.and_then(|_| c.map(drop)))
