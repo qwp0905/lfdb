@@ -1,5 +1,6 @@
 use std::{
   collections::{HashSet, VecDeque},
+  mem::replace,
   sync::Arc,
 };
 
@@ -67,7 +68,7 @@ impl GarbageCollector {
   pub fn mark(&self, pointer: Pointer) {
     self.queue.push(GcPointer::Trim(pointer))
   }
-  pub fn release(&self, pointer: Pointer) {
+  pub fn lazy_release(&self, pointer: Pointer) {
     self.queue.push(GcPointer::Release(pointer))
   }
 
@@ -134,6 +135,12 @@ fn run_entry(
     let mut index = Some(ptr);
     let mut max_found = false;
 
+    let release = |record: VersionRecord| {
+      if let RecordData::Chunked(pointers) = record.data {
+        pointers.into_iter().for_each(|p| free_list.dealloc(p));
+      }
+    };
+
     while let Some(i) = index.take() {
       let mut slot = buffer_pool.peek(i)?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
@@ -144,6 +151,7 @@ fn run_entry(
       let mut new_versions = VecDeque::new();
       for record in entry.take_versions() {
         if version_visibility.is_aborted(&record.owner) {
+          release(record);
           continue;
         }
         if record.version > min_version {
@@ -151,20 +159,23 @@ fn run_entry(
           continue;
         }
         if max_found {
+          release(record);
           continue;
         }
 
         match expired_max.as_mut() {
-          Some(max) if max.version < record.version => *max = record,
+          Some(max) if max.version < record.version => release(replace(max, record)),
           None => expired_max = Some(record),
-          _ => {}
-        }
+          _ => release(record),
+        };
       }
 
       if !max_found {
         if let Some(record) = expired_max.take() {
-          if let RecordData::Data(_) = &record.data {
-            new_versions.push_back(record);
+          match &record.data {
+            RecordData::Data(_) => new_versions.push_back(record),
+            RecordData::Chunked(_) => new_versions.push_back(record),
+            RecordData::Tombstone => {}
           }
 
           max_found = true;
@@ -200,7 +211,6 @@ fn run_entry(
 }
 
 fn run_check(buffer_pool: Arc<BufferPool>) -> impl Fn(Pointer) -> Result<bool> {
-  let buffer_pool = buffer_pool.clone();
   move |pointer: Pointer| {
     Ok(
       buffer_pool
