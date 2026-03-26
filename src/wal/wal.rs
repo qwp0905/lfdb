@@ -87,7 +87,7 @@ impl WAL {
   ) -> Result<(Self, ReplayResult)> {
     let max_index = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(max_index);
-    logger.info("start to replay wal segments");
+    logger.info(|| "start to replay wal segments");
 
     let replay_result = replay(
       config.base_dir.to_string_lossy().as_ref(),
@@ -96,14 +96,16 @@ impl WAL {
       &page_pool,
     )?;
 
-    logger.info(format!(
-      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
-      replay_result.last_log_id,
-      replay_result.last_tx_id,
-      replay_result.aborted.len(),
-      replay_result.redo.len(),
-      replay_result.segments.len()
-    ));
+    logger.info(|| {
+      format!(
+        "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
+        replay_result.last_log_id,
+        replay_result.last_tx_id,
+        replay_result.aborted.len(),
+        replay_result.redo.len(),
+        replay_result.segments.len()
+      )
+    });
 
     let prefix = PathBuf::from(config.base_dir).join(config.prefix);
 

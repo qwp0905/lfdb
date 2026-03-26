@@ -53,7 +53,7 @@ impl TreeManager {
     config: TreeManagerConfig,
   ) -> Result<Self> {
     {
-      logger.info("btree initial state.");
+      logger.info(|| "btree initial state.");
 
       let node_index = alloc_and_log(
         &free_list,
@@ -102,10 +102,7 @@ impl TreeManager {
 
     // push to queue for initial checkpoint
     entry_stack.iter().for_each(|&ptr| gc.mark(ptr));
-    logger.debug(format!(
-      "{} entry queued for initial gc.",
-      entry_stack.len()
-    ));
+    logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
 
     while let Some(index) = entry_stack.pop() {
       visited.insert(index);
@@ -125,7 +122,7 @@ impl TreeManager {
       .filter(|i| !visited.remove(i))
       .for_each(|i| gc.lazy_release(i));
 
-    logger.info("orphand block has released successfully.");
+    logger.info(|| "orphand block has released successfully.");
     Ok(Self::new(buffer_pool, recorder, gc, logger, config))
   }
 
@@ -141,7 +138,7 @@ fn run_merge_leaf(
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
-    logger.debug("clean leaf collect start.");
+    logger.debug(|| "clean leaf collect start.");
 
     let mut index = buffer_pool
       .peek(HEADER_INDEX)?
@@ -212,11 +209,8 @@ fn run_merge_leaf(
       };
 
       // merge start
-      logger.debug(format!(
-        "trying to start merge {} with {}",
-        slot.get_index(),
-        next
-      ));
+      logger
+        .debug(|| format!("trying to start merge {} with {}", slot.get_index(), next));
 
       let mut next_slot = buffer_pool.peek(next)?.for_write();
       let next_leaf = next_slot.as_ref().deserialize::<CursorNode>()?;
@@ -237,7 +231,7 @@ fn run_merge_leaf(
       orphand.into_iter().for_each(|ptr| gc.lazy_release(ptr));
     }
 
-    logger.debug("clean leaf collect end.");
+    logger.debug(|| "clean leaf collect end.");
     Ok(())
   }
 }

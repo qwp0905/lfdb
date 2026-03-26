@@ -33,10 +33,9 @@ pub struct GarbageCollector {
 impl GarbageCollector {
   pub fn run(&self) -> Result {
     let queue = self.queue.switch();
-    self.logger.debug(format!(
-      "{} data will check version in this scope.",
-      queue.len()
-    ));
+    self
+      .logger
+      .debug(|| format!("{} data will check version in this scope.", queue.len()));
     let mut waiting = Vec::new();
     let mut release = Vec::new();
     let mut dedup = HashSet::new();
@@ -51,13 +50,13 @@ impl GarbageCollector {
         GcPointer::Release(ptr) => release.push(ptr),
       }
     }
-    self.logger.debug("all entry cleaning triggered.");
+    self.logger.debug(|| "all entry cleaning triggered.");
 
     waiting
       .into_iter()
       .map(|v| v.wait_flatten())
       .collect::<Result>()?;
-    self.logger.debug("unreachable versions all collected.");
+    self.logger.debug(|| "unreachable versions all collected.");
 
     // must release after triming because of trim type can contain release type.
     // it could occur dangling pointer reference.
