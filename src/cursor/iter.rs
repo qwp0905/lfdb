@@ -36,10 +36,17 @@ impl<'a> CursorIterator<'a> {
     let mut slot = self.orchestrator.fetch(ptr)?.for_read();
     loop {
       let entry = slot.as_ref().deserialize::<DataEntry>()?;
-      if let Some(v) =
-        entry.find_value(self.state.get_id(), |i| self.orchestrator.is_visible(i))
+      if let Some(record) =
+        entry.find_record(self.state.get_id(), |i| self.orchestrator.is_visible(i))
       {
-        return Ok(Some(v));
+        return record.read_data(|i| {
+          self
+            .orchestrator
+            .fetch(i)?
+            .for_read()
+            .as_ref()
+            .deserialize()
+        });
       }
 
       match entry.get_next() {
