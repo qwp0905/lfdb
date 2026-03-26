@@ -1,29 +1,48 @@
-use std::{collections::VecDeque /*  mem::replace */};
+use std::collections::VecDeque;
 
 use crate::{
   cursor::Pointer,
   serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
-  Error,
+  Error, Result,
 };
+
+pub const MAX_KEY: usize = 1 << 8;
+pub const MAX_VALUE: usize = 1 << 16;
+pub const LARGE_VALUE: usize = SERIALIZABLE_BYTES - 8 - 2 - 18 - 1;
+pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 
 #[derive(Debug)]
 pub enum RecordData {
   Data(Vec<u8>),
+  Chunked(Vec<Pointer>),
   Tombstone,
 }
 impl RecordData {
   pub fn len(&self) -> usize {
     match self {
-      RecordData::Data(data) => 1 + data.len(),
+      RecordData::Data(data) => 1 + 2 + data.len(),
+      RecordData::Chunked(pointers) => 1 + 1 + 8 * pointers.len(),
       RecordData::Tombstone => 1,
     }
   }
 
-  pub fn cloned(&self) -> Option<Vec<u8>> {
-    match self {
-      RecordData::Data(data) => Some(data.clone()),
-      RecordData::Tombstone => None,
+  pub fn read_data<F>(&self, read_chunk: F) -> Result<Option<Vec<u8>>>
+  where
+    F: Fn(Pointer) -> Result<DataChunk>,
+  {
+    let pointers = match self {
+      RecordData::Data(data) => return Ok(Some(data.clone())),
+      RecordData::Tombstone => return Ok(None),
+      RecordData::Chunked(p) => p,
+    };
+
+    let mut data = Vec::new();
+    for &ptr in pointers {
+      let chunk: DataChunk = read_chunk(ptr)?;
+      data.extend_from_slice(chunk.get_data());
     }
+
+    Ok(Some(data))
   }
 }
 
@@ -42,7 +61,7 @@ impl VersionRecord {
     }
   }
   fn byte_len(&self) -> usize {
-    24 + self.data.len() // owner 8byte + version 8byte + data lenth 8byte + data
+    16 + self.data.len() // owner 8byte + version 8byte + data
   }
 }
 
@@ -91,13 +110,13 @@ impl DataEntry {
     self.versions.push_front(record);
   }
 
-  pub fn find_value<F>(&self, tx_id: usize, is_visible: F) -> Option<Vec<u8>>
+  pub fn find_record<F>(&self, tx_id: usize, is_visible: F) -> Option<&RecordData>
   where
     F: Fn(&usize) -> bool,
   {
     for record in self.versions.iter() {
       if record.owner == tx_id {
-        return record.data.cloned();
+        return Some(&record.data);
       }
       if record.version > tx_id {
         continue;
@@ -105,14 +124,14 @@ impl DataEntry {
       if !is_visible(&record.owner) {
         continue;
       }
-      return record.data.cloned();
+      return Some(&record.data);
     }
 
     None
   }
 
   pub fn is_available(&self, record: &VersionRecord) -> bool {
-    let byte_len = 8 + 8 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
+    let byte_len = 8 + 2 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
     record.byte_len() + byte_len < SERIALIZABLE_BYTES
   }
 
@@ -135,7 +154,7 @@ impl Serializable for DataEntry {
   }
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
     writer.write_usize(self.next.unwrap_or(0))?;
-    writer.write_usize(self.versions.len())?;
+    writer.write_u16(self.versions.len() as u16)?;
 
     for record in &self.versions {
       writer.write_usize(record.version)?;
@@ -143,10 +162,17 @@ impl Serializable for DataEntry {
       match &record.data {
         RecordData::Data(data) => {
           writer.write(&[0])?;
-          writer.write_usize(data.len())?;
+          writer.write_u16(data.len() as u16)?;
           writer.write(&data)?;
         }
         RecordData::Tombstone => writer.write(&[1])?,
+        RecordData::Chunked(pointers) => {
+          writer.write(&[2])?;
+          writer.write_u8(pointers.len() as u8)?;
+          for ptr in pointers {
+            writer.write_usize(*ptr)?;
+          }
+        }
       }
     }
     Ok(())
@@ -154,17 +180,25 @@ impl Serializable for DataEntry {
 
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let next = reader.read_usize()?;
-    let len = reader.read_usize()?;
+    let len = reader.read_u16()? as usize;
     let mut versions = VecDeque::with_capacity(len);
     for _ in 0..len {
       let version = reader.read_usize()?;
       let owner = reader.read_usize()?;
       let data = match reader.read()? {
         0 => {
-          let l = reader.read_usize()?;
+          let l = reader.read_u16()? as usize;
           RecordData::Data(reader.read_n(l)?.to_vec())
         }
         1 => RecordData::Tombstone,
+        2 => {
+          let l = reader.read()? as usize;
+          let mut pointers = Vec::with_capacity(l);
+          for _ in 0..l {
+            pointers.push(reader.read_usize()?);
+          }
+          RecordData::Chunked(pointers)
+        }
         _ => return Err(Error::InvalidFormat("invalid type for data version record")),
       };
       versions.push_back(VersionRecord::new(owner, version, data))
@@ -173,6 +207,37 @@ impl Serializable for DataEntry {
       versions,
       next: (next != 0).then_some(next),
     })
+  }
+}
+
+pub struct DataChunk {
+  chunk: Vec<u8>,
+}
+impl DataChunk {
+  pub fn new(chunk: Vec<u8>) -> Self {
+    Self { chunk }
+  }
+
+  pub fn get_data(&self) -> &[u8] {
+    &self.chunk
+  }
+}
+
+impl Serializable for DataChunk {
+  fn get_type() -> SerializeType {
+    SerializeType::DataChunk
+  }
+
+  fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
+    writer.write_u16(self.chunk.len() as u16)?;
+    writer.write(&self.chunk)?;
+    Ok(())
+  }
+
+  fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
+    let len = reader.read_u16()? as usize;
+    let chunk = reader.read_n(len)?.to_vec();
+    Ok(Self { chunk })
   }
 }
 
