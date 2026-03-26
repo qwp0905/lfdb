@@ -1,6 +1,8 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use super::{CursorNode, DataEntry, GarbageCollector, Pointer, TreeHeader, HEADER_INDEX};
+use super::{
+  CursorNode, DataEntry, GarbageCollector, Pointer, RecordData, TreeHeader, HEADER_INDEX,
+};
 use crate::{
   buffer_pool::BufferPool,
   constant::RESERVED_TX,
@@ -109,6 +111,11 @@ impl TreeManager {
       visited.insert(index);
       let entry: DataEntry =
         buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
+      for record in entry.get_versions() {
+        if let RecordData::Chunked(pointers) = &record.data {
+          visited.extend(pointers);
+        }
+      }
       if let Some(i) = entry.get_next() {
         entry_stack.push(i)
       }
@@ -116,7 +123,7 @@ impl TreeManager {
 
     (0..file_end)
       .filter(|i| !visited.remove(i))
-      .for_each(|i| gc.release(i));
+      .for_each(|i| gc.lazy_release(i));
 
     logger.info("orphand block has released successfully.");
     Ok(Self::new(buffer_pool, recorder, gc, logger, config))
@@ -199,7 +206,7 @@ fn run_merge_leaf(
           recorder.serialize_and_log(RESERVED_TX, &mut slot, &leaf.to_node())?;
           drop(slot);
 
-          orphand.into_iter().for_each(|ptr| gc.release(ptr));
+          orphand.into_iter().for_each(|ptr| gc.lazy_release(ptr));
           continue;
         }
       };
@@ -227,7 +234,7 @@ fn run_merge_leaf(
       drop(slot);
       drop(next_slot);
 
-      orphand.into_iter().for_each(|ptr| gc.release(ptr));
+      orphand.into_iter().for_each(|ptr| gc.lazy_release(ptr));
     }
 
     logger.debug("clean leaf collect end.");
