@@ -108,7 +108,11 @@ impl Engine {
       return Err(Error::EngineUnavailable);
     }
     let state = self.orchestrator.start_tx(None)?;
-    Ok(Cursor::new(self.orchestrator.clone(), state))
+    Ok(Cursor::new(
+      self.orchestrator.clone(),
+      state,
+      self.metrics_registry.clone(),
+    ))
   }
 
   /**
@@ -119,7 +123,11 @@ impl Engine {
       return Err(Error::EngineUnavailable);
     }
     let state = self.orchestrator.start_tx(Some(timeout))?;
-    Ok(Cursor::new(self.orchestrator.clone(), state))
+    Ok(Cursor::new(
+      self.orchestrator.clone(),
+      state,
+      self.metrics_registry.clone(),
+    ))
   }
 
   pub fn metrics(&self) -> EngineMetrics {

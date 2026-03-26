@@ -168,7 +168,6 @@ impl TxOrchestrator {
     self
       .timeout_thread
       .register(tx_id, timeout.unwrap_or(self.tx_timeout));
-    self.metrics.transaction_start_count.inc();
     Ok(state)
   }
 

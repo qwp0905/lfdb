@@ -73,7 +73,7 @@ impl BufferPool {
     Ok(Slot::temp(state, index, &self.disk, shard, true))
   }
 
-  pub fn read(&self, index: usize) -> Result<Slot<'_>> {
+  fn __read(&self, index: usize) -> Result<Slot<'_>> {
     let mut guard = match self.table.acquire(index) {
       Acquired::Temp(temp) => {
         let (state, shard) = temp.take();
@@ -102,8 +102,12 @@ impl BufferPool {
       .map(|evicted| self.disk.write(evicted, &old))
       .unwrap_or(Ok(()))?;
     guard.commit();
-    self.metrics.buffer_pool_cache_miss.inc();
     Ok(slot)
+  }
+
+  #[inline]
+  pub fn read(&self, index: usize) -> Result<Slot<'_>> {
+    self.metrics.buffer_pool_read.measure(|| self.__read(index))
   }
 
   pub fn flush(&self) -> Result {
