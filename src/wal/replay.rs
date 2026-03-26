@@ -57,7 +57,7 @@ pub fn replay(
     return Ok(ReplayResult::empty());
   }
 
-  let mut tx_id = 0;
+  let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
   let mut redo = BTreeMap::<usize, Vec<(usize, Vec<u8>)>>::new();
   let mut aborted = BTreeMap::<usize, usize>::new();

@@ -1,16 +1,21 @@
-use std::{any::Any, error, io, result};
+use std::{any::Any, error, io, result, sync::Arc};
 
 use thiserror::Error;
+
+use crate::utils::ToArc;
 
 #[derive(Debug, Error)]
 pub enum Error {
   #[error("not found")]
   NotFound,
 
-  #[error("invalid format")]
+  #[error("invalid format: {0}")]
   InvalidFormat(&'static str),
 
-  #[error("io error")]
+  #[error("invalid block type expected {0} received {1}")]
+  DeserializeError(u8, u8),
+
+  #[error("io error: {0:?}")]
   IO(io::Error),
 
   #[error("end of file")]
@@ -37,28 +42,21 @@ pub enum Error {
   #[error("channel disconnected")]
   ChannelDisconnected,
 
-  #[error("panic")]
-  Panic(String),
+  #[error("thread panic: {0:?}")]
+  Panic(Arc<dyn Any + Send>),
 
-  #[error("unknown")]
-  Unknown(String),
+  #[error("unknown {0:?}")]
+  Unknown(Arc<dyn Any + Send>),
 }
 impl Error {
   pub fn unknown<E>(err: E) -> Self
   where
     E: error::Error + Send + Sync + 'static,
   {
-    Self::Unknown(err.to_string())
+    Self::Unknown(err.to_arc())
   }
-  pub fn panic(err: Box<dyn Any + Send>) -> Self {
-    if let Some(str) = err.downcast_ref::<&str>() {
-      return Error::Panic(str.to_string());
-    }
-    if let Some(str) = err.downcast_ref::<String>() {
-      return Error::Panic(str.clone());
-    }
-
-    Error::Panic(format!("unknown panic."))
+  pub fn panic(err: Arc<dyn Any + Send>) -> Self {
+    Self::Panic(err)
   }
 }
 impl Clone for Error {
@@ -66,6 +64,7 @@ impl Clone for Error {
     match self {
       Self::NotFound => Self::NotFound,
       Self::InvalidFormat(err) => Self::InvalidFormat(err),
+      Self::DeserializeError(e, r) => Self::DeserializeError(*e, *r),
       Self::Unknown(err) => Self::Unknown(err.clone()),
       Self::IO(err) => Self::IO(io::Error::new(err.kind(), err.to_string())),
       Self::EOF => Self::EOF,
@@ -82,3 +81,5 @@ impl Clone for Error {
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;
+unsafe impl Send for Error {}
+unsafe impl Sync for Error {}
