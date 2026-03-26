@@ -257,7 +257,7 @@ impl LeafNode {
     self.next.replace(pointer)
   }
 
-  pub fn insert_at(
+  pub fn insert_and_split(
     &mut self,
     index: usize,
     key: Key,
