@@ -74,5 +74,5 @@ impl Clone for LogFilter {
 
 pub struct NoneLogger;
 impl Logger for NoneLogger {
-  fn log(&self, _level: LogLevel, _msg: &[u8]) {}
+  fn log(&self, _: LogLevel, _: &[u8]) {}
 }
