@@ -6,6 +6,7 @@ use crate::{
   buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   error::Result,
+  metrics::MetricsRegistry,
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
   utils::{LogFilter, ToArc, ToBox},
@@ -28,6 +29,7 @@ pub struct TxOrchestrator {
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   tree_manager: TreeManager,
+  metrics: Arc<MetricsRegistry>,
 }
 impl TxOrchestrator {
   pub fn new(
@@ -37,8 +39,10 @@ impl TxOrchestrator {
     gc_config: GarbageCollectionConfig,
     tree_config: TreeManagerConfig,
     logger: LogFilter,
+    metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let buffer_pool = BufferPool::open(buffer_pool_config, logger.clone())?.to_arc();
+    let buffer_pool =
+      BufferPool::open(buffer_pool_config, logger.clone(), metrics.clone())?.to_arc();
     let checkpoint_interval = wal_config.checkpoint_interval;
     let checkpoint_ch = WorkInput::new();
 
@@ -129,6 +133,7 @@ impl TxOrchestrator {
       timeout_thread,
       tx_timeout: transaction_config.timeout,
       tree_manager,
+      metrics,
     })
   }
   pub fn fetch(&self, index: usize) -> Result<Slot<'_>> {
@@ -167,13 +172,17 @@ impl TxOrchestrator {
   }
 
   pub fn commit_tx(&self, tx_id: usize) -> Result {
-    self.wal.commit_and_flush(tx_id)?;
+    self
+      .metrics
+      .transaction_commit
+      .measure(|| self.wal.commit_and_flush(tx_id))?;
     Ok(())
   }
 
   pub fn abort_tx(&self, tx_id: usize) -> Result {
     self.wal.append_abort(tx_id)?;
     self.version_visibility.set_abort(tx_id);
+    self.metrics.transaction_abort_count.inc();
     Ok(())
   }
 

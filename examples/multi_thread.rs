@@ -97,6 +97,8 @@ found and key not equal: {found_ne}
 not found: {not_found}"
     );
   }
+
+  println!("{:?}", engine.metrics());
   drop(engine);
   println!("done");
 }

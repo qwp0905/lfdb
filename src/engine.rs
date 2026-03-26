@@ -15,6 +15,7 @@ use crate::{
   cursor::{Cursor, GarbageCollectionConfig, TreeManagerConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
+  metrics::{EngineMetrics, MetricsRegistry},
   transaction::{TransactionConfig, TxOrchestrator},
   utils::{LogFilter, LogLevel, Logger, ToArc},
   wal::WALConfig,
@@ -42,6 +43,7 @@ where
 pub struct Engine {
   orchestrator: Arc<TxOrchestrator>,
   available: AtomicBool,
+  metrics_registry: Arc<MetricsRegistry>,
   logger: LogFilter,
 }
 impl Engine {
@@ -49,6 +51,7 @@ impl Engine {
   where
     T: AsRef<Path>,
   {
+    let metrics_registry = MetricsRegistry::new().to_arc();
     let logger = LogFilter::new(config.log_level, config.logger);
     logger.info(|| "start engine");
 
@@ -86,12 +89,14 @@ impl Engine {
       gc_config,
       tree_config,
       logger.clone(),
+      metrics_registry.clone(),
     )?;
 
     Ok(Self {
       orchestrator: orchestrator.to_arc(),
       available: AtomicBool::new(true),
       logger,
+      metrics_registry,
     })
   }
 
@@ -103,7 +108,11 @@ impl Engine {
       return Err(Error::EngineUnavailable);
     }
     let state = self.orchestrator.start_tx(None)?;
-    Ok(Cursor::new(self.orchestrator.clone(), state))
+    Ok(Cursor::new(
+      self.orchestrator.clone(),
+      state,
+      self.metrics_registry.clone(),
+    ))
   }
 
   /**
@@ -114,7 +123,15 @@ impl Engine {
       return Err(Error::EngineUnavailable);
     }
     let state = self.orchestrator.start_tx(Some(timeout))?;
-    Ok(Cursor::new(self.orchestrator.clone(), state))
+    Ok(Cursor::new(
+      self.orchestrator.clone(),
+      state,
+      self.metrics_registry.clone(),
+    ))
+  }
+
+  pub fn metrics(&self) -> EngineMetrics {
+    self.metrics_registry.snapshot()
   }
 }
 

@@ -7,6 +7,7 @@ use super::{Acquired, Frame, LRUTable, Peeked, Slot};
 use crate::{
   disk::{DiskController, PagePool, PAGE_SIZE},
   error::Result,
+  metrics::MetricsRegistry,
   utils::{Bitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc},
 };
 
@@ -23,11 +24,16 @@ pub struct BufferPool {
   disk: DiskController<PAGE_SIZE>,
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
+  metrics: Arc<MetricsRegistry>,
 }
 impl BufferPool {
-  pub fn open(config: BufferPoolConfig, logger: LogFilter) -> Result<Self> {
+  pub fn open(
+    config: BufferPoolConfig,
+    logger: LogFilter,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Result<Self> {
     let page_pool = PagePool::new(config.capacity).to_arc();
-    let disk = DiskController::open(config.path, page_pool.clone())?;
+    let disk = DiskController::open(config.path, page_pool.clone(), metrics.clone())?;
 
     let frame_cap = (config.capacity * 9) / 10; // 90% of page pool capacity 10% buffer for disk io
     let mut frame = Vec::with_capacity(frame_cap);
@@ -40,6 +46,7 @@ impl BufferPool {
       dirty: Bitmap::new(config.capacity),
       logger,
       page_pool,
+      metrics,
     })
   }
 
@@ -66,14 +73,16 @@ impl BufferPool {
     Ok(Slot::temp(state, index, &self.disk, shard, true))
   }
 
-  pub fn read(&self, index: usize) -> Result<Slot<'_>> {
+  fn __read(&self, index: usize) -> Result<Slot<'_>> {
     let mut guard = match self.table.acquire(index) {
       Acquired::Temp(temp) => {
         let (state, shard) = temp.take();
+        self.metrics.buffer_pool_cache_hit.inc();
         return Ok(Slot::temp(state, index, &self.disk, shard, false));
       }
       Acquired::Hit(state) => {
         let id = state.get_frame_id();
+        self.metrics.buffer_pool_cache_hit.inc();
         return Ok(Slot::page(&self.frame[id], &self.dirty, state));
       }
       Acquired::Evicted(guard) => guard,
@@ -96,19 +105,27 @@ impl BufferPool {
     Ok(slot)
   }
 
+  #[inline]
+  pub fn read(&self, index: usize) -> Result<Slot<'_>> {
+    self.metrics.buffer_pool_read.measure(|| self.__read(index))
+  }
+
   pub fn flush(&self) -> Result {
     self.logger.debug(|| "buffer pool flush triggered.");
-    let mut waits = Vec::new();
-    for id in self.dirty.iter() {
-      let frame = self.frame[id].rl();
-      self.dirty.remove(id);
-      waits.push(self.disk.write_async(frame.get_index(), frame.page_ref()));
-    }
+    self.metrics.buffer_pool_flush.measure(|| {
+      let mut waits = Vec::new();
+      for id in self.dirty.iter() {
+        let frame = self.frame[id].rl();
+        self.dirty.remove(id);
+        waits.push(self.disk.write_async(frame.get_index(), frame.page_ref()));
+      }
 
-    waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
-    self.logger.debug(|| "buffer pool flushed all pages.");
+      waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
+      self.logger.debug(|| "buffer pool flushed all pages.");
 
-    self.disk.fsync()?;
+      self.disk.fsync()
+    })?;
+
     self.logger.debug(|| "buffer pool synced.");
     Ok(())
   }

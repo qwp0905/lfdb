@@ -9,12 +9,14 @@ use super::{max_iov, DirectIO, PageRef, Pread, Pwrite, Pwritev};
 use crate::{
   disk::PagePool,
   error::{Error, Result},
+  metrics::MetricsRegistry,
   thread::{BackgroundThread, WorkBuilder, WorkResult},
   utils::{ToArc, ToBox},
 };
 
 fn handle_write<const N: usize>(
   file: Arc<File>,
+  metrics: Arc<MetricsRegistry>,
 ) -> impl FnMut(Vec<(usize, PageRef<N>)>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
@@ -32,7 +34,11 @@ fn handle_write<const N: usize>(
       .map(|g| g.map(|(i, s)| (*i, IoSlice::new(s.as_ref().as_ref()))))
       .map(|g| g.unzip())
       .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * N), bufs))
-      .map(|(offset, bufs)| file.pwritev(&bufs, offset as u64))
+      .map(|(offset, bufs)| {
+        metrics
+          .disk_write
+          .measure(|| file.pwritev(&bufs, offset as u64))
+      })
       .map(|r| r.map(drop).map_err(Error::IO))
       .collect()
   }
@@ -49,9 +55,14 @@ pub struct DiskController<const N: usize> {
   file: Arc<File>,
   writer: Box<dyn BackgroundThread<(usize, PageRef<N>), Result>>,
   page_pool: Arc<PagePool<N>>,
+  metrics: Arc<MetricsRegistry>,
 }
 impl<const N: usize> DiskController<N> {
-  pub fn open(path: PathBuf, page_pool: Arc<PagePool<N>>) -> Result<Self> {
+  pub fn open(
+    path: PathBuf,
+    page_pool: Arc<PagePool<N>>,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Result<Self> {
     let file = OpenOptions::new()
       .read(true)
       .write(true)
@@ -63,19 +74,21 @@ impl<const N: usize> DiskController<N> {
       .name(format!("{} write buffering", path.to_string_lossy()))
       .stack_size(2 << 20)
       .single()
-      .eager_buffering(max_iov(), handle_write::<N>(file.clone()))
+      .eager_buffering(max_iov(), handle_write::<N>(file.clone(), metrics.clone()))
       .to_box();
 
     Ok(Self {
       file,
       writer,
       page_pool,
+      metrics,
     })
   }
   pub fn read<'a>(&self, index: usize, page: &'a mut PageRef<N>) -> Result {
     self
-      .file
-      .pread(page.as_mut().as_mut(), (index * N) as u64)
+      .metrics
+      .disk_read
+      .measure(|| self.file.pread(page.as_mut().as_mut(), (index * N) as u64))
       .map(|_| ())
       .map_err(Error::IO)
   }

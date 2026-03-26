@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem::replace, sync::Arc};
+use std::{marker::PhantomData, mem::replace, sync::Arc, time::Instant};
 
 use super::{
   CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, NodeFindResult,
@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
   buffer_pool::WritableSlot,
+  metrics::MetricsRegistry,
   serialize::Serializable,
   transaction::{TxOrchestrator, TxState},
   Error, Result,
@@ -15,6 +16,8 @@ use crate::{
 pub struct Cursor<'a> {
   orchestrator: Arc<TxOrchestrator>,
   state: TxState<'a>,
+  metrics: Arc<MetricsRegistry>,
+  tx_start: Option<Instant>,
   _marker: PhantomData<*const ()>, // do not send to another thread!!!.
 }
 impl<'a> Cursor<'a> {
@@ -35,10 +38,17 @@ impl<'a> Cursor<'a> {
       .serialize_and_log(self.state.get_id(), slot, data)
   }
 
-  pub fn new(orchestrator: Arc<TxOrchestrator>, state: TxState<'a>) -> Self {
+  pub fn new(
+    orchestrator: Arc<TxOrchestrator>,
+    state: TxState<'a>,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Self {
+    let tx_start = metrics.transaction_start.start();
     Self {
       orchestrator,
       state,
+      metrics,
+      tx_start,
       _marker: Default::default(),
     }
   }
@@ -87,15 +97,8 @@ impl<'a> Cursor<'a> {
     Ok(index)
   }
 
-  pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<Vec<u8>>> {
-    if !self.state.is_available() {
-      return Err(Error::TransactionClosed);
-    }
-    if key.as_ref().len() > MAX_KEY {
-      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
-    }
-
-    let mut index = self.find_leaf(key.as_ref())?;
+  fn __get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut index = self.find_leaf(key)?;
     loop {
       let node = self
         .orchestrator
@@ -104,7 +107,7 @@ impl<'a> Cursor<'a> {
         .as_ref()
         .deserialize::<CursorNode>()?
         .as_leaf()?;
-      match node.find(key.as_ref()) {
+      match node.find(key) {
         NodeFindResult::Found(_, i) => break index = i,
         NodeFindResult::Move(i) => index = i,
         NodeFindResult::NotFound(_) => return Ok(None),
@@ -134,6 +137,20 @@ impl<'a> Cursor<'a> {
     }
   }
 
+  pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<Vec<u8>>> {
+    if !self.state.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+    if key.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    }
+
+    self
+      .metrics
+      .operation_get
+      .measure(|| self.__get(key.as_ref()))
+  }
+
   fn create_record(&self, data: Vec<u8>) -> Result<RecordData> {
     if data.len() < LARGE_VALUE {
       return Ok(RecordData::Data(data));
@@ -150,18 +167,7 @@ impl<'a> Cursor<'a> {
     Ok(RecordData::Chunked(pointers))
   }
 
-  pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
-    if !self.state.is_available() {
-      return Err(Error::TransactionClosed);
-    }
-
-    if key.len() > MAX_KEY {
-      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
-    }
-    if value.len() > MAX_VALUE {
-      return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
-    }
-
+  fn __insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
     let record = self.create_record(value)?;
 
     let (mut index, mut old_height) = {
@@ -279,6 +285,24 @@ impl<'a> Cursor<'a> {
     }
   }
 
+  pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
+    if !self.state.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+
+    if key.len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
+    }
+    if value.len() > MAX_VALUE {
+      return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
+    }
+
+    self
+      .metrics
+      .operation_insert
+      .measure(|| self.__insert(key, value))
+  }
+
   fn apply_split(
     &self,
     key: Vec<u8>,
@@ -344,14 +368,7 @@ impl<'a> Cursor<'a> {
     Ok(())
   }
 
-  pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
-    if !self.state.is_available() {
-      return Err(Error::TransactionClosed);
-    }
-    if key.as_ref().len() > MAX_KEY {
-      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
-    }
-
+  fn __remove(&self, key: &[u8]) -> Result {
     let mut index = self.find_leaf(key.as_ref())?;
     loop {
       let slot = self.orchestrator.fetch(index)?.for_read();
@@ -364,6 +381,20 @@ impl<'a> Cursor<'a> {
         NodeFindResult::NotFound(_) => return Ok(()),
       }
     }
+  }
+
+  pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
+    if !self.state.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+    if key.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    }
+
+    self
+      .metrics
+      .operation_remove
+      .measure(|| self.__remove(key.as_ref()))
   }
 
   pub fn scan<K: AsRef<[u8]>>(&self, start: &K, end: &K) -> Result<CursorIterator<'_>> {
@@ -438,6 +469,7 @@ impl<'a> Cursor<'a> {
 }
 impl<'a> Drop for Cursor<'a> {
   fn drop(&mut self) {
+    self.metrics.transaction_start.record(self.tx_start.take());
     let _ = self.abort();
   }
 }

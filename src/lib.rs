@@ -26,3 +26,6 @@ pub use utils::{LogLevel, Logger};
 mod disk;
 
 mod constant;
+
+mod metrics;
+pub use metrics::EngineMetrics;
