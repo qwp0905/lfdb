@@ -841,6 +841,9 @@ fn insert_and_remove_and_gc() {
   t.commit().expect("commit error");
 }
 
+// ============================================================
+// 17. Start but not commit
+// ============================================================
 #[test]
 #[ignore]
 fn write_not_commit() {
@@ -895,6 +898,9 @@ fn test_start_not_commit() {
   t.commit().expect("commit error")
 }
 
+// ============================================================
+// 18. Timeout
+// ============================================================
 #[test]
 fn test_timeout() {
   let dir = tempdir_in(".").unwrap();
@@ -916,4 +922,81 @@ fn test_timeout() {
 
   let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
   let _ = tx.get(b"123123");
+}
+
+// ============================================================
+// 19. Large key/value
+// ============================================================
+#[test]
+fn test_large_key_value() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  let tx = engine.new_tx().expect("start error");
+  let large_key = vec![0; 257];
+  let large_value = vec![0; (1 << 16) + 1];
+
+  assert_eq!(tx.insert(large_key, vec![]).is_err(), true);
+  assert_eq!(tx.insert(vec![], large_value).is_err(), true);
+}
+
+// ============================================================
+// 20. Large key/value + GC
+// ============================================================
+#[test]
+fn test_large_key_value_gc() {
+  let dir = tempdir_in(".").unwrap();
+
+  let count = 100;
+
+  let mut keys = Vec::with_capacity(count);
+  let mut values = Vec::with_capacity(count);
+
+  for i in 0..count {
+    keys.push(format!("{:06}", i).into_bytes());
+    let mut v = vec![0; 1 << 15];
+    v[..6].copy_from_slice(format!("{:06}", i).as_bytes());
+    values.push(v);
+  }
+
+  {
+    let engine = build_engine(&dir);
+
+    let mut tx = engine.new_tx().unwrap();
+    for i in 0..(count / 2) {
+      tx.insert(keys[i].clone(), values[i].clone()).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = engine.new_tx().unwrap();
+    for i in 0..(count / 2) {
+      tx.remove(&keys[i]).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = engine.new_tx().unwrap();
+    for i in (count / 2)..count {
+      tx.insert(keys[i].clone(), values[i].clone()).unwrap();
+    }
+    tx.commit().unwrap();
+  }
+
+  {
+    let engine = build_engine(&dir);
+
+    let tx = engine.new_tx().unwrap();
+    let mut iter = tx.scan_all().unwrap();
+
+    let mut found = 0;
+    while let Ok(Some(_)) = iter.try_next() {
+      found += 1;
+    }
+    assert_eq!(found, count / 2);
+
+    let mut tx = engine.new_tx().unwrap();
+    for i in (count / 2)..count {
+      assert_eq!(tx.get(&keys[i]).unwrap(), Some(values[i].clone()));
+    }
+    tx.commit().unwrap();
+  }
 }
