@@ -1,8 +1,9 @@
 use std::{marker::PhantomData, mem::replace, sync::Arc};
 
 use super::{
-  CursorIterator, CursorNode, DataEntry, InternalNode, NodeFindResult, RecordData,
-  TreeHeader, VersionRecord, HEADER_INDEX,
+  CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, NodeFindResult,
+  RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, HEADER_INDEX, LARGE_VALUE, MAX_KEY,
+  MAX_VALUE,
 };
 use crate::{
   buffer_pool::WritableSlot,
@@ -90,6 +91,9 @@ impl<'a> Cursor<'a> {
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
+    if key.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    }
 
     let mut index = self.find_leaf(key.as_ref())?;
     loop {
@@ -110,10 +114,17 @@ impl<'a> Cursor<'a> {
     let mut slot = self.orchestrator.fetch(index)?.for_read();
     loop {
       let entry: DataEntry = slot.as_ref().deserialize()?;
-      if let Some(v) =
-        entry.find_value(self.state.get_id(), |i| self.orchestrator.is_visible(i))
+      if let Some(record) =
+        entry.find_record(self.state.get_id(), |i| self.orchestrator.is_visible(i))
       {
-        return Ok(Some(v));
+        return record.read_data(|i| {
+          self
+            .orchestrator
+            .fetch(i)?
+            .for_read()
+            .as_ref()
+            .deserialize()
+        });
       }
 
       match entry.get_next() {
@@ -123,10 +134,35 @@ impl<'a> Cursor<'a> {
     }
   }
 
+  fn create_record(&self, data: Vec<u8>) -> Result<RecordData> {
+    if data.len() < LARGE_VALUE {
+      return Ok(RecordData::Data(data));
+    }
+
+    let chunks = data.chunks(CHUNK_SIZE);
+    let mut pointers = Vec::with_capacity(chunks.len());
+
+    for chunked in chunks {
+      let chunk = DataChunk::new(chunked.to_vec());
+      pointers.push(self.alloc_and_log(&chunk)?);
+    }
+
+    Ok(RecordData::Chunked(pointers))
+  }
+
   pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
+
+    if key.len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
+    }
+    if value.len() > MAX_VALUE {
+      return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
+    }
+
+    let record = self.create_record(value)?;
 
     let (mut index, mut old_height) = {
       let header = self
@@ -161,14 +197,12 @@ impl<'a> Cursor<'a> {
           index = i;
           continue;
         }
-        NodeFindResult::Found(_, i) => {
-          return self.insert_at(i, RecordData::Data(value), slot)
-        }
+        NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot),
         NodeFindResult::NotFound(i) => {
           let entry = DataEntry::init(VersionRecord::new(
             self.state.get_id(),
             self.orchestrator.current_version(),
-            RecordData::Data(value),
+            record,
           ));
           let entry_index = self.alloc_and_log(&entry)?;
 
@@ -314,6 +348,10 @@ impl<'a> Cursor<'a> {
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
+    if key.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    }
+
     let mut index = self.find_leaf(key.as_ref())?;
     loop {
       let slot = self.orchestrator.fetch(index)?.for_read();
@@ -331,6 +369,12 @@ impl<'a> Cursor<'a> {
   pub fn scan<K: AsRef<[u8]>>(&self, start: &K, end: &K) -> Result<CursorIterator<'_>> {
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
+    }
+    if start.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, start.as_ref().len()));
+    }
+    if end.as_ref().len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, end.as_ref().len()));
     }
 
     let mut index = self.find_leaf(start.as_ref())?;
