@@ -174,6 +174,12 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   pub fn write_u32(&mut self, value: u32) -> Result {
     self.write(&value.to_le_bytes())
   }
+  pub fn write_u16(&mut self, value: u16) -> Result {
+    self.write(&value.to_le_bytes())
+  }
+  pub fn write_u8(&mut self, value: u8) -> Result {
+    self.write(&value.to_le_bytes())
+  }
 
   pub fn finalize(self) -> usize {
     self.offset
