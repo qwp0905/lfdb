@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, mem::replace, sync::Arc};
 
 use super::{
-  CursorIterator, CursorNode, DataEntry, NodeFindResult, RecordData, SplitTask,
+  CursorIterator, CursorNode, DataEntry, InternalNode, NodeFindResult, RecordData,
   TreeHeader, VersionRecord, HEADER_INDEX,
 };
 use crate::{
@@ -128,7 +128,7 @@ impl<'a> Cursor<'a> {
       return Err(Error::TransactionClosed);
     }
 
-    let (mut index, old_height) = {
+    let (mut index, mut old_height) = {
       let header = self
         .orchestrator
         .fetch(HEADER_INDEX)?
@@ -172,7 +172,7 @@ impl<'a> Cursor<'a> {
           ));
           let entry_index = self.alloc_and_log(&entry)?;
 
-          let split = match leaf.insert_at(i, key.clone(), entry_index) {
+          let split = match leaf.insert_and_split(i, key.clone(), entry_index) {
             Some(split) => split,
             None => return self.serialize_and_log(&mut slot, &leaf.to_node()),
           };
@@ -188,9 +188,95 @@ impl<'a> Cursor<'a> {
       }
     };
 
-    let task = SplitTask::new(stack, mid_key, right_ptr, old_height);
-    self.orchestrator.split(task);
-    Ok(())
+    let mut split_key = mid_key;
+    let mut split_pointer = right_ptr;
+    while let Some(index) = stack.pop() {
+      match self.apply_split(split_key, split_pointer, index)? {
+        Some((k, p)) => {
+          split_key = k;
+          split_pointer = p;
+        }
+        None => return Ok(()),
+      };
+    }
+
+    loop {
+      let mut header_slot = self.orchestrator.fetch(HEADER_INDEX)?.for_write();
+      let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
+      let current_height = header.get_height();
+      let mut index = header.get_root();
+      if old_height == current_height {
+        let new_root = InternalNode::initialize(split_key, index, split_pointer);
+        let new_root_index = self.alloc_and_log(&new_root.to_node())?;
+
+        header.set_root(new_root_index);
+        header.increase_height();
+        return self.serialize_and_log(&mut header_slot, &header);
+      }
+
+      let diff = (current_height - old_height) as usize;
+      old_height = current_height;
+      drop(header_slot);
+      let mut stack = vec![];
+
+      while stack.len() < diff {
+        let node = self
+          .orchestrator
+          .fetch(index)?
+          .for_read()
+          .as_ref()
+          .deserialize::<CursorNode>()?
+          .as_internal()?;
+        match node.find(&split_key) {
+          Ok(i) => stack.push(replace(&mut index, i)),
+          Err(i) => index = i,
+        }
+      }
+
+      while let Some(index) = stack.pop() {
+        match self.apply_split(split_key, split_pointer, index)? {
+          Some((k, p)) => {
+            split_key = k;
+            split_pointer = p;
+          }
+          None => return Ok(()),
+        };
+      }
+    }
+  }
+
+  fn apply_split(
+    &self,
+    key: Vec<u8>,
+    ptr: usize,
+    current: usize,
+  ) -> Result<Option<(Vec<u8>, usize)>> {
+    let mut index = current;
+
+    let (mut slot, mut internal) = loop {
+      let slot = self.orchestrator.fetch(index)?.for_write();
+      let mut internal = slot.as_ref().deserialize::<CursorNode>()?.as_internal()?;
+      match internal.insert_or_next(&key, ptr) {
+        Ok(_) => break (slot, internal),
+        Err(i) => index = i,
+      }
+    };
+
+    let (split_node, split_key) = match internal.split_if_needed() {
+      Some(split) => split,
+      None => {
+        return self
+          .serialize_and_log(&mut slot, &internal.to_node())
+          .map(|_| None)
+      }
+    };
+
+    let split_index = self.alloc_and_log(&split_node.to_node())?;
+
+    internal.set_right(&split_key, split_index);
+    self.serialize_and_log(&mut slot, &internal.to_node())?;
+
+    Ok(Some((split_key, split_index)))
   }
 
   /**
