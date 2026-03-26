@@ -194,13 +194,13 @@ impl TxOrchestrator {
     self.timeout_thread.close();
     let wal_close = self.wal.twostep_close();
     self.checkpoint.close();
-    self.logger.info("last checkpoint completed.");
+    self.logger.info(|| "last checkpoint completed.");
 
     self.gc.close();
     self.buffer_pool.close();
-    self.logger.info("buffer pool closed.");
+    self.logger.info(|| "buffer pool closed.");
     wal_close();
-    self.logger.info("wal closed.");
+    self.logger.info(|| "wal closed.");
     Ok(())
   }
 }
@@ -224,16 +224,14 @@ fn run_checkpoint(
 ) -> Result {
   let log_id = wal.current_log_id();
   let min_version = version.min_version();
-  logger.debug(format!(
-    "checkpoint trigger id {log_id} version {min_version}"
-  ));
+  logger.debug(|| format!("checkpoint trigger id {log_id} version {min_version}"));
 
   gc.run()?;
   version.remove_aborted(&min_version);
-  logger.debug(format!("checkpoint garbage collected id {log_id}"));
+  logger.debug(|| format!("checkpoint garbage collected id {log_id}"));
 
   buffer_pool.flush()?;
   wal.checkpoint_and_flush(log_id, min_version)?;
-  logger.debug(format!("checkpoint complete id {log_id}"));
+  logger.debug(|| format!("checkpoint complete id {log_id}"));
   Ok(())
 }

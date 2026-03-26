@@ -97,7 +97,7 @@ impl BufferPool {
   }
 
   pub fn flush(&self) -> Result {
-    self.logger.debug("buffer pool flush triggered.");
+    self.logger.debug(|| "buffer pool flush triggered.");
     let mut waits = Vec::new();
     for id in self.dirty.iter() {
       let frame = self.frame[id].rl();
@@ -106,10 +106,10 @@ impl BufferPool {
     }
 
     waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
-    self.logger.debug("buffer pool flushed all pages.");
+    self.logger.debug(|| "buffer pool flushed all pages.");
 
     self.disk.fsync()?;
-    self.logger.debug("buffer pool synced.");
+    self.logger.debug(|| "buffer pool synced.");
     Ok(())
   }
 

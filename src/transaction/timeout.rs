@@ -217,7 +217,7 @@ impl TimeoutThread {
           if !state.try_abort() {
             return;
           }
-          logger_c.debug(format!("tx {} timeout reached", state.get_id()));
+          logger_c.trace(|| format!("tx {} timeout reached", state.get_id()));
 
           version_visibility.set_abort(state.get_id());
           state.deactive();
@@ -229,7 +229,7 @@ impl TimeoutThread {
             Msg::Register(id, timeout) => wheel.register(id, timeout),
             Msg::Term => return,
           }
-          logger.debug("timeout thread wake up.");
+          logger.debug(|| "timeout thread wake up.");
 
           while !wheel.is_empty() {
             select! {
@@ -240,7 +240,7 @@ impl TimeoutThread {
               }
             }
           }
-          logger.debug("timeout thread switches to idle.");
+          logger.debug(|| "timeout thread switches to idle.");
         }
       })
       .unwrap();

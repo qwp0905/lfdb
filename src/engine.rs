@@ -50,7 +50,7 @@ impl Engine {
     T: AsRef<Path>,
   {
     let logger = LogFilter::new(config.log_level, config.logger);
-    logger.info("start engine");
+    logger.info(|| "start engine");
 
     fs::create_dir_all(config.base_path.as_ref()).map_err(Error::IO)?;
     let wal_config = WALConfig {
@@ -125,9 +125,9 @@ impl Drop for Engine {
         .available
         .compare_exchange(true, false, Ordering::Release, Ordering::Acquire)
     {
-      self.logger.info("engine shutdown");
+      self.logger.info(|| "engine shutdown");
       if let Err(err) = self.orchestrator.close() {
-        self.logger.error(err.to_string());
+        self.logger.error(|| err.to_string());
       };
     }
   }

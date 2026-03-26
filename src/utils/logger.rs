@@ -35,28 +35,32 @@ impl LogFilter {
     Self { level, logger }
   }
 
-  fn log(&self, level: LogLevel, msg: &[u8]) {
+  fn log<T, F>(&self, level: LogLevel, msg: F)
+  where
+    T: AsRef<[u8]>,
+    F: FnOnce() -> T,
+  {
     if self.level as isize <= level as isize {
-      self.logger.log(level, msg)
+      self.logger.log(level, msg().as_ref())
     }
   }
-  pub fn info<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Info, msg.as_ref())
+  pub fn info<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Info, msg)
   }
-  pub fn warn<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Warn, msg.as_ref())
+  pub fn warn<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Warn, msg)
   }
-  pub fn error<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Error, msg.as_ref())
+  pub fn error<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Error, msg)
   }
-  pub fn fatal<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Fatal, msg.as_ref())
+  pub fn fatal<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Fatal, msg)
   }
-  pub fn debug<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Debug, msg.as_ref())
+  pub fn debug<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Debug, msg)
   }
-  pub fn trace<T: AsRef<[u8]>>(&self, msg: T) {
-    self.log(LogLevel::Trace, msg.as_ref())
+  pub fn trace<T: AsRef<[u8]>, F: FnOnce() -> T>(&self, msg: F) {
+    self.log(LogLevel::Trace, msg)
   }
 }
 impl Clone for LogFilter {
@@ -70,6 +74,5 @@ impl Clone for LogFilter {
 
 pub struct NoneLogger;
 impl Logger for NoneLogger {
-  #[allow(unused)]
-  fn log(&self, level: LogLevel, msg: &[u8]) {}
+  fn log(&self, _: LogLevel, _: &[u8]) {}
 }
