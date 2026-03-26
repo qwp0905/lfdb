@@ -42,6 +42,12 @@ pub enum Error {
   #[error("channel disconnected")]
   ChannelDisconnected,
 
+  #[error("exceeded maximum key length. maximum {0}, received {1}")]
+  KeyExceeded(usize, usize),
+
+  #[error("exceeded maximum value length. maximum {0}, received {1}")]
+  ValueExceeded(usize, usize),
+
   #[error("thread panic: {0:?}")]
   Panic(Arc<dyn Any + Send>),
 
@@ -75,6 +81,8 @@ impl Clone for Error {
       Self::WriteConflict => Self::WriteConflict,
       Self::ThreadConflict => Self::ThreadConflict,
       Self::ChannelDisconnected => Self::ChannelDisconnected,
+      Self::KeyExceeded(e, r) => Self::KeyExceeded(*e, *r),
+      Self::ValueExceeded(e, r) => Self::ValueExceeded(*e, *r),
       Self::Panic(err) => Self::Panic(err.clone()),
     }
   }
