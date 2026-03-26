@@ -4,9 +4,7 @@ use super::{FreeList, PageRecorder, TimeoutThread, TxState, VersionVisibility};
 
 use crate::{
   buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
-  cursor::{
-    GarbageCollectionConfig, GarbageCollector, SplitTask, TreeManager, TreeManagerConfig,
-  },
+  cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   error::Result,
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
@@ -75,7 +73,7 @@ impl TxOrchestrator {
 
     let tree_manager = if replay.is_new {
       TreeManager::initial_state(
-        free_list.clone(),
+        &free_list,
         buffer_pool.clone(),
         recorder.clone(),
         gc.clone(),
@@ -84,7 +82,6 @@ impl TxOrchestrator {
       )
     } else {
       TreeManager::clean_and_start(
-        free_list.clone(),
         buffer_pool.clone(),
         recorder.clone(),
         gc.clone(),
@@ -190,10 +187,6 @@ impl TxOrchestrator {
 
   pub fn current_version(&self) -> usize {
     self.version_visibility.current_version()
-  }
-
-  pub fn split(&self, task: SplitTask) {
-    self.tree_manager.split(task);
   }
 
   pub fn close(&self) -> Result {
