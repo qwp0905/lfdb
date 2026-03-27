@@ -10,8 +10,22 @@ use crate::{
   utils::ShortenedRwLock,
 };
 
+/**
+ * The MSB (bit 31) is the eviction flag; the remaining 31 bits are the
+ * pin count. Both are packed into a single atomic so that eviction and
+ * pinning can be toggled with a single CAS — analogous to an RwLock
+ * where eviction is the write lock and each pin is a read lock.
+ */
 const EVICTION_BIT: u32 = 1 << 31;
 
+/**
+ * A per-frame access token that tracks concurrent access to a buffer pool frame.
+ *
+ * Acts as a lock: readers increment the pin count while accessing the frame,
+ * and eviction requires exclusive access (EVICTION_BIT set, pin == 0).
+ * Unlike TempFrameState, FrameState does not own the page data itself —
+ * it only controls access to the frame.
+ */
 pub struct FrameState {
   pin: AtomicU32,
   frame_id: usize,
@@ -48,6 +62,11 @@ impl FrameState {
     }
   }
 
+  /**
+   * Releases the eviction lock and sets the pin count to the given value.
+   * Safe to use a plain store here because the eviction flag guarantees
+   * exclusive access — no other thread can pin or evict while it is set.
+   */
   pub fn completion_evict(&self, pin: u32) {
     self.pin.store(pin, Ordering::Release);
   }
@@ -60,6 +79,17 @@ impl FrameState {
   }
 }
 
+/**
+ * TempFrameState lifecycle:
+ *
+ * 1. Allocated by peek() (used by GC) — not promoted into the LRU table.
+ * 2. If the page is not already in memory, it is loaded from disk into
+ *    the temp page buffer.
+ * 3. The caller reads or writes the page, behaving like a regular frame.
+ * 4. Unlike regular frames, the owner of a temp page is responsible for
+ *    writing it back to disk and releasing it. It is never handed off to
+ *    the LRU eviction path.
+ */
 pub struct TempFrameState {
   pin: AtomicU32,
   page: RwLock<PageRef<PAGE_SIZE>>,
@@ -75,6 +105,12 @@ impl TempFrameState {
     }
   }
 
+  /**
+   * Unlike FrameState which waits for pin == 0 (no readers),
+   * TempFrameState waits for pin == 1 — the owner's own pin.
+   * The owner is always responsible for cleanup, so eviction
+   * is safe as soon as no other reader holds a pin.
+   */
   pub fn try_evict(&self) -> bool {
     self
       .pin
@@ -114,6 +150,11 @@ impl TempFrameState {
     }
   }
 
+  /**
+   * Releases the eviction lock and sets the pin count to the given value.
+   * Safe to use a plain store here because the eviction flag guarantees
+   * exclusive access — no other thread can pin or evict while it is set.
+   */
   pub fn completion_evict(&self, pin: u32) {
     self.pin.store(pin, Ordering::Release);
   }

@@ -2,56 +2,182 @@ use std::time::{Duration, Instant};
 
 use super::{Counter, Histogram};
 
+/**
+ * A point-in-time snapshot of engine metrics. Obtain via Engine::metrics().
+ */
 #[derive(Debug)]
 pub struct EngineMetrics {
+  /**
+   * Milliseconds since the engine started.
+   */
   pub uptime_ms: u64,
 
+  /**
+   * Number of buffer pool page reads total counts.
+   */
   pub buffer_pool_read_count: u64,
+  /**
+   * Average buffer pool read latency in microseconds.
+   */
   pub buffer_pool_read_latency_micros_avg: f64,
+  /**
+   * p50 buffer pool read latency in microseconds.
+   */
   pub buffer_pool_read_latency_micros_p50: f64,
+  /**
+   * p95 buffer pool read latency in microseconds.
+   */
   pub buffer_pool_read_latency_micros_p95: f64,
+  /**
+   * p99 buffer pool read latency in microseconds.
+   */
   pub buffer_pool_read_latency_micros_p99: f64,
+  /**
+   * Number of reads served from the in-memory cache without hitting disk.
+   */
   pub buffer_pool_cache_hit: u64,
+  /**
+   * Number of buffer pool flush triggered counts.
+   */
   pub buffer_pool_flush_count: u64,
+  /**
+   * Average buffer pool flush latency in milliseconds.
+   */
   pub buffer_pool_flush_latency_ms_avg: f64,
 
+  /**
+   * Number of disk read io counts.
+   */
   pub disk_read_count: u64,
+  /**
+   * Average disk read io latency in microseconds.
+   */
   pub disk_read_latency_micros_avg: f64,
+  /**
+   * p50 disk read io latency in microseconds.
+   */
   pub disk_read_latency_micros_p50: f64,
+  /**
+   * Number of disk write io counts.
+   */
   pub disk_write_count: u64,
+  /**
+   * Average disk write io latency in microseconds.
+   */
   pub disk_write_latency_micros_avg: f64,
+  /**
+   * p50 disk write io latency in microseconds.
+   */
   pub disk_write_latency_micros_p50: f64,
 
+  /**
+   * Number of transactions started.
+   */
   pub transaction_start_count: u64,
+  /**
+   * Number of transactions aborted (explicitly or by timeout).
+   */
   pub transaction_abort_count: u64,
 
+  /**
+   * Average total transaction duration from start to end in milliseconds.
+   */
   pub transaction_duration_ms_avg: f64,
+  /**
+   * p50 transaction duration in milliseconds.
+   */
   pub transaction_duration_ms_p50: f64,
+  /**
+   * p95 transaction duration in milliseconds.
+   */
   pub transaction_duration_ms_p95: f64,
+  /**
+   * p99 transaction duration in milliseconds.
+   */
   pub transaction_duration_ms_p99: f64,
 
+  /**
+   * Number of successfully committed transactions.
+   */
   pub transaction_commit_count: u64,
+  /**
+   * Average commit latency (WAL flush) in milliseconds.
+   */
   pub transaction_commit_latency_ms_avg: f64,
+  /**
+   * p50 commit latency in milliseconds.
+   */
   pub transaction_commit_latency_ms_p50: f64,
+  /**
+   * p95 commit latency in milliseconds.
+   */
   pub transaction_commit_latency_ms_p95: f64,
+  /**
+   * p99 commit latency in milliseconds.
+   */
   pub transaction_commit_latency_ms_p99: f64,
 
+  /**
+   * Number of get operations.
+   */
   pub operation_get_count: u64,
+  /**
+   * Average get operation latency in microseconds.
+   */
   pub operation_get_latency_micros_avg: f64,
+  /**
+   * p50 get operation latency in microseconds.
+   */
   pub operation_get_latency_micros_p50: f64,
+  /**
+   * p95 get operation latency in microseconds.
+   */
   pub operation_get_latency_micros_p95: f64,
+  /**
+   * p99 get operation latency in microseconds.
+   */
   pub operation_get_latency_micros_p99: f64,
 
+  /**
+   * Number of insert operations.
+   */
   pub operation_insert_count: u64,
+  /**
+   * Average insert operation latency in microseconds.
+   */
   pub operation_insert_latency_micros_avg: f64,
+  /**
+   * p50 insert operation latency in microseconds.
+   */
   pub operation_insert_latency_micros_p50: f64,
+  /**
+   * p95 insert operation latency in microseconds.
+   */
   pub operation_insert_latency_micros_p95: f64,
+  /**
+   * p99 insert operation latency in microseconds.
+   */
   pub operation_insert_latency_micros_p99: f64,
 
+  /**
+   * Number of remove operations.
+   */
   pub operation_remove_count: u64,
+  /**
+   * Average remove operation latency in microseconds.
+   */
   pub operation_remove_latency_micros_avg: f64,
+  /**
+   * p50 remove operation latency in microseconds.
+   */
   pub operation_remove_latency_micros_p50: f64,
+  /**
+   * p95 remove operation latency in microseconds.
+   */
   pub operation_remove_latency_micros_p95: f64,
+  /**
+   * p99 remove operation latency in microseconds.
+   */
   pub operation_remove_latency_micros_p99: f64,
 }
 pub struct MetricsRegistry {

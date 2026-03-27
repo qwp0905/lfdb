@@ -13,12 +13,17 @@ use crate::{
   Error, Result,
 };
 
+/**
+ * A handle for a single transaction, providing read and write operations.
+ * Must be used on a single thread; cross-thread behavior is untested.
+ * Automatically aborts on drop if not committed.
+ */
 pub struct Cursor<'a> {
   orchestrator: Arc<TxOrchestrator>,
   state: TxState<'a>,
   metrics: Arc<MetricsRegistry>,
   tx_start: Option<Instant>,
-  _marker: PhantomData<*const ()>, // do not send to another thread!!!.
+  _marker: PhantomData<*const ()>,
 }
 impl<'a> Cursor<'a> {
   #[inline]
@@ -151,18 +156,19 @@ impl<'a> Cursor<'a> {
       .measure(|| self.__get(key.as_ref()))
   }
 
-  fn create_record(&self, data: Vec<u8>) -> Result<RecordData> {
+  fn create_record(&self, mut data: Vec<u8>) -> Result<RecordData> {
     if data.len() < LARGE_VALUE {
       return Ok(RecordData::Data(data));
     }
 
-    let chunks = data.chunks(CHUNK_SIZE);
-    let mut pointers = Vec::with_capacity(chunks.len());
-
-    for chunked in chunks {
-      let chunk = DataChunk::new(chunked.to_vec());
+    let mut pointers = Vec::with_capacity(data.len().div_ceil(CHUNK_SIZE));
+    while data.len() > CHUNK_SIZE {
+      let remain = data.split_off(CHUNK_SIZE);
+      let chunk = DataChunk::new(data);
       pointers.push(self.alloc_and_log(&chunk)?);
+      data = remain;
     }
+    pointers.push(self.alloc_and_log(&DataChunk::new(data))?);
 
     Ok(RecordData::Chunked(pointers))
   }
@@ -240,6 +246,7 @@ impl<'a> Cursor<'a> {
       };
     }
 
+    // CAS loop: multiple concurrent splits may race to update the root.
     loop {
       let mut header_slot = self.orchestrator.fetch(HEADER_INDEX)?.for_write();
       let mut header: TreeHeader = header_slot.as_ref().deserialize()?;

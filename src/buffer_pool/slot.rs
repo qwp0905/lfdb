@@ -11,6 +11,13 @@ use crate::{
   utils::{Bitmap, ShortenedMutex, ShortenedRwLock},
 };
 
+/**
+ * A handle to a buffer pool page, abstracting over LRU frames and temp pages.
+ *
+ * Callers only need to call for_read() or for_write() — the distinction between
+ * Page and Temp is an internal detail. Dirty tracking and disk writes are handled
+ * by the buffer pool itself when the slot is dropped.
+ */
 pub enum Slot<'a> {
   Temp(TempSlot<'a>),
   Page(PageSlot<'a>),
@@ -139,6 +146,10 @@ pub struct PageSlotWrite<'a> {
 
 impl<'a> Drop for PageSlotWrite<'a> {
   fn drop(&mut self) {
+    // Obtaining a WritableSlot is treated as equivalent to modifying the page.
+    // We cannot know whether the caller actually modified it without expensive
+    // byte-level comparison. The cost of an occasional unnecessary flush is
+    // far lower than tracking write intent.
     self.dirty.insert(self.state.get_frame_id());
     self.state.unpin();
   }
@@ -191,6 +202,15 @@ impl<'a> TempSlot<'a> {
   }
 }
 
+/**
+ * The guard is wrapped in ManuallyDrop to control drop order inside Drop::drop.
+ * The lock must be released before try_evict() so that other threads waiting
+ * on this page can proceed — Rust does not allow moving fields out of self in Drop,
+ * so ManuallyDrop::drop is used to release the lock at the right moment.
+ *
+ * transmute is used to extend the guard's lifetime to match the struct,
+ * since the borrow checker cannot infer that the guard outlives self here.
+ */
 pub struct TempSlotWrite<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockWriteGuard<'a, PageRef<PAGE_SIZE>>>,
@@ -213,6 +233,8 @@ impl<'a> TempSlotWrite<'a> {
 }
 impl<'a> Drop for TempSlotWrite<'a> {
   fn drop(&mut self) {
+    // is_peek identifies the creator of this temp page, who is responsible
+    // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
     if self.is_peek {
       return self.release();
     }
@@ -222,6 +244,15 @@ impl<'a> Drop for TempSlotWrite<'a> {
   }
 }
 
+/**
+ * The guard is wrapped in ManuallyDrop to control drop order inside Drop::drop.
+ * The lock must be released before try_evict() so that other threads waiting
+ * on this page can proceed — Rust does not allow moving fields out of self in Drop,
+ * so ManuallyDrop::drop is used to release the lock at the right moment.
+ *
+ * transmute is used to extend the guard's lifetime to match the struct,
+ * since the borrow checker cannot infer that the guard outlives self here.
+ */
 pub struct TempSlotRead<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockReadGuard<'a, PageRef<PAGE_SIZE>>>,
@@ -245,6 +276,8 @@ impl<'a> TempSlotRead<'a> {
 }
 impl<'a> Drop for TempSlotRead<'a> {
   fn drop(&mut self) {
+    // is_peek identifies the creator of this temp page, who is responsible
+    // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
     if self.is_peek {
       return self.release();
     }

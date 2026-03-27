@@ -13,6 +13,10 @@ use crate::{
 use super::{BackgroundThread, Context, OneshotFulfill, SingleFn};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
+/**
+ * The callback is called once per batch and the result is cloned to each
+ * waiter — hence R: Clone.
+ */
 fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
 ) -> impl FnMut(&mut Vec<(T, OneshotFulfill<Result<R>>)>) -> bool + 'a
@@ -34,9 +38,25 @@ where
   }
 }
 
+/**
+ * A background thread that batches incoming work items and flushes them
+ * together via a single callback call.
+ *
+ * While a flush is in progress, new items accumulate in the queue.
+ * After each flush, the thread immediately drains the queue for the next
+ * batch — achieving continuous pipelining without idle gaps.
+ *
+ * The burst loop uses backoff to spin briefly before parking, allowing
+ * items that arrive just after a flush to be included in the next batch
+ * rather than triggering a separate wakeup.
+ */
 pub struct EagerBufferingThread<T, R> {
   queue: Arc<SegQueue<Context<T, R>>>,
   waker: Thread,
+  /**
+   * UnsafeCell allows taking the JoinHandle in close(&self).
+   * Safe because close() is called at most once during shutdown.
+   */
   handle: UnsafeCell<Option<JoinHandle<()>>>,
 }
 impl<T, R> EagerBufferingThread<T, R>

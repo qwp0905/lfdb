@@ -51,6 +51,11 @@ impl<const N: usize> WriteAsync<N> {
   }
 }
 
+/**
+ * Provides block-level IO to a single data file.
+ * Write requests are buffered and batched into pwritev syscalls
+ * via a background thread for efficient sequential disk access.
+ */
 pub struct DiskController<const N: usize> {
   file: Arc<File>,
   writer: Box<dyn BackgroundThread<(usize, PageRef<N>), Result>>,
@@ -63,6 +68,10 @@ impl<const N: usize> DiskController<N> {
     page_pool: Arc<PagePool<N>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
+    // Direct IO bypasses the OS page cache for predictable latency.
+    // To compensate for the lack of OS write buffering, writes are
+    // accumulated and sorted in the eager_buffering layer, then
+    // flushed as a single pwritev call per contiguous block.
     let file = OpenOptions::new()
       .read(true)
       .write(true)
@@ -93,6 +102,10 @@ impl<const N: usize> DiskController<N> {
       .map_err(Error::IO)
   }
   pub fn write_async<'a>(&self, index: usize, page: &'a PageRef<N>) -> WriteAsync<N> {
+    // Copy the page into a pooled buffer before sending to the writer thread.
+    // The original PageRef is held under a lock, which cannot be transferred
+    // across thread boundaries. Copying also releases the lock immediately,
+    // allowing concurrent access while IO happens in the background.
     let mut pooled = self.page_pool.acquire();
     pooled.as_mut().copy_from(page.as_ref());
     WriteAsync(self.writer.send((index, pooled)))

@@ -8,9 +8,18 @@ use crate::{
 
 pub const MAX_KEY: usize = 1 << 8;
 pub const MAX_VALUE: usize = 1 << 16;
-pub const LARGE_VALUE: usize = SERIALIZABLE_BYTES - 8 - 2 - 18 - 1;
+
+// Maximum inline value size for a single-version DataEntry.
+// Overhead: next(8) + version_count(2) + version(8) + owner(8) + data_len(2) + type_byte(1) = 29
+pub const LARGE_VALUE: usize = SERIALIZABLE_BYTES - 29;
 pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 
+/**
+ * Data: value fits inline in the DataEntry page.
+ * Chunked: value exceeds LARGE_VALUE and is stored across separate DataChunk pages;
+ *          only the page pointers are stored here.
+ * Tombstone: marks the key as deleted.
+ */
 #[derive(Debug)]
 pub enum RecordData {
   Data(Vec<u8>),
@@ -46,6 +55,12 @@ impl RecordData {
   }
 }
 
+/**
+ * owner: tx_id of the transaction that wrote this version.
+ * version: the global tx counter at insert time. Only transactions that started
+ * at or after this value can see this version — ensuring writes become visible
+ * only to transactions that begin after the insert.
+ */
 #[derive(Debug)]
 pub struct VersionRecord {
   pub owner: usize,
@@ -65,6 +80,12 @@ impl VersionRecord {
   }
 }
 
+/**
+ * MVCC version chain for a single key, stored as a linked list of pages.
+ * When a page fills up with version records, overflow continues on the next page
+ * pointed to by next. New versions are prepended so the most recent is always
+ * at the front.
+ */
 #[derive(Debug)]
 pub struct DataEntry {
   next: Option<Pointer>,

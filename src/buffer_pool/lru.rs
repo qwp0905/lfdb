@@ -25,6 +25,15 @@ where
   move |&ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
 }
 
+/**
+ * Two-segment LRU inspired by InnoDB's midpoint insertion strategy.
+ * New entries are placed in the old segment first; they are promoted
+ * to the new segment only on a subsequent access. This makes the cache
+ * resistant to large sequential scans — pages read only once never
+ * displace frequently accessed (hot) pages from the new segment.
+ *
+ * The rebalance threshold maintains a 3:5 ratio (new:old).
+ */
 pub struct LRUShard<K, V> {
   old_entries: RawTable<NonNull<Bucket<K, V>>>,
   old_sub_list: LRUList<K, V>,
@@ -113,6 +122,11 @@ where
       .map(|bucket| bucket.borrow_unsafe().get_value())
   }
 
+  /**
+   * Must be called after every insertion into the new segment to maintain
+   * the 3:5 (new:old) ratio. Demotes entries from the tail of the new
+   * segment to the head of the old segment until the ratio is restored.
+   */
   fn rebalance<S>(&mut self, hasher: &S)
   where
     S: BuildHasher,
@@ -152,6 +166,11 @@ where
     }
 
     let mut bucket = Bucket::new_ptr(key, value);
+
+    // Insert into the head of the old segment, not the tail.
+    // This gives the page a chance to be promoted to the new segment
+    // on a subsequent access before being evicted — the core of
+    // midpoint insertion.
     self.old_sub_list.push_head(&mut bucket);
     self.old_entries.insert(hash, bucket, make_hasher(hasher));
     None
@@ -197,8 +216,6 @@ where
     self.len() == self.capacity
   }
 }
-unsafe impl<K, V> Sync for LRUShard<K, V> {}
-unsafe impl<K, V> Send for LRUShard<K, V> {}
 
 impl<K, V> Drop for LRUShard<K, V> {
   fn drop(&mut self) {

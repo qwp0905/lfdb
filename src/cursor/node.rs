@@ -112,6 +112,13 @@ impl Serializable for CursorNode {
     }
   }
 }
+
+/**
+ * B-link tree internal node.
+ * right holds the high key and pointer to the right sibling, set when this node
+ * is split. If a search key >= high key, traversal must follow the right pointer
+ * rather than descending into this node's children.
+ */
 #[derive(Debug)]
 pub struct InternalNode {
   keys: Vec<Key>,
@@ -198,11 +205,21 @@ impl InternalNode {
   }
 }
 
+/**
+ * Result of a leaf node key lookup.
+ * Move is the B-link tree right-move: the key falls beyond this node's range,
+ * so the caller must follow the next pointer to the right sibling — the same
+ * mechanism used at the internal level when a search key >= high key.
+ */
 pub enum NodeFindResult {
   Found(usize, Pointer),
   Move(Pointer),
   NotFound(usize),
 }
+/**
+ * B+tree leaf node. Leaf nodes are linked in key order via next, set when this
+ * node is split to chain the new right sibling into the list.
+ */
 #[derive(Debug)]
 pub struct LeafNode {
   entries: Vec<(Key, Pointer)>,

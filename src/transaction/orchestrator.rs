@@ -17,6 +17,11 @@ pub struct TransactionConfig {
   pub timeout: Duration,
 }
 
+/**
+ * Composes WAL, buffer pool, GC, version visibility, and tree manager into a
+ * unified interface for the cursor layer. Does not contain business logic —
+ * it wires subsystems together and exposes transaction lifecycle operations.
+ */
 pub struct TxOrchestrator {
   wal: Arc<WAL>,
   buffer_pool: Arc<BufferPool>,
@@ -58,6 +63,9 @@ impl TxOrchestrator {
         .write(data.as_ref())?;
     }
 
+    // Flush replayed pages to disk so disk_len reflects the true file extent.
+    // TreeManager::clean_and_start uses disk_len to scan for orphaned blocks
+    // (allocated but unreferenced pages) and reclaim them into the free list.
     buffer_pool.flush()?;
     let disk_len = buffer_pool.disk_len()?;
     let free_list = FreeList::new(disk_len).to_arc();
@@ -95,6 +103,9 @@ impl TxOrchestrator {
       )
     }?;
 
+    // Checkpoint first: segments can only be deleted once all their changes are
+    // confirmed on disk. Replayed segments are also not reused — their file size
+    // may differ from the current config, so fresh segments are created instead.
     run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
     replay
       .segments
@@ -198,6 +209,11 @@ impl TxOrchestrator {
     self.version_visibility.current_version()
   }
 
+  /**
+   * Closes components in dependency order — higher-level components first.
+   * wal.twostep_close() step 1 stops new checkpoint triggers; checkpoint.close()
+   * performs the final checkpoint; step 2 (wal_close) finalizes the WAL.
+   */
   pub fn close(&self) -> Result {
     self.tree_manager.close();
     self.timeout_thread.close();

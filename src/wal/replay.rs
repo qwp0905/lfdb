@@ -10,6 +10,17 @@ use crate::{
   error::{Error, Result},
 };
 
+/**
+ * Output of WAL replay on startup.
+ *
+ * All Insert/Multi records are replayed unconditionally (redo-only) because
+ * structural operations like B-tree splits cannot be safely undone — a crash
+ * mid-split would leave the tree inconsistent if partial writes were skipped.
+ *
+ * aborted holds the set of transaction IDs that must be treated as rolled back
+ * for MVCC visibility: explicitly aborted transactions plus any transactions
+ * that were open (started but never committed or aborted) at the time of crash.
+ */
 pub struct ReplayResult {
   pub last_log_id: usize,
   pub last_tx_id: usize,
@@ -103,6 +114,8 @@ pub fn replay(
           e.push((idx2, data2));
         }
         Operation::Start => {
+          // Transactions older than min_active are already captured in the checkpoint's
+          // abort set — no need to track them again.
           if let Some(&id) = last_min_active.as_ref() {
             if id > record.tx_id {
               continue;
@@ -121,10 +134,13 @@ pub fn replay(
           aborted.insert(record.log_id, record.tx_id);
         }
         Operation::Checkpoint(last_log_id, min_active) => {
+          // Discard redo/abort entries already covered by the checkpoint.
           last_checkpoint = Some(last_checkpoint.unwrap_or(0).max(last_log_id));
           redo = redo.split_off(&last_log_id);
           aborted = aborted.split_off(&last_log_id);
 
+          // Discard started entries below min_active — they are already reflected
+          // in the checkpoint's abort set and don't need to be tracked again.
           last_min_active = Some(last_min_active.unwrap_or(0).max(min_active));
           started = started.split_off(&min_active)
         }
@@ -133,25 +149,24 @@ pub fn replay(
 
     segments.push(wal);
   }
-  let mut redo = redo
-    .into_iter()
-    .flat_map(|(id, data)| {
-      data
-        .into_iter()
-        .map(|(i, p)| (id, i, p))
-        .collect::<Vec<_>>()
-    })
-    .collect::<Vec<_>>();
-  redo.sort_by_key(|(id, _, _)| *id);
 
   Ok(ReplayResult {
     last_log_id: log_id + 1,
     last_tx_id: tx_id + 1,
+    // Explicit aborts + transactions open at crash time (started but never committed or aborted).
     aborted: aborted
       .into_values()
       .chain(started.into_iter().filter(|c| !closed.contains(&c)))
       .collect(),
-    redo,
+    redo: redo
+      .into_iter()
+      .flat_map(|(id, data)| {
+        data
+          .into_iter()
+          .map(|(i, p)| (id, i, p))
+          .collect::<Vec<_>>()
+      })
+      .collect::<Vec<_>>(),
     segments,
     generation,
     is_new: false,

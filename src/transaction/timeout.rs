@@ -99,6 +99,13 @@ impl<T> BucketLayer<T> {
   }
 }
 
+/**
+ * Hierarchical timing wheel for scheduling timeouts.
+ * execute_at is stored as milliseconds elapsed since the wheel's last reset.
+ * The number of layers grows with the magnitude of execute_at (6 bits per layer),
+ * so the timer is reset whenever the wheel becomes empty — keeping execute_at
+ * values small and the layer count minimal.
+ */
 struct TimingWheel<T, F> {
   layers: Vec<BucketLayer<T>>,
   current: u64,
@@ -194,8 +201,9 @@ enum Msg {
 }
 
 /**
- * Timeout Threads
- * Manage the timeout for each transaction
+ * Aborts transactions that exceed their timeout.
+ * Uses a timing wheel internally to schedule abort callbacks efficiently.
+ * The thread idles when no transactions are registered, waking on the first registration.
  */
 pub struct TimeoutThread {
   handle: UnsafeCell<Option<JoinHandle<()>>>,

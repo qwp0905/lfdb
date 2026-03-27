@@ -17,6 +17,10 @@ pub struct TreeManagerConfig {
   pub merge_interval: Duration,
 }
 
+/**
+ * Compacts the B-tree by traversing from root to leaf nodes and reclaiming
+ * empty entries and leaf pages.
+ */
 pub struct TreeManager {
   merge_leaf: Box<dyn BackgroundThread<(), Result>>,
 }
@@ -68,6 +72,14 @@ impl TreeManager {
     }
     Ok(Self::new(buffer_pool, recorder, gc, logger, config))
   }
+
+  /**
+   * Recovers orphaned pages on startup by traversing the entire B-tree and
+   * collecting all reachable pages. Any page in [0, file_end) not reachable
+   * is an orphan — typically a node allocated during a split, or a DataEntry
+   * page allocated during an insert, where a crash occurred before the leaf
+   * WAL record was written. Orphans are reclaimed via lazy_release.
+   */
   pub fn clean_and_start(
     buffer_pool: Arc<BufferPool>,
     recorder: Arc<PageRecorder>,
@@ -208,7 +220,7 @@ fn run_merge_leaf(
         }
       };
 
-      // merge start
+      // merge without propagating to internal nodes.
       logger
         .debug(|| format!("trying to start merge {} with {}", slot.get_index(), next));
 

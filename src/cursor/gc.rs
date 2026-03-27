@@ -18,11 +18,27 @@ pub struct GarbageCollectionConfig {
   pub thread_count: usize,
 }
 
+/**
+ * Trim: walk the version chain and discard expired or aborted versions.
+ * Release: free an orphaned DataEntry header page. This happens when the tree
+ * manager removes a key (e.g. after a tombstone) and the leaf entry is gone,
+ * leaving the DataEntry page unreachable. Release is always deferred until all
+ * Trim work is complete — a concurrent Trim on the same page would dereference
+ * a dangling pointer if Release ran first.
+ */
 enum GcPointer {
-  Trim(Pointer),    // release without head of data entry.
-  Release(Pointer), // release head of data entry lazyly.
+  Trim(Pointer),
+  Release(Pointer),
 }
 
+/**
+ * Runs at each checkpoint to clean expired and aborted versions from DataEntry
+ * pages, then confirms min_active in the checkpoint log. DataEntry pages are
+ * marked for GC (Trim) when a cursor performs an update or remove, so the same
+ * pointer can appear multiple times if the same key is written repeatedly
+ * between two GC runs. check and entry are separate workers: check answers
+ * emptiness queries, entry does version reclamation.
+ */
 pub struct GarbageCollector {
   check: Arc<dyn BackgroundThread<Pointer, Result<bool>>>,
   entry: Arc<dyn BackgroundThread<Pointer, Result>>,
@@ -162,6 +178,9 @@ fn run_entry(
           continue;
         }
 
+        // Keep only the newest version at or below min_version. All active
+        // transactions started after min_version, so older versions can never
+        // be reached again.
         match expired_max.as_mut() {
           Some(max) if max.version < record.version => release(replace(max, record)),
           None => expired_max = Some(record),

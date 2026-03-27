@@ -36,7 +36,18 @@ pub struct WALConfig {
 }
 
 /**
- * Write ahead log
+ * Lock-free, group-commit write-ahead log.
+ *
+ * Multiple threads append records concurrently into a shared 16KB block (LogBuffer)
+ * by atomically reserving a slot via a single fetch_add. No mutex is held during
+ * the write — contention is resolved only at block rotation via CAS.
+ *
+ * When a block fills up, the thread that crosses the threshold wins the CAS and
+ * rotates to the next block (or a new segment if the current segment is full).
+ * Rotated segments are fsynced asynchronously and queued for checkpoint.
+ *
+ * flush=true callers (commit, checkpoint) wait for all prior segment fsyncs to
+ * complete before returning, guaranteeing durability across segment boundaries.
  */
 pub struct WAL {
   /**
@@ -49,7 +60,9 @@ pub struct WAL {
    */
   last_log_id: AtomicUsize,
   /**
-   * wal log buffer.
+   * Current log buffer, managed via epoch GC. Epoch pinning guarantees the buffer
+   * pointer remains valid for the duration of a guard — preventing use-after-free
+   * when the buffer is rotated and the old one is deferred-destroyed.
    */
   buffer: Atomic<LogBuffer>,
   /**
@@ -61,21 +74,28 @@ pub struct WAL {
    */
   page_pool: PagePool<WAL_BLOCK_SIZE>,
   /**
-   * buffering rotated segment and trigger checkpoint.
+   * Batches rotated segments and triggers a checkpoint lazily. During write bursts,
+   * segments rotate frequently — triggering a checkpoint per rotation would stall
+   * rotation and hurt write throughput. Lazy buffering amortizes checkpoint cost
+   * by accumulating segments and triggering once per batch.
    */
   wait_checkpoint: Box<dyn BackgroundThread<WALSegment>>,
   /**
-   * queue for segment whick checkpoint failed.
-   * it will be clear and move to preloader to reuse segment when checkpoint complete.
+   * Segments whose checkpoint has not yet succeeded. These cannot be deleted or
+   * reused until a checkpoint completes — they still contain records that must
+   * be replayable on crash. Drained and returned to the preloader on next success.
    */
   checkpoint_failed: Arc<SegQueue<WALSegment>>,
   /**
-   * fsync operation result queue.
-   * asynchronously called in segment rotation .
+   * fsync results for rotated segments, pushed asynchronously at rotation time.
+   * commit_and_flush drains this queue to ensure all prior segments are durable.
+   * Without this, a commit written to segment N could be fsynced while segment N-1
+   * (containing the corresponding insert) has not — losing data on crash.
    */
   fsync_queue: SegQueue<FsyncResult>,
   /**
-   * fsync has been completed segments count
+   * Number of segments whose fsync has completed. Used by commit_and_flush to
+   * verify that all segments up to the current generation have been persisted.
    */
   syned_count: AtomicUsize,
 }
@@ -331,6 +351,16 @@ impl WAL {
     self.append(|log_id| LogRecord::new_abort(log_id, tx_id), false)
   }
 
+  /**
+   * Shutdown is split into two steps because the final checkpoint must be written
+   * while the WAL is still operational.
+   *
+   * Step 1 (this call): stops the checkpoint trigger path and drains pending fsyncs,
+   * leaving the WAL open for the caller to perform the final checkpoint_and_flush.
+   *
+   * Step 2 (returned closure): flushes the remaining buffer to disk and closes
+   * the current segment. Called after the final checkpoint completes.
+   */
   pub fn twostep_close<'a>(&'a self) -> impl Fn() + 'a {
     self.wait_checkpoint.close();
 
