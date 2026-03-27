@@ -4,6 +4,9 @@ const SHIFT: usize = 6;
 const MAX_BIT: usize = 1 << SHIFT;
 const MASK: usize = MAX_BIT - 1;
 
+/**
+ * Lock-free bitmap backed by a fixed-size array of AtomicU64.
+ */
 pub struct Bitmap {
   bits: Vec<AtomicU64>,
 }

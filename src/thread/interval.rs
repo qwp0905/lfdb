@@ -14,6 +14,11 @@ use crate::{
 use super::{BackgroundThread, Context, WorkInput};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 
+/**
+ * A background thread that processes work items on demand, and also calls
+ * the work function periodically with None when no item arrives within
+ * the timeout — useful for recurring maintenance tasks like GC or flush.
+ */
 pub struct IntervalWorkThread<T, R> {
   threads: UnsafeCell<Option<JoinHandle<()>>>,
   channel: Sender<Context<T, R>>,

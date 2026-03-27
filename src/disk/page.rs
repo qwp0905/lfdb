@@ -10,6 +10,13 @@ use crate::{
 
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 
+/**
+ * An abstraction over a fixed-size disk block.
+ *
+ * UnsafeCell is required because Page is accessed primarily via raw pointers.
+ * Without it, the compiler may optimize away writes under the assumption that
+ * no aliasing occurs, causing data to not be reflected in release builds.
+ */
 #[derive(Debug)]
 pub struct Page<const T: usize = PAGE_SIZE>(UnsafeCell<[u8; T]>);
 
@@ -72,10 +79,21 @@ impl<const T: usize> From<&[u8]> for Page<T> {
     page
   }
 }
+
+// Safety: concurrent access to Page is controlled by the buffer pool's
+// RwLock<Frame> and TempFrameState pin/lock above this layer.
+// Page itself is a plain byte buffer with no internal synchronization.
 unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}
 impl<const T: usize> RefUnwindSafe for Page<T> {}
 
+/**
+ * A cursor for reading a Page via raw pointer arithmetic.
+ *
+ * PhantomData ties the scanner's lifetime to the Page it points into.
+ * Without it, the compiler would not know that the raw pointer depends
+ * on the Page's lifetime, allowing use-after-free.
+ */
 pub struct PageScanner<'a, const T: usize = PAGE_SIZE> {
   inner: *const u8,
   offset: usize,
@@ -143,6 +161,13 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   }
 }
 
+/**
+ * A cursor for writing into a Page via raw pointer arithmetic.
+ *
+ * PhantomData ties the writer's lifetime to the Page it points into.
+ * Without it, the compiler would not know that the raw pointer depends
+ * on the Page's lifetime, allowing use-after-free.
+ */
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE> {
   inner: *mut u8,
   offset: usize,

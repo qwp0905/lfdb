@@ -2,6 +2,7 @@ use std::{ptr::copy_nonoverlapping, slice::from_raw_parts};
 
 use crate::{disk::Page, Error};
 
+// Sized to hold at least 2 base pages (base page = 8KB) with room for headers.
 pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb
 
 #[derive(Debug)]
@@ -10,7 +11,13 @@ pub enum Operation {
     usize,   // index of the page
     Vec<u8>, // data
   ),
-  // like in case merge btree node, two insert opertion should be atomic
+  /**
+   * Records two page writes as a single atomic operation.
+   * Used during B-tree node merge to prevent duplicate keys from becoming
+   * visible between the two page updates.
+   * Limited to two pages because acquiring three or more page locks
+   * simultaneously is avoided by design to prevent deadlocks.
+   */
   Multi(
     usize,   // index of the first page
     Vec<u8>, // data of the first page
@@ -20,6 +27,12 @@ pub enum Operation {
   Start,
   Commit,
   Abort,
+  /**
+   * Records the last stable log_id and the minimum active transaction version.
+   * During recovery, min_active bounds the abort set — transactions that started
+   * before min_active can be discarded, preventing the abort set from growing
+   * unboundedly.
+   */
   Checkpoint(
     usize, // last log id
     usize, // min active version

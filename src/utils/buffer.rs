@@ -2,6 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam::queue::SegQueue;
 
+/**
+ * Double-buffered queue. switch() atomically flips the active queue and returns
+ * the previous one for draining, so producers never block the consumer.
+ */
 pub struct DoubleBuffer<T> {
   active: AtomicBool,
   queues: [SegQueue<T>; 2],

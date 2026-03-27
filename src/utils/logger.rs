@@ -23,6 +23,10 @@ impl LogLevel {
   }
 }
 
+/**
+ * Implement this trait to receive log output from the engine.
+ * NoneLogger is provided as a no-op default.
+ */
 pub trait Logger: Send + Sync + RefUnwindSafe {
   fn log(&self, level: LogLevel, msg: &[u8]);
 }

@@ -8,10 +8,12 @@ use crate::{
 };
 
 /**
- * Page Recorder
- * only for serialize data into page slot and write slot with byte len into wal.
- * do not implement drop trait to close wal.
- * it has been used for free list, orchestrator, gc.
+ * Serializes data into a page slot and writes only the used bytes to the WAL —
+ * logging the full page would waste WAL space. copy_n captures only the written
+ * portion so the WAL record is as compact as the data allows.
+ *
+ * Does not implement Drop — WAL lifetime is managed externally.
+ * Used by the free list, orchestrator, and GC.
  */
 pub struct PageRecorder {
   wal: Arc<WAL>,

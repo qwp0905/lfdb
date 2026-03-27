@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam::queue::SegQueue;
 
 /**
- * Free list.
- * No need to persist on disk. release_orphand reconstructs all free pages from tree scan on startup.
+ * Free page list, reconstructed at startup via a full B-tree scan.
  */
 pub struct FreeList {
   file_end: AtomicUsize,

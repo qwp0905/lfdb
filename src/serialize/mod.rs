@@ -3,6 +3,11 @@ use crate::{
   error::{Error, Result},
 };
 
+/**
+ * A type tag written as the first byte of every serialized page.
+ * Deserialization fails if the tag does not match, catching dangling
+ * pointers or unreplayed WAL entries before corrupt data is read.
+ */
 #[derive(Debug)]
 pub enum SerializeType {
   Header,
@@ -21,7 +26,7 @@ impl From<SerializeType> for u8 {
   }
 }
 
-pub const SERIALIZABLE_BYTES: usize = PAGE_SIZE - 1;
+pub const SERIALIZABLE_BYTES: usize = PAGE_SIZE - 1; // 1 byte reserved for SerializeType tag
 
 pub trait Serializable: Sized {
   fn get_type() -> SerializeType;

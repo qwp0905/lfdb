@@ -13,6 +13,15 @@ use crate::{
 use super::{BackgroundThread, Context, OneshotFulfill, SingleFn};
 use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
 
+/**
+ * A background thread that buffers incoming work items and flushes them
+ * when either max_buffering_count is reached or the timeout expires —
+ * whichever comes first. Unlike EagerBufferingThread, it waits to
+ * accumulate a full batch before flushing.
+ *
+ * Suitable for tasks that benefit from batching but do not require
+ * burst throughput.
+ */
 pub struct LazyBufferingThread<T, R> {
   threads: UnsafeCell<Option<JoinHandle<()>>>,
   channel: Sender<Context<T, R>>,

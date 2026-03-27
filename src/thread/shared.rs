@@ -46,8 +46,8 @@ where
 }
 
 /**
- * Subscribe to shared channels to handle task distribution.
- * Use when some performance is required during bursts but idle time is long.
+ * Multiple worker threads sharing a single channel for task distribution.
+ * Suitable for tasks that require burst throughput but have long idle periods.
  */
 pub struct SharedWorkThread<T, R = ()> {
   threads: UnsafeCell<Vec<JoinHandle<()>>>,

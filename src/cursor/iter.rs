@@ -6,6 +6,15 @@ use crate::{
   transaction::{TxOrchestrator, TxState},
 };
 
+/**
+ * Range iterator over the leaf chain. Holds a deserialized copy of the current
+ * leaf rather than a page latch. This is safe because: (1) a concurrent split
+ * only moves entries to a new node whose next pointer still leads to the same
+ * successor, and newly inserted data is invisible to this transaction anyway;
+ * (2) as long as this transaction is alive, GC cannot collect DataEntry versions
+ * visible to it, so leaf merge cannot occur on those leaves and their pages are
+ * never freed.
+ */
 pub struct CursorIterator<'a> {
   state: &'a TxState<'a>,
   orchestrator: &'a TxOrchestrator,

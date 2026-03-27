@@ -5,6 +5,10 @@ use crossbeam::queue::ArrayQueue;
 use super::Page;
 use crate::utils::ToArc;
 
+/**
+ * A handle to a pooled Page. The page is always present — ManuallyDrop
+ * defers deallocation to Drop, where it is returned to the pool or freed.
+ */
 pub struct PageRef<const N: usize> {
   page: ManuallyDrop<Page<N>>,
   store: Arc<PageStore<N>>,
@@ -44,6 +48,11 @@ impl<const N: usize> Drop for PageRef<N> {
   }
 }
 
+/**
+ * A pool of reusable Page buffers.
+ * acquire() returns a pooled page if available, or allocates a new one.
+ * Dropped pages are returned to the pool; excess pages beyond capacity are freed.
+ */
 pub struct PagePool<const N: usize> {
   store: Arc<PageStore<N>>,
 }

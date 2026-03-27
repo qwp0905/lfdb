@@ -4,8 +4,14 @@ use crate::{
   Result,
 };
 
+/**
+ * Page index 0 is permanently reserved for the tree header.
+ */
 pub const HEADER_INDEX: usize = 0;
 
+/**
+ * Persisted tree metadata: root page index and current height.
+ */
 #[derive(Debug)]
 pub struct TreeHeader {
   root: usize,

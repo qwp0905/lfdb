@@ -12,6 +12,12 @@ use crate::{
   utils::{ShortenedMutex, ToArc},
 };
 
+/**
+ * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
+ * shrink its allocation on removal, which is problematic for long-running
+ * servers. Since the number of entries here is expected to be very small
+ * at any given time, the performance difference is negligible.
+ */
 pub struct Shard {
   lru: LRUShard<usize, Arc<FrameState>>,
   eviction: BTreeSet<usize>, // evicting indexes
@@ -23,6 +29,19 @@ impl Shard {
   }
 }
 
+/**
+ * Holds exclusive control over a frame during eviction.
+ *
+ * Two indexes are blocked simultaneously while this guard is alive:
+ * - The old index is added to the eviction set, preventing other threads
+ *   from reading a dirty page that has not yet been written to disk.
+ * - The new index maps to a frame in EVICTION_BIT state, preventing access
+ *   before the page has been loaded from disk.
+ *
+ * Call commit() to finalize the eviction and unblock both indexes.
+ * If dropped without commit (e.g. on IO failure), the old mapping is
+ * restored and the frame is returned to an evictable state.
+ */
 pub struct EvictionGuard<'a> {
   evicted: Option<(usize, u64)>,
   state: Arc<FrameState>,
@@ -73,6 +92,7 @@ impl<'a> Drop for EvictionGuard<'a> {
         let mut shard = self.guard.l();
         shard.eviction.remove(&i);
       }
+      // This guard now owns the frame (pin count = 1).
       self.state.completion_evict(1);
       return;
     }
@@ -86,6 +106,7 @@ impl<'a> Drop for EvictionGuard<'a> {
     shard
       .lru
       .remove(&self.new_index, self.new_index_hash, self.hasher);
+    // No ownership claimed — frame is immediately available for eviction.
     self.state.completion_evict(0);
   }
 }
@@ -154,6 +175,15 @@ impl LRUTable {
     (h, shard, offset)
   }
 
+  /**
+   * Reads a page without promoting it in the LRU (used by GC).
+   *
+   * 1. If the index is being evicted, wait.
+   * 2. If a temp page is already allocated for this index, return it.
+   * 3. If the index is in the LRU, return it without promotion.
+   * 4. If not found anywhere, allocate a new temp page in EVICTION_BIT state
+   *    and return DiskRead — the caller is responsible for loading from disk.
+   */
   pub fn peek_or_temp<'a>(&'a self, index: usize) -> Peeked<'a> {
     let (hash, s, _) = self.get_shard(index);
     let backoff = Backoff::new();
@@ -197,6 +227,21 @@ impl LRUTable {
     }
   }
 
+  /**
+   * Acquires access to a page by index, following this order:
+   *
+   * 1. If the index is being evicted, wait — the frame is temporarily inaccessible.
+   * 2. If GC has allocated a temp page for this index, return it — the temp page
+   *    takes precedence over the LRU since it reflects the latest state.
+   * 3. If the index is in the LRU cache, return a hit.
+   * 4. If the LRU has an empty slot, allocate a new frame without eviction.
+   * 5. Otherwise, evict the LRU tail and return an EvictionGuard for the caller
+   *    to perform the necessary IO.
+   *
+   * The shard lock is dropped before retrying CAS operations (try_pin, try_evict)
+   * to minimize lock contention — holding the lock during CAS would block all
+   * other threads on this shard unnecessarily.
+   */
   pub fn acquire<'a>(&'a self, index: usize) -> Acquired<'a> {
     let (hash, s, offset) = self.get_shard(index);
     let hasher = &self.hasher;
@@ -230,6 +275,9 @@ impl LRUTable {
         continue;
       }
 
+      // Each shard owns a dedicated range of frame IDs [offset, offset + cap_per_shard).
+      // This ensures shards never access the same frame, eliminating contention
+      // between shards entirely.
       if !shard.lru.is_full() {
         let frame_id = shard.lru.len() + offset;
         let state = FrameState::new(frame_id).to_arc();
@@ -260,6 +308,11 @@ impl LRUTable {
     }
   }
 }
+
+// Safe because all mutable access to LRUShard (which contains raw pointers)
+// is guarded by a Mutex, and all public methods take &self.
+unsafe impl Sync for LRUTable {}
+unsafe impl Send for LRUTable {}
 
 #[cfg(test)]
 #[path = "tests/table.rs"]

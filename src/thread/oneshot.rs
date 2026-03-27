@@ -13,6 +13,11 @@ use crate::{
   Error, Result,
 };
 
+/**
+ * Creates a single-use channel pair (Oneshot, OneshotFulfill).
+ * State transitions: Waiting → Fulfilled → Disconnected.
+ * The receiver parks until the sender fulfills the value or disconnects.
+ */
 pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
   let inner = OneshotInner::new().to_arc();
   (Oneshot(inner.clone()), OneshotFulfill(inner))
@@ -25,6 +30,10 @@ enum State {
   Disconnected,
 }
 
+/**
+ * value is uninitialized memory — safe to access only when state is Fulfilled,
+ * which is enforced by the state machine.
+ */
 struct OneshotInner<T> {
   state: AtomicCell<State>,
   value: UnsafeCell<MaybeUninit<T>>,
@@ -55,6 +64,9 @@ impl<T> OneshotInner<T> {
 pub struct Oneshot<T>(Arc<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn wait(self) -> Result<T> {
+    // Register the caller thread before checking state. If fulfill() runs
+    // first and finds caller as None, it won't call unpark() — causing park()
+    // to block forever.
     unsafe { self.0.caller.get().write(Some(current())) };
     loop {
       match self
@@ -92,6 +104,7 @@ impl<T> OneshotFulfill<T> {
       State::Waiting => {
         self.0.get_caller_mut().take().map(|th| th.unpark());
       }
+      // MaybeUninit does not auto-drop — explicit drop required to prevent memory leak.
       State::Disconnected => unsafe { value.assume_init_drop() },
       State::Fulfilled => unreachable!(),
     }
@@ -109,6 +122,8 @@ impl<T> Drop for OneshotFulfill<T> {
   }
 }
 
+// OneshotFulfill is sent to worker threads, so Send+Sync are required.
+// Oneshot stays on the requesting thread and never crosses thread boundaries.
 unsafe impl<T: Send> Sync for OneshotFulfill<T> {}
 unsafe impl<T: Send> Send for OneshotFulfill<T> {}
 impl<T> UnwindSafe for OneshotFulfill<T> {}

@@ -69,6 +69,9 @@ impl WALSegment {
       .map_err(Error::IO)?
       .to_arc();
 
+    // Pre-allocate the full file space upfront. Segments are rarely created fresh —
+    // they are almost always reused via rename(). Paying the allocation cost once
+    // at creation avoids metadata updates on every subsequent write.
     let file_len = (WAL_BLOCK_SIZE * max_len) as u64;
     file
       .fallocate(0, file_len)
@@ -100,6 +103,9 @@ impl WALSegment {
       .map_err(Error::IO)
   }
   pub fn write<P: AsRef<Page<WAL_BLOCK_SIZE>>>(&self, index: usize, page: &P) -> Result {
+    // transmute extends the slice lifetime to 'static to satisfy the background thread's
+    // type bound. Safe because wait_flatten() blocks until the write completes, ensuring
+    // the page buffer outlives the background thread's use of the pointer.
     self
       .io
       .send((index, unsafe { transmute(page.as_ref().as_ref()) }))
@@ -110,6 +116,10 @@ impl WALSegment {
     Ok((metadata.len() as usize).div_ceil(WAL_BLOCK_SIZE))
   }
 
+  /**
+   * Repurposes this segment for a new generation by renaming it in place.
+   * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
+   */
   pub fn reuse<P: AsRef<Path>>(&self, prefix: P, generation: usize) -> Result {
     let new_path = format!(
       "{}{}{}",
@@ -167,6 +177,10 @@ fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> bool {
   move |_| file.sync_data().is_ok()
 }
 
+/**
+ * Zero-pad to 20 digits: ensures lexicographic file ordering matches numeric order,
+ * and accommodates the full u64 range (max 20 digits).
+ */
 fn pad_start(n: usize) -> String {
   format!("{:0>20}", n)
 }
@@ -181,6 +195,8 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(usize, &[u8])>) -> Result {
         .map(drop);
     }
 
+    // Duplicate indexes all point to the same underlying page memory (same PageRef),
+    // so writing once is equivalent — no data is lost by deduplicating.
     buffered.dedup_by_key(|(i, _)| *i);
     buffered.sort_by_key(|(i, _)| *i);
 

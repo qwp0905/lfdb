@@ -6,6 +6,11 @@ use crate::Error;
 
 use super::{oneshot, BatchWorkResult, Context, WorkResult};
 
+/**
+ * A trait for background threads that accept work items and return results.
+ * send() returns a WorkResult which resolves to an error if the worker
+ * thread is closed or if the work panicked.
+ */
 pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe {
   /**
    * return flag of success or failed to register work to thread.

@@ -6,7 +6,7 @@ use std::{
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
 const STATUS_AVAILABLE: u8 = 0;
-const STATUS_ON_COMMIT: u8 = 1; // Exclusive state prior to commit
+const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_COMMITTED: u8 = 2; // The commit log has been successfully written.
 const STATUS_ABORTED: u8 = 3;
 
@@ -63,6 +63,13 @@ impl<'a> TxState<'a> {
   }
 }
 
+/**
+ * Tracks MVCC visibility for transactions.
+ *
+ * Visibility is determined by exclusion: a transaction's writes are visible
+ * if it is neither aborted nor still active. Committed transactions are not
+ * tracked explicitly — committing simply removes the tx from active.
+ */
 pub struct VersionVisibility {
   aborted: SkipSet<usize>,
   active: SkipMap<usize, AtomicU8>,
@@ -80,6 +87,11 @@ impl VersionVisibility {
     }
   }
 
+  /**
+   * Trims aborted tx_ids that are older than version. Called after GC completes —
+   * version is the oldest tx_id that GC has fully cleaned up, so no active reader
+   * can reference those versions anymore and their abort status no longer needs tracking.
+   */
   pub fn remove_aborted(&self, version: &usize) {
     while let Some(v) = self.aborted.front() {
       if v.value() >= version {
@@ -92,6 +104,11 @@ impl VersionVisibility {
   pub fn is_aborted(&self, tx_id: &usize) -> bool {
     self.aborted.contains(tx_id)
   }
+  /**
+   * Returns the oldest active tx_id, or the current version if no transaction is active.
+   * Called before GC to determine the safe cleanup boundary — versions older than this
+   * are not visible to any active reader and can be collected.
+   */
   pub fn min_version(&self) -> usize {
     self
       .active

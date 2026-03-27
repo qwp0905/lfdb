@@ -12,9 +12,17 @@ use crate::{
 
 const U16_MASK: u32 = 0xFFFF;
 
+/**
+ * A single WAL block (16KB page) being filled concurrently by multiple writers.
+ * Writers atomically claim a slot and sequence number via a single fetch_add on offset,
+ * then write their record independently.
+ */
 pub struct LogBuffer {
   /**
-   * entry pin (24bit) + offest (40bit)
+   * entry pin (24bit) + offset (40bit), packed into one AtomicU64.
+   * A single fetch_add atomically reserves a position in the block and increments
+   * the in-flight writer count. The offset portion can grow up to ~4000 bytes per
+   * record, so 40 bits is sufficient; 24 bits accommodates the concurrent writer count.
    */
   offset: AtomicU64,
   /**
@@ -37,8 +45,9 @@ pub struct LogBuffer {
    */
   segment_pin: *const AtomicUsize,
   /**
-   * current segment to write data block
-   * it must taken after empty pin
+   * Shared across all buffers within the same segment. Raw pointer allows exclusive
+   * ownership transfer via take_segment() when the last buffer finishes — required
+   * for segment reuse. It must taken after pin is empty.
    */
   segment: *const WALSegment,
   /**
@@ -112,6 +121,13 @@ impl LogBuffer {
       .borrow_unsafe()
       .fetch_add(1, Ordering::Release);
   }
+  /**
+   * Atomically reserves a write slot and returns (offset, ready).
+   * ready is the number of writers that claimed a slot before this call.
+   * Since each writer appends exactly one record, ready also equals the number
+   * of records already in the block — used by flush callers to write the correct
+   * record count header and to wait for all prior writers to finish.
+   */
   pub fn pin_entry(&self, len: usize) -> (usize, u32) {
     let prev = self.offset.fetch_add(
       ((len as u64) & Self::MASK) | (1 << Self::BIT),
@@ -177,7 +193,9 @@ impl LogBuffer {
       .fetch_add(1, Ordering::Release);
   }
   /**
-   * previous index blocks for current segment has been written to disk
+   * Returns true when all prior blocks in the segment have been written to disk.
+   * written_count increments after each block rotation completes its disk write,
+   * so segment_index <= written_count + 1 means blocks 0..segment_index-1 are persisted.
    */
   pub fn is_ready_to_flush(&self) -> bool {
     self.segment_index <= self.written_count.borrow_unsafe().load(Ordering::Acquire) + 1
