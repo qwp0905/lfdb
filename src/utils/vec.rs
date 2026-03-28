@@ -1,5 +1,4 @@
 use std::{
-  array,
   mem::MaybeUninit,
   ops::{Index, IndexMut},
   ptr::copy_nonoverlapping,
@@ -16,9 +15,9 @@ enum Readable<'a, T> {
   Array(&'a [MaybeUninit<T>]),
 }
 
-#[inline]
+#[inline(always)]
 fn uninit<const N: usize, T>() -> [MaybeUninit<T>; N] {
-  array::from_fn(|_| MaybeUninit::uninit())
+  [const { MaybeUninit::uninit() }; N]
 }
 
 enum Slot<T> {
