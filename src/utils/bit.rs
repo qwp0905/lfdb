@@ -1,4 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+  iter::Enumerate,
+  sync::atomic::{AtomicU64, Ordering},
+};
+
+// use crate::utils::Vector;
 
 const SHIFT: usize = 6;
 const MAX_BIT: usize = 1 << SHIFT;
@@ -7,16 +12,15 @@ const MASK: usize = MAX_BIT - 1;
 /**
  * Lock-free bitmap backed by a fixed-size array of AtomicU64.
  */
-pub struct Bitmap {
+pub struct AtomicBitmap {
   bits: Vec<AtomicU64>,
 }
-impl Bitmap {
+impl AtomicBitmap {
   pub fn new(capacity: usize) -> Self {
-    let mut bits = Vec::with_capacity(capacity);
-    for _ in 0..capacity {
-      bits.push(AtomicU64::new(0))
-    }
-    Bitmap { bits }
+    let cap = (capacity + MASK) >> SHIFT;
+    let mut bits = Vec::with_capacity(cap);
+    bits.resize_with(cap, || AtomicU64::new(0));
+    AtomicBitmap { bits }
   }
 
   pub fn insert(&self, n: usize) -> bool {
@@ -50,42 +54,101 @@ impl Bitmap {
     prev & b != 0
   }
 
-  pub fn iter(&self) -> BitMapIter<'_> {
-    BitMapIter::new(&self.bits)
+  pub fn iter(&self) -> BitMapIter<impl Iterator<Item = u64> + '_> {
+    BitMapIter::new(
+      self
+        .bits
+        .iter()
+        .map(|bit| bit.load(Ordering::Acquire))
+        .enumerate(),
+    )
   }
 }
 
-pub struct BitMapIter<'a> {
-  bits: &'a [AtomicU64],
+pub struct BitMapIter<I> {
+  bits: Enumerate<I>,
   index: usize,
   remaining: u64,
 }
-impl<'a> BitMapIter<'a> {
-  pub fn new(bits: &'a Vec<AtomicU64>) -> Self {
-    let remaining = bits.first().map(|i| i.load(Ordering::Acquire)).unwrap_or(0);
+impl<'a, I> BitMapIter<I>
+where
+  I: Iterator<Item = u64>,
+{
+  pub fn new(mut bits: Enumerate<I>) -> Self {
+    let (index, remaining) = bits.next().unwrap_or((0, 0));
     Self {
       bits,
-      index: 0,
+      index,
       remaining,
     }
   }
 }
 
-impl<'a> Iterator for BitMapIter<'a> {
+impl<'a, I> Iterator for BitMapIter<I>
+where
+  I: Iterator<Item = u64>,
+{
   type Item = usize;
 
   fn next(&mut self) -> Option<Self::Item> {
     while self.remaining == 0 {
-      self.index += 1;
-      if self.index >= self.bits.len() {
-        return None;
-      };
-      self.remaining = self.bits[self.index].load(Ordering::Acquire);
+      match self.bits.next() {
+        Some((i, bit)) => {
+          self.remaining = bit;
+          self.index = i;
+        }
+        None => return None,
+      }
     }
 
     let bit = self.remaining.trailing_zeros() as usize;
     self.remaining &= self.remaining - 1;
     Some((self.index << SHIFT) + bit)
+  }
+}
+
+pub struct OffsetBitmap {
+  offset: usize,
+  bits: Vec<u64>,
+}
+impl OffsetBitmap {
+  pub fn new(offset: usize, capacity: usize) -> Self {
+    let cap = (capacity + MASK) >> SHIFT;
+    let mut bits = Vec::with_capacity(cap);
+    for _ in 0..cap {
+      bits.push(0);
+    }
+    Self { offset, bits }
+  }
+
+  #[inline]
+  pub fn insert(&mut self, n: usize) -> bool {
+    if n < self.offset {
+      return false;
+    }
+    let diff = n - self.offset;
+
+    let i = diff >> SHIFT;
+    if i >= self.bits.len() {
+      return false;
+    };
+    let old = self.bits[i];
+    self.bits[i] |= 1 << (diff & MASK);
+    old != self.bits[i]
+  }
+
+  #[inline]
+  pub fn contains(&self, n: usize) -> bool {
+    if n < self.offset {
+      return false;
+    }
+    let diff = n - self.offset;
+
+    let i = diff >> SHIFT;
+    if i >= self.bits.len() {
+      return false;
+    }
+    self.bits[i] & (1 << (diff & MASK)) != 0
   }
 }
 

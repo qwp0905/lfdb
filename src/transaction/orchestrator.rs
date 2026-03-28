@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use super::{FreeList, PageRecorder, TimeoutThread, TxState, VersionVisibility};
+use super::{
+  FreeList, PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility,
+};
 
 use crate::{
   buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
@@ -172,14 +174,17 @@ impl TxOrchestrator {
     self.gc.mark(index);
   }
 
-  pub fn start_tx(&self, timeout: Option<Duration>) -> Result<TxState<'_>> {
-    let state = self.version_visibility.new_transaction();
+  pub fn start_tx(
+    &self,
+    timeout: Option<Duration>,
+  ) -> Result<(TxState<'_>, TxSnapshot<'_>)> {
+    let (state, snapshot) = self.version_visibility.new_transaction();
     let tx_id = state.get_id();
     self.wal.append_start(state.get_id())?;
     self
       .timeout_thread
       .register(tx_id, timeout.unwrap_or(self.tx_timeout));
-    Ok(state)
+    Ok((state, snapshot))
   }
 
   pub fn commit_tx(&self, tx_id: usize) -> Result {
@@ -195,14 +200,6 @@ impl TxOrchestrator {
     self.version_visibility.set_abort(tx_id);
     self.metrics.transaction_abort_count.inc();
     Ok(())
-  }
-
-  pub fn is_visible(&self, tx_id: &usize) -> bool {
-    self.version_visibility.is_visible(tx_id)
-  }
-
-  pub fn is_active(&self, tx_id: &usize) -> bool {
-    self.version_visibility.is_active(tx_id)
   }
 
   pub fn current_version(&self) -> usize {

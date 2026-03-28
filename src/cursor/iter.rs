@@ -3,7 +3,7 @@ use std::mem::replace;
 use super::{CursorNode, DataEntry, Key, LeafNode, Pointer};
 use crate::{
   error::{Error, Result},
-  transaction::{TxOrchestrator, TxState},
+  transaction::{TxOrchestrator, TxSnapshot, TxState},
 };
 
 /**
@@ -17,6 +17,7 @@ use crate::{
  */
 pub struct CursorIterator<'a> {
   state: &'a TxState<'a>,
+  snapshot: &'a TxSnapshot<'a>,
   orchestrator: &'a TxOrchestrator,
   leaf: LeafNode,
   pos: usize,
@@ -26,6 +27,7 @@ pub struct CursorIterator<'a> {
 impl<'a> CursorIterator<'a> {
   pub fn new(
     state: &'a TxState,
+    snapshot: &'a TxSnapshot<'a>,
     orchestrator: &'a TxOrchestrator,
     leaf: LeafNode,
     pos: usize,
@@ -33,6 +35,7 @@ impl<'a> CursorIterator<'a> {
   ) -> Self {
     Self {
       state,
+      snapshot,
       orchestrator,
       leaf,
       pos,
@@ -46,7 +49,7 @@ impl<'a> CursorIterator<'a> {
     loop {
       let entry = slot.as_ref().deserialize::<DataEntry>()?;
       if let Some(record) =
-        entry.find_record(self.state.get_id(), |i| self.orchestrator.is_visible(i))
+        entry.find_record(self.state.get_id(), |i| self.snapshot.is_visible(i))
       {
         return record.read_data(|i| {
           self
@@ -77,7 +80,7 @@ impl<'a> CursorIterator<'a> {
     loop {
       for i in self.pos..self.leaf.len() {
         let (key, ptr) = self.leaf.at(i);
-        if self.end.as_ref().map(|e| key.ge(e)).unwrap_or(false) {
+        if self.end.as_ref().map(|e| key >= e).unwrap_or(false) {
           self.closed = true;
           return Ok(None);
         }

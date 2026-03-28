@@ -8,7 +8,7 @@ use crossbeam::utils::Backoff;
 use super::{Frame, FrameState, Shard, TempFrameState};
 use crate::{
   disk::{DiskController, Page, PageRef, PAGE_SIZE},
-  utils::{Bitmap, ShortenedMutex, ShortenedRwLock},
+  utils::{AtomicBitmap, ShortenedMutex, ShortenedRwLock},
 };
 
 /**
@@ -40,7 +40,7 @@ impl<'a> Slot<'a> {
   }
   pub fn page(
     frame: &'a RwLock<Frame>,
-    dirty: &'a Bitmap,
+    dirty: &'a AtomicBitmap,
     state: Arc<FrameState>,
   ) -> Self {
     Self::Page(PageSlot {
@@ -113,7 +113,7 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for ReadableSlot<'a> {
 
 pub struct PageSlot<'a> {
   frame: &'a RwLock<Frame>,
-  dirty: &'a Bitmap,
+  dirty: &'a AtomicBitmap,
   state: Arc<FrameState>,
 }
 impl<'a> PageSlot<'a> {
@@ -140,7 +140,7 @@ impl<'a> PageSlot<'a> {
 }
 pub struct PageSlotWrite<'a> {
   guard: RwLockWriteGuard<'a, Frame>,
-  dirty: &'a Bitmap,
+  dirty: &'a AtomicBitmap,
   state: Arc<FrameState>,
 }
 

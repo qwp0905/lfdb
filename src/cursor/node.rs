@@ -39,14 +39,14 @@ impl Serializable for CursorNode {
           Some((pointer, key)) => {
             writer.write(&[1])?;
             writer.write_usize(*pointer)?;
-            writer.write_usize(key.len())?;
+            writer.write_u16(key.len() as u16)?;
             writer.write(key)
           }
           None => writer.write(&[0]),
         }?;
-        writer.write_usize(node.keys.len())?;
+        writer.write_u16(node.keys.len() as u16)?;
         for key in &node.keys {
-          writer.write_usize(key.len())?;
+          writer.write_u16(key.len() as u16)?;
           writer.write(key)?;
         }
         for ptr in &node.children {
@@ -56,9 +56,9 @@ impl Serializable for CursorNode {
       CursorNode::Leaf(node) => {
         writer.write(&[1])?;
         writer.write_usize(node.next.unwrap_or(0))?;
-        writer.write_usize(node.entries.len())?;
+        writer.write_u16(node.entries.len() as u16)?;
         for (key, pointer) in &node.entries {
-          writer.write_usize(key.len())?;
+          writer.write_u16(key.len() as u16)?;
           writer.write(&key)?;
           writer.write_usize(*pointer)?;
         }
@@ -74,15 +74,15 @@ impl Serializable for CursorNode {
         let mut right = None;
         if scanner.read()? == 1 {
           let ptr = scanner.read_usize()?;
-          let len = scanner.read_usize()?;
+          let len = scanner.read_u16()? as usize;
           let key = scanner.read_n(len)?.to_vec();
           right = Some((ptr, key));
         };
 
-        let len = scanner.read_usize()?;
+        let len = scanner.read_u16()? as usize;
         let mut keys = Vec::with_capacity(len);
         for _ in 0..len {
-          let l = scanner.read_usize()?;
+          let l = scanner.read_u16()? as usize;
           keys.push(scanner.read_n(l)?.to_vec());
         }
 
@@ -95,10 +95,10 @@ impl Serializable for CursorNode {
       1 => {
         // leaf
         let next = scanner.read_usize()?;
-        let len = scanner.read_usize()?;
+        let len = scanner.read_u16()? as usize;
         let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
-          let l = scanner.read_usize()?;
+          let l = scanner.read_u16()? as usize;
           let key = scanner.read_n(l)?.to_vec();
           let ptr = scanner.read_usize()?;
           entries.push((key, ptr));

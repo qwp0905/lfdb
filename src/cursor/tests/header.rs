@@ -1,4 +1,3 @@
-
 use crate::{disk::Page, serialize::SerializeFrom};
 
 use super::*;
@@ -6,7 +5,7 @@ use super::*;
 #[test]
 fn test_tree_header_roundtrip() {
   let mut page = Page::new();
-  let height = 0u32;
+  let height = 0u16;
   let root = 42usize;
   let mut header = TreeHeader::new(root);
   header.height = height;
@@ -20,7 +19,7 @@ fn test_tree_header_roundtrip() {
 #[test]
 fn test_tree_header_zero_root() {
   let mut page = Page::new();
-  let height = 123u32;
+  let height = 123u16;
   let root = 0usize;
   let mut header = TreeHeader::new(root);
   header.height = height;
@@ -34,7 +33,7 @@ fn test_tree_header_zero_root() {
 #[test]
 fn test_tree_header_large_root() {
   let mut page = Page::new();
-  let height = u32::MAX;
+  let height = u16::MAX;
   let root = usize::MAX;
   let mut header = TreeHeader::new(root);
   header.height = height;
