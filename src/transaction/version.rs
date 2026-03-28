@@ -1,4 +1,5 @@
 use std::{
+  ops::Bound,
   panic::RefUnwindSafe,
   sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
@@ -78,8 +79,10 @@ impl<'a> TxSnapshot<'a> {
     let max = active.back().map(|e| *e.key()).unwrap_or(offset);
 
     let mut snap = OffsetBitmap::new(offset, max - offset + 1);
-    for id in active.range(offset..=max).map(|e| *e.key()) {
-      snap.insert(id);
+    let mut entry = active.lower_bound(Bound::Included(&offset));
+    while let Some(e) = entry.take_if(|e| *e.key() <= max) {
+      snap.insert(*e.key());
+      entry = e.next();
     }
 
     TxSnapshot {
