@@ -95,3 +95,8 @@ impl<T> UnsafeDrop<T> for *const T {
     unsafe { drop_in_place(self as *mut T) };
   }
 }
+impl<T> UnsafeDrop<T> for *mut T {
+  fn drop_unsafe(self) {
+    unsafe { drop_in_place(self) };
+  }
+}

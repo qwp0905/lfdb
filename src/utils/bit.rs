@@ -3,6 +3,8 @@ use std::{
   sync::atomic::{AtomicU64, Ordering},
 };
 
+use crate::utils::Vector;
+
 const SHIFT: usize = 6;
 const MAX_BIT: usize = 1 << SHIFT;
 const MASK: usize = MAX_BIT - 1;
@@ -107,15 +109,19 @@ where
 
 pub struct OffsetBitmap {
   offset: usize,
-  bits: Vec<u64>,
+  bits: Vector<u64>,
 }
 impl OffsetBitmap {
   pub fn new(offset: usize, capacity: usize) -> Self {
     let cap = (capacity + MASK) >> SHIFT;
-    let bits = vec![0; cap];
+    let mut bits = Vector::with_capacity(cap);
+    for _ in 0..cap {
+      bits.push(0);
+    }
     Self { offset, bits }
   }
 
+  #[inline]
   pub fn insert(&mut self, n: usize) -> bool {
     if n < self.offset {
       return false;
@@ -131,6 +137,7 @@ impl OffsetBitmap {
     old != self.bits[i]
   }
 
+  #[inline]
   pub fn contains(&self, n: usize) -> bool {
     if n < self.offset {
       return false;
