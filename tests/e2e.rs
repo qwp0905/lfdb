@@ -112,21 +112,39 @@ fn test_drop_abort() {
 fn test_write_conflict() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  {
+    let mut tx1 = engine.new_tx().unwrap();
+    tx1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
+    // tx1 NOT committed — still active
 
-  let mut tx1 = engine.new_tx().unwrap();
-  tx1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
-  // tx1 NOT committed — still active
+    let tx2 = engine.new_tx().unwrap();
+    let result = tx2.insert(b"contested".to_vec(), b"v2".to_vec());
+    assert!(result.is_err());
+    if let Err(Error::WriteConflict) = result {
+      // expected
+    } else {
+      panic!("expected WriteConflict");
+    }
 
-  let tx2 = engine.new_tx().unwrap();
-  let result = tx2.insert(b"contested".to_vec(), b"v2".to_vec());
-  assert!(result.is_err());
-  if let Err(Error::WriteConflict) = result {
-    // expected
-  } else {
-    panic!("expected WriteConflict");
+    tx1.commit().unwrap();
   }
 
-  tx1.commit().unwrap();
+  {
+    let key = b"key";
+    let mut tx1 = engine.new_tx().unwrap();
+    tx1.insert(key.to_vec(), b"value1".to_vec()).unwrap();
+
+    let tx2 = engine.new_tx().unwrap();
+    assert_eq!(tx2.get(key).unwrap(), None);
+
+    tx1.commit().unwrap();
+
+    // it should throw WriteConflict after commit.
+    match tx2.insert(key.to_vec(), b"value2".to_vec()) {
+      Err(Error::WriteConflict) => {}
+      _ => panic!("must be WriteConflict"),
+    }
+  }
 }
 
 // ============================================================
@@ -999,4 +1017,23 @@ fn test_large_key_value_gc() {
     }
     tx.commit().unwrap();
   }
+}
+
+// ============================================================
+// 21. Snapshot Isolation 2
+// ============================================================
+#[test]
+fn test_isolation() {
+  let dir = tempdir_in(".").unwrap();
+  let e = build_engine(&dir);
+
+  let mut t1 = e.new_tx().unwrap();
+  t1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
+
+  let t2 = e.new_tx().unwrap();
+  assert_eq!(t2.get(b"111").unwrap(), None);
+
+  t1.commit().unwrap();
+
+  assert_eq!(t2.get(b"111").unwrap(), None);
 }
