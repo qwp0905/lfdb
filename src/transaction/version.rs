@@ -1,5 +1,4 @@
 use std::{
-  ops::Bound,
   panic::RefUnwindSafe,
   sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
@@ -75,18 +74,29 @@ pub struct TxSnapshot<'a> {
 }
 impl<'a> TxSnapshot<'a> {
   fn new(active: &SkipMap<usize, AtomicU8>, aborted: &'a SkipSet<usize>) -> Self {
-    let offset = active.front().map(|e| *e.key()).unwrap_or(0);
-    let max = active.back().map(|e| *e.key()).unwrap_or(offset);
+    let (front, max) = match (active.front(), active.back()) {
+      (Some(front), Some(back)) => (front, *back.key()),
+      _ => {
+        return TxSnapshot {
+          active: OffsetBitmap::new(0, 0),
+          aborted,
+        }
+      }
+    };
 
-    let mut snap = OffsetBitmap::new(offset, max - offset + 1);
-    let mut entry = active.lower_bound(Bound::Included(&offset));
+    let offset = *front.key();
+    let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
+
+    let mut entry = Some(front);
     while let Some(e) = entry.take_if(|e| *e.key() <= max) {
-      snap.insert(*e.key());
+      if !e.is_removed() {
+        snapshot.insert(*e.key());
+      }
       entry = e.next();
     }
 
     TxSnapshot {
-      active: snap,
+      active: snapshot,
       aborted,
     }
   }
