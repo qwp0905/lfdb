@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_insert() {
-  let bits = Bitmap::new(100);
+  let bits = AtomicBitmap::new(100);
   assert!(bits.insert(0));
   assert!(bits.insert(1));
   assert!(bits.insert(63));
@@ -12,7 +12,7 @@ fn test_insert() {
 
 #[test]
 fn test_contains() {
-  let bits = Bitmap::new(100);
+  let bits = AtomicBitmap::new(100);
   bits.insert(0);
   bits.insert(1);
   bits.insert(63);
@@ -30,7 +30,7 @@ fn test_contains() {
 
 #[test]
 fn test_remove() {
-  let bits = Bitmap::new(100);
+  let bits = AtomicBitmap::new(100);
   assert!(bits.insert(0));
   assert!(bits.insert(1));
   assert!(bits.insert(63));
@@ -44,7 +44,7 @@ fn test_remove() {
 
 #[test]
 fn test_iter() {
-  let bits = Bitmap::new(100);
+  let bits = AtomicBitmap::new(100);
   bits.insert(0);
   bits.insert(1);
   bits.insert(63);
@@ -57,4 +57,15 @@ fn test_iter() {
   assert_eq!(iter.next(), Some(64));
   assert_eq!(iter.next(), Some(65));
   assert_eq!(iter.next(), None);
+}
+
+#[test]
+fn test_offset_bit() {
+  let mut bits = OffsetBitmap::new(100, 10);
+  assert_eq!(bits.insert(0), false);
+  assert_eq!(bits.insert(100), true);
+  assert_eq!(bits.insert(100), false);
+  assert_eq!(bits.contains(100), true);
+  assert_eq!(bits.contains(101), false);
+  assert_eq!(bits.insert(200), false);
 }
