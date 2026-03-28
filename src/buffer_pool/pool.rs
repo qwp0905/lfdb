@@ -8,7 +8,7 @@ use crate::{
   disk::{DiskController, PagePool, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
-  utils::{Bitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc},
+  utils::{AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc},
 };
 
 pub struct BufferPoolConfig {
@@ -20,7 +20,7 @@ pub struct BufferPoolConfig {
 pub struct BufferPool {
   table: LRUTable,
   frame: Vec<RwLock<Frame>>,
-  dirty: Bitmap,
+  dirty: AtomicBitmap,
   disk: DiskController<PAGE_SIZE>,
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
@@ -46,7 +46,7 @@ impl BufferPool {
       frame,
       disk,
       table: LRUTable::new(page_pool.clone(), config.shard_count, frame_cap),
-      dirty: Bitmap::new(config.capacity),
+      dirty: AtomicBitmap::new(frame_cap),
       logger,
       page_pool,
       metrics,
