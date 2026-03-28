@@ -107,10 +107,11 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let state = self.orchestrator.start_tx(None)?;
+    let (state, snapshot) = self.orchestrator.start_tx(None)?;
     Ok(Cursor::new(
       self.orchestrator.clone(),
       state,
+      snapshot,
       self.metrics_registry.clone(),
     ))
   }
@@ -122,10 +123,11 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let state = self.orchestrator.start_tx(Some(timeout))?;
+    let (state, snapshot) = self.orchestrator.start_tx(Some(timeout))?;
     Ok(Cursor::new(
       self.orchestrator.clone(),
       state,
+      snapshot,
       self.metrics_registry.clone(),
     ))
   }

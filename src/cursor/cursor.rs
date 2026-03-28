@@ -9,7 +9,7 @@ use crate::{
   buffer_pool::WritableSlot,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  transaction::{TxOrchestrator, TxState},
+  transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
 };
 
@@ -21,6 +21,7 @@ use crate::{
 pub struct Cursor<'a> {
   orchestrator: Arc<TxOrchestrator>,
   state: TxState<'a>,
+  snapshot: TxSnapshot<'a>,
   metrics: Arc<MetricsRegistry>,
   tx_start: Option<Instant>,
   _marker: PhantomData<*const ()>,
@@ -46,12 +47,14 @@ impl<'a> Cursor<'a> {
   pub fn new(
     orchestrator: Arc<TxOrchestrator>,
     state: TxState<'a>,
+    snapshot: TxSnapshot<'a>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
     Self {
       orchestrator,
       state,
+      snapshot,
       metrics,
       tx_start,
       _marker: Default::default(),
@@ -123,7 +126,7 @@ impl<'a> Cursor<'a> {
     loop {
       let entry: DataEntry = slot.as_ref().deserialize()?;
       if let Some(record) =
-        entry.find_record(self.state.get_id(), |i| self.orchestrator.is_visible(i))
+        entry.find_record(self.state.get_id(), |i| self.snapshot.is_visible(i))
       {
         return record.read_data(|i| {
           self
@@ -353,7 +356,7 @@ impl<'a> Cursor<'a> {
 
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     if let Some(owner) = entry.get_last_owner() {
-      if owner != self.state.get_id() && self.orchestrator.is_active(&owner) {
+      if owner != self.state.get_id() && self.snapshot.is_active(&owner) {
         return Err(Error::WriteConflict);
       }
     }
@@ -433,6 +436,7 @@ impl<'a> Cursor<'a> {
 
     Ok(CursorIterator::new(
       &self.state,
+      &self.snapshot,
       &self.orchestrator,
       leaf,
       pos,
@@ -467,6 +471,7 @@ impl<'a> Cursor<'a> {
 
     Ok(CursorIterator::new(
       &self.state,
+      &self.snapshot,
       &self.orchestrator,
       leaf,
       0,
