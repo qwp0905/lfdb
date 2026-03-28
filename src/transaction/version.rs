@@ -89,9 +89,7 @@ impl<'a> TxSnapshot<'a> {
 
     let mut entry = Some(front);
     while let Some(e) = entry.take_if(|e| *e.key() <= max) {
-      if !e.is_removed() {
-        snapshot.insert(*e.key());
-      }
+      snapshot.insert(*e.key());
       entry = e.next();
     }
 
