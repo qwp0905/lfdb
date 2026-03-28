@@ -5,6 +5,8 @@ use std::{
 
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
+use crate::utils::OffsetBitmap;
+
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_COMMITTED: u8 = 2; // The commit log has been successfully written.
@@ -64,6 +66,39 @@ impl<'a> TxState<'a> {
 }
 
 /**
+ * Snapshot of the version visibility active set to achieve snapshot isolation.
+ */
+pub struct TxSnapshot<'a> {
+  active: OffsetBitmap,
+  aborted: &'a SkipSet<usize>,
+}
+impl<'a> TxSnapshot<'a> {
+  fn new(active: &SkipMap<usize, AtomicU8>, aborted: &'a SkipSet<usize>) -> Self {
+    let offset = active.front().map(|e| *e.key()).unwrap_or(0);
+    let max = active.back().map(|e| *e.key()).unwrap_or(offset);
+
+    let mut snap = OffsetBitmap::new(offset, max - offset + 1);
+    for id in active.range(offset..=max).map(|e| *e.key()) {
+      snap.insert(id);
+    }
+
+    TxSnapshot {
+      active: snap,
+      aborted,
+    }
+  }
+
+  #[inline]
+  pub fn is_visible(&self, tx_id: &usize) -> bool {
+    !self.is_active(tx_id) && !self.aborted.contains(tx_id)
+  }
+  #[inline]
+  pub fn is_active(&self, &tx_id: &usize) -> bool {
+    self.active.contains(tx_id)
+  }
+}
+
+/**
  * Tracks MVCC visibility for transactions.
  *
  * Visibility is determined by exclusion: a transaction's writes are visible
@@ -101,6 +136,7 @@ impl VersionVisibility {
     }
   }
 
+  #[inline]
   pub fn is_aborted(&self, tx_id: &usize) -> bool {
     self.aborted.contains(tx_id)
   }
@@ -116,22 +152,23 @@ impl VersionVisibility {
       .map(|v| *v.key())
       .unwrap_or_else(|| self.current_version())
   }
-  pub fn is_visible(&self, tx_id: &usize) -> bool {
-    !self.aborted.contains(tx_id) && !self.active.contains_key(tx_id)
-  }
-  pub fn is_active(&self, tx_id: &usize) -> bool {
-    self.active.contains_key(tx_id)
-  }
+  #[inline]
   pub fn set_abort(&self, tx_id: usize) {
     self.aborted.insert(tx_id);
   }
-  pub fn new_transaction(&self) -> TxState<'_> {
+  pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
+    let snapshot = TxSnapshot::new(&self.active, &self.aborted);
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
-    TxState(self.active.insert(tx_id, AtomicU8::new(STATUS_AVAILABLE)))
+    (
+      TxState(self.active.insert(tx_id, AtomicU8::new(STATUS_AVAILABLE))),
+      snapshot,
+    )
   }
+  #[inline]
   pub fn current_version(&self) -> usize {
     self.last_tx_id.load(Ordering::Acquire)
   }
+  #[inline]
   pub fn get_active_state(&self, tx_id: usize) -> Option<TxState<'_>> {
     self.active.get(&tx_id).map(TxState)
   }
