@@ -25,7 +25,7 @@ impl<const T: usize> Page<T> {
   pub fn new() -> Self {
     Self(UnsafeCell::new([0; T]))
   }
-  #[inline]
+  #[inline(always)]
   pub fn as_ptr(&self) -> *const u8 {
     self.0.get() as *const u8
   }
@@ -52,19 +52,19 @@ impl<const T: usize> Page<T> {
 }
 
 impl<const T: usize> AsRef<[u8]> for Page<T> {
-  #[inline]
+  #[inline(always)]
   fn as_ref(&self) -> &[u8] {
     self.0.get().borrow_unsafe()
   }
 }
 impl<const T: usize> AsMut<[u8]> for Page<T> {
-  #[inline]
+  #[inline(always)]
   fn as_mut(&mut self) -> &mut [u8] {
     self.0.get_mut()
   }
 }
 impl<const T: usize> From<[u8; T]> for Page<T> {
-  #[inline]
+  #[inline(always)]
   fn from(bytes: [u8; T]) -> Self {
     Self(UnsafeCell::new(bytes))
   }
@@ -100,7 +100,6 @@ pub struct PageScanner<'a, const T: usize = PAGE_SIZE> {
   _marker: PhantomData<&'a Page<T>>,
 }
 impl<'a, const T: usize> PageScanner<'a, T> {
-  #[inline]
   fn new(inner: *const u8) -> Self {
     Self {
       inner,
@@ -109,7 +108,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline]
   pub fn read(&mut self) -> Result<u8> {
     if self.offset >= T {
       return Err(Error::EOF);
@@ -119,7 +117,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
 
-  #[inline]
   pub fn read_n(&mut self, n: usize) -> Result<&[u8]> {
     let end = self.offset + n;
     if end > T {
@@ -130,7 +127,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
-  #[inline]
   fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
     if self.offset + N > T {
       return Err(Error::EOF);
@@ -139,23 +135,15 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     self.offset += N;
     Ok(v)
   }
-
-  #[inline]
+  #[inline(always)]
   pub fn read_usize(&mut self) -> Result<usize> {
     self.read_const_n::<8>().map(usize::from_le_bytes)
   }
-
-  #[inline]
+  #[inline(always)]
   pub fn read_u16(&mut self) -> Result<u16> {
     self.read_const_n::<2>().map(u16::from_le_bytes)
   }
-
-  #[inline]
-  pub fn read_u32(&mut self) -> Result<u32> {
-    self.read_const_n::<4>().map(u32::from_le_bytes)
-  }
-
-  #[inline]
+  #[inline(always)]
   pub fn is_eof(&self) -> bool {
     T <= self.offset
   }
@@ -193,23 +181,25 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     Ok(())
   }
 
+  #[inline(always)]
   pub fn write_usize(&mut self, value: usize) -> Result<()> {
     self.write(&value.to_le_bytes())
   }
-  pub fn write_u32(&mut self, value: u32) -> Result {
-    self.write(&value.to_le_bytes())
-  }
+  #[inline(always)]
   pub fn write_u16(&mut self, value: u16) -> Result {
     self.write(&value.to_le_bytes())
   }
+  #[inline(always)]
   pub fn write_u8(&mut self, value: u8) -> Result {
     self.write(&value.to_le_bytes())
   }
 
+  #[inline(always)]
   pub fn finalize(self) -> usize {
     self.offset
   }
 
+  #[inline(always)]
   pub fn is_eof(&self) -> bool {
     T <= self.offset
   }

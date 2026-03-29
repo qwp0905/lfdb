@@ -70,7 +70,6 @@ impl<'a> Cursor<'a> {
       return Err(err);
     }
 
-    self.state.complete_commit();
     self.state.deactive();
     Ok(())
   }
@@ -481,7 +480,7 @@ impl<'a> Cursor<'a> {
 }
 impl<'a> Drop for Cursor<'a> {
   fn drop(&mut self) {
-    self.metrics.transaction_start.record(self.tx_start.take());
     let _ = self.abort();
+    self.metrics.transaction_start.record(self.tx_start.take());
   }
 }

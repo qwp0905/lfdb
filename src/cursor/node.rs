@@ -169,12 +169,8 @@ impl InternalNode {
       .binary_search_by(|k| k.cmp(key))
       .unwrap_or_else(|i| i);
 
-    let tmp = self.keys.split_off(at);
-    self.keys.push(key.clone());
-    self.keys.extend(tmp);
-    let tmp = self.children.split_off(at + 1);
-    self.children.push(pointer);
-    self.children.extend(tmp);
+    self.keys.insert(at, key.clone());
+    self.children.insert(at + 1, pointer);
     Ok(())
   }
 
@@ -280,9 +276,7 @@ impl LeafNode {
     key: Key,
     pointer: Pointer,
   ) -> Option<LeafNode> {
-    let tmp = self.entries.split_off(index);
-    self.entries.push((key, pointer));
-    self.entries.extend(tmp);
+    self.entries.insert(index, (key, pointer));
 
     let mut byte_len = 1 + 8 + 8 + 8;
     for i in 0..self.entries.len() {
