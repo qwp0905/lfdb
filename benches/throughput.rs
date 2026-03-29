@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use crossbeam::channel::{unbounded, Sender};
-use lfkv_db::EngineBuilder;
+use lfdb::EngineBuilder;
 use tempfile::TempDir;
 
 const KEY_SIZE: usize = 16;

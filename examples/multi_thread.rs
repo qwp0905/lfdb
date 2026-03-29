@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use crossbeam::channel::{unbounded, Sender};
-use lfkv_db::{EngineBuilder, LogLevel, Logger};
+use lfdb::{EngineBuilder, LogLevel, Logger};
 use rand::{seq::IteratorRandom, thread_rng};
 
 struct DebugLogger;

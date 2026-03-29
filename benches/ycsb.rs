@@ -8,7 +8,7 @@ use std::{
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam::channel::{unbounded, Sender};
-use lfkv_db::EngineBuilder;
+use lfdb::EngineBuilder;
 use rand::Rng;
 use rand_distr::{Distribution, Zipf};
 use tempfile::TempDir;
@@ -76,7 +76,7 @@ enum Op {
 }
 
 fn spawn_workers(
-  engine: Arc<lfkv_db::Engine>,
+  engine: Arc<lfdb::Engine>,
   count: usize,
   done: &Sender<()>,
 ) -> (
@@ -103,7 +103,7 @@ fn spawn_workers(
               }
               Op::Insert(k, v) => match tx.insert(k.clone(), v.clone()) {
                 Ok(_) => false,
-                Err(lfkv_db::Error::WriteConflict) => true,
+                Err(lfdb::Error::WriteConflict) => true,
                 Err(e) => panic!("insert error: {e}"),
               },
               Op::Scan(start, end) => {
@@ -115,7 +115,7 @@ fn spawn_workers(
                 tx.get(k).expect("rmw read error");
                 match tx.insert(k.clone(), v.clone()) {
                   Ok(_) => false,
-                  Err(lfkv_db::Error::WriteConflict) => true,
+                  Err(lfdb::Error::WriteConflict) => true,
                   Err(e) => panic!("rmw write error: {e}"),
                 }
               }

@@ -1,4 +1,4 @@
-# LFKV-DB
+# LFDB
 
 Lock-Free Key-Value Storage Engine implemented in Rust.
 
@@ -9,7 +9,7 @@ A persistent, ACID-compliant embedded key-value store built for **high-concurren
 ### Open
 
 ```rust
-use lfkv_db::EngineBuilder;
+use lfdb::EngineBuilder;
 
 let engine = EngineBuilder::new("./data")
     .buffer_pool_memory_capacity(128 << 20) // 128MB
@@ -114,7 +114,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 
 ### Transaction Lifecycle and Isolation
 
-LFKV-DB provides **Snapshot Isolation**. Each transaction reads from a consistent snapshot taken at the moment it starts — concurrent writes by other transactions are invisible until they commit, and only to transactions that begin after the commit.
+LFDB provides **Snapshot Isolation**. Each transaction reads from a consistent snapshot taken at the moment it starts — concurrent writes by other transactions are invisible until they commit, and only to transactions that begin after the commit.
 
 **Visibility rules:**
 - A transaction always sees its own writes
@@ -149,7 +149,7 @@ A transaction that exceeds its configured timeout is automatically aborted. Any 
 
 ### Crash Recovery
 
-LFKV-DB recovers automatically on restart — no manual intervention is required.
+LFDB recovers automatically on restart — no manual intervention is required.
 
 On startup, the engine replays the WAL and redoes all committed transactions since the last checkpoint. Uncommitted transactions (those that were in-flight at the time of the crash) are treated as aborted and their writes are invisible.
 
