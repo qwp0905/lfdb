@@ -21,6 +21,3 @@ pub use bit::*;
 
 mod buffer;
 pub use buffer::*;
-
-// mod vec;
-// pub use vec::*;
