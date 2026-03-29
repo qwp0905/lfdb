@@ -1,4 +1,4 @@
-use lfkv_db::{EngineBuilder, LogLevel, Logger};
+use lfdb::{EngineBuilder, LogLevel, Logger};
 
 struct DebugLogger;
 impl Logger for DebugLogger {

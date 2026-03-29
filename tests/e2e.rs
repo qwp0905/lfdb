@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Sender};
-use lfkv_db::{Engine, EngineBuilder, Error, LogLevel, Logger};
+use lfdb::{Engine, EngineBuilder, Error, LogLevel, Logger};
 use rand::{seq::IteratorRandom, thread_rng};
 use tempfile::{tempdir_in, TempDir};
 
@@ -934,7 +934,7 @@ fn test_timeout() {
   std::thread::sleep(Duration::from_secs(5));
 
   match tx.get(b"123") {
-    Err(lfkv_db::Error::TransactionClosed) => {}
+    Err(lfdb::Error::TransactionClosed) => {}
     _ => panic!("must timeout"),
   }
 

@@ -1,4 +1,4 @@
-# LFKV-DB
+# LFDB
 
 Lock-Free Key-Value Storage Engine implemented in Rust.
 
@@ -9,7 +9,7 @@ A persistent, ACID-compliant embedded key-value store built for **high-concurren
 ### Open
 
 ```rust
-use lfkv_db::EngineBuilder;
+use lfdb::EngineBuilder;
 
 let engine = EngineBuilder::new("./data")
     .buffer_pool_memory_capacity(128 << 20) // 128MB
