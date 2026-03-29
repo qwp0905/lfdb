@@ -9,8 +9,7 @@ use crate::utils::OffsetBitmap;
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
-const STATUS_COMMITTED: u8 = 2; // The commit log has been successfully written.
-const STATUS_ABORTED: u8 = 3;
+const STATUS_ABORTED: u8 = 2;
 
 pub struct TxState<'a>(Entry<'a, usize, AtomicU8>);
 impl<'a> TxState<'a> {
@@ -55,10 +54,6 @@ impl<'a> TxState<'a> {
     self.0.remove();
   }
 
-  #[inline]
-  pub fn complete_commit(&self) {
-    self.0.value().store(STATUS_COMMITTED, Ordering::Release)
-  }
   #[inline]
   pub fn make_available(&self) {
     self.0.value().store(STATUS_AVAILABLE, Ordering::Release)

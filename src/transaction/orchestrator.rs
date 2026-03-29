@@ -196,8 +196,8 @@ impl TxOrchestrator {
   }
 
   pub fn abort_tx(&self, tx_id: usize) -> Result {
-    self.wal.append_abort(tx_id)?;
     self.version_visibility.set_abort(tx_id);
+    self.wal.append_abort(tx_id)?;
     self.metrics.transaction_abort_count.inc();
     Ok(())
   }
