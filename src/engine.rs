@@ -92,6 +92,7 @@ impl Engine {
       metrics_registry.clone(),
     )?;
 
+    logger.info(|| "engine bootstrapped.");
     Ok(Self {
       orchestrator: orchestrator.to_arc(),
       available: AtomicBool::new(true),

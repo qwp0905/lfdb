@@ -777,6 +777,13 @@ fn test_hard_workload() {
   drop(tx);
   threads.into_iter().for_each(|h| h.join().unwrap());
 
+  // verify each key
+  let tx = engine.new_tx().unwrap();
+  for (table, key) in &keys {
+    let table = tx.table(table).unwrap();
+    assert_eq!(table.get(key).unwrap(), Some(key.to_vec()))
+  }
+
   // verify each table
   let keys_per_table: usize = key_count / table_count;
   for name in &table_names {
