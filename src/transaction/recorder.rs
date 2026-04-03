@@ -4,7 +4,7 @@ use crate::{
   buffer_pool::WritableSlot,
   error::Result,
   serialize::{Serializable, SerializeFrom},
-  wal::WAL,
+  wal::{TxId, WAL},
 };
 
 /**
@@ -26,22 +26,22 @@ impl PageRecorder {
   #[inline]
   pub fn serialize_and_log<T>(
     &self,
-    tx_id: usize,
+    tx_id: TxId,
     slot: &mut WritableSlot<'_>,
     data: &T,
   ) -> Result
   where
     T: Serializable,
   {
-    let index = slot.get_index();
+    let ptr = slot.get_pointer();
     let page = slot.as_mut();
     let byte_len = page.serialize_from(data)?;
-    self.wal.append_insert(tx_id, index, page.copy_n(byte_len))
+    self.wal.append_insert(tx_id, ptr, page.copy_n(byte_len))
   }
 
   pub fn log_multi<T, R>(
     &self,
-    tx_id: usize,
+    tx_id: TxId,
     slot1: &mut WritableSlot<'_>,
     data1: &T,
     slot2: &mut WritableSlot<'_>,
@@ -51,16 +51,16 @@ impl PageRecorder {
     T: Serializable,
     R: Serializable,
   {
-    let index1 = slot1.get_index();
+    let ptr1 = slot1.get_pointer();
     let page = slot1.as_mut();
     let byte_len = page.serialize_from(data1)?;
     let data1 = page.copy_n(byte_len);
 
-    let index2 = slot2.get_index();
+    let ptr2 = slot2.get_pointer();
     let page = slot2.as_mut();
     let byte_len = page.serialize_from(data2)?;
     let data2 = page.copy_n(byte_len);
 
-    self.wal.append_multi(tx_id, index1, data1, index2, data2)
+    self.wal.append_multi(tx_id, ptr1, data1, ptr2, data2)
   }
 }

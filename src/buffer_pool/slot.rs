@@ -7,7 +7,7 @@ use crossbeam::utils::Backoff;
 
 use super::{Frame, FrameState, Shard, TempFrameState};
 use crate::{
-  disk::{DiskController, Page, PageRef, PAGE_SIZE},
+  disk::{DiskController, Page, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, ShortenedMutex, ShortenedRwLock},
 };
 
@@ -25,14 +25,14 @@ pub enum Slot<'a> {
 impl<'a> Slot<'a> {
   pub fn temp(
     state: Arc<TempFrameState>,
-    index: usize,
+    pointer: Pointer,
     disk: &'a DiskController<PAGE_SIZE>,
     shard: &'a Mutex<Shard>,
     is_peek: bool,
   ) -> Self {
     Self::Temp(TempSlot {
       state,
-      index,
+      pointer,
       disk,
       shard,
       is_peek,
@@ -90,10 +90,10 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
   }
 }
 impl<'a> WritableSlot<'a> {
-  pub fn get_index(&self) -> usize {
+  pub fn get_pointer(&self) -> Pointer {
     match self {
-      WritableSlot::Temp(temp) => temp.index,
-      WritableSlot::Page(page) => page.guard.get_index(),
+      WritableSlot::Temp(temp) => temp.pointer,
+      WritableSlot::Page(page) => page.guard.get_pointer(),
     }
   }
 }
@@ -167,7 +167,7 @@ impl<'a> Drop for PageSlotRead<'a> {
 
 pub struct TempSlot<'a> {
   state: Arc<TempFrameState>,
-  index: usize,
+  pointer: Pointer,
   disk: &'a DiskController<PAGE_SIZE>,
   shard: &'a Mutex<Shard>,
   is_peek: bool,
@@ -180,7 +180,7 @@ impl<'a> TempSlot<'a> {
     TempSlotRead {
       guard: ManuallyDrop::new(unsafe { transmute(self.state.for_read()) }),
       state: self.state.clone(),
-      index: self.index,
+      pointer: self.pointer,
       disk: self.disk,
       shard: self.shard,
       is_peek: self.is_peek,
@@ -194,7 +194,7 @@ impl<'a> TempSlot<'a> {
     TempSlotWrite {
       guard: ManuallyDrop::new(unsafe { transmute(self.state.for_write()) }),
       state: self.state.clone(),
-      index: self.index,
+      pointer: self.pointer,
       disk: self.disk,
       shard: self.shard,
       is_peek: self.is_peek,
@@ -214,7 +214,7 @@ impl<'a> TempSlot<'a> {
 pub struct TempSlotWrite<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockWriteGuard<'a, PageRef<PAGE_SIZE>>>,
-  index: usize,
+  pointer: Pointer,
   disk: &'a DiskController<PAGE_SIZE>,
   shard: &'a Mutex<Shard>,
   is_peek: bool,
@@ -227,8 +227,8 @@ impl<'a> TempSlotWrite<'a> {
     while !self.state.try_evict() {
       backoff.snooze();
     }
-    let _ = self.disk.write(self.index, &self.state.for_read());
-    self.shard.l().remove_temp(self.index);
+    let _ = self.disk.write(self.pointer, &self.state.for_read());
+    self.shard.l().remove_temp(self.pointer);
   }
 }
 impl<'a> Drop for TempSlotWrite<'a> {
@@ -256,7 +256,7 @@ impl<'a> Drop for TempSlotWrite<'a> {
 pub struct TempSlotRead<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockReadGuard<'a, PageRef<PAGE_SIZE>>>,
-  index: usize,
+  pointer: Pointer,
   disk: &'a DiskController<PAGE_SIZE>,
   shard: &'a Mutex<Shard>,
   is_peek: bool,
@@ -269,9 +269,9 @@ impl<'a> TempSlotRead<'a> {
       backoff.snooze();
     }
     if self.state.is_dirty() {
-      let _ = self.disk.write(self.index, &self.state.for_read());
+      let _ = self.disk.write(self.pointer, &self.state.for_read());
     }
-    self.shard.l().remove_temp(self.index);
+    self.shard.l().remove_temp(self.pointer);
   }
 }
 impl<'a> Drop for TempSlotRead<'a> {

@@ -4,14 +4,15 @@ use std::{
   sync::Arc,
 };
 
-use super::{DataEntry, Pointer, RecordData, VersionRecord};
+use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
   buffer_pool::BufferPool,
-  constant::RESERVED_TX,
+  disk::Pointer,
   error::Result,
   thread::{BackgroundThread, BatchWorkResult, WorkBuilder, WorkResult},
   transaction::{FreeList, PageRecorder, VersionVisibility},
   utils::{DoubleBuffer, LogFilter, ToArc},
+  wal::RESERVED_TX,
 };
 
 pub struct GarbageCollectionConfig {
@@ -146,8 +147,8 @@ fn run_entry(
   recorder: Arc<PageRecorder>,
   free_list: Arc<FreeList>,
 ) -> impl Fn(Pointer) -> Result {
-  move |ptr: Pointer| {
-    let mut index = Some(ptr);
+  move |pointer: Pointer| {
+    let mut ptr = Some(pointer);
     let mut max_found = false;
 
     let release = |record: VersionRecord| {
@@ -156,7 +157,7 @@ fn run_entry(
       }
     };
 
-    while let Some(i) = index.take() {
+    while let Some(i) = ptr.take() {
       let mut slot = buffer_pool.peek(i)?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
@@ -201,14 +202,14 @@ fn run_entry(
       }
 
       if new_versions.len() == prev_len {
-        index = entry.get_next();
+        ptr = entry.get_next();
         continue;
       }
 
       if new_versions.len() > 0 {
         entry.set_versions(new_versions);
         recorder.serialize_and_log(RESERVED_TX, &mut slot, &entry)?;
-        index = entry.get_next();
+        ptr = entry.get_next();
         continue;
       }
 
@@ -220,7 +221,7 @@ fn run_entry(
       let next_entry: DataEntry =
         buffer_pool.peek(next)?.for_read().as_ref().deserialize()?;
       recorder.serialize_and_log(RESERVED_TX, &mut slot, &next_entry)?;
-      index = Some(i);
+      ptr = Some(i);
 
       free_list.dealloc(next);
     }

@@ -3,12 +3,13 @@ use std::{
   fs::read_dir,
 };
 
-use super::{Operation, WALSegment, WAL_BLOCK_SIZE};
+use super::{LogId, Operation, SegmentGeneration, TxId, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
-  constant::RESERVED_TX,
-  disk::PagePool,
+  disk::{PagePool, Pointer},
   error::{Error, Result},
 };
+
+pub const RESERVED_TX: TxId = 0;
 
 /**
  * Output of WAL replay on startup.
@@ -22,12 +23,12 @@ use crate::{
  * that were open (started but never committed or aborted) at the time of crash.
  */
 pub struct ReplayResult {
-  pub last_log_id: usize,
-  pub last_tx_id: usize,
-  pub aborted: BTreeSet<usize>,
-  pub redo: Vec<(usize, usize, Vec<u8>)>,
+  pub last_log_id: LogId,
+  pub last_tx_id: TxId,
+  pub aborted: BTreeSet<TxId>,
+  pub redo: Vec<(LogId, Pointer, Vec<u8>)>,
   pub segments: Vec<WALSegment>,
-  pub generation: usize,
+  pub generation: SegmentGeneration,
   pub is_new: bool,
 }
 impl ReplayResult {
@@ -70,15 +71,15 @@ pub fn replay(
 
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
-  let mut redo = BTreeMap::<usize, Vec<(usize, Vec<u8>)>>::new();
-  let mut aborted = BTreeMap::<usize, usize>::new();
-  let mut started = BTreeSet::<usize>::new();
-  let mut closed = HashSet::<usize>::new();
+  let mut redo = BTreeMap::<LogId, Vec<(Pointer, Vec<u8>)>>::new();
+  let mut aborted = BTreeMap::<LogId, TxId>::new();
+  let mut started = BTreeSet::<TxId>::new();
+  let mut closed = HashSet::<TxId>::new();
 
   let mut segments = Vec::new();
 
-  let mut last_checkpoint = None as Option<usize>;
-  let mut last_min_active = None as Option<usize>;
+  let mut last_checkpoint = None as Option<LogId>;
+  let mut last_min_active = None as Option<TxId>;
   for path in files.into_iter() {
     let wal = WALSegment::open_exists(&path, flush_count)?;
     let len = wal.len()?;

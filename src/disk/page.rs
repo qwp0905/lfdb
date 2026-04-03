@@ -136,8 +136,8 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
   #[inline(always)]
-  pub fn read_usize(&mut self) -> Result<usize> {
-    self.read_const_n::<8>().map(usize::from_le_bytes)
+  pub fn read_u64(&mut self) -> Result<u64> {
+    self.read_const_n::<8>().map(u64::from_le_bytes)
   }
   #[inline(always)]
   pub fn read_u16(&mut self) -> Result<u16> {
@@ -182,7 +182,7 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   }
 
   #[inline(always)]
-  pub fn write_usize(&mut self, value: usize) -> Result<()> {
+  pub fn write_u64(&mut self, value: u64) -> Result<()> {
     self.write(&value.to_le_bytes())
   }
   #[inline(always)]

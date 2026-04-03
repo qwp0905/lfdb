@@ -4,16 +4,19 @@ use std::{
   time::Duration,
 };
 
-use super::{CursorNode, DataEntry, GarbageCollector, Pointer, RecordData, TreeHeader};
+use super::{CursorNode, DataEntry, GarbageCollector, RecordData, TreeHeader};
 use crate::{
   buffer_pool::BufferPool,
-  constant::{META_TABLE_HEADER, RESERVED_TX},
+  disk::Pointer,
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder},
   transaction::{FreeList, PageRecorder, TableMapper, VersionVisibility},
   utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
+  wal::RESERVED_TX,
   Error, Result,
 };
+
+pub const META_TABLE_HEADER: Pointer = 0;
 
 pub struct TreeManagerConfig {
   pub merge_interval: Duration,
@@ -103,9 +106,9 @@ impl TreeManager {
     version_visibility: &VersionVisibility,
     logger: LogFilter,
     config: TreeManagerConfig,
-    file_end: usize,
+    file_end: Pointer,
   ) -> Result<Self> {
-    let visited: Arc<Mutex<HashSet<usize>>> =
+    let visited: Arc<Mutex<HashSet<Pointer>>> =
       Mutex::new(HashSet::from_iter(vec![META_TABLE_HEADER])).to_arc();
 
     let meta_root = buffer_pool
@@ -117,10 +120,10 @@ impl TreeManager {
     let mut node_stack = vec![meta_root];
     let mut key_values = vec![];
 
-    while let Some(index) = node_stack.pop() {
-      visited.l().insert(index);
+    while let Some(ptr) = node_stack.pop() {
+      visited.l().insert(ptr);
       match buffer_pool
-        .read(index)?
+        .read(ptr)?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
@@ -133,12 +136,11 @@ impl TreeManager {
     let tree_headers = Mutex::new(BTreeMap::new()).to_arc();
     let tx_id = version_visibility.current_version();
 
-    while let Some((key, index)) = key_values.pop() {
-      visited.l().insert(index);
-      gc.mark(index);
+    while let Some((key, ptr)) = key_values.pop() {
+      visited.l().insert(ptr);
+      gc.mark(ptr);
 
-      let entry: DataEntry =
-        buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
+      let entry: DataEntry = buffer_pool.read(ptr)?.for_read().as_ref().deserialize()?;
       for record in entry.get_versions() {
         if let RecordData::Chunked(pointers) = &record.data {
           visited.l().extend(pointers);
@@ -166,7 +168,7 @@ impl TreeManager {
         None => continue,
       };
       let header = match bytes.try_into() {
-        Ok(v) => usize::from_le_bytes(v),
+        Ok(v) => Pointer::from_le_bytes(v),
         Err(_) => continue,
       };
 
@@ -227,7 +229,7 @@ fn run_merge_leaf(
     {
       logger.debug(|| format!("clean leaf {name} collect start."));
 
-      let mut index = buffer_pool
+      let mut ptr = buffer_pool
         .peek(header)?
         .for_read()
         .as_ref()
@@ -235,15 +237,15 @@ fn run_merge_leaf(
         .get_root();
 
       while let CursorNode::Internal(node) = buffer_pool
-        .peek(index)?
+        .peek(ptr)?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
       {
-        index = node.first_child()
+        ptr = node.first_child()
       }
 
-      let mut index = Some(index);
+      let mut index = Some(ptr);
       while let Some(i) = index.take() {
         {
           let leaf = buffer_pool
@@ -296,12 +298,13 @@ fn run_merge_leaf(
         };
 
         // merge without propagating to internal nodes.
-        logger
-          .debug(|| format!("trying to start merge {} with {}", slot.get_index(), next));
+        logger.debug(|| {
+          format!("trying to start merge {} with {}", slot.get_pointer(), next)
+        });
 
         let mut next_slot = buffer_pool.peek(next)?.for_write();
         let next_leaf = next_slot.as_ref().deserialize::<CursorNode>()?;
-        leaf.set_next(slot.get_index());
+        leaf.set_next(slot.get_pointer());
 
         recorder.log_multi(
           RESERVED_TX,
@@ -310,7 +313,7 @@ fn run_merge_leaf(
           &mut next_slot,
           &leaf.to_node(),
         )?;
-        index = Some(slot.get_index());
+        index = Some(slot.get_pointer());
 
         drop(slot);
         drop(next_slot);
@@ -330,10 +333,10 @@ fn alloc_and_log<T: Serializable>(
   recorder: &PageRecorder,
   data: &T,
 ) -> Result<Pointer> {
-  let index = free_list.alloc();
-  let mut slot = buffer_pool.peek(index)?.for_write();
+  let ptr = free_list.alloc();
+  let mut slot = buffer_pool.peek(ptr)?.for_write();
   recorder.serialize_and_log(RESERVED_TX, &mut slot, data)?;
-  Ok(index)
+  Ok(ptr)
 }
 
 fn run_release_tree(
@@ -352,9 +355,9 @@ fn run_release_tree(
     let mut node_stack = vec![root];
     let mut entry_stack = vec![];
 
-    while let Some(index) = node_stack.pop() {
+    while let Some(ptr) = node_stack.pop() {
       match buffer_pool
-        .read(index)?
+        .read(ptr)?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
@@ -362,12 +365,11 @@ fn run_release_tree(
         CursorNode::Internal(internal) => node_stack.extend(internal.get_all_child()),
         CursorNode::Leaf(leaf) => entry_stack.extend(leaf.get_entry_pointers()),
       };
-      gc.lazy_release(index);
+      gc.lazy_release(ptr);
     }
 
-    while let Some(index) = entry_stack.pop() {
-      let entry: DataEntry =
-        buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
+    while let Some(ptr) = entry_stack.pop() {
+      let entry: DataEntry = buffer_pool.read(ptr)?.for_read().as_ref().deserialize()?;
       for record in entry.get_versions() {
         if let RecordData::Chunked(pointers) = &record.data {
           pointers.iter().for_each(|&p| gc.lazy_release(p));
@@ -376,7 +378,7 @@ fn run_release_tree(
       if let Some(i) = entry.get_next() {
         entry_stack.push(i)
       }
-      gc.lazy_release(index);
+      gc.lazy_release(ptr);
     }
 
     Ok(())
@@ -388,7 +390,7 @@ fn tree_traversal(
   gc: &GarbageCollector,
   logger: &LogFilter,
   header: Pointer,
-  visited: &Mutex<HashSet<usize>>,
+  visited: &Mutex<HashSet<Pointer>>,
 ) -> Result {
   visited.l().insert(header);
 
@@ -401,10 +403,10 @@ fn tree_traversal(
   let mut node_stack = vec![root];
   let mut entry_stack = vec![];
 
-  while let Some(index) = node_stack.pop() {
-    visited.l().insert(index);
+  while let Some(ptr) = node_stack.pop() {
+    visited.l().insert(ptr);
     match buffer_pool
-      .read(index)?
+      .read(ptr)?
       .for_read()
       .as_ref()
       .deserialize::<CursorNode>()?
@@ -418,9 +420,9 @@ fn tree_traversal(
   entry_stack.iter().for_each(|&ptr| gc.mark(ptr));
   logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
 
-  while let Some(index) = entry_stack.pop() {
-    visited.l().insert(index);
-    let entry: DataEntry = buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
+  while let Some(ptr) = entry_stack.pop() {
+    visited.l().insert(ptr);
+    let entry: DataEntry = buffer_pool.read(ptr)?.for_read().as_ref().deserialize()?;
     for record in entry.get_versions() {
       if let RecordData::Chunked(pointers) = &record.data {
         visited.l().extend(pointers);

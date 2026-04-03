@@ -5,44 +5,13 @@ use std::{
   sync::Arc,
 };
 
-use super::{max_iov, DirectIO, PageRef, Pread, Pwrite, Pwritev};
+use super::{max_iov, DirectIO, PagePool, PageRef, Pointer, Pread, Pwrite, Pwritev};
 use crate::{
-  disk::PagePool,
   error::{Error, Result},
   metrics::MetricsRegistry,
   thread::{BackgroundThread, WorkBuilder, WorkResult},
   utils::{ToArc, ToBox},
 };
-
-fn handle_write<const N: usize>(
-  file: Arc<File>,
-  metrics: Arc<MetricsRegistry>,
-) -> impl FnMut(Vec<(usize, PageRef<N>)>) -> Result {
-  move |mut buffered| {
-    if buffered.len() == 1 {
-      let (i, slice) = &buffered[0];
-      return file
-        .pwrite(slice.as_ref().as_ref(), (i * N) as u64)
-        .map_err(Error::IO)
-        .map(drop);
-    }
-
-    buffered.sort_by_key(|(i, _)| *i);
-    buffered
-      .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
-      .map(|g| g.into_iter())
-      .map(|g| g.map(|(i, s)| (*i, IoSlice::new(s.as_ref().as_ref()))))
-      .map(|g| g.unzip())
-      .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * N), bufs))
-      .map(|(offset, bufs)| {
-        metrics
-          .disk_write
-          .measure(|| file.pwritev(&bufs, offset as u64))
-      })
-      .map(|r| r.map(drop).map_err(Error::IO))
-      .collect()
-  }
-}
 
 pub struct WriteAsync<const N: usize>(WorkResult<Result>);
 impl<const N: usize> WriteAsync<N> {
@@ -58,11 +27,39 @@ impl<const N: usize> WriteAsync<N> {
  */
 pub struct DiskController<const N: usize> {
   file: Arc<File>,
-  writer: Box<dyn BackgroundThread<(usize, PageRef<N>), Result>>,
+  writer: Box<dyn BackgroundThread<(Pointer, PageRef<N>), Result>>,
   page_pool: Arc<PagePool<N>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl<const N: usize> DiskController<N> {
+  const SIZE: Pointer = N as Pointer;
+
+  fn handle_write(
+    file: Arc<File>,
+    metrics: Arc<MetricsRegistry>,
+  ) -> impl FnMut(Vec<(Pointer, PageRef<N>)>) -> Result {
+    move |mut buffered| {
+      if buffered.len() == 1 {
+        let (p, slice) = &buffered[0];
+        return file
+          .pwrite(slice.as_ref().as_ref(), p * Self::SIZE)
+          .map_err(Error::IO)
+          .map(drop);
+      }
+
+      buffered.sort_by_key(|(i, _)| *i);
+      buffered
+        .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
+        .map(|g| g.into_iter())
+        .map(|g| g.map(|(p, s)| (*p, IoSlice::new(s.as_ref().as_ref()))))
+        .map(|g| g.unzip())
+        .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| ((ptrs[0] * Self::SIZE), bufs))
+        .map(|(offset, bufs)| metrics.disk_write.measure(|| file.pwritev(&bufs, offset)))
+        .map(|r| r.map(drop).map_err(Error::IO))
+        .collect()
+    }
+  }
+
   pub fn open(
     path: PathBuf,
     page_pool: Arc<PagePool<N>>,
@@ -83,7 +80,7 @@ impl<const N: usize> DiskController<N> {
       .name(format!("{} write buffering", path.to_string_lossy()))
       .stack_size(2 << 20)
       .single()
-      .eager_buffering(max_iov(), handle_write::<N>(file.clone(), metrics.clone()))
+      .eager_buffering(max_iov(), Self::handle_write(file.clone(), metrics.clone()))
       .to_box();
 
     Ok(Self {
@@ -93,36 +90,44 @@ impl<const N: usize> DiskController<N> {
       metrics,
     })
   }
-  pub fn read<'a>(&self, index: usize, page: &'a mut PageRef<N>) -> Result {
+  pub fn read<'a>(&self, pointer: Pointer, page: &'a mut PageRef<N>) -> Result {
     self
       .metrics
       .disk_read
-      .measure(|| self.file.pread(page.as_mut().as_mut(), (index * N) as u64))
+      .measure(|| {
+        self
+          .file
+          .pread(page.as_mut().as_mut(), pointer * Self::SIZE)
+      })
       .map(|_| ())
       .map_err(Error::IO)
   }
-  pub fn write_async<'a>(&self, index: usize, page: &'a PageRef<N>) -> WriteAsync<N> {
+  pub fn write_async<'a>(&self, pointer: Pointer, page: &'a PageRef<N>) -> WriteAsync<N> {
     // Copy the page into a pooled buffer before sending to the writer thread.
     // The original PageRef is held under a lock, which cannot be transferred
     // across thread boundaries. Copying also releases the lock immediately,
     // allowing concurrent access while IO happens in the background.
     let mut pooled = self.page_pool.acquire();
     pooled.as_mut().copy_from(page.as_ref());
-    WriteAsync(self.writer.send((index, pooled)))
+    WriteAsync(self.writer.send((pointer, pooled)))
   }
-  pub fn write<'a>(&self, index: usize, page: &'a PageRef<N>) -> Result {
-    self.write_async(index, page).wait()
+  #[inline]
+  pub fn write<'a>(&self, pointer: Pointer, page: &'a PageRef<N>) -> Result {
+    self.write_async(pointer, page).wait()
   }
 
+  #[inline]
   pub fn fsync(&self) -> Result {
     self.file.sync_all().map_err(Error::IO)
   }
 
-  pub fn len(&self) -> Result<usize> {
+  #[inline]
+  pub fn len(&self) -> Result<Pointer> {
     let meta = self.file.metadata().map_err(Error::IO)?;
-    Ok((meta.len() as usize) / N)
+    Ok(meta.len() / Self::SIZE)
   }
 
+  #[inline]
   pub fn close(&self) {
     self.writer.close();
   }

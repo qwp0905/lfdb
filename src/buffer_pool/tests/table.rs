@@ -9,14 +9,14 @@ fn make_table(shard_count: usize, capacity: usize) -> LRUTable {
   LRUTable::new(page_pool, shard_count, capacity)
 }
 
-fn miss(table: &LRUTable, index: usize) -> EvictionGuard<'_> {
+fn miss(table: &LRUTable, index: Pointer) -> EvictionGuard<'_> {
   match table.acquire(index) {
     Acquired::Evicted(guard) => guard,
     _ => panic!("expected miss for index {}", index),
   }
 }
 
-fn hit(table: &LRUTable, index: usize) -> Arc<FrameState> {
+fn hit(table: &LRUTable, index: Pointer) -> Arc<FrameState> {
   match table.acquire(index) {
     Acquired::Hit(state) => state,
     _ => panic!("expected hit for index {}", index),
@@ -29,7 +29,7 @@ fn test_cache_miss_then_hit() {
 
   let mut guard = miss(&table, 42);
   let frame_id = guard.get_frame_id();
-  assert!(guard.get_evicted_index().is_none());
+  assert!(guard.get_evicted_pointer().is_none());
   guard.commit();
   drop(guard);
 
@@ -45,8 +45,8 @@ fn test_multiple_misses_no_eviction() {
 
   let mut frame_ids = Vec::new();
   for i in 0..cap {
-    let mut guard = miss(&table, i);
-    assert!(guard.get_evicted_index().is_none());
+    let mut guard = miss(&table, i as Pointer);
+    assert!(guard.get_evicted_pointer().is_none());
     frame_ids.push(guard.get_frame_id());
     guard.commit();
   }
@@ -62,22 +62,22 @@ fn test_eviction_when_full() {
   let table = make_table(1, cap);
 
   for i in 0..cap {
-    let mut guard = miss(&table, i);
-    assert!(guard.get_evicted_index().is_none());
+    let mut guard = miss(&table, i as Pointer);
+    assert!(guard.get_evicted_pointer().is_none());
     guard.commit();
   }
 
   // unpin all so eviction can happen
   for i in 0..cap {
-    let state = hit(&table, i);
+    let state = hit(&table, i as Pointer);
     state.unpin(); // pin=1 from commit
     state.unpin(); // pin=0
   }
 
   let mut guard = miss(&table, 100);
-  let evicted = guard.get_evicted_index();
+  let evicted = guard.get_evicted_pointer();
   assert!(evicted.is_some());
-  assert!(evicted.unwrap() < cap);
+  assert!(evicted.unwrap() < cap as Pointer);
   guard.commit();
 }
 
@@ -133,7 +133,7 @@ fn test_sharded_eviction() {
         continue;
       }
       Acquired::Evicted(mut guard) => {
-        if guard.get_evicted_index().is_some() {
+        if guard.get_evicted_pointer().is_some() {
           eviction_happened = true;
         }
         inserted.push((i, guard.get_frame_id()));
@@ -162,11 +162,11 @@ fn test_eviction_reuses_frame_id() {
   let table = make_table(1, cap);
 
   for i in 0..cap {
-    miss(&table, i).commit();
+    miss(&table, i as Pointer).commit();
   }
 
   for i in 0..cap {
-    let state = hit(&table, i);
+    let state = hit(&table, i as Pointer);
     state.unpin();
     state.unpin();
   }
@@ -195,7 +195,7 @@ fn test_eviction_guard_drop_rollback() {
 
   // evict but don't commit — Drop should rollback
   let guard = miss(&table, 30);
-  let evicted = guard.get_evicted_index().unwrap();
+  let evicted = guard.get_evicted_pointer().unwrap();
   drop(guard);
 
   // evicted index should still be accessible (restored by rollback)
@@ -219,7 +219,7 @@ fn test_eviction_guard_commit_persists() {
   }
 
   let mut guard = miss(&table, 30);
-  assert!(guard.get_evicted_index().is_some());
+  assert!(guard.get_evicted_pointer().is_some());
   guard.commit();
   drop(guard);
 
@@ -244,7 +244,7 @@ fn test_pinned_entry_not_evicted() {
 
   // eviction should evict 20 (pin=0), not 10 (pin=2)
   let guard = miss(&table, 30);
-  assert_eq!(guard.get_evicted_index().unwrap(), 20);
+  assert_eq!(guard.get_evicted_pointer().unwrap(), 20);
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn test_concurrent_acquire_waits_for_evicted_index() {
 
   // evict without commit — index 10 is in eviction set
   let guard = miss(&table, 30);
-  let evicted = guard.get_evicted_index().unwrap();
+  let evicted = guard.get_evicted_pointer().unwrap();
 
   let done = AtomicBool::new(false);
 

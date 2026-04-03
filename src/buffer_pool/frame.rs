@@ -1,19 +1,19 @@
 use std::mem::replace;
 
-use crate::disk::{PageRef, PAGE_SIZE};
+use crate::disk::{PageRef, Pointer, PAGE_SIZE};
 
 pub struct Frame {
   page: PageRef<PAGE_SIZE>,
   /**
-   * index can be wrong if nothing allocated.
+   * pointer can be wrong if nothing allocated.
    * only lru table is the single truth source.
    */
-  index: usize,
+  pointer: Pointer,
 }
 impl Frame {
   #[inline]
-  pub fn new(index: usize, page: PageRef<PAGE_SIZE>) -> Self {
-    Self { page, index }
+  pub fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>) -> Self {
+    Self { page, pointer }
   }
   #[inline]
   pub fn empty(page: PageRef<PAGE_SIZE>) -> Self {
@@ -22,15 +22,15 @@ impl Frame {
   #[inline]
   pub fn replace(
     &mut self,
-    index: usize,
+    pointer: Pointer,
     page: PageRef<PAGE_SIZE>,
   ) -> PageRef<PAGE_SIZE> {
-    self.index = index;
+    self.pointer = pointer;
     replace(&mut self.page, page)
   }
   #[inline]
-  pub fn get_index(&self) -> usize {
-    self.index
+  pub fn get_pointer(&self) -> Pointer {
+    self.pointer
   }
   #[inline]
   pub fn page_ref(&self) -> &PageRef<PAGE_SIZE> {

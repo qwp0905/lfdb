@@ -241,22 +241,22 @@ fn test_from_slice() {
 }
 
 #[test]
-fn test_read_usize() {
+fn test_read_u64() {
   let mut page = Page::<15>::new();
-  let test_value: usize = 42;
+  let test_value = 42u64;
 
-  // Write usize value
+  // Write value
   let bytes = test_value.to_le_bytes();
   let mut writer = page.writer();
   writer.write(&bytes).unwrap();
 
   // Read and verify usize value
   let mut scanner = page.scanner();
-  let read_value = scanner.read_usize().unwrap();
+  let read_value = scanner.read_u64().unwrap();
   assert_eq!(read_value, test_value);
 
   // Test EOF handling
-  assert!(scanner.read_usize().is_err());
+  assert!(scanner.read_u64().is_err());
 }
 
 #[test]

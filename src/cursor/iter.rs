@@ -1,7 +1,8 @@
 use std::mem::replace;
 
-use super::{CursorNode, DataEntry, Key, LeafNode, Pointer};
+use super::{CursorNode, DataEntry, Key, LeafNode};
 use crate::{
+  disk::Pointer,
   error::{Error, Result},
   transaction::{TxOrchestrator, TxSnapshot, TxState},
 };
@@ -91,7 +92,7 @@ impl<'a> CursorIterator<'a> {
         }
       }
 
-      let index = match self.leaf.get_next() {
+      let ptr = match self.leaf.get_next() {
         Some(i) => i,
         None => {
           self.closed = true;
@@ -101,7 +102,7 @@ impl<'a> CursorIterator<'a> {
 
       self.leaf = self
         .orchestrator
-        .fetch(index)?
+        .fetch(ptr)?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?

@@ -5,10 +5,11 @@ use crossbeam::{
   queue::SegQueue,
 };
 
+use super::{SegmentGeneration, WALSegment};
 use crate::{
+  disk::Pointer,
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
-  wal::WALSegment,
   Result,
 };
 
@@ -30,9 +31,9 @@ pub struct SegmentPreload {
 impl SegmentPreload {
   pub fn new(
     prefix: PathBuf,
-    generation: usize,
+    generation: SegmentGeneration,
     flush_count: usize,
-    max_len: usize,
+    max_len: Pointer,
   ) -> Self {
     let (tx, rx) = unbounded();
     let reuse = SegQueue::<WALSegment>::new().to_arc();

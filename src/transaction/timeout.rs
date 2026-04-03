@@ -11,7 +11,10 @@ use crossbeam::{
   select,
 };
 
-use crate::utils::{LogFilter, UnsafeBorrowMut};
+use crate::{
+  utils::{LogFilter, UnsafeBorrowMut},
+  wal::TxId,
+};
 
 use super::VersionVisibility;
 
@@ -196,7 +199,7 @@ where
 }
 
 enum Msg {
-  Register(usize, Duration),
+  Register(TxId, Duration),
   Term,
 }
 
@@ -217,7 +220,7 @@ impl TimeoutThread {
       .stack_size(2 << 20)
       .spawn(move || {
         let logger_c = logger.clone();
-        let mut wheel = TimingWheel::new(move |tx_id: usize| {
+        let mut wheel = TimingWheel::new(move |tx_id: TxId| {
           let state = match version_visibility.get_active_state(tx_id) {
             Some(s) => s,
             None => return,
@@ -259,7 +262,7 @@ impl TimeoutThread {
     }
   }
 
-  pub fn register(&self, id: usize, timeout: Duration) {
+  pub fn register(&self, id: TxId, timeout: Duration) {
     self.channel.send(Msg::Register(id, timeout)).unwrap();
   }
 

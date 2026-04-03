@@ -1,21 +1,21 @@
 use std::{
   panic::RefUnwindSafe,
-  sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+  sync::atomic::{AtomicU64, AtomicU8, Ordering},
 };
 
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
-use crate::utils::OffsetBitmap;
+use crate::{utils::OffsetBitmap, wal::TxId};
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
 
-pub struct TxState<'a>(Entry<'a, usize, AtomicU8>);
+pub struct TxState<'a>(Entry<'a, TxId, AtomicU8>);
 impl<'a> TxState<'a> {
   #[inline(always)]
-  pub fn get_id(&self) -> usize {
+  pub fn get_id(&self) -> TxId {
     *self.0.key()
   }
   #[inline]
@@ -84,10 +84,10 @@ impl<'a> TxState<'a> {
  */
 pub struct TxSnapshot<'a> {
   active: OffsetBitmap,
-  aborted: &'a SkipSet<usize>,
+  aborted: &'a SkipSet<TxId>,
 }
 impl<'a> TxSnapshot<'a> {
-  fn new(active: &SkipMap<usize, AtomicU8>, aborted: &'a SkipSet<usize>) -> Self {
+  fn new(active: &SkipMap<TxId, AtomicU8>, aborted: &'a SkipSet<TxId>) -> Self {
     let (front, max) = match (active.front(), active.back()) {
       (Some(front), Some(back)) => (front, *back.key()),
       _ => {
@@ -116,11 +116,11 @@ impl<'a> TxSnapshot<'a> {
   }
 
   #[inline]
-  pub fn is_visible(&self, tx_id: &usize) -> bool {
+  pub fn is_visible(&self, tx_id: &TxId) -> bool {
     !self.is_active(tx_id) && !self.aborted.contains(tx_id)
   }
   #[inline]
-  pub fn is_active(&self, &tx_id: &usize) -> bool {
+  pub fn is_active(&self, &tx_id: &TxId) -> bool {
     self.active.contains(tx_id)
   }
 }
@@ -133,19 +133,19 @@ impl<'a> TxSnapshot<'a> {
  * tracked explicitly — committing simply removes the tx from active.
  */
 pub struct VersionVisibility {
-  aborted: SkipSet<usize>,
-  active: SkipMap<usize, AtomicU8>,
-  last_tx_id: AtomicUsize,
+  aborted: SkipSet<TxId>,
+  active: SkipMap<TxId, AtomicU8>,
+  last_tx_id: AtomicU64,
 }
 impl VersionVisibility {
-  pub fn new<T>(aborted: T, last_tx_id: usize) -> Self
+  pub fn new<T>(aborted: T, last_tx_id: TxId) -> Self
   where
-    T: IntoIterator<Item = usize>,
+    T: IntoIterator<Item = TxId>,
   {
     Self {
       active: Default::default(),
       aborted: SkipSet::from_iter(aborted),
-      last_tx_id: AtomicUsize::new(last_tx_id),
+      last_tx_id: AtomicU64::new(last_tx_id),
     }
   }
 
@@ -154,7 +154,7 @@ impl VersionVisibility {
    * version is the oldest tx_id that GC has fully cleaned up, so no active reader
    * can reference those versions anymore and their abort status no longer needs tracking.
    */
-  pub fn remove_aborted(&self, version: &usize) {
+  pub fn remove_aborted(&self, version: &TxId) {
     while let Some(v) = self.aborted.front() {
       if v.value() >= version {
         return;
@@ -164,7 +164,7 @@ impl VersionVisibility {
   }
 
   #[inline]
-  pub fn is_aborted(&self, tx_id: &usize) -> bool {
+  pub fn is_aborted(&self, tx_id: &TxId) -> bool {
     self.aborted.contains(tx_id)
   }
   /**
@@ -172,7 +172,7 @@ impl VersionVisibility {
    * Called before GC to determine the safe cleanup boundary — versions older than this
    * are not visible to any active reader and can be collected.
    */
-  pub fn min_version(&self) -> usize {
+  pub fn min_version(&self) -> TxId {
     self
       .active
       .front()
@@ -180,7 +180,7 @@ impl VersionVisibility {
       .unwrap_or_else(|| self.current_version())
   }
   #[inline]
-  pub fn set_abort(&self, tx_id: usize) {
+  pub fn set_abort(&self, tx_id: TxId) {
     self.aborted.insert(tx_id);
   }
   pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
@@ -192,11 +192,11 @@ impl VersionVisibility {
     )
   }
   #[inline]
-  pub fn current_version(&self) -> usize {
+  pub fn current_version(&self) -> TxId {
     self.last_tx_id.load(Ordering::Acquire)
   }
   #[inline]
-  pub fn get_active_state(&self, tx_id: usize) -> Option<TxState<'_>> {
+  pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
     self.active.get(&tx_id).map(TxState)
   }
 }
