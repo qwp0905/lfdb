@@ -16,16 +16,25 @@ let engine = EngineBuilder::new("./data")
     .build()?;
 ```
 
+### Create Table
+
+```rust
+let mut tx = engine.new_tx()?;
+tx.open_table("users")?;
+tx.commit()?;
+```
+
 ### Read & Write
 
 ```rust
 let mut tx = engine.new_tx()?;
+let users = tx.table("users")?;
 
-tx.insert(b"key1".to_vec(), b"value1".to_vec())?;
+users.insert(b"key1".to_vec(), b"value1".to_vec())?;
 
-let value = tx.get(b"key1")?; // returns Option<Vec<u8>>
+let value = users.get(b"key1")?; // returns Option<Vec<u8>>
 
-tx.remove(b"key1")?;
+users.remove(b"key1")?;
 
 tx.commit()?;
 ```
@@ -33,21 +42,35 @@ tx.commit()?;
 ### Scan
 
 ```rust
-let mut tx = engine.new_tx()?;
+let tx = engine.new_tx()?;
+let users = tx.table("users")?;
 
 // Range scan [start, end)
-let mut iter = tx.scan(b"key1", b"key3")?;
+let mut iter = users.scan(b"key1", b"key3")?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
 // Full scan
-let mut iter = tx.scan_all()?;
+let mut iter = users.scan_all()?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
 tx.commit()?;
+```
+
+### Multi-Table Transaction
+
+```rust
+let mut tx = engine.new_tx()?;
+let users = tx.table("users")?;
+let orders = tx.table("orders")?;
+
+users.insert(user_id.clone(), user_data)?;
+orders.insert(order_id, order_data)?;
+
+tx.commit()?; // atomic across both tables
 ```
 
 ### Metrics
@@ -129,9 +152,10 @@ Optimistic locking is straightforward — read, compute, write, and retry on con
 ```rust
 loop {
     let mut tx = engine.new_tx()?;
-    let current = tx.get(&key)?;
+    let table = tx.table("accounts")?;
+    let current = table.get(&key)?;
     let next = compute_next(current);
-    match tx.insert(key.clone(), next) {
+    match table.insert(key.clone(), next) {
         Ok(_) => {},
         Err(Error::WriteConflict) => continue,
         Err(e) => return Err(e),
@@ -142,10 +166,10 @@ loop {
 ```
 
 **Auto-abort:**
-A `Cursor` automatically aborts on drop if `commit()` was not called. There is no need to explicitly call `abort()` on error paths.
+A transaction automatically aborts on drop if `commit()` was not called. There is no need to explicitly call `abort()` on error paths.
 
 **Timeout:**
-A transaction that exceeds its configured timeout is automatically aborted. Any subsequent operation on the cursor returns `TransactionClosed`.
+A transaction that exceeds its configured timeout is automatically aborted. Any subsequent operation returns `TransactionClosed`.
 
 ### Crash Recovery
 
