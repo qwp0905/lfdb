@@ -222,7 +222,7 @@ impl TimeoutThread {
             Some(s) => s,
             None => return,
           };
-          if !state.try_abort() {
+          if !state.try_timeout() {
             return;
           }
           logger_c.trace(|| format!("tx {} timeout reached", state.get_id()));

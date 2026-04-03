@@ -10,6 +10,7 @@ use crate::utils::OffsetBitmap;
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
+const STATUS_TIMEOUT: u8 = 3;
 
 pub struct TxState<'a>(Entry<'a, usize, AtomicU8>);
 impl<'a> TxState<'a> {
@@ -21,14 +22,32 @@ impl<'a> TxState<'a> {
   pub fn is_available(&self) -> bool {
     self.0.value().load(Ordering::Acquire) == STATUS_AVAILABLE
   }
-  #[inline]
+
   pub fn try_abort(&self) -> bool {
+    let status = self.0.value();
+    let current = status.load(Ordering::Acquire);
+    if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
+      return false;
+    }
+
+    status
+      .compare_exchange(
+        current,
+        STATUS_ABORTED,
+        Ordering::Release,
+        Ordering::Acquire,
+      )
+      .is_ok()
+  }
+
+  #[inline]
+  pub fn try_timeout(&self) -> bool {
     self
       .0
       .value()
       .compare_exchange(
         STATUS_AVAILABLE,
-        STATUS_ABORTED,
+        STATUS_TIMEOUT,
         Ordering::Release,
         Ordering::Acquire,
       )
