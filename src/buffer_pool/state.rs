@@ -40,7 +40,7 @@ impl FrameState {
   pub fn try_evict(&self) -> bool {
     self
       .pin
-      .compare_exchange(0, EVICTION_BIT, Ordering::Release, Ordering::Acquire)
+      .compare_exchange(0, EVICTION_BIT, Ordering::Acquire, Ordering::Relaxed)
       .is_ok()
   }
   pub fn try_pin(&self) -> bool {
@@ -53,7 +53,7 @@ impl FrameState {
 
       if self
         .pin
-        .compare_exchange(current, current + 1, Ordering::Release, Ordering::Acquire)
+        .compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
         return true;
@@ -114,7 +114,7 @@ impl TempFrameState {
   pub fn try_evict(&self) -> bool {
     self
       .pin
-      .compare_exchange(1, EVICTION_BIT, Ordering::Release, Ordering::Acquire)
+      .compare_exchange(1, EVICTION_BIT, Ordering::Acquire, Ordering::Relaxed)
       .is_ok()
   }
 
@@ -141,7 +141,7 @@ impl TempFrameState {
 
       if self
         .pin
-        .compare_exchange(current, current + 1, Ordering::Release, Ordering::Acquire)
+        .compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
         return true;

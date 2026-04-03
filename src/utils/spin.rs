@@ -34,7 +34,7 @@ impl<T> SpinRwLock<T> {
 
       if self
         .pin
-        .compare_exchange(cur, cur + 1, Ordering::Release, Ordering::Acquire)
+        .compare_exchange(cur, cur + 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
         return SpinRwLockReadGuard {
@@ -52,7 +52,7 @@ impl<T> SpinRwLock<T> {
     loop {
       if self
         .pin
-        .compare_exchange(0, WRITE_BIT, Ordering::Release, Ordering::Acquire)
+        .compare_exchange(0, WRITE_BIT, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
         return SpinRwLockWriteGuard {
