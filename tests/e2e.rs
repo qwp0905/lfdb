@@ -29,6 +29,14 @@ fn build_engine(dir: &TempDir) -> Engine {
     .expect("engine bootstrap failed")
 }
 
+const TEST_TABLE: &str = "test";
+
+fn create_table(engine: &Engine, name: &str) {
+  let mut tx = engine.new_tx().unwrap();
+  tx.open_table(name).unwrap();
+  tx.commit().unwrap();
+}
+
 // ============================================================
 // 1. Basic CRUD
 // ============================================================
@@ -38,15 +46,17 @@ fn test_basic_crud() {
   let engine = build_engine(&dir);
 
   let mut tx = engine.new_tx().unwrap();
-  tx.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
+  let table = tx.open_table(TEST_TABLE).unwrap();
+
+  table.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
 
   // read within same tx
-  let val = tx.get(&b"key1".to_vec()).unwrap();
+  let val = table.get(&b"key1".to_vec()).unwrap();
   assert_eq!(val, Some(b"value1".to_vec()));
 
   // remove
-  tx.remove(&b"key1".to_vec()).unwrap();
-  let val = tx.get(&b"key1".to_vec()).unwrap();
+  table.remove(&b"key1".to_vec()).unwrap();
+  let val = table.get(&b"key1".to_vec()).unwrap();
   assert_eq!(val, None);
 
   tx.commit().unwrap();
@@ -61,11 +71,19 @@ fn test_commit_visibility() {
   let engine = build_engine(&dir);
 
   let mut tx1 = engine.new_tx().unwrap();
-  tx1.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
+  tx1
+    .open_table(TEST_TABLE)
+    .unwrap()
+    .insert(b"hello".to_vec(), b"world".to_vec())
+    .unwrap();
   tx1.commit().unwrap();
 
   let tx2 = engine.new_tx().unwrap();
-  let val = tx2.get(&b"hello".to_vec()).unwrap();
+  let val = tx2
+    .table(TEST_TABLE)
+    .unwrap()
+    .get(&b"hello".to_vec())
+    .unwrap();
   assert_eq!(val, Some(b"world".to_vec()));
 }
 
@@ -76,13 +94,16 @@ fn test_commit_visibility() {
 fn test_abort_invisibility() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx1 = engine.new_tx().unwrap();
-  tx1.insert(b"ghost".to_vec(), b"data".to_vec()).unwrap();
+  let t1 = tx1.table(TEST_TABLE).unwrap();
+  t1.insert(b"ghost".to_vec(), b"data".to_vec()).unwrap();
   tx1.abort().unwrap();
 
   let tx2 = engine.new_tx().unwrap();
-  let val = tx2.get(&b"ghost".to_vec()).unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
+  let val = t2.get(&b"ghost".to_vec()).unwrap();
   assert_eq!(val, None);
 }
 
@@ -93,15 +114,18 @@ fn test_abort_invisibility() {
 fn test_drop_abort() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   {
     let tx1 = engine.new_tx().unwrap();
-    tx1.insert(b"vanish".to_vec(), b"poof".to_vec()).unwrap();
+    let t1 = tx1.table(TEST_TABLE).unwrap();
+    t1.insert(b"vanish".to_vec(), b"poof".to_vec()).unwrap();
     // no commit, no abort — just drop
   }
 
   let tx2 = engine.new_tx().unwrap();
-  let val = tx2.get(&b"vanish".to_vec()).unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
+  let val = t2.get(&b"vanish".to_vec()).unwrap();
   assert_eq!(val, None);
 }
 
@@ -112,13 +136,16 @@ fn test_drop_abort() {
 fn test_write_conflict() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
   {
     let mut tx1 = engine.new_tx().unwrap();
-    tx1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
+    let t1 = tx1.table(TEST_TABLE).unwrap();
+    t1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
     // tx1 NOT committed — still active
 
     let tx2 = engine.new_tx().unwrap();
-    let result = tx2.insert(b"contested".to_vec(), b"v2".to_vec());
+    let t2 = tx2.table(TEST_TABLE).unwrap();
+    let result = t2.insert(b"contested".to_vec(), b"v2".to_vec());
     assert!(result.is_err());
     if let Err(Error::WriteConflict) = result {
       // expected
@@ -132,15 +159,17 @@ fn test_write_conflict() {
   {
     let key = b"key";
     let mut tx1 = engine.new_tx().unwrap();
-    tx1.insert(key.to_vec(), b"value1".to_vec()).unwrap();
+    let t1 = tx1.table(TEST_TABLE).unwrap();
+    t1.insert(key.to_vec(), b"value1".to_vec()).unwrap();
 
     let tx2 = engine.new_tx().unwrap();
-    assert_eq!(tx2.get(key).unwrap(), None);
+    let t2 = tx2.table(TEST_TABLE).unwrap();
+    assert_eq!(t2.get(key).unwrap(), None);
 
     tx1.commit().unwrap();
 
     // it should throw WriteConflict after commit.
-    match tx2.insert(key.to_vec(), b"value2".to_vec()) {
+    match t2.insert(key.to_vec(), b"value2".to_vec()) {
       Err(Error::WriteConflict) => {}
       _ => panic!("must be WriteConflict"),
     }
@@ -154,24 +183,19 @@ fn test_write_conflict() {
 fn test_transaction_closed_after_commit() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx = engine.new_tx().unwrap();
-  tx.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+  {
+    let table = tx.table(TEST_TABLE).unwrap();
+    table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+  }
   tx.commit().unwrap();
 
   assert!(matches!(
-    tx.insert(b"k2".to_vec(), b"v2".to_vec()),
+    tx.table(TEST_TABLE),
     Err(Error::TransactionClosed)
   ));
-  assert!(matches!(
-    tx.get(&b"k".to_vec()),
-    Err(Error::TransactionClosed)
-  ));
-  assert!(matches!(
-    tx.remove(&b"k".to_vec()),
-    Err(Error::TransactionClosed)
-  ));
-  assert!(matches!(tx.scan_all(), Err(Error::TransactionClosed)));
   assert!(matches!(tx.commit(), Err(Error::TransactionClosed)));
   assert!(matches!(tx.abort(), Err(Error::TransactionClosed)));
 }
@@ -180,17 +204,17 @@ fn test_transaction_closed_after_commit() {
 fn test_transaction_closed_after_abort() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx = engine.new_tx().unwrap();
-  tx.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+  {
+    let table = tx.table(TEST_TABLE).unwrap();
+    table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+  }
   tx.abort().unwrap();
 
   assert!(matches!(
-    tx.insert(b"k2".to_vec(), b"v2".to_vec()),
-    Err(Error::TransactionClosed)
-  ));
-  assert!(matches!(
-    tx.get(&b"k".to_vec()),
+    tx.table(TEST_TABLE),
     Err(Error::TransactionClosed)
   ));
 }
@@ -202,17 +226,20 @@ fn test_transaction_closed_after_abort() {
 fn test_scan_range() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx = engine.new_tx().unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..10 {
-    tx.insert(vec![i], vec![i * 10]).unwrap();
+    table.insert(vec![i], vec![i * 10]).unwrap();
   }
   tx.commit().unwrap();
 
   let tx2 = engine.new_tx().unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
 
   // scan [3, 7)
-  let mut iter = tx2.scan(&vec![3], &vec![7]).unwrap();
+  let mut iter = t2.scan(&vec![3], &vec![7]).unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -226,15 +253,18 @@ fn test_scan_range() {
 fn test_scan_all() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx = engine.new_tx().unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..5 {
-    tx.insert(vec![i], vec![i]).unwrap();
+    table.insert(vec![i], vec![i]).unwrap();
   }
   tx.commit().unwrap();
 
   let tx2 = engine.new_tx().unwrap();
-  let mut iter = tx2.scan_all().unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
+  let mut iter = t2.scan_all().unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -252,17 +282,21 @@ fn test_scan_all() {
 fn test_overwrite() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let mut tx1 = engine.new_tx().unwrap();
-  tx1.insert(b"key".to_vec(), b"v1".to_vec()).unwrap();
+  let t1 = tx1.table(TEST_TABLE).unwrap();
+  t1.insert(b"key".to_vec(), b"v1".to_vec()).unwrap();
   tx1.commit().unwrap();
 
   let mut tx2 = engine.new_tx().unwrap();
-  tx2.insert(b"key".to_vec(), b"v2".to_vec()).unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
+  t2.insert(b"key".to_vec(), b"v2".to_vec()).unwrap();
   tx2.commit().unwrap();
 
   let tx3 = engine.new_tx().unwrap();
-  let val = tx3.get(&b"key".to_vec()).unwrap();
+  let t3 = tx3.table(TEST_TABLE).unwrap();
+  let val = t3.get(&b"key".to_vec()).unwrap();
   assert_eq!(val, Some(b"v2".to_vec()));
 }
 
@@ -278,6 +312,7 @@ fn test_crash_recovery() {
   // Phase 1: concurrent writes, then drop engine mid-flight
   {
     let engine = Arc::new(build_engine(&dir));
+    create_table(&engine, TEST_TABLE);
     let mut handles = vec![];
 
     for t in 0..4u8 {
@@ -296,7 +331,11 @@ fn test_crash_recovery() {
             Ok(tx) => tx,
             Err(_) => break,
           };
-          if tx.insert(key.clone(), value).is_err() {
+          let table = match tx.table(TEST_TABLE) {
+            Ok(t) => t,
+            Err(_) => break,
+          };
+          if table.insert(key.clone(), value).is_err() {
             continue;
           }
           if tx.commit().is_ok() {
@@ -318,12 +357,13 @@ fn test_crash_recovery() {
   // Phase 2: restart and verify
   let engine = build_engine(&dir);
   let tx = engine.new_tx().unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
   let keys = committed_keys.lock().unwrap();
 
   assert!(!keys.is_empty(), "should have committed at least some keys");
 
   for key in keys.iter() {
-    let val = tx.get(key).unwrap();
+    let val = table.get(key).unwrap();
     assert!(
       val.is_some(),
       "committed key {:?} missing after recovery",
@@ -343,25 +383,28 @@ fn test_crash_recovery() {
 fn test_snapshot_isolation() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   // tx1 and tx2 both start
   let mut tx1 = engine.new_tx().unwrap();
+  let t1 = tx1.table(TEST_TABLE).unwrap();
   let tx2 = engine.new_tx().unwrap();
+  let t2 = tx2.table(TEST_TABLE).unwrap();
 
   // tx1 inserts and commits AFTER tx2 started
-  tx1
-    .insert(b"after".to_vec(), b"should-not-see".to_vec())
+  t1.insert(b"after".to_vec(), b"should-not-see".to_vec())
     .unwrap();
   tx1.commit().unwrap();
 
   // tx2 should NOT see tx1's write (snapshot isolation)
-  let val = tx2.get(&b"after".to_vec()).unwrap();
+  let val = t2.get(&b"after".to_vec()).unwrap();
   assert_eq!(val, None, "tx2 should not see tx1's post-start commit");
   drop(tx2);
 
   // tx3 starts AFTER tx1 committed — should see it
   let tx3 = engine.new_tx().unwrap();
-  let val = tx3.get(&b"after".to_vec()).unwrap();
+  let t3 = tx3.table(TEST_TABLE).unwrap();
+  let val = t3.get(&b"after".to_vec()).unwrap();
   assert_eq!(val, Some(b"should-not-see".to_vec()));
 }
 
@@ -372,6 +415,7 @@ fn test_snapshot_isolation() {
 fn test_entry_split() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let key = b"hot-key".to_vec();
   // 100-byte value * 50 txs → well over 4KB page, forces split
@@ -379,14 +423,16 @@ fn test_entry_split() {
 
   for i in 0..iterations {
     let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
     let value = vec![i as u8; 100];
-    tx.insert(key.clone(), value).unwrap();
+    table.insert(key.clone(), value).unwrap();
     tx.commit().unwrap();
   }
 
   // verify latest value is readable
   let tx = engine.new_tx().unwrap();
-  let val = tx.get(&key).unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
+  let val = table.get(&key).unwrap();
   assert!(
     val.is_some(),
     "hot key should be readable after many overwrites"
@@ -407,6 +453,7 @@ fn test_btree_node_split_and_recovery() {
   // Phase 1: worker pool (100 threads) concurrently insert → forces leaf + internal node splits
   {
     let engine = Arc::new(build_engine(&dir));
+    create_table(&engine, TEST_TABLE);
     let thread_count = 1000;
     let (task_tx, task_rx) =
       crossbeam::channel::unbounded::<(usize, crossbeam::channel::Sender<()>)>();
@@ -418,9 +465,10 @@ fn test_btree_node_split_and_recovery() {
       workers.push(thread::spawn(move || {
         while let Ok((i, done)) = rx.recv() {
           let mut cursor = e.new_tx().unwrap();
+          let table = cursor.table(TEST_TABLE).unwrap();
           let key = format!("key-{:06}", i).into_bytes();
           let value = format!("val-{:06}", i).into_bytes();
-          cursor.insert(key, value).unwrap();
+          table.insert(key, value).unwrap();
           cursor.commit().unwrap();
           done.send(()).unwrap();
         }
@@ -442,7 +490,8 @@ fn test_btree_node_split_and_recovery() {
 
     // scan all and verify order + completeness
     let tx = engine.new_tx().unwrap();
-    let mut iter = tx.scan_all().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
+    let mut iter = table.scan_all().unwrap();
     let mut count = 0;
     let mut prev_key: Option<Vec<u8>> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -473,7 +522,7 @@ fn test_btree_node_split_and_recovery() {
     // point-read spot checks
     for i in [0, 1, 500, 2500, 4999] {
       let key = format!("key-{:06}", i).into_bytes();
-      let val = tx.get(&key).unwrap();
+      let val = table.get(&key).unwrap();
       assert!(
         val.is_some(),
         "key {:?} missing",
@@ -487,8 +536,9 @@ fn test_btree_node_split_and_recovery() {
   {
     let engine = build_engine(&dir);
     let tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
 
-    let mut iter = tx.scan_all().unwrap();
+    let mut iter = table.scan_all().unwrap();
     let mut count = 0;
     let mut prev_key: Option<Vec<u8>> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -519,7 +569,7 @@ fn test_btree_node_split_and_recovery() {
 // 13. Crash Recovery via process::exit
 // ============================================================
 
-// Child process: concurrent writes then process::exit (no drop, no flush)
+// Child process: concurrent writes to 10 tables then process::exit (no drop, no flush)
 #[test]
 #[ignore]
 fn crash_writer() {
@@ -530,25 +580,38 @@ fn crash_writer() {
     .expect("engine bootstrap failed");
   let rng = &mut thread_rng();
 
+  let table_count: usize = 10;
+  let table_names: Vec<String> = (0..table_count)
+    .map(|i| format!("table_{:02}", i))
+    .collect();
+  for name in &table_names {
+    create_table(&engine, name);
+  }
+
   let key_count: usize = 30_000;
   let thread_count = 1000;
   let (task_tx, task_rx) =
     crossbeam::channel::unbounded::<(usize, crossbeam::channel::Sender<()>)>();
   let engine = Arc::new(engine);
+  let table_names = Arc::new(table_names);
 
   for _ in 0..thread_count {
     let rx = task_rx.clone();
     let e = engine.clone();
+    let names = table_names.clone();
     thread::spawn(move || {
       while let Ok((i, done)) = rx.recv() {
+        let table_name = &names[i % names.len()];
         let mut cursor = e.new_tx().unwrap();
+        let table = cursor.table(table_name).unwrap();
         let key = format!("key-{:06}", i).into_bytes();
         let value = format!("val-{:06}", i).into_bytes();
-        cursor.insert(key, value).unwrap();
+        table.insert(key, value).unwrap();
         cursor.commit().unwrap();
+        // output format: table_index:key_index
         let _ = std::io::Write::write_all(
           &mut std::io::stdout().lock(),
-          format!("{:07}\n", i).as_bytes(),
+          format!("{:02}:{:06}\n", i % names.len(), i).as_bytes(),
         );
         let _ = done.send(());
       }
@@ -572,7 +635,7 @@ fn crash_writer() {
   }
 }
 
-// Parent process: spawn crash_writer, collect committed keys, verify recovery
+// Parent process: spawn crash_writer, collect committed keys, verify recovery across 10 tables
 #[test]
 fn test_process_crash_recovery() {
   use std::io::BufRead;
@@ -580,7 +643,12 @@ fn test_process_crash_recovery() {
 
   let dir = tempdir_in(".").unwrap();
 
-  // Phase 1: spawn child that writes concurrently then crashes
+  let table_count: usize = 10;
+  let table_names: Vec<String> = (0..table_count)
+    .map(|i| format!("table_{:02}", i))
+    .collect();
+
+  // Phase 1: spawn child that writes concurrently to 10 tables then crashes
   let mut child = Command::new(std::env::current_exe().unwrap())
     .arg("--ignored")
     .arg("--exact")
@@ -595,53 +663,58 @@ fn test_process_crash_recovery() {
   let stdout = child.stdout.take().unwrap();
   let reader = std::io::BufReader::new(stdout);
 
-  let mut committed = std::collections::HashSet::new();
+  // committed per table: table_index -> set of key indices
+  let mut committed: std::collections::HashMap<usize, std::collections::HashSet<usize>> =
+    std::collections::HashMap::new();
   for s in reader.lines().map_while(|l| l.ok()) {
-    if s.len() < 7 {
+    // format: "TT:KKKKKK"
+    if s.len() < 9 {
       continue;
     }
-    if let Ok(i) = s.trim().parse::<usize>() {
-      committed.insert(i);
+    if let Some((t, k)) = s.split_once(':') {
+      if let (Ok(table_idx), Ok(key_idx)) =
+        (t.trim().parse::<usize>(), k.trim().parse::<usize>())
+      {
+        committed.entry(table_idx).or_default().insert(key_idx);
+      }
     }
   }
 
   let _ = child.wait();
 
+  let total_committed: usize = committed.values().map(|s| s.len()).sum();
   assert!(
-    !committed.is_empty(),
+    total_committed > 0,
     "child should have committed at least some keys"
   );
 
-  // Phase 2: reopen engine and verify all committed keys survived
+  // Phase 2: reopen engine and verify all committed keys survived across all tables
   {
     let engine = build_engine(&dir);
-    let mut tx = engine.new_tx().unwrap();
-    let mut c = 0;
-    let mut iter = tx.scan_all().unwrap();
-    while let Ok(Some(_)) = iter.try_next() {
-      c += 1;
+
+    for (table_idx, keys) in &committed {
+      let table_name = &table_names[*table_idx];
+      let tx = engine.new_tx().unwrap();
+      let table = tx.table(table_name).unwrap();
+
+      for key_idx in keys {
+        let key = format!("key-{:06}", key_idx).into_bytes();
+        let expected = format!("val-{:06}", key_idx).into_bytes();
+        let val = table.get(&key).unwrap();
+        assert_eq!(
+          val,
+          Some(expected),
+          "committed key {} in {} missing after crash recovery",
+          key_idx,
+          table_name
+        );
+      }
     }
-    assert!(
-      c >= committed.len(),
-      "exists {c} committed {}",
-      committed.len()
-    );
-    for i in &committed {
-      let key = format!("key-{:06}", i).into_bytes();
-      let expected = format!("val-{:06}", i).into_bytes();
-      let val = tx.get(&key).unwrap();
-      assert_eq!(
-        val,
-        Some(expected),
-        "committed key {} missing after crash recovery",
-        i
-      );
-    }
-    tx.commit().unwrap();
   }
 
   eprintln!(
-    "crash recovery: {} keys committed, all verified",
+    "crash recovery: {} keys committed across {} tables, all verified",
+    total_committed,
     committed.len()
   );
 }
@@ -655,23 +728,38 @@ fn test_hard_workload() {
   let engine = Arc::new(build_engine(&dir));
   let rng = &mut thread_rng();
 
-  let key_count: usize = 100000;
+  let table_count: usize = 10;
+  let key_count: usize = 100_000;
   let thread_count: usize = 1000;
-  let mut keys: Vec<Vec<u8>> = (0..key_count)
-    .map(|i| format!("123{:06}", i))
-    .map(|s| s.as_bytes().to_vec())
+
+  let table_names: Vec<String> = (0..table_count)
+    .map(|i| format!("table_{:02}", i))
+    .collect();
+
+  for name in &table_names {
+    create_table(&engine, name);
+  }
+
+  // each key is assigned to a table by index % table_count
+  let keys: Vec<(String, Vec<u8>)> = (0..key_count)
+    .map(|i| {
+      let table = table_names[i % table_count].clone();
+      let key = format!("{:06}", i).as_bytes().to_vec();
+      (table, key)
+    })
     .choose_multiple(rng, key_count);
 
   let mut waiting = Vec::with_capacity(key_count);
   let mut threads = Vec::with_capacity(thread_count);
-  let (tx, rx) = unbounded::<(Vec<u8>, Sender<()>)>();
+  let (tx, rx) = unbounded::<(String, Vec<u8>, Sender<()>)>();
   for _ in 0..thread_count {
     let e = engine.clone();
     let rx = rx.clone();
     let th = std::thread::spawn(move || {
-      while let Ok((vec, t)) = rx.recv() {
+      while let Ok((table_name, vec, t)) = rx.recv() {
         let mut r = e.new_tx().expect("start error");
-        r.insert(vec.clone(), vec).expect("insert error");
+        let table = r.table(&table_name).expect("table error");
+        table.insert(vec.clone(), vec).expect("insert error");
         r.commit().expect("commit error");
         t.send(()).unwrap();
       }
@@ -679,29 +767,32 @@ fn test_hard_workload() {
     threads.push(th);
   }
 
-  for i in 0..key_count {
+  for (table_name, key) in &keys {
     let (t, r) = unbounded();
-    tx.send((keys[i].clone(), t)).unwrap();
+    tx.send((table_name.clone(), key.clone(), t)).unwrap();
     waiting.push(r);
   }
 
   waiting.into_iter().for_each(|r| r.recv().unwrap());
   drop(tx);
-
   threads.into_iter().for_each(|h| h.join().unwrap());
 
-  keys.sort();
-  let mut count = 0;
-  let mut t = engine.new_tx().expect("tx start error");
-
-  let mut iter = t.scan_all().expect("scan start error");
-  while let Ok(Some((k, _))) = iter.try_next() {
-    assert_eq!(keys[count], k);
-    count += 1;
+  // verify each table
+  let keys_per_table: usize = key_count / table_count;
+  for name in &table_names {
+    let t = engine.new_tx().expect("tx start error");
+    let table = t.table(name).expect("table error");
+    let mut iter = table.scan_all().expect("scan start error");
+    let mut count = 0;
+    while let Ok(Some(_)) = iter.try_next() {
+      count += 1;
+    }
+    assert_eq!(
+      keys_per_table, count,
+      "table {} expected {} keys, got {}",
+      name, keys_per_table, count
+    );
   }
-
-  assert_eq!(key_count, count);
-  t.commit().expect("commit error");
 }
 
 // ============================================================
@@ -722,6 +813,8 @@ fn test_heavy_gc_single_key() {
       .expect("engine bootstrap failed"),
   );
 
+  create_table(&engine, TEST_TABLE);
+
   let key = b"hot-key".to_vec();
   let iterations = 500;
   let stop = Arc::new(AtomicBool::new(false));
@@ -739,8 +832,9 @@ fn test_heavy_gc_single_key() {
         break;
       }
       let mut tx = writer_engine.new_tx().unwrap();
+      let table = tx.table(TEST_TABLE).unwrap();
       let value = (i as u32).to_le_bytes().to_vec();
-      tx.insert(writer_key.clone(), value).unwrap();
+      table.insert(writer_key.clone(), value).unwrap();
       tx.commit().unwrap();
       *last_val_writer.lock().unwrap() = i as u32;
     }
@@ -754,7 +848,8 @@ fn test_heavy_gc_single_key() {
     let mut read_count = 0u64;
     while !reader_stop.load(Ordering::Acquire) {
       let tx = reader_engine.new_tx().unwrap();
-      let _ = tx.get(&reader_key);
+      let table = tx.table(TEST_TABLE).unwrap();
+      let _ = table.get(&reader_key);
       read_count += 1;
     }
     read_count
@@ -767,7 +862,8 @@ fn test_heavy_gc_single_key() {
   // phase 1: verify final value
   let final_val = *last_value.lock().unwrap();
   let tx = engine.new_tx().unwrap();
-  let val = tx.get(&key).unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
+  let val = table.get(&key).unwrap();
   assert!(val.is_some(), "key should exist after heavy writes");
   let bytes = val.unwrap();
   let stored = u32::from_le_bytes(bytes.try_into().unwrap());
@@ -783,7 +879,8 @@ fn test_heavy_gc_single_key() {
   drop(engine);
   let engine = build_engine(&dir);
   let tx = engine.new_tx().unwrap();
-  let val = tx.get(&key).unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
+  let val = table.get(&key).unwrap();
   assert!(val.is_some(), "key should survive restart");
   let bytes = val.unwrap();
   let stored = u32::from_le_bytes(bytes.try_into().unwrap());
@@ -797,26 +894,30 @@ fn test_heavy_gc_single_key() {
 fn insert_and_remove_and_gc() {
   let dir = tempdir_in(".").unwrap();
   let engine = Arc::new(build_engine(&dir));
+  create_table(&engine, TEST_TABLE);
 
   let count: usize = 1000;
   for i in 0..count {
     let mut t = engine.new_tx().expect("tx start error");
+    let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
-    t.insert(bytes.clone(), bytes).expect("insert error");
+    table.insert(bytes.clone(), bytes).expect("insert error");
     t.commit().expect("commit error")
   }
 
   for i in 0..count {
     let mut t = engine.new_tx().expect("tx start error");
+    let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
-    t.remove(&bytes).expect("insert error");
+    table.remove(&bytes).expect("remove error");
     t.commit().expect("commit error")
   }
   let e = engine.clone();
   let th = std::thread::spawn(move || {
     for _ in 0..count {
       let tx = e.new_tx().expect("tx start error");
-      let mut iter = tx.scan_all().expect("scan error");
+      let table = tx.table(TEST_TABLE).expect("table error");
+      let mut iter = table.scan_all().expect("scan error");
       while let Ok(Some(_)) = iter.try_next() {}
     }
   });
@@ -824,8 +925,9 @@ fn insert_and_remove_and_gc() {
 
   for i in count..count << 1 {
     let mut t = engine.new_tx().expect("tx start error");
+    let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
-    t.insert(bytes.clone(), bytes).expect("insert error");
+    table.insert(bytes.clone(), bytes).expect("insert error");
     t.commit().expect("commit error")
   }
   th.join().unwrap();
@@ -833,7 +935,8 @@ fn insert_and_remove_and_gc() {
   let engine = build_engine(&dir);
 
   let mut t = engine.new_tx().expect("tx start error");
-  let mut iter = t.scan_all().expect("scan start error");
+  let table = t.table(TEST_TABLE).expect("table error");
+  let mut iter = table.scan_all().expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -843,13 +946,14 @@ fn insert_and_remove_and_gc() {
 
   for i in 0..count {
     let bytes: Vec<u8> = i.to_le_bytes().into();
-    t.insert(bytes.clone(), bytes).expect("insert error");
+    table.insert(bytes.clone(), bytes).expect("insert error");
   }
 
   t.commit().expect("commit error");
 
   let mut t = engine.new_tx().expect("tx start error");
-  let mut iter = t.scan_all().expect("scan start error");
+  let table = t.table(TEST_TABLE).expect("table error");
+  let mut iter = table.scan_all().expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -871,13 +975,18 @@ fn write_not_commit() {
     .group_commit_count(10)
     .build()
     .expect("engine bootstrap failed");
+  create_table(&engine, TEST_TABLE);
 
   let t = engine.new_tx().expect("start failed.");
-  t.insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
+  let table = t.table(TEST_TABLE).expect("table failed");
+  table
+    .insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
     .expect("insert failed");
 
   let mut t2 = engine.new_tx().expect("start failed.");
-  t2.insert(vec![1, 2, 3], vec![1, 2, 3])
+  let table2 = t2.table(TEST_TABLE).expect("table failed");
+  table2
+    .insert(vec![1, 2, 3], vec![1, 2, 3])
     .expect("insert failed");
   t2.commit().expect("commit failed");
 
@@ -912,7 +1021,8 @@ fn test_start_not_commit() {
   let engine = build_engine(&dir);
 
   let mut t = engine.new_tx().expect("tx start error");
-  assert_eq!(t.get(&key.into_bytes()).expect("find error"), None);
+  let table = t.table(TEST_TABLE).expect("table error");
+  assert_eq!(table.get(&key.into_bytes()).expect("find error"), None);
   t.commit().expect("commit error")
 }
 
@@ -928,18 +1038,23 @@ fn test_timeout() {
     .log_level(LogLevel::Trace)
     .build()
     .unwrap();
+  {
+    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let table = tx.open_table(TEST_TABLE).unwrap();
 
-  let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    std::thread::sleep(Duration::from_secs(5));
 
-  std::thread::sleep(Duration::from_secs(5));
-
-  match tx.get(b"123") {
-    Err(lfdb::Error::TransactionClosed) => {}
-    _ => panic!("must timeout"),
+    match table.get(b"123") {
+      Err(lfdb::Error::TransactionClosed) => {}
+      _ => panic!("must timeout"),
+    }
   }
 
-  let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
-  let _ = tx.get(b"123123");
+  {
+    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let table = tx.open_table(TEST_TABLE).unwrap();
+    let _ = table.get(b"123123");
+  }
 }
 
 // ============================================================
@@ -949,13 +1064,15 @@ fn test_timeout() {
 fn test_large_key_value() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
 
   let tx = engine.new_tx().expect("start error");
+  let table = tx.table(TEST_TABLE).expect("table error");
   let large_key = vec![0; 257];
   let large_value = vec![0; (1 << 16) + 1];
 
-  assert_eq!(tx.insert(large_key, vec![]).is_err(), true);
-  assert_eq!(tx.insert(vec![], large_value).is_err(), true);
+  assert_eq!(table.insert(large_key, vec![]).is_err(), true);
+  assert_eq!(table.insert(vec![], large_value).is_err(), true);
 }
 
 // ============================================================
@@ -979,22 +1096,26 @@ fn test_large_key_value_gc() {
 
   {
     let engine = build_engine(&dir);
+    create_table(&engine, TEST_TABLE);
 
     let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
-      tx.insert(keys[i].clone(), values[i].clone()).unwrap();
+      table.insert(keys[i].clone(), values[i].clone()).unwrap();
     }
     tx.commit().unwrap();
 
     let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
-      tx.remove(&keys[i]).unwrap();
+      table.remove(&keys[i]).unwrap();
     }
     tx.commit().unwrap();
 
     let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
-      tx.insert(keys[i].clone(), values[i].clone()).unwrap();
+      table.insert(keys[i].clone(), values[i].clone()).unwrap();
     }
     tx.commit().unwrap();
   }
@@ -1003,7 +1124,8 @@ fn test_large_key_value_gc() {
     let engine = build_engine(&dir);
 
     let tx = engine.new_tx().unwrap();
-    let mut iter = tx.scan_all().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
+    let mut iter = table.scan_all().unwrap();
 
     let mut found = 0;
     while let Ok(Some(_)) = iter.try_next() {
@@ -1012,8 +1134,9 @@ fn test_large_key_value_gc() {
     assert_eq!(found, count / 2);
 
     let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
-      assert_eq!(tx.get(&keys[i]).unwrap(), Some(values[i].clone()));
+      assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
     }
     tx.commit().unwrap();
   }
@@ -1026,14 +1149,43 @@ fn test_large_key_value_gc() {
 fn test_isolation() {
   let dir = tempdir_in(".").unwrap();
   let e = build_engine(&dir);
+  create_table(&e, TEST_TABLE);
 
   let mut t1 = e.new_tx().unwrap();
-  t1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
+  let tab1 = t1.table(TEST_TABLE).unwrap();
+  tab1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
 
   let t2 = e.new_tx().unwrap();
-  assert_eq!(t2.get(b"111").unwrap(), None);
+  let tab2 = t2.table(TEST_TABLE).unwrap();
+  assert_eq!(tab2.get(b"111").unwrap(), None);
 
   t1.commit().unwrap();
 
-  assert_eq!(t2.get(b"111").unwrap(), None);
+  assert_eq!(tab2.get(b"111").unwrap(), None);
+}
+
+// ============================================================
+// 22. Abort open table
+// ============================================================
+#[test]
+fn test_abort_open_table() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  {
+    let mut tx = engine.new_tx().unwrap();
+    let table = tx.open_table(TEST_TABLE).unwrap();
+    for i in 0..100 {
+      let key = format!("123{:06}", i).as_bytes().to_vec();
+      table.insert(key.clone(), key).unwrap();
+    }
+
+    tx.abort().unwrap();
+  }
+
+  let tx = engine.new_tx().unwrap();
+  match tx.table(TEST_TABLE) {
+    Err(_) => {}
+    Ok(_) => panic!("must error."),
+  };
 }

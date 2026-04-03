@@ -25,6 +25,13 @@ fn main() {
       .expect("bootstrap error"),
   );
 
+  let table = "test";
+  {
+    let mut tx = engine.new_tx().unwrap();
+    tx.open_table(table).unwrap();
+    tx.commit().unwrap();
+  }
+
   let count = 100_000_usize;
   let rng = &mut thread_rng();
   let keys = (0..count)
@@ -44,7 +51,8 @@ fn main() {
       .spawn(move || {
         while let Ok((vec, t)) = rx.recv() {
           let mut r = e.new_tx().expect("start error");
-          r.insert(vec.clone(), vec).expect("insert error");
+          let ta = r.table(table).expect("table error");
+          ta.insert(vec.clone(), vec).expect("insert error");
           r.commit().expect("commit error");
           t.send(()).unwrap();
         }
@@ -75,14 +83,15 @@ fn main() {
     let mut found_ne = 0;
     let mut not_found = 0;
     let mut t = engine.new_tx().expect("scan start error");
+    let tt = t.table(table).expect("table error");
 
-    let mut iter = t.scan_all().expect("scan create error");
+    let mut iter = tt.scan_all().expect("scan create error");
     while let Ok(Some(_)) = iter.try_next() {
       total += 1;
     }
     println!("total {}", total);
     for key in keys {
-      match t.get(&key).unwrap() {
+      match tt.get(&key).unwrap() {
         Some(v) if v == key => found_eq += 1,
         Some(_) => found_ne += 1,
         None => not_found += 1,
