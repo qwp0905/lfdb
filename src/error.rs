@@ -6,8 +6,8 @@ use crate::utils::ToArc;
 
 #[derive(Debug, Error)]
 pub enum Error {
-  #[error("not found")]
-  NotFound,
+  #[error("table {0} not found")]
+  TableNotFound(String),
 
   #[error("invalid format: {0}")]
   InvalidFormat(&'static str),
@@ -68,7 +68,7 @@ impl Error {
 impl Clone for Error {
   fn clone(&self) -> Self {
     match self {
-      Self::NotFound => Self::NotFound,
+      Self::TableNotFound(str) => Self::TableNotFound(str.clone()),
       Self::InvalidFormat(err) => Self::InvalidFormat(err),
       Self::DeserializeError(e, r) => Self::DeserializeError(*e, *r),
       Self::Unknown(err) => Self::Unknown(err.clone()),

@@ -13,12 +13,22 @@ fn main() {
     .build()
     .expect("bootstrap error");
 
+  let table = "test";
+  {
+    let mut t = engine.new_tx().unwrap();
+    t.open_table(table).unwrap();
+    t.commit().unwrap();
+  }
+
   let count = 1_000_usize;
   {
     for i in 0..count {
       let mut t = engine.new_tx().expect("tx start error");
       let bytes: Vec<u8> = i.to_le_bytes().into();
-      t.insert(bytes.clone(), bytes).expect("insert error");
+      t.table(table)
+        .unwrap()
+        .insert(bytes.clone(), bytes)
+        .expect("insert error");
       t.commit().expect("commit error")
     }
 
@@ -27,13 +37,18 @@ fn main() {
     for i in 0..count {
       let mut t = engine.new_tx().expect("tx start error");
       let bytes: Vec<u8> = i.to_le_bytes().into();
-      t.remove(&bytes).expect("insert error");
+      t.table(table)
+        .unwrap()
+        .remove(&bytes)
+        .expect("insert error");
       t.commit().expect("commit error")
     }
     println!("remove done");
 
     let mut tt = engine.new_tx().expect("tx start error");
-    tt.insert(count.to_le_bytes().into(), count.to_le_bytes().into())
+    tt.table(table)
+      .unwrap()
+      .insert(count.to_le_bytes().into(), count.to_le_bytes().into())
       .expect("insert error");
     tt.commit().expect("commit error");
   }
@@ -44,7 +59,8 @@ fn main() {
     .expect("bootstrap error");
 
   let mut t = engine.new_tx().expect("tx start error");
-  let mut iter = t.scan_all().expect("scan start error");
+  let tt = t.table(table).unwrap();
+  let mut iter = tt.scan_all().expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -54,7 +70,10 @@ fn main() {
 
   for i in 0..count {
     let bytes: Vec<u8> = i.to_le_bytes().into();
-    t.insert(bytes.clone(), bytes).expect("insert error");
+    t.table(table)
+      .unwrap()
+      .insert(bytes.clone(), bytes)
+      .expect("insert error");
   }
   t.commit().expect("commit error");
 }

@@ -11,6 +11,7 @@ const DEFAULT_SAMPLE_SIZE: usize = 30;
 const SEQ_SIZE: usize = 1_000;
 const CONC_SIZE: usize = 10_000;
 const CONC_THREADS: usize = 128;
+const TABLE: &str = "bench";
 
 fn make_key(i: usize) -> Vec<u8> {
   format!("{i:0>width$}", width = KEY_SIZE)
@@ -35,12 +36,20 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
     .gc_thread_count(5)
 }
 
+fn create_table(engine: &lfdb::Engine) {
+  let mut tx = engine.new_tx().unwrap();
+  tx.open_table(TABLE).unwrap();
+  tx.commit().unwrap();
+}
+
 fn pre_write_keys<P: AsRef<std::path::Path> + ?Sized>(dir: &P, count: usize) {
   let engine = build(dir).build().unwrap();
+  create_table(&engine);
   let mut tx = engine.new_tx().unwrap();
+  let table = tx.table(TABLE).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
-    .for_each(|(k, v)| tx.insert(k, v).unwrap());
+    .for_each(|(k, v)| table.insert(k, v).unwrap());
   tx.commit().unwrap();
 }
 
@@ -61,7 +70,8 @@ fn bench_sequential_get(c: &mut Criterion) {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
           let mut tx = engine.new_tx().expect("start error");
-          tx.get(&keys[i]).expect("get error");
+          let t = tx.table(TABLE).expect("table error");
+          t.get(&keys[i]).expect("get error");
           tx.commit().expect("commit error");
         }
       });
@@ -83,12 +93,14 @@ fn bench_sequential_insert(c: &mut Criterion) {
         || {
           let dir = TempDir::new_in(".").expect("dir failed.");
           let engine = build(dir.path()).build().expect("bootstrap error");
+          create_table(&engine);
           (dir, engine)
         },
         |(_, engine)| {
           for i in 0..SEQ_SIZE {
             let mut tx = engine.new_tx().expect("start error");
-            tx.insert(keys[i].clone(), values[i].clone())
+            let t = tx.table(TABLE).expect("table error");
+            t.insert(keys[i].clone(), values[i].clone())
               .expect("insert error");
             tx.commit().expect("commit error");
           }
@@ -117,7 +129,8 @@ fn bench_sequential_update(c: &mut Criterion) {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
           let mut tx = engine.new_tx().expect("start error");
-          tx.insert(keys[i].clone(), values[i].clone())
+          let t = tx.table(TABLE).expect("table error");
+          t.insert(keys[i].clone(), values[i].clone())
             .expect("update error");
           tx.commit().expect("commit error");
         }
@@ -140,7 +153,8 @@ fn bench_concurrent_get(c: &mut Criterion) {
       std::thread::spawn(move || {
         while let Ok((k, done)) = rx.recv() {
           let mut tx = e.new_tx().expect("start error");
-          tx.get(&k).expect("get error");
+          let t = tx.table(TABLE).expect("table error");
+          t.get(&k).expect("get error");
           tx.commit().expect("commit error");
           done.send(()).unwrap();
         }
@@ -184,6 +198,7 @@ fn bench_concurrent_insert(c: &mut Criterion) {
         || {
           let dir = TempDir::new_in(".").expect("dir failed.");
           let engine = Arc::new(build(dir.path()).build().expect("bootstrap error"));
+          create_table(&engine);
           let (tx, rx) = unbounded::<(Vec<u8>, Vec<u8>, Sender<()>)>();
           let threads: Vec<_> = (0..CONC_THREADS)
             .map(|_| {
@@ -192,7 +207,8 @@ fn bench_concurrent_insert(c: &mut Criterion) {
               std::thread::spawn(move || {
                 while let Ok((k, v, done)) = rx.recv() {
                   let mut tx = e.new_tx().expect("start error");
-                  tx.insert(k, v).expect("insert error");
+                  let t = tx.table(TABLE).expect("table error");
+                  t.insert(k, v).expect("insert error");
                   tx.commit().expect("commit error");
                   done.send(()).unwrap();
                 }
@@ -231,7 +247,8 @@ fn bench_concurrent_update(c: &mut Criterion) {
       std::thread::spawn(move || {
         while let Ok((k, v, done)) = rx.recv() {
           let mut tx = e.new_tx().expect("start error");
-          tx.insert(k, v).expect("update error");
+          let t = tx.table(TABLE).expect("table error");
+          t.insert(k, v).expect("update error");
           tx.commit().expect("commit error");
           done.send(()).unwrap();
         }

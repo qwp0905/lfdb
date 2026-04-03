@@ -12,11 +12,11 @@ use std::{
 use super::constant::{DATA_PATH, FILE_SUFFIX};
 use crate::{
   buffer_pool::BufferPoolConfig,
-  cursor::{Cursor, GarbageCollectionConfig, TreeManagerConfig},
+  cursor::{GarbageCollectionConfig, TreeManagerConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
   metrics::{EngineMetrics, MetricsRegistry},
-  transaction::{TransactionConfig, TxOrchestrator},
+  transaction::{Transaction, TransactionConfig, TxOrchestrator},
   utils::{LogFilter, LogLevel, Logger, ToArc},
   wal::WALConfig,
 };
@@ -92,6 +92,7 @@ impl Engine {
       metrics_registry.clone(),
     )?;
 
+    logger.info(|| "engine bootstrapped.");
     Ok(Self {
       orchestrator: orchestrator.to_arc(),
       available: AtomicBool::new(true),
@@ -103,12 +104,12 @@ impl Engine {
   /**
    * create tranaction cursor with default timeout.
    */
-  pub fn new_tx(&self) -> Result<Cursor<'_>> {
+  pub fn new_tx(&self) -> Result<Transaction<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
     let (state, snapshot) = self.orchestrator.start_tx(None)?;
-    Ok(Cursor::new(
+    Ok(Transaction::new(
       self.orchestrator.clone(),
       state,
       snapshot,
@@ -119,12 +120,12 @@ impl Engine {
   /**
    * create tranaction cursor with specified timeout.
    */
-  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Cursor<'_>> {
+  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Transaction<'_>> {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
     let (state, snapshot) = self.orchestrator.start_tx(Some(timeout))?;
-    Ok(Cursor::new(
+    Ok(Transaction::new(
       self.orchestrator.clone(),
       state,
       snapshot,

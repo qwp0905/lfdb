@@ -35,6 +35,7 @@ const THREADS: usize = 128;
 const SCAN_LENGTH: usize = 100;
 const ZIPF_EXPONENT: f64 = 0.99;
 const DEFAULT_SAMPLE_SIZE: usize = 10;
+const TABLE: &str = "bench";
 
 fn make_key(i: usize) -> Vec<u8> {
   format!("{i:0>width$}", width = KEY_SIZE)
@@ -59,12 +60,20 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
     .gc_thread_count(5)
 }
 
+fn create_table(engine: &lfdb::Engine) {
+  let mut tx = engine.new_tx().unwrap();
+  tx.open_table(TABLE).unwrap();
+  tx.commit().unwrap();
+}
+
 fn pre_load(dir: &std::path::Path, count: usize) {
   let engine = build(dir).build().unwrap();
+  create_table(&engine);
   let mut tx = engine.new_tx_timeout(Duration::from_mins(10)).unwrap();
+  let table = tx.table(TABLE).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
-    .for_each(|(k, v)| tx.insert(k, v).unwrap());
+    .for_each(|(k, v)| table.insert(k, v).unwrap());
   tx.commit().unwrap();
 }
 
@@ -96,24 +105,25 @@ fn spawn_workers(
         while let Ok(op) = rx.recv() {
           loop {
             let mut tx = e.new_tx().expect("start error");
+            let t = tx.table(TABLE).expect("table error");
             let conflict = match &op {
               Op::Get(k) => {
-                tx.get(k).expect("get error");
+                t.get(k).expect("get error");
                 false
               }
-              Op::Insert(k, v) => match tx.insert(k.clone(), v.clone()) {
+              Op::Insert(k, v) => match t.insert(k.clone(), v.clone()) {
                 Ok(_) => false,
                 Err(lfdb::Error::WriteConflict) => true,
                 Err(e) => panic!("insert error: {e}"),
               },
               Op::Scan(start, end) => {
-                let mut iter = tx.scan(start, end).expect("scan error");
+                let mut iter = t.scan(start, end).expect("scan error");
                 while let Ok(Some(_)) = iter.try_next() {}
                 false
               }
               Op::ReadModifyWrite(k, v) => {
-                tx.get(k).expect("rmw read error");
-                match tx.insert(k.clone(), v.clone()) {
+                t.get(k).expect("rmw read error");
+                match t.insert(k.clone(), v.clone()) {
                   Ok(_) => false,
                   Err(lfdb::Error::WriteConflict) => true,
                   Err(e) => panic!("rmw write error: {e}"),

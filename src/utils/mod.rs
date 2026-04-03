@@ -21,3 +21,6 @@ pub use bit::*;
 
 mod buffer;
 pub use buffer::*;
+
+mod spin;
+pub use spin::*;

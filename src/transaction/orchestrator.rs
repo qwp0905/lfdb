@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use super::{
-  FreeList, PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility,
+  FreeList, PageRecorder, TableMapper, TimeoutThread, TxSnapshot, TxState,
+  VersionVisibility,
 };
 
 use crate::{
@@ -26,6 +27,7 @@ pub struct TransactionConfig {
  */
 pub struct TxOrchestrator {
   wal: Arc<WAL>,
+  tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
   checkpoint: Box<dyn BackgroundThread<(), Result>>,
   free_list: Arc<FreeList>,
@@ -48,6 +50,7 @@ impl TxOrchestrator {
     logger: LogFilter,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
+    let tables = TableMapper::new().to_arc();
     let buffer_pool =
       BufferPool::open(buffer_pool_config, logger.clone(), metrics.clone())?.to_arc();
     let checkpoint_interval = wal_config.checkpoint_interval;
@@ -85,24 +88,26 @@ impl TxOrchestrator {
     )
     .to_arc();
 
-    let tree_manager = if replay.is_new {
-      TreeManager::initial_state(
+    let tree_manager = match replay.is_new {
+      true => TreeManager::initial_state(
         &free_list,
         buffer_pool.clone(),
+        tables.clone(),
         recorder.clone(),
         gc.clone(),
         logger.clone(),
         tree_config,
-      )
-    } else {
-      TreeManager::clean_and_start(
+      ),
+      false => TreeManager::clean_and_start(
         buffer_pool.clone(),
+        tables.clone(),
         recorder.clone(),
         gc.clone(),
+        &version_visibility,
         logger.clone(),
         tree_config,
         disk_len,
-      )
+      ),
     }?;
 
     // Checkpoint first: segments can only be deleted once all their changes are
@@ -136,6 +141,7 @@ impl TxOrchestrator {
 
     Ok(Self {
       checkpoint,
+      tables,
       wal,
       free_list,
       buffer_pool,
@@ -149,10 +155,12 @@ impl TxOrchestrator {
       metrics,
     })
   }
+  #[inline]
   pub fn fetch(&self, index: usize) -> Result<Slot<'_>> {
     self.buffer_pool.read(index)
   }
 
+  #[inline]
   pub fn serialize_and_log<T>(
     &self,
     tx_id: usize,
@@ -165,15 +173,18 @@ impl TxOrchestrator {
     self.recorder.serialize_and_log(tx_id, slot, data)
   }
 
+  #[inline]
   pub fn alloc(&self) -> Result<WritableSlot<'_>> {
     let free = self.free_list.alloc();
     Ok(self.buffer_pool.read(free)?.for_write())
   }
 
+  #[inline]
   pub fn mark_gc(&self, index: usize) {
     self.gc.mark(index);
   }
 
+  #[inline]
   pub fn start_tx(
     &self,
     timeout: Option<Duration>,
@@ -187,6 +198,7 @@ impl TxOrchestrator {
     Ok((state, snapshot))
   }
 
+  #[inline]
   pub fn commit_tx(&self, tx_id: usize) -> Result {
     self
       .metrics
@@ -195,6 +207,7 @@ impl TxOrchestrator {
     Ok(())
   }
 
+  #[inline]
   pub fn abort_tx(&self, tx_id: usize) -> Result {
     self.version_visibility.set_abort(tx_id);
     self.wal.append_abort(tx_id)?;
@@ -202,8 +215,27 @@ impl TxOrchestrator {
     Ok(())
   }
 
+  #[inline]
   pub fn current_version(&self) -> usize {
     self.version_visibility.current_version()
+  }
+
+  #[inline]
+  pub fn reserve_table(&self, name: &str) -> Result<Option<usize>> {
+    self.tables.get_or_reserve(name)
+  }
+  #[inline]
+  pub fn get_table(&self, name: &str) -> Option<usize> {
+    self.tables.get(name)
+  }
+  #[inline]
+  pub fn create_table(&self, name: String, header: usize) {
+    self.tables.insert(name, header);
+  }
+  #[inline]
+  pub fn drop_table(&self, name: &str, header: usize) {
+    self.tables.remove(name);
+    self.tree_manager.release_tree(header);
   }
 
   /**

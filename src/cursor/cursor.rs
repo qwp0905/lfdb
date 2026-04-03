@@ -1,9 +1,8 @@
-use std::{marker::PhantomData, mem::replace, sync::Arc, time::Instant};
+use std::{marker::PhantomData, mem::replace};
 
 use super::{
   CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, NodeFindResult,
-  RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, HEADER_INDEX, LARGE_VALUE, MAX_KEY,
-  MAX_VALUE,
+  RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, LARGE_VALUE, MAX_KEY, MAX_VALUE,
 };
 use crate::{
   buffer_pool::WritableSlot,
@@ -14,16 +13,15 @@ use crate::{
 };
 
 /**
- * A handle for a single transaction, providing read and write operations.
+ * A handle for a single table, providing read and write operations.
  * Must be used on a single thread; cross-thread behavior is untested.
- * Automatically aborts on drop if not committed.
  */
 pub struct Cursor<'a> {
-  orchestrator: Arc<TxOrchestrator>,
-  state: TxState<'a>,
-  snapshot: TxSnapshot<'a>,
-  metrics: Arc<MetricsRegistry>,
-  tx_start: Option<Instant>,
+  header: usize,
+  orchestrator: &'a TxOrchestrator,
+  state: &'a TxState<'a>,
+  snapshot: &'a TxSnapshot<'a>,
+  metrics: &'a MetricsRegistry,
   _marker: PhantomData<*const ()>,
 }
 impl<'a> Cursor<'a> {
@@ -44,49 +42,60 @@ impl<'a> Cursor<'a> {
       .serialize_and_log(self.state.get_id(), slot, data)
   }
 
-  pub fn new(
-    orchestrator: Arc<TxOrchestrator>,
-    state: TxState<'a>,
-    snapshot: TxSnapshot<'a>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Self {
-    let tx_start = metrics.transaction_start.start();
-    Self {
+  pub fn get_header(&self) -> usize {
+    self.header
+  }
+
+  pub fn initialize(
+    orchestrator: &'a TxOrchestrator,
+    state: &'a TxState<'a>,
+    snapshot: &'a TxSnapshot<'a>,
+    metrics: &'a MetricsRegistry,
+  ) -> Result<Self> {
+    let mut root = orchestrator.alloc()?;
+    orchestrator.serialize_and_log(
+      state.get_id(),
+      &mut root,
+      &CursorNode::initial_state(),
+    )?;
+
+    let mut header = orchestrator.alloc()?;
+    orchestrator.serialize_and_log(
+      state.get_id(),
+      &mut header,
+      &TreeHeader::new(root.get_index()),
+    )?;
+    Ok(Self {
+      header: header.get_index(),
       orchestrator,
       state,
       snapshot,
       metrics,
-      tx_start,
-      _marker: Default::default(),
-    }
+      _marker: PhantomData,
+    })
   }
 
-  pub fn commit(&mut self) -> Result {
-    if !self.state.try_commit() {
-      return Err(Error::TransactionClosed);
+  pub fn new(
+    header: usize,
+    orchestrator: &'a TxOrchestrator,
+    state: &'a TxState<'a>,
+    snapshot: &'a TxSnapshot<'a>,
+    metrics: &'a MetricsRegistry,
+  ) -> Self {
+    Self {
+      header,
+      orchestrator,
+      state,
+      snapshot,
+      metrics,
+      _marker: PhantomData,
     }
-    if let Err(err) = self.orchestrator.commit_tx(self.state.get_id()) {
-      self.state.make_available();
-      return Err(err);
-    }
-
-    self.state.deactive();
-    Ok(())
-  }
-
-  pub fn abort(&mut self) -> Result {
-    if !self.state.try_abort() {
-      return Err(Error::TransactionClosed);
-    }
-    self.orchestrator.abort_tx(self.state.get_id())?;
-    self.state.deactive();
-    Ok(())
   }
 
   fn find_leaf(&self, key: &[u8]) -> Result<usize> {
     let mut index = self
       .orchestrator
-      .fetch(HEADER_INDEX)?
+      .fetch(self.header)?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -181,7 +190,7 @@ impl<'a> Cursor<'a> {
     let (mut index, mut old_height) = {
       let header = self
         .orchestrator
-        .fetch(HEADER_INDEX)?
+        .fetch(self.header)?
         .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?;
@@ -250,7 +259,7 @@ impl<'a> Cursor<'a> {
 
     // CAS loop: multiple concurrent splits may race to update the root.
     loop {
-      let mut header_slot = self.orchestrator.fetch(HEADER_INDEX)?.for_write();
+      let mut header_slot = self.orchestrator.fetch(self.header)?.for_write();
       let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
       let current_height = header.get_height();
       let mut index = header.get_root();
@@ -450,7 +459,7 @@ impl<'a> Cursor<'a> {
 
     let mut index = self
       .orchestrator
-      .fetch(HEADER_INDEX)?
+      .fetch(self.header)?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -476,11 +485,5 @@ impl<'a> Cursor<'a> {
       0,
       None,
     ))
-  }
-}
-impl<'a> Drop for Cursor<'a> {
-  fn drop(&mut self) {
-    let _ = self.abort();
-    self.metrics.transaction_start.record(self.tx_start.take());
   }
 }

@@ -253,10 +253,10 @@ impl LeafNode {
     self.entries.len()
   }
 
-  pub fn drain(&mut self) -> impl Iterator<Item = (Key, Pointer)> + use<'_> {
+  pub fn drain(&mut self) -> impl Iterator<Item = (Key, Pointer)> + '_ {
     self.entries.drain(..)
   }
-  pub fn get_entry_pointers<'a>(&'a self) -> impl Iterator<Item = Pointer> + 'a {
+  pub fn get_entry_pointers(&self) -> impl Iterator<Item = Pointer> + '_ {
     self.entries.iter().map(|(_, p)| *p)
   }
   pub fn set_entries(&mut self, entries: Vec<(Key, Pointer)>) {
