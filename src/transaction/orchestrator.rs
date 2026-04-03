@@ -88,8 +88,8 @@ impl TxOrchestrator {
     )
     .to_arc();
 
-    let tree_manager = if replay.is_new {
-      TreeManager::initial_state(
+    let tree_manager = match replay.is_new {
+      true => TreeManager::initial_state(
         &free_list,
         buffer_pool.clone(),
         tables.clone(),
@@ -97,17 +97,17 @@ impl TxOrchestrator {
         gc.clone(),
         logger.clone(),
         tree_config,
-      )
-    } else {
-      TreeManager::clean_and_start(
+      ),
+      false => TreeManager::clean_and_start(
         buffer_pool.clone(),
         tables.clone(),
         recorder.clone(),
         gc.clone(),
+        &version_visibility,
         logger.clone(),
         tree_config,
         disk_len,
-      )
+      ),
     }?;
 
     // Checkpoint first: segments can only be deleted once all their changes are

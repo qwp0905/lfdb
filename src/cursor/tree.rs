@@ -1,10 +1,8 @@
 use std::{
-  collections::HashSet,
+  collections::{BTreeMap, HashSet},
   sync::{Arc, Mutex},
   time::Duration,
 };
-
-use crossbeam::queue::SegQueue;
 
 use super::{CursorNode, DataEntry, GarbageCollector, Pointer, RecordData, TreeHeader};
 use crate::{
@@ -12,7 +10,7 @@ use crate::{
   constant::{META_TABLE_HEADER, RESERVED_TX},
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder},
-  transaction::{FreeList, PageRecorder, TableMapper},
+  transaction::{FreeList, PageRecorder, TableMapper, VersionVisibility},
   utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
   Error, Result,
 };
@@ -90,58 +88,6 @@ impl TreeManager {
     Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
   }
 
-  fn tree_traversal(
-    buffer_pool: &BufferPool,
-    gc: &GarbageCollector,
-    logger: &LogFilter,
-    header: Pointer,
-    visited: &Mutex<HashSet<usize>>,
-  ) -> Result {
-    visited.l().insert(header);
-
-    let root = buffer_pool
-      .read(header)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-    let mut node_stack = vec![root];
-    let mut entry_stack = vec![];
-
-    while let Some(index) = node_stack.pop() {
-      visited.l().insert(index);
-      match buffer_pool
-        .read(index)?
-        .for_read()
-        .as_ref()
-        .deserialize::<CursorNode>()?
-      {
-        CursorNode::Internal(internal) => node_stack.extend(internal.get_all_child()),
-        CursorNode::Leaf(leaf) => entry_stack.extend(leaf.get_entry_pointers()),
-      };
-    }
-
-    // push to queue for initial checkpoint
-    entry_stack.iter().for_each(|&ptr| gc.mark(ptr));
-    logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
-
-    while let Some(index) = entry_stack.pop() {
-      visited.l().insert(index);
-      let entry: DataEntry =
-        buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
-      for record in entry.get_versions() {
-        if let RecordData::Chunked(pointers) = &record.data {
-          visited.l().extend(pointers);
-        }
-      }
-      if let Some(i) = entry.get_next() {
-        entry_stack.push(i)
-      }
-    }
-
-    Ok(())
-  }
-
   /**
    * Recovers orphaned pages on startup by traversing the entire B-tree and
    * collecting all reachable pages. Any page in [0, file_end) not reachable
@@ -154,6 +100,7 @@ impl TreeManager {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
+    version_visibility: &VersionVisibility,
     logger: LogFilter,
     config: TreeManagerConfig,
     file_end: usize,
@@ -183,10 +130,10 @@ impl TreeManager {
       };
     }
 
-    let tree_headers = SegQueue::new().to_arc();
-    let mut entry_stack = vec![];
+    let tree_headers = Mutex::new(BTreeMap::new()).to_arc();
+    let tx_id = version_visibility.current_version();
 
-    for (key, index) in key_values {
+    while let Some((key, index)) = key_values.pop() {
       visited.l().insert(index);
       gc.mark(index);
 
@@ -198,15 +145,21 @@ impl TreeManager {
         }
       }
       if let Some(i) = entry.get_next() {
-        entry_stack.push(i);
+        key_values.push((key.clone(), i));
       }
 
-      let record = match entry.get_last_version() {
+      let mut tree_headers = tree_headers.l();
+      if tree_headers.contains_key(&key) {
+        continue;
+      }
+
+      let record = match entry.find_record(tx_id, |i| !version_visibility.is_aborted(&i))
+      {
         Some(record) => record,
         None => continue,
       };
+
       let bytes = match record
-        .data
         .read_data(|i| buffer_pool.read(i)?.for_read().as_ref().deserialize())?
       {
         Some(bytes) => bytes,
@@ -217,22 +170,8 @@ impl TreeManager {
         Err(_) => continue,
       };
 
+      tree_headers.insert(key.clone(), header);
       tables.insert(unsafe { String::from_utf8_unchecked(key) }, header);
-      tree_headers.push(header);
-    }
-
-    while let Some(index) = entry_stack.pop() {
-      visited.l().insert(index);
-      let entry: DataEntry =
-        buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
-      for record in entry.get_versions() {
-        if let RecordData::Chunked(pointers) = &record.data {
-          visited.l().extend(pointers);
-        }
-      }
-      if let Some(i) = entry.get_next() {
-        entry_stack.push(i)
-      }
     }
 
     let threads = (0..5)
@@ -243,8 +182,8 @@ impl TreeManager {
         let visited = visited.clone();
         let tree_headers = tree_headers.clone();
         std::thread::spawn(move || {
-          while let Some(header) = tree_headers.pop() {
-            Self::tree_traversal(&buffer_pool, &gc, &logger, header, &visited)?;
+          while let Some((_, header)) = tree_headers.l().pop_first() {
+            tree_traversal(&buffer_pool, &gc, &logger, header, &visited)?;
           }
           Ok(()) as Result
         })
@@ -442,4 +381,55 @@ fn run_release_tree(
 
     Ok(())
   }
+}
+
+fn tree_traversal(
+  buffer_pool: &BufferPool,
+  gc: &GarbageCollector,
+  logger: &LogFilter,
+  header: Pointer,
+  visited: &Mutex<HashSet<usize>>,
+) -> Result {
+  visited.l().insert(header);
+
+  let root = buffer_pool
+    .read(header)?
+    .for_read()
+    .as_ref()
+    .deserialize::<TreeHeader>()?
+    .get_root();
+  let mut node_stack = vec![root];
+  let mut entry_stack = vec![];
+
+  while let Some(index) = node_stack.pop() {
+    visited.l().insert(index);
+    match buffer_pool
+      .read(index)?
+      .for_read()
+      .as_ref()
+      .deserialize::<CursorNode>()?
+    {
+      CursorNode::Internal(internal) => node_stack.extend(internal.get_all_child()),
+      CursorNode::Leaf(leaf) => entry_stack.extend(leaf.get_entry_pointers()),
+    };
+  }
+
+  // push to queue for initial checkpoint
+  entry_stack.iter().for_each(|&ptr| gc.mark(ptr));
+  logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
+
+  while let Some(index) = entry_stack.pop() {
+    visited.l().insert(index);
+    let entry: DataEntry = buffer_pool.read(index)?.for_read().as_ref().deserialize()?;
+    for record in entry.get_versions() {
+      if let RecordData::Chunked(pointers) = &record.data {
+        visited.l().extend(pointers);
+      }
+    }
+    if let Some(i) = entry.get_next() {
+      entry_stack.push(i)
+    }
+  }
+
+  Ok(())
 }
