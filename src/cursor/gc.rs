@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashSet, VecDeque},
+  collections::{BTreeSet, HashSet, VecDeque},
   mem::replace,
   sync::Arc,
 };
@@ -53,7 +53,7 @@ impl GarbageCollector {
       .logger
       .debug(|| format!("{} data will check version in this scope.", queue.len()));
     let mut waiting = Vec::new();
-    let mut release = Vec::new();
+    let mut release = BTreeSet::new();
     let mut dedup = HashSet::new();
     while let Some(ptr) = queue.pop() {
       match ptr {
@@ -63,7 +63,7 @@ impl GarbageCollector {
           }
           waiting.push(self.entry.send(ptr));
         }
-        GcPointer::Release(ptr) => release.push(ptr),
+        GcPointer::Release(ptr) => drop(release.insert(ptr)),
       }
     }
     self.logger.debug(|| "all entry cleaning triggered.");

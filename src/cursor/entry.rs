@@ -116,6 +116,10 @@ impl DataEntry {
     self.versions.iter()
   }
 
+  pub fn get_last_version(&self) -> Option<&VersionRecord> {
+    self.versions.front()
+  }
+
   pub fn get_last_owner(&self) -> Option<usize> {
     self.versions.front().map(|v| v.owner)
   }
