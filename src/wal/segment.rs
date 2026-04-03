@@ -6,10 +6,10 @@ use std::{
   sync::{Arc, Mutex},
 };
 
-use super::WAL_BLOCK_SIZE;
+use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   constant::FILE_SUFFIX,
-  disk::{max_iov, DirectIO, Fallocate, Page, Pread, Pwrite, Pwritev},
+  disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
   thread::{BackgroundThread, WorkBuilder, WorkResult},
   utils::{ShortenedMutex, ToArc, ToBox},
@@ -27,19 +27,21 @@ impl FsyncResult {
   }
 }
 
+const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
+
 pub struct WALSegment {
   file: Arc<File>,
   path: Mutex<PathBuf>,
-  io: Box<dyn BackgroundThread<(usize, &'static [u8]), Result>>,
+  io: Box<dyn BackgroundThread<(Pointer, &'static [u8]), Result>>,
   flush: Box<dyn BackgroundThread<(), bool>>,
 }
 impl WALSegment {
-  pub fn parse_generation<A, B>(filename: &A, prefix: &B) -> Result<usize>
+  pub fn parse_generation<A, B>(filename: &A, prefix: &B) -> Result<SegmentGeneration>
   where
     A: AsRef<str>,
     B: AsRef<str>,
   {
-    let generation: usize = filename
+    let generation: SegmentGeneration = filename
       .as_ref()
       .replace(prefix.as_ref(), "")
       .trim_end_matches(FILE_SUFFIX)
@@ -50,9 +52,9 @@ impl WALSegment {
 
   pub fn open_new<P: AsRef<Path>>(
     prefix: P,
-    generation: usize,
+    generation: SegmentGeneration,
     flush_count: usize,
-    max_len: usize,
+    max_len: Pointer,
   ) -> Result<Self> {
     let path = format!(
       "{}{}{}",
@@ -72,7 +74,7 @@ impl WALSegment {
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
     // at creation avoids metadata updates on every subsequent write.
-    let file_len = (WAL_BLOCK_SIZE * max_len) as u64;
+    let file_len = max_len * SIZE;
     file
       .fallocate(0, file_len)
       .and_then(|_| file.set_len(file_len))
@@ -93,34 +95,43 @@ impl WALSegment {
 
   pub fn read<P: AsMut<Page<WAL_BLOCK_SIZE>>>(
     &self,
-    index: usize,
+    pointer: Pointer,
     page: &mut P,
   ) -> Result {
     self
       .file
-      .pread(page.as_mut().as_mut(), (index * WAL_BLOCK_SIZE) as u64)
+      .pread(page.as_mut().as_mut(), pointer * SIZE)
       .map(|_| ())
       .map_err(Error::IO)
   }
-  pub fn write<P: AsRef<Page<WAL_BLOCK_SIZE>>>(&self, index: usize, page: &P) -> Result {
+  pub fn write<P: AsRef<Page<WAL_BLOCK_SIZE>>>(
+    &self,
+    pointer: Pointer,
+    page: &P,
+  ) -> Result {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait_flatten() blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
     self
       .io
-      .send((index, unsafe { transmute(page.as_ref().as_ref()) }))
+      .send((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
       .wait_flatten()
   }
-  pub fn len(&self) -> Result<usize> {
+  #[inline]
+  pub fn len(&self) -> Result<Pointer> {
     let metadata = self.file.metadata().map_err(Error::IO)?;
-    Ok((metadata.len() as usize).div_ceil(WAL_BLOCK_SIZE))
+    Ok(metadata.len().div_ceil(SIZE))
   }
 
   /**
    * Repurposes this segment for a new generation by renaming it in place.
    * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
    */
-  pub fn reuse<P: AsRef<Path>>(&self, prefix: P, generation: usize) -> Result {
+  pub fn reuse<P: AsRef<Path>>(
+    &self,
+    prefix: P,
+    generation: SegmentGeneration,
+  ) -> Result {
     let new_path = format!(
       "{}{}{}",
       prefix.as_ref().to_string_lossy(),
@@ -158,21 +169,25 @@ impl WALSegment {
     }
   }
 
+  #[inline]
   pub fn fsync(&self) -> FsyncResult {
     FsyncResult(self.flush.send(()))
   }
 
+  #[inline]
   pub fn truncate(self) -> Result {
     self.flush.close();
     remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
   }
 
+  #[inline]
   pub fn close(&self) {
     self.flush.close();
   }
 }
 
+#[inline]
 fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> bool {
   move |_| file.sync_data().is_ok()
 }
@@ -181,18 +196,15 @@ fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> bool {
  * Zero-pad to 20 digits: ensures lexicographic file ordering matches numeric order,
  * and accommodates the full u64 range (max 20 digits).
  */
-fn pad_start(n: usize) -> String {
+fn pad_start(n: SegmentGeneration) -> String {
   format!("{:0>20}", n)
 }
 
-fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(usize, &[u8])>) -> Result {
+fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];
-      return file
-        .pwrite(slice, (i * WAL_BLOCK_SIZE) as u64)
-        .map_err(Error::IO)
-        .map(drop);
+      return file.pwrite(slice, i * SIZE).map_err(Error::IO).map(drop);
     }
 
     // Duplicate indexes all point to the same underlying page memory (same PageRef),
@@ -204,8 +216,8 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(usize, &[u8])>) -> Result {
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
       .map(|g| g.into_iter())
       .map(|g| g.map(|(i, s)| (*i, IoSlice::new(*s))).unzip())
-      .map(|(indexes, bufs): (Vec<_>, Vec<_>)| ((indexes[0] * WAL_BLOCK_SIZE), bufs))
-      .map(|(offset, bufs)| file.pwritev(&bufs, offset as u64))
+      .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| (ptrs[0] * SIZE, bufs))
+      .map(|(offset, bufs)| file.pwritev(&bufs, offset))
       .fold(Ok(()), |a, c| a.and_then(|_| c.map(drop)))
       .map_err(Error::IO)
   }

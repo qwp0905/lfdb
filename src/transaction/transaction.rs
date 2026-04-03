@@ -1,8 +1,8 @@
 use std::{marker::PhantomData, sync::Arc, time::Instant};
 
 use crate::{
-  constant::META_TABLE_HEADER,
-  cursor::Cursor,
+  cursor::{Cursor, META_TABLE_HEADER},
+  disk::Pointer,
   metrics::MetricsRegistry,
   transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
@@ -19,7 +19,7 @@ pub struct Transaction<'a> {
   snapshot: TxSnapshot<'a>,
   metrics: Arc<MetricsRegistry>,
   tx_start: Option<Instant>,
-  created_tables: Vec<(String, usize)>,
+  created_tables: Vec<(String, Pointer)>,
   _marker: PhantomData<*const ()>,
 }
 impl<'a> Transaction<'a> {
@@ -42,7 +42,7 @@ impl<'a> Transaction<'a> {
   }
 
   #[inline]
-  fn open_cursor(&self, header: usize) -> Cursor<'_> {
+  fn open_cursor(&self, header: Pointer) -> Cursor<'_> {
     Cursor::new(
       header,
       &self.orchestrator,
@@ -75,7 +75,7 @@ impl<'a> Transaction<'a> {
     let meta = self.open_cursor(META_TABLE_HEADER);
     if let Some(bytes) = meta.get(&name.as_bytes())? {
       if let Ok(bytes) = bytes.try_into() {
-        let header = usize::from_le_bytes(bytes);
+        let header = Pointer::from_le_bytes(bytes);
         self.orchestrator.create_table(name.to_string(), header);
         return Ok(self.open_cursor(header));
       }

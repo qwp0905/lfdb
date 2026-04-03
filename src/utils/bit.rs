@@ -108,12 +108,13 @@ where
 }
 
 pub struct OffsetBitmap {
-  offset: usize,
+  offset: u64,
   bits: Vec<u64>,
 }
 impl OffsetBitmap {
-  pub fn new(offset: usize, capacity: usize) -> Self {
-    let cap = (capacity + MASK) >> SHIFT;
+  const MASK: u64 = MASK as u64;
+  pub fn new(offset: u64, capacity: u64) -> Self {
+    let cap = ((capacity + Self::MASK) >> SHIFT) as usize;
     let mut bits = Vec::with_capacity(cap);
     for _ in 0..cap {
       bits.push(0);
@@ -122,33 +123,33 @@ impl OffsetBitmap {
   }
 
   #[inline]
-  pub fn insert(&mut self, n: usize) -> bool {
+  pub fn insert(&mut self, n: u64) -> bool {
     if n < self.offset {
       return false;
     }
     let diff = n - self.offset;
 
-    let i = diff >> SHIFT;
+    let i = (diff >> SHIFT) as usize;
     if i >= self.bits.len() {
       return false;
     };
     let old = self.bits[i];
-    self.bits[i] |= 1 << (diff & MASK);
+    self.bits[i] |= 1 << (diff & Self::MASK);
     old != self.bits[i]
   }
 
   #[inline]
-  pub fn contains(&self, n: usize) -> bool {
+  pub fn contains(&self, n: u64) -> bool {
     if n < self.offset {
       return false;
     }
     let diff = n - self.offset;
 
-    let i = diff >> SHIFT;
+    let i = (diff >> SHIFT) as usize;
     if i >= self.bits.len() {
       return false;
     }
-    self.bits[i] & (1 << (diff & MASK)) != 0
+    self.bits[i] & (1 << (diff & Self::MASK)) != 0
   }
 }
 

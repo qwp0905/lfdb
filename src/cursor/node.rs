@@ -1,6 +1,6 @@
-use super::{Key, KeyRef, Pointer};
+use super::{Key, KeyRef};
 use crate::{
-  disk::{PageScanner, PageWriter, PAGE_SIZE},
+  disk::{PageScanner, PageWriter, Pointer, PAGE_SIZE},
   serialize::{Serializable, SerializeType},
   Error, Result,
 };
@@ -38,7 +38,7 @@ impl Serializable for CursorNode {
         match &node.right {
           Some((pointer, key)) => {
             writer.write(&[1])?;
-            writer.write_usize(*pointer)?;
+            writer.write_u64(*pointer)?;
             writer.write_u16(key.len() as u16)?;
             writer.write(key)
           }
@@ -50,17 +50,17 @@ impl Serializable for CursorNode {
           writer.write(key)?;
         }
         for ptr in &node.children {
-          writer.write_usize(*ptr)?;
+          writer.write_u64(*ptr)?;
         }
       }
       CursorNode::Leaf(node) => {
         writer.write(&[1])?;
-        writer.write_usize(node.next.unwrap_or(0))?;
+        writer.write_u64(node.next.unwrap_or(0))?;
         writer.write_u16(node.entries.len() as u16)?;
         for (key, pointer) in &node.entries {
           writer.write_u16(key.len() as u16)?;
           writer.write(&key)?;
-          writer.write_usize(*pointer)?;
+          writer.write_u64(*pointer)?;
         }
       }
     }
@@ -73,7 +73,7 @@ impl Serializable for CursorNode {
         //internal
         let mut right = None;
         if scanner.read()? == 1 {
-          let ptr = scanner.read_usize()?;
+          let ptr = scanner.read_u64()?;
           let len = scanner.read_u16()? as usize;
           let key = scanner.read_n(len)?.to_vec();
           right = Some((ptr, key));
@@ -88,19 +88,19 @@ impl Serializable for CursorNode {
 
         let mut children = Vec::with_capacity(len + 1);
         for _ in 0..=len {
-          children.push(scanner.read_usize()?);
+          children.push(scanner.read_u64()?);
         }
         Ok(Self::Internal(InternalNode::new(keys, children, right)))
       }
       1 => {
         // leaf
-        let next = scanner.read_usize()?;
+        let next = scanner.read_u64()?;
         let len = scanner.read_u16()? as usize;
         let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
           let l = scanner.read_u16()? as usize;
           let key = scanner.read_n(l)?.to_vec();
-          let ptr = scanner.read_usize()?;
+          let ptr = scanner.read_u64()?;
           entries.push((key, ptr));
         }
         Ok(Self::Leaf(LeafNode::new(

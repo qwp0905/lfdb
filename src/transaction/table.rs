@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use crate::{utils::SpinRwLock, Error, Result};
+use crate::{disk::Pointer, utils::SpinRwLock, Error, Result};
 
 enum Slot {
   Reserved,
-  Occupied(usize),
+  Occupied(Pointer),
 }
 
 pub struct TableMapper {
@@ -17,13 +17,13 @@ impl TableMapper {
     }
   }
 
-  pub fn get(&self, name: &str) -> Option<usize> {
+  pub fn get(&self, name: &str) -> Option<Pointer> {
     match self.mapping.read().get(name)? {
       Slot::Reserved => None,
       Slot::Occupied(i) => Some(*i),
     }
   }
-  pub fn get_or_reserve(&self, name: &str) -> Result<Option<usize>> {
+  pub fn get_or_reserve(&self, name: &str) -> Result<Option<Pointer>> {
     let mut mapping = self.mapping.write();
     if let Some(slot) = mapping.get(name) {
       match slot {
@@ -36,14 +36,14 @@ impl TableMapper {
     Ok(None)
   }
 
-  pub fn insert(&self, name: String, header: usize) {
+  pub fn insert(&self, name: String, header: Pointer) {
     self.mapping.write().insert(name, Slot::Occupied(header));
   }
   pub fn remove(&self, name: &str) {
     self.mapping.write().remove(name);
   }
 
-  pub fn get_all(&self) -> Vec<(String, usize)> {
+  pub fn get_all(&self) -> Vec<(String, Pointer)> {
     self
       .mapping
       .read()

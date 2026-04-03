@@ -5,7 +5,7 @@ use std::{
 
 use super::{Acquired, Frame, LRUTable, Peeked, Slot};
 use crate::{
-  disk::{DiskController, PagePool, PAGE_SIZE},
+  disk::{DiskController, PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
   utils::{AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc},
@@ -63,37 +63,37 @@ impl BufferPool {
    * concurrent read() from promoting this page into the LRU while we
    * are reading — which would create two live copies of the same page.
    */
-  pub fn peek(&self, index: usize) -> Result<Slot<'_>> {
-    let (state, shard) = match self.table.peek_or_temp(index) {
+  pub fn peek(&self, pointer: Pointer) -> Result<Slot<'_>> {
+    let (state, shard) = match self.table.peek_or_temp(pointer) {
       Peeked::Hit(state) => {
         let id = state.get_frame_id();
         return Ok(Slot::page(&self.frame[id], &self.dirty, state));
       }
       Peeked::Temp(temp) => {
         let (state, shard) = temp.take();
-        return Ok(Slot::temp(state, index, &self.disk, shard, false));
+        return Ok(Slot::temp(state, pointer, &self.disk, shard, false));
       }
       Peeked::DiskRead(temp) => temp.take(),
     };
-    match self.disk.read(index, &mut state.for_write()) {
+    match self.disk.read(pointer, &mut state.for_write()) {
       Ok(p) => p,
       Err(err) => {
         // Remove the temp entry so other threads waiting on this page
         // don't block forever on a completion signal that will never arrive.
-        shard.l().remove_temp(index);
+        shard.l().remove_temp(pointer);
         return Err(err);
       }
     };
     state.completion_evict(1);
-    Ok(Slot::temp(state, index, &self.disk, shard, true))
+    Ok(Slot::temp(state, pointer, &self.disk, shard, true))
   }
 
-  fn __read(&self, index: usize) -> Result<Slot<'_>> {
-    let mut guard = match self.table.acquire(index) {
+  fn __read(&self, pointer: Pointer) -> Result<Slot<'_>> {
+    let mut guard = match self.table.acquire(pointer) {
       Acquired::Temp(temp) => {
         let (state, shard) = temp.take();
         self.metrics.buffer_pool_cache_hit.inc();
-        return Ok(Slot::temp(state, index, &self.disk, shard, false));
+        return Ok(Slot::temp(state, pointer, &self.disk, shard, false));
       }
       Acquired::Hit(state) => {
         let id = state.get_frame_id();
@@ -107,11 +107,11 @@ impl BufferPool {
     let frame = &self.frame[id];
 
     let mut new = self.page_pool.acquire();
-    self.disk.read(index, &mut new)?;
-    let old = frame.wl().replace(index, new);
+    self.disk.read(pointer, &mut new)?;
+    let old = frame.wl().replace(pointer, new);
 
     let slot = Slot::page(frame, &self.dirty, guard.get_state());
-    if let Some(evicted) = guard.get_evicted_index() {
+    if let Some(evicted) = guard.get_evicted_pointer() {
       if self.dirty.contains(id) {
         self.disk.write(evicted, &old)?;
         self.dirty.remove(id);
@@ -123,8 +123,11 @@ impl BufferPool {
   }
 
   #[inline]
-  pub fn read(&self, index: usize) -> Result<Slot<'_>> {
-    self.metrics.buffer_pool_read.measure(|| self.__read(index))
+  pub fn read(&self, pointer: Pointer) -> Result<Slot<'_>> {
+    self
+      .metrics
+      .buffer_pool_read
+      .measure(|| self.__read(pointer))
   }
 
   pub fn flush(&self) -> Result {
@@ -139,7 +142,7 @@ impl BufferPool {
         // buffer and sort them, then batch into a single pwritev call.
         // Writing synchronously one by one would bypass this optimization
         // and issue a separate syscall per page.
-        waits.push(self.disk.write_async(frame.get_index(), frame.page_ref()));
+        waits.push(self.disk.write_async(frame.get_pointer(), frame.page_ref()));
       }
 
       waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
@@ -156,7 +159,7 @@ impl BufferPool {
     self.disk.close();
   }
 
-  pub fn disk_len(&self) -> Result<usize> {
+  pub fn disk_len(&self) -> Result<Pointer> {
     self.disk.len()
   }
 }

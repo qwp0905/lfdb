@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
 use crate::{
-  cursor::Pointer,
+  disk::Pointer,
   serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
+  wal::TxId,
   Error, Result,
 };
 
@@ -63,12 +64,12 @@ impl RecordData {
  */
 #[derive(Debug)]
 pub struct VersionRecord {
-  pub owner: usize,
-  pub version: usize,
+  pub owner: TxId,
+  pub version: TxId,
   pub data: RecordData,
 }
 impl VersionRecord {
-  pub fn new(owner: usize, version: usize, data: RecordData) -> Self {
+  pub fn new(owner: TxId, version: TxId, data: RecordData) -> Self {
     Self {
       owner,
       version,
@@ -116,7 +117,7 @@ impl DataEntry {
     self.versions.iter()
   }
 
-  pub fn get_last_owner(&self) -> Option<usize> {
+  pub fn get_last_owner(&self) -> Option<TxId> {
     self.versions.front().map(|v| v.owner)
   }
 
@@ -131,9 +132,9 @@ impl DataEntry {
     self.versions.push_front(record);
   }
 
-  pub fn find_record<F>(&self, tx_id: usize, is_visible: F) -> Option<&RecordData>
+  pub fn find_record<F>(&self, tx_id: TxId, is_visible: F) -> Option<&RecordData>
   where
-    F: Fn(&usize) -> bool,
+    F: Fn(&TxId) -> bool,
   {
     for record in self.versions.iter() {
       if record.owner == tx_id {
@@ -174,12 +175,12 @@ impl Serializable for DataEntry {
     SerializeType::DataEntry
   }
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
-    writer.write_usize(self.next.unwrap_or(0))?;
+    writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.versions.len() as u16)?;
 
     for record in &self.versions {
-      writer.write_usize(record.version)?;
-      writer.write_usize(record.owner)?;
+      writer.write_u64(record.version)?;
+      writer.write_u64(record.owner)?;
       match &record.data {
         RecordData::Data(data) => {
           writer.write(&[0])?;
@@ -191,7 +192,7 @@ impl Serializable for DataEntry {
           writer.write(&[2])?;
           writer.write_u8(pointers.len() as u8)?;
           for ptr in pointers {
-            writer.write_usize(*ptr)?;
+            writer.write_u64(*ptr)?;
           }
         }
       }
@@ -200,12 +201,12 @@ impl Serializable for DataEntry {
   }
 
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
-    let next = reader.read_usize()?;
+    let next = reader.read_u64()?;
     let len = reader.read_u16()? as usize;
     let mut versions = VecDeque::with_capacity(len);
     for _ in 0..len {
-      let version = reader.read_usize()?;
-      let owner = reader.read_usize()?;
+      let version = reader.read_u64()?;
+      let owner = reader.read_u64()?;
       let data = match reader.read()? {
         0 => {
           let l = reader.read_u16()? as usize;
@@ -216,7 +217,7 @@ impl Serializable for DataEntry {
           let l = reader.read()? as usize;
           let mut pointers = Vec::with_capacity(l);
           for _ in 0..l {
-            pointers.push(reader.read_usize()?);
+            pointers.push(reader.read_u64()?);
           }
           RecordData::Chunked(pointers)
         }

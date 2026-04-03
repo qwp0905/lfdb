@@ -1,6 +1,10 @@
 use std::{ptr::copy_nonoverlapping, slice::from_raw_parts};
 
-use crate::{disk::Page, Error};
+use super::{LogId, TxId};
+use crate::{
+  disk::{Page, Pointer},
+  Error,
+};
 
 // Sized to hold at least 2 base pages (base page = 8KB) with room for headers.
 pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb
@@ -8,7 +12,7 @@ pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb
 #[derive(Debug)]
 pub enum Operation {
   Insert(
-    usize,   // index of the page
+    Pointer, // disk pointer of the page
     Vec<u8>, // data
   ),
   /**
@@ -19,9 +23,9 @@ pub enum Operation {
    * simultaneously is avoided by design to prevent deadlocks.
    */
   Multi(
-    usize,   // index of the first page
+    Pointer, // disk pointer of the first page
     Vec<u8>, // data of the first page
-    usize,   // index of the second page
+    Pointer, // disk pointer of the second page
     Vec<u8>, // data of the second page
   ),
   Start,
@@ -34,8 +38,8 @@ pub enum Operation {
    * unboundedly.
    */
   Checkpoint(
-    usize, // last log id
-    usize, // min active version
+    LogId, // last log id
+    TxId,  // min active version
   ),
 }
 impl Operation {
@@ -64,13 +68,13 @@ impl Operation {
 
 #[derive(Debug)]
 pub struct LogRecord {
-  pub log_id: usize,
-  pub tx_id: usize,
+  pub log_id: LogId,
+  pub tx_id: TxId,
   pub operation: Operation,
 }
 impl LogRecord {
   #[inline]
-  fn new(log_id: usize, tx_id: usize, operation: Operation) -> Self {
+  fn new(log_id: LogId, tx_id: TxId, operation: Operation) -> Self {
     LogRecord {
       tx_id,
       operation,
@@ -78,42 +82,38 @@ impl LogRecord {
     }
   }
   pub fn new_insert(
-    log_id: usize,
-    tx_id: usize,
-    page_index: usize,
+    log_id: LogId,
+    tx_id: TxId,
+    page_pointer: Pointer,
     data: Vec<u8>,
   ) -> Self {
-    LogRecord::new(log_id, tx_id, Operation::Insert(page_index, data))
+    LogRecord::new(log_id, tx_id, Operation::Insert(page_pointer, data))
   }
 
-  pub fn new_start(log_id: usize, tx_id: usize) -> Self {
+  pub fn new_start(log_id: LogId, tx_id: TxId) -> Self {
     LogRecord::new(log_id, tx_id, Operation::Start)
   }
 
-  pub fn new_commit(log_id: usize, tx_id: usize) -> Self {
+  pub fn new_commit(log_id: LogId, tx_id: TxId) -> Self {
     LogRecord::new(log_id, tx_id, Operation::Commit)
   }
 
-  pub fn new_abort(log_id: usize, tx_id: usize) -> Self {
+  pub fn new_abort(log_id: LogId, tx_id: TxId) -> Self {
     LogRecord::new(log_id, tx_id, Operation::Abort)
   }
 
-  pub fn new_checkpoint(log_id: usize, last_log_id: usize, min_active: usize) -> Self {
+  pub fn new_checkpoint(log_id: LogId, last_log_id: LogId, min_active: TxId) -> Self {
     LogRecord::new(log_id, 0, Operation::Checkpoint(last_log_id, min_active))
   }
   pub fn new_multi(
-    log_id: usize,
-    tx_id: usize,
-    index1: usize,
+    log_id: LogId,
+    tx_id: TxId,
+    ptr1: Pointer,
     data1: Vec<u8>,
-    index2: usize,
+    ptr2: Pointer,
     data2: Vec<u8>,
   ) -> Self {
-    LogRecord::new(
-      log_id,
-      tx_id,
-      Operation::Multi(index1, data1, index2, data2),
-    )
+    LogRecord::new(log_id, tx_id, Operation::Multi(ptr1, data1, ptr2, data2))
   }
 
   unsafe fn write_at(&self, ptr: *mut u8) {
@@ -127,8 +127,8 @@ impl LogRecord {
     *ptr.add(offset) = self.operation.type_byte();
     offset += 1;
     match &self.operation {
-      Operation::Insert(index, data) => {
-        copy_nonoverlapping(index.to_le_bytes().as_ptr(), ptr.add(offset), 8);
+      Operation::Insert(page_ptr, data) => {
+        copy_nonoverlapping(page_ptr.to_le_bytes().as_ptr(), ptr.add(offset), 8);
         offset += 8;
         let data_len = data.len();
         copy_nonoverlapping(data.as_ptr(), ptr.add(offset), data_len);
@@ -143,8 +143,8 @@ impl LogRecord {
       Operation::Start => {}
       Operation::Commit => {}
       Operation::Abort => {}
-      Operation::Multi(index1, data1, index2, data2) => {
-        copy_nonoverlapping(index1.to_le_bytes().as_ptr(), ptr.add(offset), 8);
+      Operation::Multi(ptr1, data1, ptr2, data2) => {
+        copy_nonoverlapping(ptr1.to_le_bytes().as_ptr(), ptr.add(offset), 8);
         offset += 8;
         let data_len = data1.len();
         copy_nonoverlapping((data_len as u16).to_le_bytes().as_ptr(), ptr.add(offset), 2);
@@ -153,7 +153,7 @@ impl LogRecord {
         copy_nonoverlapping(data1.as_ptr(), ptr.add(offset), data_len);
         offset += data_len;
 
-        copy_nonoverlapping(index2.to_le_bytes().as_ptr(), ptr.add(offset), 8);
+        copy_nonoverlapping(ptr2.to_le_bytes().as_ptr(), ptr.add(offset), 8);
         offset += 8;
         let data_len = data2.len();
         copy_nonoverlapping(data2.as_ptr(), ptr.add(offset), data_len);
@@ -205,11 +205,11 @@ impl TryFrom<&[u8]> for LogRecord {
     }
 
     let mut offset = 21;
-    let log_id = usize::from_le_bytes(unsafe { (ptr.add(4) as *const [u8; 8]).read() });
-    let tx_id = usize::from_le_bytes(unsafe { (ptr.add(12) as *const [u8; 8]).read() });
+    let log_id = LogId::from_le_bytes(unsafe { (ptr.add(4) as *const [u8; 8]).read() });
+    let tx_id = TxId::from_le_bytes(unsafe { (ptr.add(12) as *const [u8; 8]).read() });
     let operation = match unsafe { *ptr.add(20) } {
       1 => unsafe {
-        let index = usize::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let index = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
         offset += 8;
 
         let mut data = vec![0; len - offset];
@@ -238,13 +238,13 @@ impl TryFrom<&[u8]> for LogRecord {
         if len != offset + 16 {
           return Err(Error::InvalidFormat("invalid len for checkpoint log."));
         }
-        let log_id = usize::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let log_id = LogId::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
         offset += 8;
-        let min_active = usize::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let min_active = TxId::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
         Operation::Checkpoint(log_id, min_active)
       },
       6 => unsafe {
-        let index1 = usize::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let ptr1 = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
         offset += 8;
 
         let data_len =
@@ -255,13 +255,13 @@ impl TryFrom<&[u8]> for LogRecord {
         copy_nonoverlapping(ptr.add(offset), data1.as_mut_ptr(), data_len);
         offset += data_len;
 
-        let index2 = usize::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let ptr2 = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
         offset += 8;
 
         let mut data2 = vec![0; len - offset];
         copy_nonoverlapping(ptr.add(offset), data2.as_mut_ptr(), data2.len());
 
-        Operation::Multi(index1, data1, index2, data2)
+        Operation::Multi(ptr1, data1, ptr2, data2)
       },
       _ => return Err(Error::InvalidFormat("invalid type log record.")),
     };

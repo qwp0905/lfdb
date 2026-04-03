@@ -1,5 +1,5 @@
 use crate::{
-  disk::{PageScanner, PageWriter},
+  disk::{PageScanner, PageWriter, Pointer},
   serialize::{Serializable, SerializeType},
   Result,
 };
@@ -9,21 +9,21 @@ use crate::{
  */
 #[derive(Debug)]
 pub struct TreeHeader {
-  root: usize,
+  root: Pointer,
   height: u16,
 }
 
 impl TreeHeader {
-  pub fn new(root: usize) -> Self {
+  pub fn new(root: Pointer) -> Self {
     Self { root, height: 0 }
   }
 
-  pub fn get_root(&self) -> usize {
+  pub fn get_root(&self) -> Pointer {
     self.root
   }
 
-  pub fn set_root(&mut self, index: usize) {
-    self.root = index
+  pub fn set_root(&mut self, pointer: Pointer) {
+    self.root = pointer
   }
   pub fn increase_height(&mut self) {
     self.height += 1;
@@ -39,13 +39,13 @@ impl Serializable for TreeHeader {
   }
 
   fn write_at(&self, writer: &mut PageWriter) -> Result {
-    writer.write_usize(self.root)?;
+    writer.write_u64(self.root)?;
     writer.write_u16(self.height)?;
     Ok(())
   }
 
   fn read_from(reader: &mut PageScanner) -> Result<Self> {
-    let root = reader.read_usize()?;
+    let root = reader.read_u64()?;
     let height = reader.read_u16()?;
     Ok(Self { root, height })
   }

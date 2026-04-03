@@ -8,12 +8,13 @@ use super::{
 use crate::{
   buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
+  disk::Pointer,
   error::Result,
   metrics::MetricsRegistry,
   serialize::Serializable,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
   utils::{LogFilter, ToArc, ToBox},
-  wal::{WALConfig, WAL},
+  wal::{TxId, WALConfig, WAL},
 };
 
 pub struct TransactionConfig {
@@ -156,14 +157,14 @@ impl TxOrchestrator {
     })
   }
   #[inline]
-  pub fn fetch(&self, index: usize) -> Result<Slot<'_>> {
-    self.buffer_pool.read(index)
+  pub fn fetch(&self, pointer: Pointer) -> Result<Slot<'_>> {
+    self.buffer_pool.read(pointer)
   }
 
   #[inline]
   pub fn serialize_and_log<T>(
     &self,
-    tx_id: usize,
+    tx_id: TxId,
     slot: &mut WritableSlot<'_>,
     data: &T,
   ) -> Result
@@ -180,8 +181,8 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn mark_gc(&self, index: usize) {
-    self.gc.mark(index);
+  pub fn mark_gc(&self, pointer: Pointer) {
+    self.gc.mark(pointer);
   }
 
   #[inline]
@@ -199,7 +200,7 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn commit_tx(&self, tx_id: usize) -> Result {
+  pub fn commit_tx(&self, tx_id: TxId) -> Result {
     self
       .metrics
       .transaction_commit
@@ -208,7 +209,7 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn abort_tx(&self, tx_id: usize) -> Result {
+  pub fn abort_tx(&self, tx_id: TxId) -> Result {
     self.version_visibility.set_abort(tx_id);
     self.wal.append_abort(tx_id)?;
     self.metrics.transaction_abort_count.inc();
@@ -216,24 +217,24 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn current_version(&self) -> usize {
+  pub fn current_version(&self) -> TxId {
     self.version_visibility.current_version()
   }
 
   #[inline]
-  pub fn reserve_table(&self, name: &str) -> Result<Option<usize>> {
+  pub fn reserve_table(&self, name: &str) -> Result<Option<Pointer>> {
     self.tables.get_or_reserve(name)
   }
   #[inline]
-  pub fn get_table(&self, name: &str) -> Option<usize> {
+  pub fn get_table(&self, name: &str) -> Option<Pointer> {
     self.tables.get(name)
   }
   #[inline]
-  pub fn create_table(&self, name: String, header: usize) {
+  pub fn create_table(&self, name: String, header: Pointer) {
     self.tables.insert(name, header);
   }
   #[inline]
-  pub fn drop_table(&self, name: &str, header: usize) {
+  pub fn drop_table(&self, name: &str, header: Pointer) {
     self.tables.remove(name);
     self.tree_manager.release_tree(header);
   }

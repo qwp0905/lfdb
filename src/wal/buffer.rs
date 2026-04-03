@@ -1,11 +1,11 @@
 use std::{
   ptr::copy_nonoverlapping,
-  sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+  sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use super::{FsyncResult, WALSegment, WAL_BLOCK_SIZE};
+use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
-  disk::PageRef,
+  disk::{PageRef, Pointer},
   error::Result,
   utils::{ToRawPointer, UnsafeBorrow, UnsafeDrop, UnsafeTake},
 };
@@ -26,7 +26,7 @@ pub struct LogBuffer {
    */
   offset: AtomicU64,
   /**
-   * data block for current index to store wal records.
+   * data block for current pointer to store wal records.
    * must mark records count before write to disk.
    * records count can be obtained from pinning entry.
    */
@@ -36,14 +36,14 @@ pub struct LogBuffer {
    */
   commit_count: AtomicU32,
   /**
-   * disk index for current data block
+   * disk pointer for current data block
    */
-  segment_index: usize,
+  segment_ptr: Pointer,
   /**
    * pin for using segment
    * it must taken with segment pointer.
    */
-  segment_pin: *const AtomicUsize,
+  segment_pin: *const AtomicU32,
   /**
    * Shared across all buffers within the same segment. Raw pointer allows exclusive
    * ownership transfer via take_segment() when the last buffer finishes — required
@@ -53,11 +53,11 @@ pub struct LogBuffer {
   /**
    * rotated and written complete data block count for current segment
    */
-  written_count: *const AtomicUsize,
+  written_count: *const AtomicU64,
   /**
    * current generation for current segment
    */
-  generation: usize,
+  generation: SegmentGeneration,
 }
 impl LogBuffer {
   const BIT: u64 = 40;
@@ -70,14 +70,14 @@ impl LogBuffer {
   pub fn init_new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment: WALSegment,
-    generation: usize,
+    generation: SegmentGeneration,
   ) -> Self {
     Self::new(
       entry,
       0,
-      AtomicUsize::new(0).to_raw_ptr(),
+      AtomicU32::new(0).to_raw_ptr(),
       segment.to_raw_ptr(),
-      AtomicUsize::new(0).to_raw_ptr(),
+      AtomicU64::new(0).to_raw_ptr(),
       generation,
     )
   }
@@ -87,7 +87,7 @@ impl LogBuffer {
   pub fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
     Self::new(
       entry,
-      self.segment_index + 1,
+      self.segment_ptr + 1,
       self.segment_pin,
       self.segment,
       self.written_count,
@@ -97,17 +97,17 @@ impl LogBuffer {
 
   fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
-    segment_index: usize,
-    segment_pin: *const AtomicUsize,
+    segment_ptr: Pointer,
+    segment_pin: *const AtomicU32,
     segment: *const WALSegment,
-    written_count: *const AtomicUsize,
-    generation: usize,
+    written_count: *const AtomicU64,
+    generation: SegmentGeneration,
   ) -> Self {
     Self {
       offset: AtomicU64::new(Self::OFFSET_BYTE),
       entry,
       commit_count: AtomicU32::new(0),
-      segment_index,
+      segment_ptr,
       segment_pin,
       segment,
       written_count,
@@ -153,7 +153,7 @@ impl LogBuffer {
     self
       .segment
       .borrow_unsafe()
-      .write(self.segment_index, &self.entry)
+      .write(self.segment_ptr, &self.entry)
   }
   /**
    * to complete writing data to entry
@@ -167,8 +167,8 @@ impl LogBuffer {
       .borrow_unsafe()
       .fetch_sub(1, Ordering::Release);
   }
-  pub fn get_index(&self) -> usize {
-    self.segment_index
+  pub fn get_pointer(&self) -> Pointer {
+    self.segment_ptr
   }
 
   /**
@@ -183,7 +183,7 @@ impl LogBuffer {
   pub fn load_offset(&self) -> usize {
     (self.offset.load(Ordering::Acquire) & Self::MASK) as usize
   }
-  pub fn load_segment_pinned(&self) -> usize {
+  pub fn load_segment_pinned(&self) -> u32 {
     self.segment_pin.borrow_unsafe().load(Ordering::Acquire)
   }
   pub fn increase_written_count(&self) {
@@ -195,12 +195,12 @@ impl LogBuffer {
   /**
    * Returns true when all prior blocks in the segment have been written to disk.
    * written_count increments after each block rotation completes its disk write,
-   * so segment_index <= written_count + 1 means blocks 0..segment_index-1 are persisted.
+   * so segment_ptr <= written_count + 1 means blocks 0..segment_ptr-1 are persisted.
    */
   pub fn is_ready_to_flush(&self) -> bool {
-    self.segment_index <= self.written_count.borrow_unsafe().load(Ordering::Acquire) + 1
+    self.segment_ptr <= self.written_count.borrow_unsafe().load(Ordering::Acquire) + 1
   }
-  pub fn get_generation(&self) -> usize {
+  pub fn get_generation(&self) -> SegmentGeneration {
     self.generation
   }
 }

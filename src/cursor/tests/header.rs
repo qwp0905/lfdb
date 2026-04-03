@@ -6,7 +6,7 @@ use super::*;
 fn test_tree_header_roundtrip() {
   let mut page = Page::new();
   let height = 0u16;
-  let root = 42usize;
+  let root = 42;
   let mut header = TreeHeader::new(root);
   header.height = height;
   page.serialize_from(&header).expect("serialize error");
@@ -20,7 +20,7 @@ fn test_tree_header_roundtrip() {
 fn test_tree_header_zero_root() {
   let mut page = Page::new();
   let height = 123u16;
-  let root = 0usize;
+  let root = 0;
   let mut header = TreeHeader::new(root);
   header.height = height;
   page.serialize_from(&header).expect("serialize error");
@@ -34,7 +34,7 @@ fn test_tree_header_zero_root() {
 fn test_tree_header_large_root() {
   let mut page = Page::new();
   let height = u16::MAX;
-  let root = usize::MAX;
+  let root = Pointer::MAX;
   let mut header = TreeHeader::new(root);
   header.height = height;
   page.serialize_from(&header).expect("serialize error");

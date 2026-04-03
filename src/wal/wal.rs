@@ -1,7 +1,7 @@
 use std::{
   path::PathBuf,
   sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
   },
   time::Duration,
@@ -14,15 +14,15 @@ use crossbeam::{
 };
 
 use crate::{
-  disk::PagePool,
+  disk::{PagePool, Pointer},
   error::Result,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
   utils::{LogFilter, ToArc, ToBox, UnsafeBorrow},
 };
 
 use super::{
-  replay, FsyncResult, LogBuffer, LogRecord, ReplayResult, SegmentPreload, WALSegment,
-  WAL_BLOCK_SIZE,
+  replay, FsyncResult, LogBuffer, LogId, LogRecord, ReplayResult, SegmentPreload, TxId,
+  WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -58,7 +58,7 @@ pub struct WAL {
   /**
    * last log id (LSN)
    */
-  last_log_id: AtomicUsize,
+  last_log_id: AtomicU64,
   /**
    * Current log buffer, managed via epoch GC. Epoch pinning guarantees the buffer
    * pointer remains valid for the duration of a guard — preventing use-after-free
@@ -68,7 +68,7 @@ pub struct WAL {
   /**
    * wal segment max size
    */
-  max_index: usize,
+  max_len: Pointer,
   /**
    * preloaded data block.
    */
@@ -97,7 +97,7 @@ pub struct WAL {
    * Number of segments whose fsync has completed. Used by commit_and_flush to
    * verify that all segments up to the current generation have been persisted.
    */
-  syned_count: AtomicUsize,
+  syned_count: AtomicU64,
 }
 impl WAL {
   pub fn replay(
@@ -105,8 +105,8 @@ impl WAL {
     checkpoint: WorkInput<(), Result>,
     logger: LogFilter,
   ) -> Result<(Self, ReplayResult)> {
-    let max_index = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(max_index);
+    let max_len = config.max_file_size / WAL_BLOCK_SIZE;
+    let page_pool = PagePool::new(max_len);
     logger.info(|| "start to replay wal segments");
 
     let replay_result = replay(
@@ -133,7 +133,7 @@ impl WAL {
       prefix,
       replay_result.generation,
       config.group_commit_count,
-      max_index,
+      max_len as Pointer,
     )
     .to_arc();
 
@@ -153,15 +153,15 @@ impl WAL {
 
     Ok((
       Self {
-        last_log_id: AtomicUsize::new(replay_result.last_log_id),
+        last_log_id: AtomicU64::new(replay_result.last_log_id),
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
-        max_index,
+        max_len: max_len as Pointer,
         wait_checkpoint,
         checkpoint_failed: not_flushed,
         fsync_queue: SegQueue::new(),
-        syned_count: AtomicUsize::new(0),
+        syned_count: AtomicU64::new(0),
       },
       replay_result,
     ))
@@ -190,7 +190,7 @@ impl WAL {
    * 7.  if obtained offset exceed the threshold(eg. WAL_BLOCK_SIZE), yield and move to 2 and retry.
    *
    * 8.  if obtained offset exceed the thredhold at first, then start to rotate current buffer.
-   *   8-1. if current buffer segment index has been exceed the threshold(eg. max len),
+   *   8-1. if current buffer segment pointer has been exceed the threshold(eg. max len),
    *          then trying to rotate buffer with rotated segment.
    *
    * 9.  if failed to rotate buffer, then clear this buffer and reuse segment if the segment has been rotated.
@@ -203,7 +203,7 @@ impl WAL {
    */
   fn append<F>(&self, create_record: F, flush: bool) -> Result
   where
-    F: FnOnce(usize) -> LogRecord,
+    F: FnOnce(LogId) -> LogRecord,
   {
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
     let record = create_record(log_id).to_bytes_with_len();
@@ -255,7 +255,7 @@ impl WAL {
         continue;
       }
 
-      let replacement = if buffer.get_index() + 1 >= self.max_index {
+      let replacement = if buffer.get_pointer() + 1 >= self.max_len {
         LogBuffer::init_new(
           self.page_pool.acquire(),
           self.preloader.load()?,
@@ -272,7 +272,7 @@ impl WAL {
         Ordering::Acquire,
         guard,
       ) {
-        if failed.new.get_index() > 0 {
+        if failed.new.get_pointer() > 0 {
           failed.current.as_raw().borrow_unsafe().unpin_segment();
           backoff.snooze();
           continue;
@@ -295,7 +295,7 @@ impl WAL {
       buffer.write_to_disk()?;
       buffer.increase_written_count();
 
-      if buffer.get_index() + 1 < self.max_index {
+      if buffer.get_pointer() + 1 < self.max_len {
         buffer.unpin_segment();
         backoff.snooze();
         continue;
@@ -310,44 +310,44 @@ impl WAL {
     }
   }
 
-  pub fn current_log_id(&self) -> usize {
+  pub fn current_log_id(&self) -> LogId {
     self.last_log_id.load(Ordering::Acquire)
   }
 
-  pub fn append_insert(&self, tx_id: usize, index: usize, data: Vec<u8>) -> Result {
+  pub fn append_insert(&self, tx_id: TxId, ptr: Pointer, data: Vec<u8>) -> Result {
     self.append(
-      |log_id| LogRecord::new_insert(log_id, tx_id, index, data),
+      |log_id| LogRecord::new_insert(log_id, tx_id, ptr, data),
       false,
     )
   }
 
   pub fn append_multi(
     &self,
-    tx_id: usize,
-    index1: usize,
+    tx_id: TxId,
+    ptr1: Pointer,
     data1: Vec<u8>,
-    index2: usize,
+    ptr2: Pointer,
     data2: Vec<u8>,
   ) -> Result {
     self.append(
-      |log_id| LogRecord::new_multi(log_id, tx_id, index1, data1, index2, data2),
+      |log_id| LogRecord::new_multi(log_id, tx_id, ptr1, data1, ptr2, data2),
       false,
     )
   }
 
-  pub fn checkpoint_and_flush(&self, last_log_id: usize, min_active: usize) -> Result {
+  pub fn checkpoint_and_flush(&self, last_log_id: LogId, min_active: TxId) -> Result {
     self.append(
       |log_id| LogRecord::new_checkpoint(log_id, last_log_id, min_active),
       true,
     )
   }
-  pub fn append_start(&self, tx_id: usize) -> Result {
+  pub fn append_start(&self, tx_id: TxId) -> Result {
     self.append(|log_id| LogRecord::new_start(log_id, tx_id), false)
   }
-  pub fn commit_and_flush(&self, tx_id: usize) -> Result {
+  pub fn commit_and_flush(&self, tx_id: TxId) -> Result {
     self.append(|log_id| LogRecord::new_commit(log_id, tx_id), true)
   }
-  pub fn append_abort(&self, tx_id: usize) -> Result {
+  pub fn append_abort(&self, tx_id: TxId) -> Result {
     self.append(|log_id| LogRecord::new_abort(log_id, tx_id), false)
   }
 

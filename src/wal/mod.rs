@@ -8,10 +8,13 @@ mod segment;
 pub use segment::*;
 
 mod replay;
-use replay::*;
+pub use replay::*;
 
 mod buffer;
 use buffer::*;
 
 mod preload;
 use preload::*;
+
+mod types;
+pub use types::*;
