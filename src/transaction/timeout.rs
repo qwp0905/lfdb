@@ -217,7 +217,6 @@ impl TimeoutThread {
     let (tx, rx) = unbounded();
     let th = Builder::new()
       .name("timeout".to_string())
-      .stack_size(2 << 20)
       .spawn(move || {
         let logger_c = logger.clone();
         let mut wheel = TimingWheel::new(move |tx_id: TxId| {

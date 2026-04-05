@@ -4,6 +4,26 @@ use std::{
   path::Path,
 };
 
+#[cfg(unix)]
+use libc;
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::{
+  io::Error,
+  os::{fd::AsRawFd, unix::fs::FileExt},
+};
+
+#[cfg(windows)]
+use winapi;
+
+#[cfg(windows)]
+use std::{
+  intrinsics::copy_nonoverlapping,
+  os::windows::fs::{FileExt, OpenOptionsExt},
+};
+
 #[cfg(any(
   target_os = "dragonfly",
   target_os = "freebsd",
@@ -43,26 +63,6 @@ pub const fn max_iov() -> usize {
 pub const fn max_iov() -> usize {
   16 // The minimum value required by POSIX.
 }
-
-#[cfg(unix)]
-use libc;
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
-use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::{
-  io::Error,
-  os::{fd::AsRawFd, unix::fs::FileExt},
-};
-
-#[cfg(windows)]
-use winapi;
-
-#[cfg(windows)]
-use std::{
-  intrinsics::copy_nonoverlapping,
-  os::windows::fs::{FileExt, OpenOptionsExt},
-};
 
 pub trait Pread {
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
