@@ -39,12 +39,10 @@ impl<const N: usize> AsMut<Page<N>> for PageRef<N> {
 }
 impl<const N: usize> Drop for PageRef<N> {
   fn drop(&mut self) {
-    unsafe {
-      if let Ok(_) = self.store.data.push(ManuallyDrop::take(&mut self.page)) {
-        return;
-      };
-      ManuallyDrop::drop(&mut self.page);
-    }
+    let _ = self
+      .store
+      .data
+      .push(unsafe { ManuallyDrop::take(&mut self.page) });
   }
 }
 
@@ -64,13 +62,10 @@ impl<const N: usize> PagePool<N> {
   }
 
   pub fn acquire(&self) -> PageRef<N> {
-    self
-      .store
-      .as_ref()
-      .data
-      .pop()
-      .map(|p| PageRef::from_exists(self.store.clone(), p))
-      .unwrap_or_else(|| PageRef::new(self.store.clone()))
+    if let Some(page) = self.store.data.pop() {
+      return PageRef::from_exists(self.store.clone(), page);
+    }
+    PageRef::new(self.store.clone())
   }
 
   #[allow(unused)]
@@ -86,6 +81,13 @@ impl<const N: usize> PageStore<N> {
   fn new(cap: usize) -> Self {
     Self {
       data: ArrayQueue::new(cap),
+    }
+  }
+}
+impl<const N: usize> Drop for PageStore<N> {
+  fn drop(&mut self) {
+    while let Some(page) = self.data.pop() {
+      drop(page);
     }
   }
 }
