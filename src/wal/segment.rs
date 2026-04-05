@@ -150,14 +150,12 @@ impl WALSegment {
         "{} buffered write",
         path.as_path().to_string_lossy()
       ))
-      .stack_size(2 << 20)
       .single()
       .eager_buffering(max_iov(), handle_write(file.clone()))
       .to_box();
 
     let flush = WorkBuilder::new()
       .name(format!("{} flush", path.as_path().to_string_lossy()))
-      .stack_size(2 << 20)
       .single()
       .eager_buffering(flush_count, handle_flush(file.clone()))
       .to_box();

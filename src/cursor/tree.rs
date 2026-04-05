@@ -41,7 +41,6 @@ impl TreeManager {
   ) -> Self {
     let merge_leaf = WorkBuilder::new()
       .name("merge leaf nodes")
-      .stack_size(2 << 20)
       .single()
       .interval(
         config.merge_interval,
@@ -56,7 +55,6 @@ impl TreeManager {
       .to_box();
     let release_tree = WorkBuilder::new()
       .name("release tree")
-      .stack_size(2 << 20)
       .multi(1)
       .shared(run_release_tree(buffer_pool.clone(), gc.clone()))
       .to_box();

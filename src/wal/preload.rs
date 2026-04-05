@@ -41,7 +41,6 @@ impl SegmentPreload {
     let mut generation = generation;
     let thread = WorkBuilder::new()
       .name("wal segment preloader")
-      .stack_size(2 << 20)
       .single()
       .interval(SEGMENT_MAX_LIFE, move |trigger| {
         if trigger.is_none() {

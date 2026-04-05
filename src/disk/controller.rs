@@ -78,7 +78,6 @@ impl<const N: usize> DiskController<N> {
       .to_arc();
     let writer = WorkBuilder::new()
       .name(format!("{} write buffering", path.to_string_lossy()))
-      .stack_size(2 << 20)
       .single()
       .eager_buffering(max_iov(), Self::handle_write(file.clone(), metrics.clone()))
       .to_box();

@@ -4,7 +4,7 @@ use std::{
   ptr::NonNull,
 };
 
-use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeTake};
+use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 use super::{Bucket, LRUList};
 use hashbrown::{raw::RawTable, Equivalent};
@@ -220,10 +220,10 @@ where
 impl<K, V> Drop for LRUShard<K, V> {
   fn drop(&mut self) {
     while let Some(ptr) = self.old_sub_list.pop_tail() {
-      let _ = ptr.take_unsafe().take();
+      ptr.drop_unsafe();
     }
     while let Some(ptr) = self.new_sub_list.pop_tail() {
-      let _ = ptr.take_unsafe().take();
+      ptr.drop_unsafe();
     }
   }
 }

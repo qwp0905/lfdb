@@ -140,7 +140,6 @@ impl WAL {
     let not_flushed = SegQueue::new().to_arc();
     let wait_checkpoint = WorkBuilder::new()
       .name("wal checkpoint buffering")
-      .stack_size(2 << 20)
       .single()
       .lazy_buffering(
         config.segment_flush_delay,

@@ -110,7 +110,6 @@ impl GarbageCollector {
 
     let entry = WorkBuilder::new()
       .name("gc found entry")
-      .stack_size(2 << 20)
       .multi(config.thread_count)
       .shared(run_entry(
         buffer_pool.clone(),
@@ -121,7 +120,6 @@ impl GarbageCollector {
       .to_arc();
     let check = WorkBuilder::new()
       .name("gc check top entry")
-      .stack_size(2 << 20)
       .multi(config.thread_count)
       .shared(run_check(buffer_pool.clone()))
       .to_arc();

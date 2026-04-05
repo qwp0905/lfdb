@@ -18,7 +18,7 @@ impl WorkBuilder {
   pub fn new() -> Self {
     WorkBuilder {
       name: Default::default(),
-      stack_size: 2 << 20,
+      stack_size: 16 << 10,
     }
   }
   pub fn name<S: ToString>(mut self, name: S) -> Self {
