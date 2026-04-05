@@ -62,10 +62,10 @@ impl<const N: usize> PagePool<N> {
   }
 
   pub fn acquire(&self) -> PageRef<N> {
-    if let Some(page) = self.store.data.pop() {
-      return PageRef::from_exists(self.store.clone(), page);
+    match self.store.data.pop() {
+      Some(page) => PageRef::from_exists(self.store.clone(), page),
+      None => PageRef::new(self.store.clone()),
     }
-    PageRef::new(self.store.clone())
   }
 
   #[allow(unused)]
