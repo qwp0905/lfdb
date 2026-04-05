@@ -216,18 +216,6 @@ fn test_page_copy() {
   }
 }
 
-// #[test]
-// fn test_from_array() {
-//   const SIZE: usize = 5;
-//   let data = [1, 2, 3, 4, 5];
-//   let page = Page::<SIZE>::from(data);
-
-//   let mut scanner = page.scanner();
-//   for &expected in data.iter() {
-//     assert_eq!(scanner.read().unwrap(), expected);
-//   }
-// }
-
 #[test]
 fn test_from_slice() {
   const SIZE: usize = 4;
