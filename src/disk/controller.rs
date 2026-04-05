@@ -41,8 +41,9 @@ impl<const N: usize> DiskController<N> {
     move |mut buffered| {
       if buffered.len() == 1 {
         let (p, slice) = &buffered[0];
-        return file
-          .pwrite(slice.as_ref().as_ref(), p * Self::SIZE)
+        return metrics
+          .disk_write
+          .measure(|| file.pwrite(slice.as_ref().as_ref(), p * Self::SIZE))
           .map_err(Error::IO)
           .map(drop);
       }
