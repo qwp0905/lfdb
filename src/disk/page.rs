@@ -1,72 +1,77 @@
 use std::{
-  cell::UnsafeCell, marker::PhantomData, panic::RefUnwindSafe, ptr::copy_nonoverlapping,
-  slice::from_raw_parts,
+  alloc::{alloc_zeroed, dealloc, Layout},
+  marker::PhantomData,
+  panic::RefUnwindSafe,
+  ptr::copy_nonoverlapping,
+  slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-use crate::{
-  error::{Error, Result},
-  utils::UnsafeBorrow,
-};
+use crate::error::{Error, Result};
 
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 
+pub const ALIGN: usize = 512;
+
 /**
  * An abstraction over a fixed-size disk block.
- *
- * UnsafeCell is required because Page is accessed primarily via raw pointers.
- * Without it, the compiler may optimize away writes under the assumption that
- * no aliasing occurs, causing data to not be reflected in release builds.
+ * Allocate 512-byte aligned heap memory for Direct I/O.
+ * For memory alignment, the page size must always be a multiple of 2.
  */
 #[derive(Debug)]
-pub struct Page<const T: usize = PAGE_SIZE>(UnsafeCell<[u8; T]>);
+pub struct Page<const T: usize = PAGE_SIZE>(*mut u8, PhantomData<[u8; T]>);
 
 impl<const T: usize> Page<T> {
+  const LAYOUT: Layout = {
+    assert!(T & (T - 1) == 0);
+    unsafe { Layout::from_size_align_unchecked(T, ALIGN) }
+  };
+
   #[inline]
   pub fn new() -> Self {
-    Self(UnsafeCell::new([0; T]))
+    Self(unsafe { alloc_zeroed(Self::LAYOUT) }, PhantomData)
   }
   #[inline(always)]
   pub fn as_ptr(&self) -> *const u8 {
-    self.0.get() as *const u8
+    self.0 as *const u8
   }
   #[inline]
   pub fn copy_from<V: AsRef<[u8]>>(&mut self, data: V) {
     let data = data.as_ref();
     let len = data.len().min(T);
-    unsafe { copy_nonoverlapping(data.as_ptr(), self.as_ptr() as *mut u8, len) };
+    unsafe { copy_nonoverlapping(data.as_ptr(), self.0, len) };
   }
   #[inline]
   pub fn copy_n(&mut self, byte_len: usize) -> Vec<u8> {
     let mut data = vec![0; byte_len];
-    unsafe { copy_nonoverlapping(self.as_ptr(), data.as_mut_ptr(), byte_len) };
+    unsafe { copy_nonoverlapping(self.0, data.as_mut_ptr(), byte_len) };
     data
   }
   #[inline]
   pub fn scanner(&self) -> PageScanner<'_, T> {
-    PageScanner::new(self.as_ptr())
+    PageScanner::new(self.0)
   }
   #[inline]
   pub fn writer(&mut self) -> PageWriter<'_, T> {
-    PageWriter::new(self.0.get() as *mut u8)
+    PageWriter::new(self.0)
+  }
+}
+
+impl<const T: usize> Drop for Page<T> {
+  fn drop(&mut self) {
+    unsafe { dealloc(self.0, Self::LAYOUT) };
   }
 }
 
 impl<const T: usize> AsRef<[u8]> for Page<T> {
   #[inline(always)]
   fn as_ref(&self) -> &[u8] {
-    self.0.get().borrow_unsafe()
+    unsafe { from_raw_parts(self.0, T) }
   }
 }
 impl<const T: usize> AsMut<[u8]> for Page<T> {
   #[inline(always)]
   fn as_mut(&mut self) -> &mut [u8] {
-    self.0.get_mut()
-  }
-}
-impl<const T: usize> From<[u8; T]> for Page<T> {
-  #[inline(always)]
-  fn from(bytes: [u8; T]) -> Self {
-    Self(UnsafeCell::new(bytes))
+    unsafe { from_raw_parts_mut(self.0, T) }
   }
 }
 
@@ -208,3 +213,8 @@ impl<'a, const T: usize> PageWriter<'a, T> {
 #[cfg(test)]
 #[path = "tests/page.rs"]
 mod tests;
+
+#[test]
+fn sdf() {
+  println!("{}", size_of::<Page<4096>>())
+}
