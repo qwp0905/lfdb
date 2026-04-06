@@ -259,6 +259,9 @@ impl LeafNode {
   pub fn get_entry_pointers(&self) -> impl Iterator<Item = Pointer> + '_ {
     self.entries.iter().map(|(_, p)| *p)
   }
+  pub fn get_entries(&self) -> impl Iterator<Item = &(Key, Pointer)> + '_ {
+    self.entries.iter()
+  }
   pub fn set_entries(&mut self, entries: Vec<(Key, Pointer)>) {
     self.entries = entries;
   }
