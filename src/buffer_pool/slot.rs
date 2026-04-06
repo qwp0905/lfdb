@@ -7,7 +7,8 @@ use crossbeam::utils::Backoff;
 
 use super::{Frame, FrameState, Shard, TempFrameState};
 use crate::{
-  disk::{DiskController, Page, PageRef, Pointer, PAGE_SIZE},
+  disk::{Page, PageRef, Pointer, PAGE_SIZE},
+  table::TableHandle,
   utils::{AtomicBitmap, ShortenedMutex, ShortenedRwLock},
 };
 
@@ -26,16 +27,14 @@ impl<'a> Slot<'a> {
   pub fn temp(
     state: Arc<TempFrameState>,
     pointer: Pointer,
-    disk: &'a DiskController<PAGE_SIZE>,
+    handle: Option<Arc<TableHandle>>,
     shard: &'a Mutex<Shard>,
-    is_peek: bool,
   ) -> Self {
     Self::Temp(TempSlot {
       state,
       pointer,
-      disk,
+      handle,
       shard,
-      is_peek,
     })
   }
   pub fn page(
@@ -168,9 +167,8 @@ impl<'a> Drop for PageSlotRead<'a> {
 pub struct TempSlot<'a> {
   state: Arc<TempFrameState>,
   pointer: Pointer,
-  disk: &'a DiskController<PAGE_SIZE>,
+  handle: Option<Arc<TableHandle>>,
   shard: &'a Mutex<Shard>,
-  is_peek: bool,
 }
 impl<'a> TempSlot<'a> {
   fn for_read<'b>(self) -> TempSlotRead<'b>
@@ -181,9 +179,8 @@ impl<'a> TempSlot<'a> {
       guard: ManuallyDrop::new(unsafe { transmute(self.state.for_read()) }),
       state: self.state.clone(),
       pointer: self.pointer,
-      disk: self.disk,
+      handle: self.handle,
       shard: self.shard,
-      is_peek: self.is_peek,
     }
   }
 
@@ -195,9 +192,8 @@ impl<'a> TempSlot<'a> {
       guard: ManuallyDrop::new(unsafe { transmute(self.state.for_write()) }),
       state: self.state.clone(),
       pointer: self.pointer,
-      disk: self.disk,
+      handle: self.handle,
       shard: self.shard,
-      is_peek: self.is_peek,
     }
   }
 }
@@ -215,28 +211,30 @@ pub struct TempSlotWrite<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockWriteGuard<'a, PageRef<PAGE_SIZE>>>,
   pointer: Pointer,
-  disk: &'a DiskController<PAGE_SIZE>,
+  handle: Option<Arc<TableHandle>>,
   shard: &'a Mutex<Shard>,
-  is_peek: bool,
 }
 
 impl<'a> TempSlotWrite<'a> {
-  fn release(&mut self) {
+  fn release(&mut self, handle: Arc<TableHandle>) {
     unsafe { ManuallyDrop::drop(&mut self.guard) };
     let backoff = Backoff::new();
     while !self.state.try_evict() {
       backoff.snooze();
     }
-    let _ = self.disk.write(self.pointer, &self.state.for_read());
-    self.shard.l().remove_temp(self.pointer);
+    let _ = handle.disk().write(self.pointer, &self.state.for_read());
+    self
+      .shard
+      .l()
+      .remove_temp(handle.metadata().get_id(), self.pointer);
   }
 }
 impl<'a> Drop for TempSlotWrite<'a> {
   fn drop(&mut self) {
-    // is_peek identifies the creator of this temp page, who is responsible
+    // handle identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if self.is_peek {
-      return self.release();
+    if let Some(handle) = self.handle.take() {
+      return self.release(handle);
     }
     self.state.mark_dirty();
     self.state.unpin();
@@ -257,29 +255,31 @@ pub struct TempSlotRead<'a> {
   state: Arc<TempFrameState>,
   guard: ManuallyDrop<RwLockReadGuard<'a, PageRef<PAGE_SIZE>>>,
   pointer: Pointer,
-  disk: &'a DiskController<PAGE_SIZE>,
+  handle: Option<Arc<TableHandle>>,
   shard: &'a Mutex<Shard>,
-  is_peek: bool,
 }
 impl<'a> TempSlotRead<'a> {
-  fn release(&mut self) {
+  fn release(&mut self, handle: Arc<TableHandle>) {
     unsafe { ManuallyDrop::drop(&mut self.guard) };
     let backoff = Backoff::new();
     while !self.state.try_evict() {
       backoff.snooze();
     }
     if self.state.is_dirty() {
-      let _ = self.disk.write(self.pointer, &self.state.for_read());
+      let _ = handle.disk().write(self.pointer, &self.state.for_read());
     }
-    self.shard.l().remove_temp(self.pointer);
+    self
+      .shard
+      .l()
+      .remove_temp(handle.metadata().get_id(), self.pointer);
   }
 }
 impl<'a> Drop for TempSlotRead<'a> {
   fn drop(&mut self) {
-    // is_peek identifies the creator of this temp page, who is responsible
+    // handle identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if self.is_peek {
-      return self.release();
+    if let Some(handle) = self.handle.take() {
+      return self.release(handle);
     }
 
     self.state.unpin();
