@@ -8,6 +8,8 @@ A persistent, ACID-compliant embedded key-value store built for **high-concurren
 
 ### Open
 
+The path passed to `EngineBuilder` is used as a dedicated data directory. The engine creates WAL segments and per-table data files inside it. Use a directory that is not shared with other applications.
+
 ```rust
 use lfdb::EngineBuilder;
 
@@ -113,21 +115,25 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
          │        ┌───────┘  │  └───────┐         │
          │        │          │          │         │
 ┌────────▼──────┐ │ ┌────────▼───────┐  │ ┌───────▼───────┐
-│  Buffer Pool  │ │ │   Free List    │  │ │    Garbage    │
-│  2-tier LRU   │ │ │  (page alloc)  │  │ │   Collector   │
-│  sharded lock │ │ └────────────────┘  │ │   2-process   │
-└───────┬───────┘ │                     │ └───────────────┘
-        │  ┌──────▼────────┐  ┌─────────▼───────┐
-        │  │      WAL      │  │     Version     │
-        │  │  lock-free    │  │    Visibility   │
-        │  │  CAS append   │  │     (MVCC)      │
-        │  └──┬─────┬──────┘  └─────────────────┘
-        │     │     │
-┌───────▼─────▼┐ ┌──▼─────────────┐
-│DiskController│ │  WAL Segments  │
-│ (async I/O)  │ │  + Preloader   │
-│  Direct I/O  │ │  + Checkpoint  │
-└──────────────┘ └────────────────┘
+│  Buffer Pool  │ │ │  TableMapper   │  │ │    Garbage    │
+│  2-tier LRU   │ │ │  ┌───────────┐ │  │ │   Collector   │
+│  sharded lock │ │ │  │TableHandle│ │  │ │   2-process   │
+└───────────────┘ │ │  │ FreeList  │ │  │ └───────────────┘
+                  │ │  │ DiskCtrl  │ │  │
+   ┌──────────────┘ │  └───────────┘ │  │
+   │                └────────────────┘  │
+   │                                    │
+┌──▼──────────────┐  ┌──────────────────▼┐
+│      WAL        │  │     Version       │
+│  lock-free      │  │    Visibility     │
+│  CAS append     │  │     (MVCC)        │
+└──┬─────┬────────┘  └──────────────────-┘
+   │     │
+┌──▼─────▼────────┐
+│  WAL Segments   │
+│  + Preloader    │
+│  + Checkpoint   │
+└─────────────────┘
 ```
 
 ### Characteristics
@@ -183,7 +189,7 @@ On startup, the engine replays the WAL and redoes all committed transactions sin
 
 - **Key size**: maximum 256 bytes
 - **Value size**: maximum 65,536 bytes (64 KB)
-- **Heavy removes**: compaction is not implemented. Disk space freed by removes is returned to the free list and reused for new writes, but the data file never shrinks. Heavy delete workloads will cause disk fragmentation over time. Tune `gc_trigger_interval` to reduce empty leaf nodes and maintain scan performance, but this does not recover fragmented disk space.
+- **Heavy removes**: compaction is not implemented. Disk space freed by removes is returned to the per-table free list and reused for new writes, but each table's data file never shrinks. Heavy delete workloads will cause disk fragmentation over time. Tune `gc_trigger_interval` to reduce empty leaf nodes and maintain scan performance, but this does not recover fragmented disk space. Dropping a table deletes the entire file immediately.
 
 ## License
 
