@@ -1,9 +1,10 @@
-use std::mem::replace;
+use std::{mem::replace, sync::Arc};
 
 use super::{CursorNode, DataEntry, Key, LeafNode};
 use crate::{
   disk::Pointer,
   error::{Error, Result},
+  table::TableHandle,
   transaction::{TxOrchestrator, TxSnapshot, TxState},
 };
 
@@ -17,6 +18,7 @@ use crate::{
  * never freed.
  */
 pub struct CursorIterator<'a> {
+  table: Arc<TableHandle>,
   state: &'a TxState<'a>,
   snapshot: &'a TxSnapshot<'a>,
   orchestrator: &'a TxOrchestrator,
@@ -27,6 +29,7 @@ pub struct CursorIterator<'a> {
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(
+    table: Arc<TableHandle>,
     state: &'a TxState,
     snapshot: &'a TxSnapshot<'a>,
     orchestrator: &'a TxOrchestrator,
@@ -35,6 +38,7 @@ impl<'a> CursorIterator<'a> {
     end: Option<Key>,
   ) -> Self {
     Self {
+      table,
       state,
       snapshot,
       orchestrator,
@@ -46,7 +50,7 @@ impl<'a> CursorIterator<'a> {
   }
 
   fn find_value(&self, ptr: Pointer) -> Result<Option<Vec<u8>>> {
-    let mut slot = self.orchestrator.fetch(ptr)?.for_read();
+    let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
     loop {
       let entry = slot.as_ref().deserialize::<DataEntry>()?;
       if let Some(record) =
@@ -55,7 +59,7 @@ impl<'a> CursorIterator<'a> {
         return record.read_data(|i| {
           self
             .orchestrator
-            .fetch(i)?
+            .fetch(i, self.table.clone())?
             .for_read()
             .as_ref()
             .deserialize()
@@ -63,7 +67,10 @@ impl<'a> CursorIterator<'a> {
       }
 
       match entry.get_next() {
-        Some(i) => drop(replace(&mut slot, self.orchestrator.fetch(i)?.for_read())),
+        Some(i) => drop(replace(
+          &mut slot,
+          self.orchestrator.fetch(i, self.table.clone())?.for_read(),
+        )),
         None => return Ok(None),
       }
     }
@@ -102,7 +109,7 @@ impl<'a> CursorIterator<'a> {
 
       self.leaf = self
         .orchestrator
-        .fetch(ptr)?
+        .fetch(ptr, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
