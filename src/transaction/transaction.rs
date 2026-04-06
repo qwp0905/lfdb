@@ -1,9 +1,9 @@
 use std::{marker::PhantomData, sync::Arc, time::Instant};
 
 use crate::{
-  cursor::{Cursor, META_TABLE_HEADER},
-  disk::Pointer,
+  cursor::Cursor,
   metrics::MetricsRegistry,
+  table::{ReserveResult, TableHandle, TableMetadata},
   transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
 };
@@ -19,7 +19,7 @@ pub struct Transaction<'a> {
   snapshot: TxSnapshot<'a>,
   metrics: Arc<MetricsRegistry>,
   tx_start: Option<Instant>,
-  created_tables: Vec<(String, Pointer)>,
+  created_tables: Vec<(String, Arc<TableHandle>)>,
   _marker: PhantomData<*const ()>,
 }
 impl<'a> Transaction<'a> {
@@ -42,9 +42,9 @@ impl<'a> Transaction<'a> {
   }
 
   #[inline]
-  fn open_cursor(&self, header: Pointer) -> Cursor<'_> {
+  fn open_cursor(&self, table: Arc<TableHandle>) -> Cursor<'_> {
     Cursor::new(
-      header,
+      table,
       &self.orchestrator,
       &self.state,
       &self.snapshot,
@@ -57,8 +57,8 @@ impl<'a> Transaction<'a> {
       return Err(Error::TransactionClosed);
     }
 
-    if let Some(header) = self.orchestrator.get_table(name) {
-      return Ok(self.open_cursor(header));
+    if let Some(table) = self.orchestrator.get_table(name) {
+      return Ok(self.open_cursor(table));
     }
     Err(Error::TableNotFound(name.to_string()))
   }
@@ -68,32 +68,36 @@ impl<'a> Transaction<'a> {
       return Err(Error::TransactionClosed);
     }
 
-    if let Some(header) = self.orchestrator.reserve_table(name)? {
-      return Ok(self.open_cursor(header));
-    }
-
-    let meta = self.open_cursor(META_TABLE_HEADER);
-    if let Some(bytes) = meta.get(&name.as_bytes())? {
-      if let Ok(bytes) = bytes.try_into() {
-        let header = Pointer::from_le_bytes(bytes);
-        self.orchestrator.create_table(name.to_string(), header);
-        return Ok(self.open_cursor(header));
-      }
+    match self.orchestrator.reserve_table(name)? {
+      ReserveResult::Found(table) => return Ok(self.open_cursor(table)),
+      ReserveResult::Reserved => return Err(Error::WriteConflict),
+      ReserveResult::New => {}
     };
 
+    let meta = self.open_cursor(self.orchestrator.get_metadata_table());
+    if let Some(bytes) = meta.get(&name.as_bytes())? {
+      if let Ok(table_meta) = TableMetadata::from_bytes(&bytes) {
+        let table = self.orchestrator.create_table(table_meta)?;
+        self
+          .orchestrator
+          .open_table(name.to_string(), table.clone());
+        return Ok(self.open_cursor(table));
+      }
+    }
+
+    let table_meta = self.orchestrator.create_table_metadata(name);
+    meta.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
+
+    let table = self.orchestrator.create_table(table_meta)?;
     let cursor = Cursor::initialize(
+      table.clone(),
       &self.orchestrator,
       &self.state,
       &self.snapshot,
       &self.metrics,
     )?;
-    meta.insert(
-      name.as_bytes().to_vec(),
-      cursor.get_header().to_le_bytes().to_vec(),
-    )?;
-    self
-      .created_tables
-      .push((name.to_string(), cursor.get_header()));
+    self.created_tables.push((name.to_string(), table));
+
     Ok(cursor)
   }
 
@@ -106,8 +110,8 @@ impl<'a> Transaction<'a> {
       return Err(err);
     }
 
-    while let Some((name, header)) = self.created_tables.pop() {
-      self.orchestrator.create_table(name, header);
+    while let Some((name, table)) = self.created_tables.pop() {
+      self.orchestrator.open_table(name, table);
     }
     self.state.deactive();
     Ok(())
@@ -119,8 +123,8 @@ impl<'a> Transaction<'a> {
     }
     self.orchestrator.abort_tx(self.state.get_id())?;
 
-    while let Some((name, header)) = self.created_tables.pop() {
-      self.orchestrator.drop_table(&name, header);
+    while let Some((name, table)) = self.created_tables.pop() {
+      self.orchestrator.drop_table(&name, table)?;
     }
     self.state.deactive();
     Ok(())
