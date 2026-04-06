@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam::queue::SegQueue;
 
-use crate::disk::Pointer;
+use super::Pointer;
 
 /**
  * Free page list, reconstructed at startup via a full B-tree scan.
@@ -12,9 +12,9 @@ pub struct FreeList {
   released: SegQueue<Pointer>,
 }
 impl FreeList {
-  pub fn new(file_end: Pointer) -> Self {
+  pub fn new() -> Self {
     Self {
-      file_end: AtomicU64::new((file_end == 0).then(|| 1).unwrap_or(file_end)),
+      file_end: AtomicU64::new(1),
       released: SegQueue::new(),
     }
   }
@@ -28,5 +28,8 @@ impl FreeList {
 
   pub fn dealloc(&self, pointer: Pointer) {
     self.released.push(pointer);
+  }
+  pub fn replay(&self, file_end: Pointer) {
+    self.file_end.store(file_end, Ordering::Release);
   }
 }
