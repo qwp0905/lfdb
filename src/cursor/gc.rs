@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeSet, HashSet, VecDeque},
+  collections::{BTreeMap, HashSet, VecDeque},
   mem::replace,
   sync::Arc,
 };
@@ -9,8 +9,9 @@ use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
   error::Result,
+  table::TableHandle,
   thread::{BackgroundThread, BatchWorkResult, WorkBuilder, WorkResult},
-  transaction::{FreeList, PageRecorder, VersionVisibility},
+  transaction::{PageRecorder, VersionVisibility},
   utils::{DoubleBuffer, LogFilter, ToArc},
   wal::RESERVED_TX,
 };
@@ -28,8 +29,8 @@ pub struct GarbageCollectionConfig {
  * a dangling pointer if Release ran first.
  */
 enum GcPointer {
-  Trim(Pointer),
-  Release(Pointer),
+  Trim(Arc<TableHandle>, Pointer),
+  Release(Arc<TableHandle>, Pointer),
 }
 
 /**
@@ -41,9 +42,8 @@ enum GcPointer {
  * emptiness queries, entry does version reclamation.
  */
 pub struct GarbageCollector {
-  check: Arc<dyn BackgroundThread<Pointer, Result<bool>>>,
-  entry: Arc<dyn BackgroundThread<Pointer, Result>>,
-  free_list: Arc<FreeList>,
+  check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
+  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
   logger: LogFilter,
 }
@@ -54,17 +54,19 @@ impl GarbageCollector {
       .logger
       .debug(|| format!("{} data will check version in this scope.", queue.len()));
     let mut waiting = Vec::new();
-    let mut release = BTreeSet::new();
+    let mut release = BTreeMap::new();
     let mut dedup = HashSet::new();
     while let Some(ptr) = queue.pop() {
       match ptr {
-        GcPointer::Trim(ptr) => {
-          if !dedup.insert(ptr) {
+        GcPointer::Trim(table, ptr) => {
+          if !dedup.insert((table.metadata().get_id(), ptr)) {
             continue;
           }
-          waiting.push(self.entry.send(ptr));
+          waiting.push(self.entry.send((table, ptr)));
         }
-        GcPointer::Release(ptr) => drop(release.insert(ptr)),
+        GcPointer::Release(table, ptr) => {
+          release.insert((table.metadata().get_id(), ptr), table);
+        }
       }
     }
     self.logger.debug(|| "all entry cleaning triggered.");
@@ -77,31 +79,36 @@ impl GarbageCollector {
 
     // must release after triming because of trim type can contain release type.
     // it could occur dangling pointer reference.
-    release.into_iter().for_each(|i| self.free_list.dealloc(i));
+    release
+      .into_iter()
+      .for_each(|((_, ptr), table)| table.free().dealloc(ptr));
     Ok(())
   }
 
-  pub fn mark(&self, pointer: Pointer) {
-    self.queue.push(GcPointer::Trim(pointer))
+  pub fn mark(&self, table: Arc<TableHandle>, pointer: Pointer) {
+    self.queue.push(GcPointer::Trim(table, pointer))
   }
-  pub fn lazy_release(&self, pointer: Pointer) {
-    self.queue.push(GcPointer::Release(pointer))
+  pub fn lazy_release(&self, table: Arc<TableHandle>, pointer: Pointer) {
+    self.queue.push(GcPointer::Release(table, pointer))
   }
 
   pub fn batch_check_empty(
     &self,
-    pointers: Vec<Pointer>,
+    pointers: Vec<(Arc<TableHandle>, Pointer)>,
   ) -> BatchWorkResult<Result<bool>> {
     self.check.send_batch(pointers)
   }
-  pub fn check_empty(&self, pointer: Pointer) -> WorkResult<Result<bool>> {
-    self.check.send(pointer)
+  pub fn check_empty(
+    &self,
+    table: Arc<TableHandle>,
+    pointer: Pointer,
+  ) -> WorkResult<Result<bool>> {
+    self.check.send((table, pointer))
   }
 
   pub fn start(
     buffer_pool: Arc<BufferPool>,
     version_visibility: Arc<VersionVisibility>,
-    free_list: Arc<FreeList>,
     recorder: Arc<PageRecorder>,
     logger: LogFilter,
     config: GarbageCollectionConfig,
@@ -115,7 +122,6 @@ impl GarbageCollector {
         buffer_pool.clone(),
         version_visibility,
         recorder.clone(),
-        free_list.clone(),
       ))
       .to_arc();
     let check = WorkBuilder::new()
@@ -127,7 +133,6 @@ impl GarbageCollector {
     Self {
       check,
       entry,
-      free_list,
       queue,
       logger,
     }
@@ -143,20 +148,20 @@ fn run_entry(
   buffer_pool: Arc<BufferPool>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
-  free_list: Arc<FreeList>,
-) -> impl Fn(Pointer) -> Result {
-  move |pointer: Pointer| {
+) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
+  move |(table, pointer)| {
+    let table_id = table.metadata().get_id();
     let mut ptr = Some(pointer);
     let mut max_found = false;
 
     let release = |record: VersionRecord| {
       if let RecordData::Chunked(pointers) = record.data {
-        pointers.into_iter().for_each(|p| free_list.dealloc(p));
+        pointers.into_iter().for_each(|p| table.free().dealloc(p));
       }
     };
 
     while let Some(i) = ptr.take() {
-      let mut slot = buffer_pool.peek(i)?.for_write();
+      let mut slot = buffer_pool.peek(i, table.clone())?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -206,32 +211,39 @@ fn run_entry(
 
       if new_versions.len() > 0 {
         entry.set_versions(new_versions);
-        recorder.serialize_and_log(RESERVED_TX, &mut slot, &entry)?;
+        recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &entry)?;
         ptr = entry.get_next();
         continue;
       }
 
       let next = match entry.get_next() {
         Some(i) => i,
-        None => return recorder.serialize_and_log(RESERVED_TX, &mut slot, &entry),
+        None => {
+          return recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &entry)
+        }
       };
 
-      let next_entry: DataEntry =
-        buffer_pool.peek(next)?.for_read().as_ref().deserialize()?;
-      recorder.serialize_and_log(RESERVED_TX, &mut slot, &next_entry)?;
+      let next_entry: DataEntry = buffer_pool
+        .peek(next, table.clone())?
+        .for_read()
+        .as_ref()
+        .deserialize()?;
+      recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &next_entry)?;
       ptr = Some(i);
 
-      free_list.dealloc(next);
+      table.free().dealloc(next);
     }
     Ok(())
   }
 }
 
-fn run_check(buffer_pool: Arc<BufferPool>) -> impl Fn(Pointer) -> Result<bool> {
-  move |pointer: Pointer| {
+fn run_check(
+  buffer_pool: Arc<BufferPool>,
+) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
+  move |(table, pointer)| {
     Ok(
       buffer_pool
-        .peek(pointer)?
+        .peek(pointer, table)?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?
