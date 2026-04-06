@@ -75,15 +75,26 @@ impl TableMapper {
     })
   }
 
-  pub fn open_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn create_handle(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
     Ok(
       TableHandle::open(table_meta, self.page_pool.clone(), self.metrics.clone())?
         .to_arc(),
     )
   }
 
-  pub fn replay(&self, last_table_id: TableId) {
-    self.last_table_id.store(last_table_id, Ordering::Relaxed)
+  pub fn replay<Iter: Iterator<Item = (String, Arc<TableHandle>)>>(
+    &self,
+    iter: Iter,
+  ) -> Result {
+    self.metadata.replay()?;
+    for (name, table) in iter {
+      table.replay()?;
+      self
+        .last_table_id
+        .fetch_max(table.metadata().get_id() + 1, Ordering::Relaxed);
+      self.mapping.write().insert(name, Slot::Occupied(table));
+    }
+    Ok(())
   }
 
   pub fn is_new(&self) -> bool {
