@@ -2,8 +2,6 @@ use std::{any::Any, error, io, result, sync::Arc};
 
 use thiserror::Error;
 
-use crate::utils::ToArc;
-
 #[derive(Debug, Error)]
 pub enum Error {
   #[error("table {0} not found")]
@@ -52,14 +50,14 @@ pub enum Error {
   Panic(Arc<dyn Any + Send>),
 
   #[error("unknown {0:?}")]
-  Unknown(Arc<dyn Any + Send>),
+  Unknown(String),
 }
 impl Error {
   pub fn unknown<E>(err: E) -> Self
   where
     E: error::Error + Send + Sync + 'static,
   {
-    Self::Unknown(err.to_arc())
+    Self::Unknown(err.to_string())
   }
   pub fn panic(err: Arc<dyn Any + Send>) -> Self {
     Self::Panic(err)
