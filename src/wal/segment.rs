@@ -8,13 +8,14 @@ use std::{
 
 use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
-  constant::FILE_SUFFIX,
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
   thread::{BackgroundThread, WorkBuilder, WorkResult},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
+
+pub const FILE_SUFFIX: &str = ".wal";
 
 pub struct FsyncResult(WorkResult<bool>);
 impl FsyncResult {
@@ -36,14 +37,12 @@ pub struct WALSegment {
   flush: Box<dyn BackgroundThread<(), bool>>,
 }
 impl WALSegment {
-  pub fn parse_generation<A, B>(filename: &A, prefix: &B) -> Result<SegmentGeneration>
+  pub fn parse_generation<A>(filename: &A) -> Result<SegmentGeneration>
   where
     A: AsRef<str>,
-    B: AsRef<str>,
   {
     let generation: SegmentGeneration = filename
       .as_ref()
-      .replace(prefix.as_ref(), "")
       .trim_end_matches(FILE_SUFFIX)
       .parse()
       .map_err(Error::unknown)?;
@@ -56,12 +55,9 @@ impl WALSegment {
     flush_count: usize,
     max_len: Pointer,
   ) -> Result<Self> {
-    let path = format!(
-      "{}{}{}",
-      prefix.as_ref().to_string_lossy(),
-      pad_start(generation),
-      FILE_SUFFIX
-    );
+    let path = prefix
+      .as_ref()
+      .join(format!("{}{}", pad_start(generation), FILE_SUFFIX));
 
     let file = OpenOptions::new()
       .read(true)
@@ -132,12 +128,10 @@ impl WALSegment {
     prefix: P,
     generation: SegmentGeneration,
   ) -> Result {
-    let new_path = format!(
-      "{}{}{}",
-      prefix.as_ref().to_string_lossy(),
-      pad_start(generation),
-      FILE_SUFFIX
-    );
+    let new_path =
+      prefix
+        .as_ref()
+        .join(format!("{}{}", pad_start(generation), FILE_SUFFIX));
     let mut path = self.path.l();
     rename(path.as_path(), &new_path).map_err(Error::IO)?;
     *path = PathBuf::from(new_path);
