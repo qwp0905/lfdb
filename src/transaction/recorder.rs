@@ -4,6 +4,7 @@ use crate::{
   buffer_pool::WritableSlot,
   error::Result,
   serialize::{Serializable, SerializeFrom},
+  table::TableId,
   wal::{TxId, WAL},
 };
 
@@ -13,7 +14,7 @@ use crate::{
  * portion so the WAL record is as compact as the data allows.
  *
  * Does not implement Drop — WAL lifetime is managed externally.
- * Used by the free list, orchestrator, and GC.
+ * Used by the orchestrator, and GC.
  */
 pub struct PageRecorder {
   wal: Arc<WAL>,
@@ -27,6 +28,7 @@ impl PageRecorder {
   pub fn serialize_and_log<T>(
     &self,
     tx_id: TxId,
+    table_id: TableId,
     slot: &mut WritableSlot<'_>,
     data: &T,
   ) -> Result
@@ -36,12 +38,15 @@ impl PageRecorder {
     let ptr = slot.get_pointer();
     let page = slot.as_mut();
     let byte_len = page.serialize_from(data)?;
-    self.wal.append_insert(tx_id, ptr, page.copy_n(byte_len))
+    self
+      .wal
+      .append_insert(tx_id, table_id, ptr, page.copy_n(byte_len))
   }
 
   pub fn log_multi<T, R>(
     &self,
     tx_id: TxId,
+    table_id: TableId,
     slot1: &mut WritableSlot<'_>,
     data1: &T,
     slot2: &mut WritableSlot<'_>,
@@ -61,6 +66,8 @@ impl PageRecorder {
     let byte_len = page.serialize_from(data2)?;
     let data2 = page.copy_n(byte_len);
 
-    self.wal.append_multi(tx_id, ptr1, data1, ptr2, data2)
+    self
+      .wal
+      .append_multi(tx_id, table_id, ptr1, data1, ptr2, data2)
   }
 }

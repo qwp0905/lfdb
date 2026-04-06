@@ -3,10 +3,13 @@ use std::{
   fs::read_dir,
 };
 
-use super::{LogId, Operation, SegmentGeneration, TxId, WALSegment, WAL_BLOCK_SIZE};
+use super::{
+  LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_SUFFIX, WAL_BLOCK_SIZE,
+};
 use crate::{
   disk::{PagePool, Pointer},
   error::{Error, Result},
+  table::TableId,
 };
 
 pub const RESERVED_TX: TxId = 0;
@@ -26,7 +29,7 @@ pub struct ReplayResult {
   pub last_log_id: LogId,
   pub last_tx_id: TxId,
   pub aborted: BTreeSet<TxId>,
-  pub redo: Vec<(LogId, Pointer, Vec<u8>)>,
+  pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
   pub segments: Vec<WALSegment>,
   pub generation: SegmentGeneration,
   pub is_new: bool,
@@ -47,7 +50,6 @@ impl ReplayResult {
 
 pub fn replay(
   base_dir: &str,
-  prefix: &str,
   flush_count: usize,
   page_pool: &PagePool<WAL_BLOCK_SIZE>,
 ) -> Result<ReplayResult> {
@@ -55,12 +57,11 @@ pub fn replay(
   let mut generation = 0;
   for file in read_dir(base_dir).map_err(Error::IO)? {
     let file = file.map_err(Error::IO)?;
-    if !file.file_name().to_string_lossy().starts_with(prefix) {
+    if !file.file_name().to_string_lossy().ends_with(FILE_SUFFIX) {
       continue;
     }
 
-    let current =
-      WALSegment::parse_generation(&file.file_name().to_string_lossy(), &prefix)?;
+    let current = WALSegment::parse_generation(&file.file_name().to_string_lossy())?;
     generation = generation.max(current + 1);
     files.push(file.path())
   }
@@ -71,7 +72,7 @@ pub fn replay(
 
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
-  let mut redo = BTreeMap::<LogId, Vec<(Pointer, Vec<u8>)>>::new();
+  let mut redo = BTreeMap::<LogId, Vec<(TableId, Pointer, Vec<u8>)>>::new();
   let mut aborted = BTreeMap::<LogId, TxId>::new();
   let mut started = BTreeSet::<TxId>::new();
   let mut closed = HashSet::<TxId>::new();
@@ -100,19 +101,22 @@ pub fn replay(
       log_id = record.log_id.max(log_id);
       tx_id = tx_id.max(record.tx_id);
       match record.operation {
-        Operation::Insert(i, page) => {
+        Operation::Insert(table_id, ptr, page) => {
           if last_checkpoint.map_or(false, |c| c >= record.log_id) {
             continue;
           }
-          redo.entry(record.log_id).or_default().push((i, page));
+          redo
+            .entry(record.log_id)
+            .or_default()
+            .push((table_id, ptr, page));
         }
-        Operation::Multi(idx1, data1, idx2, data2) => {
+        Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
           if last_checkpoint.map_or(false, |c| c >= record.log_id) {
             continue;
           }
           let e = redo.entry(record.log_id).or_default();
-          e.push((idx1, data1));
-          e.push((idx2, data2));
+          e.push((table_id, ptr1, data1));
+          e.push((table_id, ptr2, data2));
         }
         Operation::Start => {
           // Transactions older than min_active are already captured in the checkpoint's
@@ -159,15 +163,7 @@ pub fn replay(
       .into_values()
       .chain(started.into_iter().filter(|c| !closed.contains(&c)))
       .collect(),
-    redo: redo
-      .into_iter()
-      .flat_map(|(id, data)| {
-        data
-          .into_iter()
-          .map(|(i, p)| (id, i, p))
-          .collect::<Vec<_>>()
-      })
-      .collect::<Vec<_>>(),
+    redo: redo.into_values().flatten().collect::<Vec<_>>(),
     segments,
     generation,
     is_new: false,

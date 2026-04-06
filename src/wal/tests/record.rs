@@ -35,10 +35,11 @@ fn test_insert_roundtrip() {
   page[0] = 0xAB;
   page[99] = 0xCD;
 
-  let r = LogRecord::new_insert(4, 42, 99, page);
+  let r = LogRecord::new_insert(4, 42, 1, 99, page);
   let parsed = assert_roundtrip(&r);
   match parsed.operation {
-    Operation::Insert(index, data) => {
+    Operation::Insert(table_id, index, data) => {
+      assert_eq!(table_id, 1);
       assert_eq!(index, 99);
       assert_eq!(data[0], 0xAB);
       assert_eq!(data[99], 0xCD);
@@ -67,7 +68,7 @@ fn test_entry_roundtrip() {
 
   let _ = writer.write(&(3 as u16).to_le_bytes());
   let r1 = LogRecord::new_start(1, 1);
-  let r2 = LogRecord::new_insert(2, 1, 10, vec![]);
+  let r2 = LogRecord::new_insert(2, 1, 0, 10, vec![]);
   let r3 = LogRecord::new_commit(3, 1);
   let _ = writer.write(&r1.to_bytes_with_len());
   let _ = writer.write(&r2.to_bytes_with_len());
@@ -82,7 +83,7 @@ fn test_entry_roundtrip() {
   assert!(matches!(d[0].operation, Operation::Start));
   assert_eq!(d[1].log_id, 2);
   assert_eq!(d[1].tx_id, 1);
-  assert!(matches!(d[1].operation, Operation::Insert(10, _)));
+  assert!(matches!(d[1].operation, Operation::Insert(0, 10, _)));
   assert_eq!(d[2].log_id, 3);
   assert_eq!(d[2].tx_id, 1);
   assert!(matches!(d[2].operation, Operation::Commit));
