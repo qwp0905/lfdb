@@ -1,4 +1,5 @@
 use std::{
+  collections::HashMap,
   fs,
   panic::{RefUnwindSafe, UnwindSafe},
   path::Path,
@@ -9,16 +10,19 @@ use std::{
   time::Duration,
 };
 
-use super::constant::{DATA_PATH, FILE_SUFFIX};
 use crate::{
-  buffer_pool::BufferPoolConfig,
-  cursor::{GarbageCollectionConfig, TreeManagerConfig},
+  buffer_pool::{BufferPool, BufferPoolConfig},
+  cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
   metrics::{EngineMetrics, MetricsRegistry},
-  transaction::{Transaction, TransactionConfig, TxOrchestrator},
+  table::{TableConfig, TableMapper, META_TABLE_ID},
+  thread::WorkInput,
+  transaction::{
+    PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
+  },
   utils::{LogFilter, LogLevel, Logger, ToArc},
-  wal::WALConfig,
+  wal::{WALConfig, WAL},
 };
 
 pub struct EngineConfig<T>
@@ -57,8 +61,6 @@ impl Engine {
 
     fs::create_dir_all(config.base_path.as_ref()).map_err(Error::IO)?;
     let wal_config = WALConfig {
-      prefix: "wal".into(),
-      checkpoint_interval: config.checkpoint_interval,
       group_commit_count: config.group_commit_count,
       max_file_size: config.wal_file_size,
       base_dir: config.base_path.as_ref().into(),
@@ -68,10 +70,6 @@ impl Engine {
     let buffer_pool_config = BufferPoolConfig {
       shard_count: config.buffer_pool_shard_count,
       capacity: config.buffer_pool_memory_capacity / PAGE_SIZE,
-      path: config
-        .base_path
-        .as_ref()
-        .join(format!("{}{}", DATA_PATH, FILE_SUFFIX)),
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
@@ -81,20 +79,148 @@ impl Engine {
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
+      checkpoint_interval: config.checkpoint_interval,
     };
-    let orchestrator = TxOrchestrator::new(
-      tx_config,
-      buffer_pool_config,
-      wal_config,
-      gc_config,
-      tree_config,
-      logger.clone(),
+    let table_config = TableConfig {
+      base_path: config.base_path.as_ref().into(),
+    };
+
+    let buffer_pool =
+      BufferPool::open(buffer_pool_config, logger.clone(), metrics_registry.clone())?
+        .to_arc();
+    let tables = TableMapper::new(
+      table_config,
+      buffer_pool.page_pool(),
       metrics_registry.clone(),
+    )?
+    .to_arc();
+    let checkpoint_ch = WorkInput::new();
+
+    let (wal, replay) = WAL::replay(wal_config, checkpoint_ch.copy(), logger.clone())?;
+    let wal = wal.to_arc();
+
+    let recorder = PageRecorder::new(wal.clone()).to_arc();
+    let version_visibility =
+      VersionVisibility::new(replay.aborted, replay.last_tx_id).to_arc();
+
+    let gc = GarbageCollector::start(
+      buffer_pool.clone(),
+      version_visibility.clone(),
+      recorder.clone(),
+      logger.clone(),
+      gc_config,
+    )
+    .to_arc();
+
+    if tables.is_new() {
+      logger.info(|| "engine initial state.");
+      let tree_manager = TreeManager::initialize(
+        buffer_pool.clone(),
+        tables.clone(),
+        recorder.clone(),
+        gc.clone(),
+        logger.clone(),
+        tree_config,
+      )?;
+      let orchestrator = TxOrchestrator::new(
+        tx_config,
+        wal,
+        buffer_pool,
+        tables,
+        version_visibility,
+        gc,
+        recorder,
+        logger.clone(),
+        tree_manager,
+        metrics_registry.clone(),
+        checkpoint_ch,
+      )?
+      .to_arc();
+
+      logger.info(|| "engine bootstrapped.");
+      return Ok(Self {
+        orchestrator,
+        available: AtomicBool::new(true),
+        metrics_registry,
+        logger,
+      });
+    }
+
+    logger.info(|| "trying to replay...");
+
+    // To recover table information, first replay the metadata table
+    let meta_table = tables.meta_table();
+    for (_, ptr, data) in replay
+      .redo
+      .iter()
+      .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
+    {
+      buffer_pool
+        .read(*ptr, meta_table.clone())?
+        .for_write()
+        .as_mut()
+        .writer()
+        .write(data)?;
+    }
+
+    let mut handles = HashMap::new();
+    for (name, table) in
+      TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)?
+    {
+      handles.insert(table.metadata().get_id(), (name, table));
+    }
+
+    for (table_id, ptr, data) in replay
+      .redo
+      .iter()
+      .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
+    {
+      let handle = match handles.get(table_id) {
+        Some((_, handle)) => handle.clone(),
+        None => continue,
+      };
+      buffer_pool
+        .read(*ptr, handle)?
+        .for_write()
+        .as_mut()
+        .writer()
+        .write(data)?;
+    }
+
+    // Flush replayed pages to disk so disk_len reflects the true file extent.
+    // TreeManager::clean_and_start uses disk_len to scan for orphaned blocks
+    // (allocated but unreferenced pages) and reclaim them into the free list.
+    buffer_pool.flush()?;
+    tables.replay(handles.into_values())?;
+
+    let tree_manager = TreeManager::clean_and_start(
+      buffer_pool.clone(),
+      tables.clone(),
+      recorder.clone(),
+      gc.clone(),
+      logger.clone(),
+      tree_config,
     )?;
+
+    let orchestrator = TxOrchestrator::initial_checkpoint(
+      tx_config,
+      wal,
+      buffer_pool,
+      tables,
+      version_visibility,
+      gc,
+      recorder,
+      logger.clone(),
+      tree_manager,
+      metrics_registry.clone(),
+      checkpoint_ch,
+      replay.segments,
+    )?
+    .to_arc();
 
     logger.info(|| "engine bootstrapped.");
     Ok(Self {
-      orchestrator: orchestrator.to_arc(),
+      orchestrator,
       available: AtomicBool::new(true),
       logger,
       metrics_registry,
