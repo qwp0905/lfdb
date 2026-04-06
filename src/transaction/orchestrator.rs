@@ -55,7 +55,7 @@ impl TxOrchestrator {
   ) -> Result<Self> {
     let checkpoint = WorkBuilder::new()
       .name("checkpoint")
-      .stack_size(2 << 20)
+      .stack_size(64 << 10)
       .single()
       .from_channel(checkpoint_ch)
       .interval(
