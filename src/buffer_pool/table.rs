@@ -9,8 +9,11 @@ use crossbeam::utils::Backoff;
 use super::{FrameState, LRUShard, TempFrameState};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
+  table::TableId,
   utils::{ShortenedMutex, ToArc},
 };
+
+type Key = (TableId, Pointer);
 
 /**
  * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
@@ -19,13 +22,13 @@ use crate::{
  * at any given time, the performance difference is negligible.
  */
 pub struct Shard {
-  lru: LRUShard<Pointer, Arc<FrameState>>,
-  eviction: BTreeSet<Pointer>, // evicting pointers
-  temporary: BTreeMap<Pointer, Arc<TempFrameState>>, // temporary pages for gc without promote
+  lru: LRUShard<Key, Arc<FrameState>>,
+  eviction: BTreeSet<Key>, // evicting pointers
+  temporary: BTreeMap<Key, Arc<TempFrameState>>, // temporary pages for gc without promote
 }
 impl Shard {
-  pub fn remove_temp(&mut self, ptr: Pointer) {
-    self.temporary.remove(&ptr);
+  pub fn remove_temp(&mut self, table_id: TableId, ptr: Pointer) {
+    self.temporary.remove(&(table_id, ptr));
   }
 }
 
@@ -43,22 +46,22 @@ impl Shard {
  * restored and the frame is returned to an evictable state.
  */
 pub struct EvictionGuard<'a> {
-  evicted: Option<(Pointer, u64)>,
+  evicted: Option<(Key, u64)>,
   state: Arc<FrameState>,
   guard: &'a Mutex<Shard>,
   hasher: &'a RandomState,
-  new_pointer: Pointer,
+  new_pointer: Key,
   new_pointer_hash: u64,
   committed: bool,
 }
 
 impl<'a> EvictionGuard<'a> {
   fn new(
-    evicted: Option<(Pointer, u64)>,
+    evicted: Option<(Key, u64)>,
     state: Arc<FrameState>,
     guard: &'a Mutex<Shard>,
     hasher: &'a RandomState,
-    new_pointer: Pointer,
+    new_pointer: Key,
     new_pointer_hash: u64,
   ) -> Self {
     Self {
@@ -79,7 +82,7 @@ impl<'a> EvictionGuard<'a> {
     self.state.clone()
   }
   pub fn get_evicted_pointer(&self) -> Option<Pointer> {
-    self.evicted.as_ref().map(|(i, _)| *i)
+    self.evicted.as_ref().map(|(i, _)| i.1)
   }
   pub fn commit(&mut self) {
     self.committed = true;
@@ -167,7 +170,7 @@ impl LRUTable {
       page_pool,
     }
   }
-  fn get_shard(&self, key: Pointer) -> (u64, &Mutex<Shard>, usize) {
+  fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {
     let h = self.hasher.hash_one(key);
     let i = h as usize % self.shards.len();
     let shard = &self.shards[i];
@@ -184,19 +187,20 @@ impl LRUTable {
    * 4. If not found anywhere, allocate a new temp page in EVICTION_BIT state
    *    and return DiskRead — the caller is responsible for loading from disk.
    */
-  pub fn peek_or_temp<'a>(&'a self, pointer: Pointer) -> Peeked<'a> {
-    let (hash, s, _) = self.get_shard(pointer);
+  pub fn peek_or_temp<'a>(&'a self, table_id: TableId, pointer: Pointer) -> Peeked<'a> {
+    let key = (table_id, pointer);
+    let (hash, s, _) = self.get_shard(key);
     let backoff = Backoff::new();
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(&pointer) {
+      if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
         continue;
       }
 
-      if let Some(state) = shard.temporary.get(&pointer) {
+      if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
           return Peeked::Temp(TempGuard::new(state.clone(), s));
         }
@@ -206,7 +210,7 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(state) = shard.lru.peek(&pointer, hash) {
+      if let Some(state) = shard.lru.peek(&key, hash) {
         if state.try_pin() {
           return Peeked::Hit(state.clone());
         }
@@ -218,7 +222,7 @@ impl LRUTable {
 
       let state = shard
         .temporary
-        .entry(pointer)
+        .entry(key)
         .insert_entry(TempFrameState::new(self.page_pool.acquire()).to_arc())
         .get()
         .clone();
@@ -242,20 +246,21 @@ impl LRUTable {
    * to minimize lock contention — holding the lock during CAS would block all
    * other threads on this shard unnecessarily.
    */
-  pub fn acquire<'a>(&'a self, pointer: Pointer) -> Acquired<'a> {
-    let (hash, s, offset) = self.get_shard(pointer);
+  pub fn acquire<'a>(&'a self, table_id: TableId, pointer: Pointer) -> Acquired<'a> {
+    let key = (table_id, pointer);
+    let (hash, s, offset) = self.get_shard(key);
     let hasher = &self.hasher;
     let backoff = Backoff::new();
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(&pointer) {
+      if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
         continue;
       }
 
-      if let Some(state) = shard.temporary.get(&pointer) {
+      if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
           return Acquired::Temp(TempGuard::new(state.clone(), s));
         }
@@ -265,7 +270,7 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(state) = shard.lru.get(&pointer, hash, hasher) {
+      if let Some(state) = shard.lru.get(&key, hash, hasher) {
         if state.try_pin() {
           return Acquired::Hit(state.clone());
         }
@@ -281,10 +286,8 @@ impl LRUTable {
       if !shard.lru.is_full() {
         let frame_id = shard.lru.len() + offset;
         let state = FrameState::new(frame_id).to_arc();
-        shard.lru.insert(pointer, state.clone(), hash, hasher);
-        return Acquired::Evicted(EvictionGuard::new(
-          None, state, &s, hasher, pointer, hash,
-        ));
+        shard.lru.insert(key, state.clone(), hash, hasher);
+        return Acquired::Evicted(EvictionGuard::new(None, state, &s, hasher, key, hash));
       }
 
       let ((evicted, state), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
@@ -296,16 +299,24 @@ impl LRUTable {
       }
 
       shard.eviction.insert(evicted);
-      shard.lru.insert(pointer, state.clone(), hash, hasher);
+      shard.lru.insert(key, state.clone(), hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         state,
         &s,
         hasher,
-        pointer,
+        key,
         hash,
       ));
     }
+  }
+
+  pub fn len_per_shard(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+    self
+      .shards
+      .iter()
+      .enumerate()
+      .map(|(i, s)| (s.l().lru.len(), self.offset[i]))
   }
 }
 

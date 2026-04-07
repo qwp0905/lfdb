@@ -1,15 +1,16 @@
-use std::{marker::PhantomData, mem::replace};
+use std::{marker::PhantomData, mem::replace, sync::Arc};
 
 use super::{
   CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, Key, KeyRef,
-  NodeFindResult, RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, LARGE_VALUE,
-  MAX_KEY, MAX_VALUE,
+  NodeFindResult, RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, HEADER_POINTER,
+  LARGE_VALUE, MAX_KEY, MAX_VALUE,
 };
 use crate::{
   buffer_pool::WritableSlot,
   disk::Pointer,
   metrics::MetricsRegistry,
   serialize::Serializable,
+  table::TableHandle,
   transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
 };
@@ -19,7 +20,7 @@ use crate::{
  * Must be used on a single thread; cross-thread behavior is untested.
  */
 pub struct Cursor<'a> {
-  header: Pointer,
+  table: Arc<TableHandle>,
   orchestrator: &'a TxOrchestrator,
   state: &'a TxState<'a>,
   snapshot: &'a TxSnapshot<'a>,
@@ -29,7 +30,7 @@ pub struct Cursor<'a> {
 impl<'a> Cursor<'a> {
   #[inline]
   fn alloc_and_log<T: Serializable>(&self, data: &T) -> Result<Pointer> {
-    let slot = &mut self.orchestrator.alloc()?;
+    let slot = &mut self.orchestrator.alloc(self.table.clone())?;
     self.serialize_and_log(slot, data)?;
     Ok(slot.get_pointer())
   }
@@ -39,53 +40,44 @@ impl<'a> Cursor<'a> {
     slot: &mut WritableSlot<'_>,
     data: &T,
   ) -> Result {
-    self
-      .orchestrator
-      .serialize_and_log(self.state.get_id(), slot, data)
-  }
-
-  pub fn get_header(&self) -> Pointer {
-    self.header
+    self.orchestrator.serialize_and_log(
+      self.state.get_id(),
+      self.table.metadata().get_id(),
+      slot,
+      data,
+    )
   }
 
   pub fn initialize(
+    table: Arc<TableHandle>,
     orchestrator: &'a TxOrchestrator,
     state: &'a TxState<'a>,
     snapshot: &'a TxSnapshot<'a>,
     metrics: &'a MetricsRegistry,
   ) -> Result<Self> {
-    let mut root = orchestrator.alloc()?;
-    orchestrator.serialize_and_log(
-      state.get_id(),
-      &mut root,
-      &CursorNode::initial_state(),
-    )?;
-
-    let mut header = orchestrator.alloc()?;
-    orchestrator.serialize_and_log(
-      state.get_id(),
-      &mut header,
-      &TreeHeader::new(root.get_pointer()),
-    )?;
-    Ok(Self {
-      header: header.get_pointer(),
+    let cursor = Self {
+      table: table.clone(),
       orchestrator,
       state,
       snapshot,
       metrics,
       _marker: PhantomData,
-    })
+    };
+    let root = cursor.alloc_and_log(&CursorNode::initial_state())?;
+    let mut header = orchestrator.fetch(HEADER_POINTER, table)?.for_write();
+    cursor.serialize_and_log(&mut header, &TreeHeader::new(root))?;
+    Ok(cursor)
   }
 
   pub fn new(
-    header: Pointer,
+    table: Arc<TableHandle>,
     orchestrator: &'a TxOrchestrator,
     state: &'a TxState<'a>,
     snapshot: &'a TxSnapshot<'a>,
     metrics: &'a MetricsRegistry,
   ) -> Self {
     Self {
-      header,
+      table,
       orchestrator,
       state,
       snapshot,
@@ -97,7 +89,7 @@ impl<'a> Cursor<'a> {
   fn find_leaf(&self, key: KeyRef) -> Result<Pointer> {
     let mut ptr = self
       .orchestrator
-      .fetch(self.header)?
+      .fetch(HEADER_POINTER, self.table.clone())?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -105,7 +97,7 @@ impl<'a> Cursor<'a> {
 
     while let CursorNode::Internal(node) = self
       .orchestrator
-      .fetch(ptr)?
+      .fetch(ptr, self.table.clone())?
       .for_read()
       .as_ref()
       .deserialize()?
@@ -120,7 +112,7 @@ impl<'a> Cursor<'a> {
     loop {
       let node = self
         .orchestrator
-        .fetch(ptr)?
+        .fetch(ptr, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
@@ -132,7 +124,7 @@ impl<'a> Cursor<'a> {
       }
     }
 
-    let mut slot = self.orchestrator.fetch(ptr)?.for_read();
+    let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
     loop {
       let entry: DataEntry = slot.as_ref().deserialize()?;
       if let Some(record) =
@@ -141,7 +133,7 @@ impl<'a> Cursor<'a> {
         return record.read_data(|i| {
           self
             .orchestrator
-            .fetch(i)?
+            .fetch(i, self.table.clone())?
             .for_read()
             .as_ref()
             .deserialize()
@@ -149,7 +141,10 @@ impl<'a> Cursor<'a> {
       }
 
       match entry.get_next() {
-        Some(i) => drop(replace(&mut slot, self.orchestrator.fetch(i)?.for_read())),
+        Some(i) => drop(replace(
+          &mut slot,
+          self.orchestrator.fetch(i, self.table.clone())?.for_read(),
+        )),
         None => return Ok(None),
       }
     }
@@ -192,7 +187,7 @@ impl<'a> Cursor<'a> {
     let (mut ptr, mut old_height) = {
       let header = self
         .orchestrator
-        .fetch(self.header)?
+        .fetch(HEADER_POINTER, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?;
@@ -202,7 +197,7 @@ impl<'a> Cursor<'a> {
 
     while let CursorNode::Internal(node) = self
       .orchestrator
-      .fetch(ptr)?
+      .fetch(ptr, self.table.clone())?
       .for_read()
       .as_ref()
       .deserialize()?
@@ -214,7 +209,10 @@ impl<'a> Cursor<'a> {
     }
 
     let (mid_key, right_ptr) = loop {
-      let mut slot = self.orchestrator.fetch(ptr)?.for_write();
+      let mut slot = self
+        .orchestrator
+        .fetch(ptr, self.table.clone())?
+        .for_write();
       let mut leaf = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
 
       match leaf.find(&key) {
@@ -261,7 +259,10 @@ impl<'a> Cursor<'a> {
 
     // CAS loop: multiple concurrent splits may race to update the root.
     loop {
-      let mut header_slot = self.orchestrator.fetch(self.header)?.for_write();
+      let mut header_slot = self
+        .orchestrator
+        .fetch(HEADER_POINTER, self.table.clone())?
+        .for_write();
       let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
       let current_height = header.get_height();
       let mut ptr = header.get_root();
@@ -282,7 +283,7 @@ impl<'a> Cursor<'a> {
       while stack.len() < diff {
         let node = self
           .orchestrator
-          .fetch(ptr)?
+          .fetch(ptr, self.table.clone())?
           .for_read()
           .as_ref()
           .deserialize::<CursorNode>()?
@@ -332,7 +333,10 @@ impl<'a> Cursor<'a> {
     let mut ptr = current;
 
     let (mut slot, mut internal) = loop {
-      let slot = self.orchestrator.fetch(ptr)?.for_write();
+      let slot = self
+        .orchestrator
+        .fetch(ptr, self.table.clone())?
+        .for_write();
       let mut internal = slot.as_ref().deserialize::<CursorNode>()?.as_internal()?;
       match internal.insert_or_next(&evicted_key, evicted_ptr) {
         Ok(_) => break (slot, internal),
@@ -361,7 +365,10 @@ impl<'a> Cursor<'a> {
    * coupling required because of gc can collect entry header before write lock.
    */
   fn insert_at<T>(&self, entry_ptr: Pointer, data: RecordData, coupling: T) -> Result {
-    let mut slot = self.orchestrator.fetch(entry_ptr)?.for_write();
+    let mut slot = self
+      .orchestrator
+      .fetch(entry_ptr, self.table.clone())?
+      .for_write();
     drop(coupling);
 
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
@@ -371,7 +378,7 @@ impl<'a> Cursor<'a> {
       }
     }
 
-    self.orchestrator.mark_gc(entry_ptr);
+    self.orchestrator.mark_gc(self.table.clone(), entry_ptr);
     let version = self.orchestrator.current_version();
     let record = VersionRecord::new(self.state.get_id(), version, data);
 
@@ -391,7 +398,7 @@ impl<'a> Cursor<'a> {
   fn __remove(&self, key: KeyRef) -> Result {
     let mut ptr = self.find_leaf(key.as_ref())?;
     loop {
-      let slot = self.orchestrator.fetch(ptr)?.for_read();
+      let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
       let node = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
       match node.find(key.as_ref()) {
         NodeFindResult::Found(_, i) => {
@@ -432,7 +439,7 @@ impl<'a> Cursor<'a> {
     let (leaf, pos) = loop {
       let node = self
         .orchestrator
-        .fetch(ptr)?
+        .fetch(ptr, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
@@ -445,6 +452,7 @@ impl<'a> Cursor<'a> {
     };
 
     Ok(CursorIterator::new(
+      self.table.clone(),
       &self.state,
       &self.snapshot,
       &self.orchestrator,
@@ -461,7 +469,7 @@ impl<'a> Cursor<'a> {
 
     let mut ptr = self
       .orchestrator
-      .fetch(self.header)?
+      .fetch(HEADER_POINTER, self.table.clone())?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -469,7 +477,7 @@ impl<'a> Cursor<'a> {
     let leaf = loop {
       let node: CursorNode = self
         .orchestrator
-        .fetch(ptr)?
+        .fetch(ptr, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize()?;
@@ -480,6 +488,7 @@ impl<'a> Cursor<'a> {
     };
 
     Ok(CursorIterator::new(
+      self.table.clone(),
       &self.state,
       &self.snapshot,
       &self.orchestrator,

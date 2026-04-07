@@ -1,24 +1,23 @@
 use std::{sync::Arc, time::Duration};
 
-use super::{
-  FreeList, PageRecorder, TableMapper, TimeoutThread, TxSnapshot, TxState,
-  VersionVisibility,
-};
+use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
-  buffer_pool::{BufferPool, BufferPoolConfig, Slot, WritableSlot},
-  cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
+  buffer_pool::{BufferPool, Slot, WritableSlot},
+  cursor::{GarbageCollector, TreeManager},
   disk::Pointer,
   error::Result,
   metrics::MetricsRegistry,
   serialize::Serializable,
+  table::{ReserveResult, TableHandle, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder, WorkInput},
-  utils::{LogFilter, ToArc, ToBox},
-  wal::{TxId, WALConfig, WAL},
+  utils::{LogFilter, ToBox},
+  wal::{TxId, WALSegment, WAL},
 };
 
 pub struct TransactionConfig {
   pub timeout: Duration,
+  pub checkpoint_interval: Duration,
 }
 
 /**
@@ -31,7 +30,6 @@ pub struct TxOrchestrator {
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
   checkpoint: Box<dyn BackgroundThread<(), Result>>,
-  free_list: Arc<FreeList>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
@@ -43,91 +41,25 @@ pub struct TxOrchestrator {
 }
 impl TxOrchestrator {
   pub fn new(
-    transaction_config: TransactionConfig,
-    buffer_pool_config: BufferPoolConfig,
-    wal_config: WALConfig,
-    gc_config: GarbageCollectionConfig,
-    tree_config: TreeManagerConfig,
+    config: TransactionConfig,
+    wal: Arc<WAL>,
+    buffer_pool: Arc<BufferPool>,
+    tables: Arc<TableMapper>,
+    version_visibility: Arc<VersionVisibility>,
+    gc: Arc<GarbageCollector>,
+    recorder: Arc<PageRecorder>,
     logger: LogFilter,
+    tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
+    checkpoint_ch: WorkInput<(), Result>,
   ) -> Result<Self> {
-    let tables = TableMapper::new().to_arc();
-    let buffer_pool =
-      BufferPool::open(buffer_pool_config, logger.clone(), metrics.clone())?.to_arc();
-    let checkpoint_interval = wal_config.checkpoint_interval;
-    let checkpoint_ch = WorkInput::new();
-
-    let (wal, replay) = WAL::replay(wal_config, checkpoint_ch.copy(), logger.clone())?;
-    let wal = wal.to_arc();
-    let recorder = PageRecorder::new(wal.clone()).to_arc();
-    for (_, i, data) in replay.redo {
-      buffer_pool
-        .read(i)?
-        .for_write()
-        .as_mut()
-        .writer()
-        .write(data.as_ref())?;
-    }
-
-    // Flush replayed pages to disk so disk_len reflects the true file extent.
-    // TreeManager::clean_and_start uses disk_len to scan for orphaned blocks
-    // (allocated but unreferenced pages) and reclaim them into the free list.
-    buffer_pool.flush()?;
-    let disk_len = buffer_pool.disk_len()?;
-    let free_list = FreeList::new(disk_len).to_arc();
-
-    let version_visibility =
-      VersionVisibility::new(replay.aborted, replay.last_tx_id).to_arc();
-
-    let gc = GarbageCollector::start(
-      buffer_pool.clone(),
-      version_visibility.clone(),
-      free_list.clone(),
-      recorder.clone(),
-      logger.clone(),
-      gc_config,
-    )
-    .to_arc();
-
-    let tree_manager = match replay.is_new {
-      true => TreeManager::initial_state(
-        &free_list,
-        buffer_pool.clone(),
-        tables.clone(),
-        recorder.clone(),
-        gc.clone(),
-        logger.clone(),
-        tree_config,
-      ),
-      false => TreeManager::clean_and_start(
-        buffer_pool.clone(),
-        tables.clone(),
-        recorder.clone(),
-        gc.clone(),
-        &version_visibility,
-        logger.clone(),
-        tree_config,
-        disk_len,
-      ),
-    }?;
-
-    // Checkpoint first: segments can only be deleted once all their changes are
-    // confirmed on disk. Replayed segments are also not reused — their file size
-    // may differ from the current config, so fresh segments are created instead.
-    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
-    replay
-      .segments
-      .into_iter()
-      .map(|seg| seg.truncate())
-      .collect::<Result>()?;
-
     let checkpoint = WorkBuilder::new()
       .name("checkpoint")
-      .stack_size(2 << 20)
+      .stack_size(64 << 10)
       .single()
       .from_channel(checkpoint_ch)
       .interval(
-        checkpoint_interval,
+        config.checkpoint_interval,
         handle_checkpoint(
           wal.clone(),
           buffer_pool.clone(),
@@ -137,52 +69,86 @@ impl TxOrchestrator {
         ),
       )?
       .to_box();
-
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
-
     Ok(Self {
-      checkpoint,
-      tables,
       wal,
-      free_list,
+      tables,
       buffer_pool,
+      checkpoint,
       version_visibility,
       gc,
       recorder,
       logger,
       timeout_thread,
-      tx_timeout: transaction_config.timeout,
+      tx_timeout: config.timeout,
       tree_manager,
       metrics,
     })
   }
+
+  pub fn initial_checkpoint(
+    config: TransactionConfig,
+    wal: Arc<WAL>,
+    buffer_pool: Arc<BufferPool>,
+    tables: Arc<TableMapper>,
+    version_visibility: Arc<VersionVisibility>,
+    gc: Arc<GarbageCollector>,
+    recorder: Arc<PageRecorder>,
+    logger: LogFilter,
+    tree_manager: TreeManager,
+    metrics: Arc<MetricsRegistry>,
+    checkpoint_ch: WorkInput<(), Result>,
+    segments: Vec<WALSegment>,
+  ) -> Result<Self> {
+    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
+    segments
+      .into_iter()
+      .map(|seg| seg.truncate())
+      .collect::<Result>()?;
+
+    Self::new(
+      config,
+      wal,
+      buffer_pool,
+      tables,
+      version_visibility,
+      gc,
+      recorder,
+      logger,
+      tree_manager,
+      metrics,
+      checkpoint_ch,
+    )
+  }
+
   #[inline]
-  pub fn fetch(&self, pointer: Pointer) -> Result<Slot<'_>> {
-    self.buffer_pool.read(pointer)
+  pub fn fetch(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
+    self.buffer_pool.read(pointer, handle)
   }
 
   #[inline]
   pub fn serialize_and_log<T>(
     &self,
     tx_id: TxId,
+    table_id: TableId,
     slot: &mut WritableSlot<'_>,
     data: &T,
   ) -> Result
   where
     T: Serializable,
   {
-    self.recorder.serialize_and_log(tx_id, slot, data)
+    self.recorder.serialize_and_log(tx_id, table_id, slot, data)
   }
 
   #[inline]
-  pub fn alloc(&self) -> Result<WritableSlot<'_>> {
-    let free = self.free_list.alloc();
-    Ok(self.buffer_pool.read(free)?.for_write())
+  pub fn alloc(&self, handle: Arc<TableHandle>) -> Result<WritableSlot<'_>> {
+    let free = handle.free().alloc();
+    Ok(self.buffer_pool.read(free, handle)?.for_write())
   }
 
   #[inline]
-  pub fn mark_gc(&self, pointer: Pointer) {
-    self.gc.mark(pointer);
+  pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
+    self.gc.mark(handle, pointer);
   }
 
   #[inline]
@@ -222,21 +188,31 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn reserve_table(&self, name: &str) -> Result<Option<Pointer>> {
+  pub fn reserve_table(&self, name: &str) -> Result<ReserveResult> {
     self.tables.get_or_reserve(name)
   }
   #[inline]
-  pub fn get_table(&self, name: &str) -> Option<Pointer> {
+  pub fn get_table(&self, name: &str) -> Option<Arc<TableHandle>> {
     self.tables.get(name)
   }
   #[inline]
-  pub fn create_table(&self, name: String, header: Pointer) {
-    self.tables.insert(name, header);
+  pub fn open_table(&self, name: String, table: Arc<TableHandle>) {
+    self.tables.insert(name, table);
+  }
+  pub fn create_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
+    self.tables.create_handle(table_meta)
+  }
+  pub fn create_table_metadata(&self, name: &str) -> TableMetadata {
+    self.tables.create_metadata(name)
   }
   #[inline]
-  pub fn drop_table(&self, name: &str, header: Pointer) {
+  pub fn drop_table(&self, name: &str, table: Arc<TableHandle>) -> Result {
     self.tables.remove(name);
-    self.tree_manager.release_tree(header);
+    table.truncate()?;
+    Ok(())
+  }
+  pub fn get_metadata_table(&self) -> Arc<TableHandle> {
+    self.tables.meta_table()
   }
 
   /**
@@ -252,7 +228,7 @@ impl TxOrchestrator {
     self.logger.info(|| "last checkpoint completed.");
 
     self.gc.close();
-    self.buffer_pool.close();
+    self.tables.close();
     self.logger.info(|| "buffer pool closed.");
     wal_close();
     self.logger.info(|| "wal closed.");

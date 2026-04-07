@@ -16,6 +16,7 @@ use crossbeam::{
 use crate::{
   disk::{PagePool, Pointer},
   error::Result,
+  table::TableId,
   thread::{BackgroundThread, WorkBuilder, WorkInput},
   utils::{LogFilter, ToArc, ToBox, UnsafeBorrow},
 };
@@ -27,8 +28,6 @@ use super::{
 
 pub struct WALConfig {
   pub base_dir: PathBuf,
-  pub prefix: PathBuf,
-  pub checkpoint_interval: Duration,
   pub segment_flush_delay: Duration,
   pub segment_flush_count: usize,
   pub group_commit_count: usize,
@@ -111,7 +110,6 @@ impl WAL {
 
     let replay_result = replay(
       config.base_dir.to_string_lossy().as_ref(),
-      config.prefix.to_string_lossy().as_ref(),
       config.group_commit_count,
       &page_pool,
     )?;
@@ -127,10 +125,8 @@ impl WAL {
       )
     });
 
-    let prefix = PathBuf::from(config.base_dir).join(config.prefix);
-
     let preloader = SegmentPreload::new(
-      prefix,
+      config.base_dir,
       replay_result.generation,
       config.group_commit_count,
       max_len as Pointer,
@@ -313,9 +309,15 @@ impl WAL {
     self.last_log_id.load(Ordering::Acquire)
   }
 
-  pub fn append_insert(&self, tx_id: TxId, ptr: Pointer, data: Vec<u8>) -> Result {
+  pub fn append_insert(
+    &self,
+    tx_id: TxId,
+    table_id: TableId,
+    ptr: Pointer,
+    data: Vec<u8>,
+  ) -> Result {
     self.append(
-      |log_id| LogRecord::new_insert(log_id, tx_id, ptr, data),
+      |log_id| LogRecord::new_insert(log_id, tx_id, table_id, ptr, data),
       false,
     )
   }
@@ -323,13 +325,14 @@ impl WAL {
   pub fn append_multi(
     &self,
     tx_id: TxId,
+    table_id: TableId,
     ptr1: Pointer,
     data1: Vec<u8>,
     ptr2: Pointer,
     data2: Vec<u8>,
   ) -> Result {
     self.append(
-      |log_id| LogRecord::new_multi(log_id, tx_id, ptr1, data1, ptr2, data2),
+      |log_id| LogRecord::new_multi(log_id, tx_id, table_id, ptr1, data1, ptr2, data2),
       false,
     )
   }

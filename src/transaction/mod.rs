@@ -1,9 +1,6 @@
 mod orchestrator;
 pub use orchestrator::*;
 
-mod free;
-pub use free::*;
-
 mod version;
 pub use version::*;
 
@@ -12,9 +9,6 @@ pub use recorder::*;
 
 mod timeout;
 use timeout::*;
-
-mod table;
-pub use table::*;
 
 mod transaction;
 pub use transaction::*;

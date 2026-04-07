@@ -1,7 +1,7 @@
 use std::{
   fs::{File, OpenOptions},
   io::IoSlice,
-  path::PathBuf,
+  path::Path,
   sync::Arc,
 };
 
@@ -61,8 +61,8 @@ impl<const N: usize> DiskController<N> {
     }
   }
 
-  pub fn open(
-    path: PathBuf,
+  pub fn open<P: AsRef<Path>>(
+    path: P,
     page_pool: Arc<PagePool<N>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
@@ -74,11 +74,14 @@ impl<const N: usize> DiskController<N> {
       .read(true)
       .write(true)
       .create(true)
-      .direct_io(&path)
+      .direct_io(path.as_ref())
       .map_err(Error::IO)?
       .to_arc();
     let writer = WorkBuilder::new()
-      .name(format!("{} write buffering", path.to_string_lossy()))
+      .name(format!(
+        "{} write buffering",
+        path.as_ref().to_string_lossy()
+      ))
       .single()
       .eager_buffering(max_iov(), Self::handle_write(file.clone(), metrics.clone()))
       .to_box();

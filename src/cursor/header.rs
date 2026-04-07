@@ -4,6 +4,8 @@ use crate::{
   Result,
 };
 
+pub const HEADER_POINTER: Pointer = 0;
+
 /**
  * Persisted tree metadata: root page index and current height.
  */

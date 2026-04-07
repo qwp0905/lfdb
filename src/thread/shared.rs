@@ -25,8 +25,9 @@ where
   T: Send + UnwindSafe + 'static,
   R: Send + 'static,
 {
-  let backoff = Backoff::new();
   move || {
+    let backoff = Backoff::new();
+
     while let Ok(Context::Work(v, done)) = receiver.recv() {
       done.fulfill(work.call(v));
 
