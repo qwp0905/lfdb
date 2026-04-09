@@ -136,7 +136,7 @@ impl BufferPool {
     let frame = unsafe { self.frame[id].assume_init_ref() };
     let (old_p, old_h) = frame.wl().replace(pointer, new, handle);
 
-    if self.dirty.contains(id) {
+    if self.dirty.contains(id) && !old_h.closed() {
       old_h.disk().write(evicted, &old_p)?;
       self.dirty.remove(id);
     }
@@ -161,6 +161,9 @@ impl BufferPool {
       for id in self.dirty.iter() {
         let frame = unsafe { self.frame[id].assume_init_ref() }.rl();
         self.dirty.remove(id);
+        if frame.handle().closed() {
+          continue;
+        }
 
         // Submit all writes asynchronously first so the DiskController can
         // buffer and sort them, then batch into a single pwritev call.

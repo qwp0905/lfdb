@@ -1,6 +1,7 @@
 use std::{
   collections::HashMap,
   fs::exists,
+  mem::replace,
   path::{Path, PathBuf},
   sync::{
     atomic::{AtomicU16, Ordering},
@@ -8,10 +9,11 @@ use std::{
   },
 };
 
-use super::{TableHandle, TableId, TableMetadata};
+use super::{PinnedHandle, TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
+  thread::TaskHandle,
   utils::{SpinRwLock, ToArc},
   Error, Result,
 };
@@ -20,13 +22,20 @@ const FILE_SUFFIX: &str = ".db";
 
 enum Slot {
   Reserved,
+  PendingDrop(Arc<TableHandle>),
+  InDrop(TableId, TaskHandle<()>),
   Occupied(Arc<TableHandle>),
 }
 
 pub enum ReserveResult {
-  Found(Arc<TableHandle>),
+  Found(PinnedHandle),
   New,
   Reserved,
+}
+pub enum DropResult {
+  Reserved(Arc<TableHandle>),
+  NotFound,
+  Conflict,
 }
 
 pub const META_TABLE: &str = "__meta";
@@ -101,32 +110,69 @@ impl TableMapper {
     self.is_new
   }
 
-  pub fn get(&self, name: &str) -> Option<Arc<TableHandle>> {
+  pub fn get(&self, name: &str) -> Option<PinnedHandle> {
     match self.mapping.read().get(name)? {
       Slot::Reserved => None,
-      Slot::Occupied(i) => Some(i.clone()),
+      Slot::InDrop(_, _) => None,
+      Slot::Occupied(i) => Some(PinnedHandle::new(i.clone())),
+      Slot::PendingDrop(i) => Some(PinnedHandle::new(i.clone())),
     }
   }
   pub fn get_or_reserve(&self, name: &str) -> Result<ReserveResult> {
-    {
-      let mut mapping = self.mapping.write();
-      if let Some(slot) = mapping.get(name) {
-        match slot {
-          Slot::Reserved => return Ok(ReserveResult::Reserved),
-          Slot::Occupied(i) => return Ok(ReserveResult::Found(i.clone())),
+    let mut mapping = self.mapping.write();
+    if let Some(slot) = mapping.get_mut(name) {
+      match slot {
+        Slot::Reserved => return Ok(ReserveResult::Reserved),
+        Slot::InDrop(_, _) => {
+          if let Slot::InDrop(_, o) = replace(slot, Slot::Reserved) {
+            drop(mapping);
+            let _ = o.wait();
+            return Ok(ReserveResult::New);
+          }
+        }
+        Slot::Occupied(i) => {
+          return Ok(ReserveResult::Found(PinnedHandle::new(i.clone())))
+        }
+        Slot::PendingDrop(i) => {
+          return Ok(ReserveResult::Found(PinnedHandle::new(i.clone())))
         }
       }
-      mapping.insert(name.to_string(), Slot::Reserved);
     }
-
+    mapping.insert(name.to_string(), Slot::Reserved);
     Ok(ReserveResult::New)
+  }
+
+  pub fn try_drop(&self, name: &str) -> DropResult {
+    if let Some(slot) = self.mapping.write().get_mut(name) {
+      match slot {
+        Slot::Occupied(handle) => {
+          let cloned = handle.clone();
+          *slot = Slot::PendingDrop(cloned.clone());
+          return DropResult::Reserved(cloned);
+        }
+        Slot::PendingDrop(_) => return DropResult::Conflict,
+        _ => {}
+      }
+    };
+    DropResult::NotFound
   }
 
   pub fn insert(&self, name: String, handle: Arc<TableHandle>) {
     self.mapping.write().insert(name, Slot::Occupied(handle));
   }
-  pub fn remove(&self, name: &str) {
-    self.mapping.write().remove(name);
+  pub fn remove(&self, id: TableId, name: &str) {
+    let mut mapping = self.mapping.write();
+    if let Some(Slot::InDrop(i, _)) = mapping.get(name) {
+      if *i == id {
+        mapping.remove(name);
+      }
+    }
+  }
+  pub fn remove_reserve(&self, id: TableId, name: &str, handle: TaskHandle<()>) {
+    self
+      .mapping
+      .write()
+      .insert(name.to_string(), Slot::InDrop(id, handle));
   }
 
   pub fn create_metadata(&self, name: &str) -> TableMetadata {
@@ -136,20 +182,22 @@ impl TableMapper {
     )
   }
 
-  pub fn meta_table(&self) -> Arc<TableHandle> {
-    self.metadata.clone()
+  pub fn meta_table(&self) -> PinnedHandle {
+    PinnedHandle::new(self.metadata.clone())
   }
 
-  pub fn get_all(&self) -> Vec<(String, Arc<TableHandle>)> {
+  pub fn get_all(&self) -> Vec<(String, PinnedHandle)> {
     self
       .mapping
       .read()
       .iter()
       .filter_map(|(k, v)| match v {
         Slot::Reserved => None,
-        Slot::Occupied(i) => Some((k.clone(), i.clone())),
+        Slot::InDrop(_, _) => None,
+        Slot::Occupied(i) => Some((k.clone(), PinnedHandle::new(i.clone()))),
+        Slot::PendingDrop(i) => Some((k.clone(), PinnedHandle::new(i.clone()))),
       })
-      .chain([(META_TABLE.to_string(), self.metadata.clone())])
+      .chain([(META_TABLE.to_string(), self.meta_table())])
       .collect()
   }
 
@@ -157,7 +205,9 @@ impl TableMapper {
     for slot in self.mapping.read().values() {
       match slot {
         Slot::Reserved => continue,
+        Slot::InDrop(_, _) => continue,
         Slot::Occupied(handle) => handle.disk().close(),
+        Slot::PendingDrop(handle) => handle.disk().close(),
       }
     }
     self.metadata.disk().close();

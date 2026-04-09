@@ -10,7 +10,7 @@ use super::{
 use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
-  table::{TableHandle, TableMapper, TableMetadata},
+  table::{PinnedHandle, TableHandle, TableMapper, TableMetadata},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
@@ -68,7 +68,7 @@ impl TreeManager {
     let table_id = table.metadata().get_id();
     {
       let root_ptr = table.free().alloc();
-      let mut root = buffer_pool.read(root_ptr, table.clone())?.for_write();
+      let mut root = buffer_pool.read(root_ptr, table.handle())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -76,7 +76,9 @@ impl TreeManager {
         &CursorNode::initial_state(),
       )?;
 
-      let mut header = buffer_pool.read(HEADER_POINTER, table.clone())?.for_write();
+      let mut header = buffer_pool
+        .read(HEADER_POINTER, table.handle())?
+        .for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -98,7 +100,7 @@ impl TreeManager {
     let meta_table = tables.meta_table();
 
     let mut ptr = buffer_pool
-      .read(HEADER_POINTER, meta_table.clone())?
+      .read(HEADER_POINTER, meta_table.handle())?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -106,7 +108,7 @@ impl TreeManager {
 
     let leaf = loop {
       let node: CursorNode = buffer_pool
-        .read(ptr, meta_table.clone())?
+        .read(ptr, meta_table.handle())?
         .for_read()
         .as_ref()
         .deserialize()?;
@@ -120,7 +122,7 @@ impl TreeManager {
     while let Some(leaf) = next.take() {
       if let Some(ptr) = leaf.get_next() {
         next = buffer_pool
-          .read(ptr, meta_table.clone())?
+          .read(ptr, meta_table.handle())?
           .for_read()
           .as_ref()
           .deserialize::<CursorNode>()?
@@ -133,7 +135,7 @@ impl TreeManager {
         let mut ptr = Some(*ptr);
         while let Some(p) = ptr.take() {
           let entry = buffer_pool
-            .read(p, meta_table.clone())?
+            .read(p, meta_table.handle())?
             .for_read()
             .as_ref()
             .deserialize::<DataEntry>()?;
@@ -143,7 +145,7 @@ impl TreeManager {
           {
             if let Some(bytes) = record.read_data(|i| {
               buffer_pool
-                .read(i, meta_table.clone())?
+                .read(i, meta_table.handle())?
                 .for_read()
                 .as_ref()
                 .deserialize()
@@ -218,19 +220,19 @@ fn run_merge_leaf(
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
-    for (name, handle) in tables.get_all().into_iter() {
+    for (name, table) in tables.get_all().into_iter() {
       logger.debug(|| format!("clean leaf {name} collect start."));
-      let table_id = handle.metadata().get_id();
+      let table_id = table.metadata().get_id();
 
       let mut ptr = buffer_pool
-        .peek(HEADER_POINTER, handle.clone())?
+        .peek(HEADER_POINTER, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?
         .get_root();
 
       while let CursorNode::Internal(node) = buffer_pool
-        .peek(ptr, handle.clone())?
+        .peek(ptr, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
@@ -242,7 +244,7 @@ fn run_merge_leaf(
       while let Some(i) = index.take() {
         {
           let leaf = buffer_pool
-            .peek(i, handle.clone())?
+            .peek(i, table.handle())?
             .for_read()
             .as_ref()
             .deserialize::<CursorNode>()?
@@ -251,7 +253,7 @@ fn run_merge_leaf(
             .batch_check_empty(
               leaf
                 .get_entry_pointers()
-                .map(|p| (handle.clone(), p))
+                .map(|p| (table.handle(), p))
                 .collect(),
             )
             .wait()?
@@ -263,7 +265,7 @@ fn run_merge_leaf(
           }
         }
 
-        let mut slot = buffer_pool.peek(i, handle.clone())?.for_write();
+        let mut slot = buffer_pool.peek(i, table.handle())?.for_write();
         let mut leaf = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
         index = leaf.get_next();
 
@@ -273,7 +275,7 @@ fn run_merge_leaf(
 
         let found = leaf
           .drain()
-          .map(|(key, ptr)| (key, ptr, gc.check_empty(handle.clone(), ptr)))
+          .map(|(key, ptr)| (key, ptr, gc.check_empty(table.handle(), ptr)))
           .collect::<Vec<_>>();
         for (key, ptr, r) in found.into_iter() {
           match r.wait().flatten()? {
@@ -297,7 +299,7 @@ fn run_merge_leaf(
 
             orphand
               .into_iter()
-              .for_each(|ptr| gc.lazy_release(handle.clone(), ptr));
+              .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
             continue;
           }
         };
@@ -307,7 +309,7 @@ fn run_merge_leaf(
           format!("trying to start merge {} with {}", slot.get_pointer(), next)
         });
 
-        let mut next_slot = buffer_pool.peek(next, handle.clone())?.for_write();
+        let mut next_slot = buffer_pool.peek(next, table.handle())?.for_write();
         let next_leaf = next_slot.as_ref().deserialize::<CursorNode>()?;
         leaf.set_next(slot.get_pointer());
 
@@ -326,7 +328,7 @@ fn run_merge_leaf(
 
         orphand
           .into_iter()
-          .for_each(|ptr| gc.lazy_release(handle.clone(), ptr));
+          .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
       }
 
       logger.debug(|| format!("clean leaf {name} collect end."));
@@ -339,11 +341,11 @@ fn release_orphand(
   buffer_pool: &BufferPool,
   gc: &GarbageCollector,
   logger: &LogFilter,
-  table: Arc<TableHandle>,
+  table: PinnedHandle,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = buffer_pool
-    .read(HEADER_POINTER, table.clone())?
+    .read(HEADER_POINTER, table.handle())?
     .for_read()
     .as_ref()
     .deserialize::<TreeHeader>()?
@@ -354,7 +356,7 @@ fn release_orphand(
   while let Some(ptr) = node_stack.pop() {
     visited.insert(ptr);
     match buffer_pool
-      .read(ptr, table.clone())?
+      .read(ptr, table.handle())?
       .for_read()
       .as_ref()
       .deserialize::<CursorNode>()?
@@ -367,13 +369,13 @@ fn release_orphand(
   // push to queue for initial checkpoint
   entry_stack
     .iter()
-    .for_each(|&ptr| gc.mark(table.clone(), ptr));
+    .for_each(|&ptr| gc.mark(table.handle(), ptr));
   logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
     let entry: DataEntry = buffer_pool
-      .read(ptr, table.clone())?
+      .read(ptr, table.handle())?
       .for_read()
       .as_ref()
       .deserialize()?;
@@ -391,7 +393,7 @@ fn release_orphand(
 
   (0..file_end)
     .filter(|i| !visited.remove(i))
-    .for_each(|i| gc.lazy_release(table.clone(), i));
+    .for_each(|i| gc.lazy_release(table.handle(), i));
 
   Ok(())
 }
