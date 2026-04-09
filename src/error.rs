@@ -59,8 +59,8 @@ impl Error {
   {
     Self::Unknown(err.to_string())
   }
-  pub fn panic(err: Arc<dyn Any + Send>) -> Self {
-    Self::Panic(err)
+  pub fn panic(err: impl Any + Send) -> Self {
+    Self::Panic(Arc::from(err))
   }
 }
 impl Clone for Error {
