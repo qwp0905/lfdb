@@ -10,14 +10,14 @@ use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
-  thread::{BackgroundThread, WorkBuilder, WorkResult},
+  thread::{BackgroundThread, Runtime, TaskHandle},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
 
 pub const FILE_SUFFIX: &str = ".wal";
 
-pub struct FsyncResult(WorkResult<bool>);
+pub struct FsyncResult(TaskHandle<bool>);
 impl FsyncResult {
   pub fn wait(self) -> Result {
     self
@@ -50,6 +50,7 @@ impl WALSegment {
   }
 
   pub fn open_new<P: AsRef<Path>>(
+    runtime: &Runtime,
     prefix: P,
     generation: SegmentGeneration,
     flush_count: usize,
@@ -76,9 +77,13 @@ impl WALSegment {
       .and_then(|_| file.set_len(file_len))
       .and_then(|_| file.sync_all()) // sync metadata for replay at once
       .map_err(Error::IO)?;
-    Ok(Self::new(file, path.into(), flush_count))
+    Ok(Self::new(runtime, file, path.into(), flush_count))
   }
-  pub fn open_exists<P: AsRef<Path>>(path: P, flush_count: usize) -> Result<Self> {
+  pub fn open_exists<P: AsRef<Path>>(
+    runtime: &Runtime,
+    path: P,
+    flush_count: usize,
+  ) -> Result<Self> {
     let file = OpenOptions::new()
       .read(true)
       .write(true)
@@ -86,7 +91,7 @@ impl WALSegment {
       .direct_io(path.as_ref())
       .map_err(Error::IO)?
       .to_arc();
-    Ok(Self::new(file, path.as_ref().into(), flush_count))
+    Ok(Self::new(runtime, file, path.as_ref().into(), flush_count))
   }
 
   pub fn read<P: AsMut<Page<WAL_BLOCK_SIZE>>>(
@@ -111,7 +116,7 @@ impl WALSegment {
     self
       .io
       .send((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
-      .wait_flatten()
+      .wait()?
   }
   #[inline]
   pub fn len(&self) -> Result<Pointer> {
@@ -138,19 +143,11 @@ impl WALSegment {
     Ok(())
   }
 
-  fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
-    let io = WorkBuilder::new()
-      .name(format!(
-        "{} buffered write",
-        path.as_path().to_string_lossy()
-      ))
-      .single()
+  fn new(runtime: &Runtime, file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
+    let io = runtime
       .eager_buffering(max_iov(), handle_write(file.clone()))
       .to_box();
-
-    let flush = WorkBuilder::new()
-      .name(format!("{} flush", path.as_path().to_string_lossy()))
-      .single()
+    let flush = runtime
       .eager_buffering(flush_count, handle_flush(file.clone()))
       .to_box();
     Self {
@@ -168,13 +165,14 @@ impl WALSegment {
 
   #[inline]
   pub fn truncate(self) -> Result {
-    self.flush.close();
+    self.close();
     remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
   }
 
   #[inline]
   pub fn close(&self) {
+    self.io.close();
     self.flush.close();
   }
 }
@@ -192,7 +190,7 @@ fn pad_start(n: SegmentGeneration) -> String {
   format!("{:0>20}", n)
 }
 
-fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
+fn handle_write(file: Arc<File>) -> impl Fn(Vec<(Pointer, &[u8])>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];

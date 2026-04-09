@@ -10,6 +10,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
+  thread::Runtime,
   utils::{
     AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, UnsafeBorrow,
   },
@@ -27,10 +28,12 @@ pub struct BufferPool {
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   metrics: Arc<MetricsRegistry>,
+  runtime: Arc<Runtime>,
 }
 impl BufferPool {
   pub fn open(
     config: BufferPoolConfig,
+    runtime: Arc<Runtime>,
     logger: LogFilter,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
@@ -45,12 +48,12 @@ impl BufferPool {
 
     Ok(Self {
       frame,
-      // disk,
       table: LRUTable::new(page_pool.clone(), config.shard_count, frame_cap),
       dirty: AtomicBitmap::new(frame_cap),
       logger,
       page_pool,
       metrics,
+      runtime,
     })
   }
 
@@ -176,9 +179,13 @@ impl BufferPool {
       waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
       self.logger.debug(|| "buffer pool flushed all pages.");
 
+      let sub_pool = self
+        .runtime
+        .sub_pool(10, |handle: Arc<TableHandle>| handle.disk().fsync());
       for handle in handles.into_values() {
-        handle.disk().fsync()?;
+        sub_pool.push(handle);
       }
+      sub_pool.join()?;
 
       Ok(())
     })?;

@@ -1,133 +1,114 @@
-// use std::{
-//   cell::UnsafeCell,
-//   panic::{catch_unwind, UnwindSafe},
-//   sync::Arc,
-//   thread::{Builder, JoinHandle},
-// };
+use std::{
+  panic::{RefUnwindSafe, UnwindSafe},
+  sync::Arc,
+  time::Duration,
+};
 
-// use crossbeam::{
-//   channel::{unbounded, Receiver, Sender, TryRecvError},
-//   utils::Backoff,
-// };
+use crate::utils::ToArc;
 
-// use super::{oneshot, Oneshot};
-// use crate::{
-//   utils::{ToArc, ToBox, UnsafeBorrowMut, UnwrappedSender},
-//   Error, Result,
-// };
+use super::{
+  BackgroundThread, EagerBufferingThread, IntervalWorkThread, LazyBufferingThread,
+  SharedFn, Spawner, SubPool, TaskHandle, TimerThread,
+};
 
-// enum Task {
-//   Done,
-//   Work(Box<dyn FnOnce() + Send>),
-// }
-// impl Task {
-//   #[inline]
-//   fn work<F: FnOnce() + Send + 'static>(f: F) -> Self {
-//     Task::Work(f.to_box())
-//   }
-// }
+pub struct RuntimeConfig {
+  pub count: usize,
+}
 
-// pub struct TaskHandle<T>(Oneshot<Result<T>>);
-// impl<T> TaskHandle<T> {
-//   #[inline]
-//   pub fn wait(self) -> Result<T> {
-//     self.0.wait()?
-//   }
-// }
+const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
-// fn worker_loop(receiver: Receiver<Task>) -> impl Fn() {
-//   move || {
-//     let backoff = Backoff::new();
-//     while let Ok(Task::Work(task)) = receiver.recv() {
-//       task();
-//       backoff.reset();
+pub struct Runtime {
+  spawner: Arc<Spawner>,
+  timer: Arc<TimerThread>,
+}
+impl Runtime {
+  #[inline]
+  pub fn new(config: RuntimeConfig) -> Self {
+    let spawner = Spawner::new(DEFAULT_STACK_SIZE, config.count).to_arc();
+    let timer = TimerThread::new(spawner.clone()).to_arc();
+    Self { spawner, timer }
+  }
 
-//       while !backoff.is_completed() {
-//         match receiver.try_recv() {
-//           Ok(Task::Work(task)) => {
-//             task();
-//             backoff.reset();
-//           }
-//           Ok(Task::Done) | Err(TryRecvError::Disconnected) => return,
-//           Err(TryRecvError::Empty) => backoff.snooze(),
-//         }
-//       }
-//     }
-//   }
-// }
+  #[inline]
+  pub fn submit<T, F>(&self, task: F) -> TaskHandle<T>
+  where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + UnwindSafe + 'static,
+  {
+    self.spawner.spawn(task)
+  }
 
-// /**
-//  * Multiple worker threads sharing a single channel for task distribution.
-//  * Suitable for tasks that require burst throughput but have long idle periods.
-//  */
-// pub struct RuntimeInner {
-//   threads: UnsafeCell<Vec<JoinHandle<()>>>,
-//   queue: Sender<Task>,
-// }
-// impl RuntimeInner {
-//   pub fn new(size: usize, count: usize) -> Self {
-//     let (tx, rx) = unbounded();
-//     let mut threads = Vec::with_capacity(count);
-//     for i in 0..count {
-//       let thread = Builder::new()
-//         .name(format!("thread-runtime-{i}"))
-//         .stack_size(size)
-//         .spawn(worker_loop(rx.clone()))
-//         .unwrap();
+  pub fn reserve_submit<T, F>(&self, task: F, timeout: Duration) -> TaskHandle<T>
+  where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + UnwindSafe + 'static,
+  {
+    self.timer.register(task, timeout)
+  }
 
-//       threads.push(thread);
-//     }
+  #[inline]
+  pub fn close(&self) {
+    self.timer.close();
+    self.spawner.close();
+  }
 
-//     Self {
-//       queue: tx,
-//       threads: UnsafeCell::new(threads),
-//     }
-//   }
+  pub fn eager_buffering<T, R, F>(
+    &self,
+    count: usize,
+    when_buffered: F,
+  ) -> impl BackgroundThread<T, R>
+  where
+    T: Send + UnwindSafe + 'static,
+    R: Send + Clone + 'static,
+    F: Fn(Vec<T>) -> R + RefUnwindSafe + Send + Sync + 'static,
+  {
+    EagerBufferingThread::new(
+      self.spawner.clone(),
+      count,
+      SharedFn::new(when_buffered.to_arc()),
+    )
+  }
 
-//   pub fn submit<T, F>(&self, f: F) -> TaskHandle<T>
-//   where
-//     T: Send + 'static,
-//     F: FnOnce() -> T + Send + UnwindSafe + 'static,
-//   {
-//     let (oneshot, fulfill) = oneshot();
-//     let work = || catch_unwind(f).map_err(Arc::from).map_err(Error::panic);
-//     let task = Task::work(|| fulfill.fulfill(work()));
-//     self.queue.must_send(task);
-//     TaskHandle(oneshot)
-//   }
+  pub fn lazy_buffering<T, R, F>(
+    &self,
+    max_buffering_count: usize,
+    timeout: Duration,
+    when_buffered: F,
+  ) -> impl BackgroundThread<T, R>
+  where
+    T: Send + UnwindSafe + 'static,
+    R: Send + Clone + 'static,
+    F: Fn(Vec<T>) -> R + RefUnwindSafe + Send + Sync + 'static,
+  {
+    LazyBufferingThread::new(
+      self.timer.clone(),
+      self.spawner.clone(),
+      max_buffering_count,
+      timeout,
+      SharedFn::new(when_buffered.to_arc()),
+    )
+  }
 
-//   pub fn close(&self) {
-//     let threads = self.threads.get().borrow_mut_unsafe();
-//     for _ in 0..threads.len() {
-//       self.queue.must_send(Task::Done);
-//     }
-//     for th in threads.drain(..) {
-//       let _ = th.join();
-//     }
-//   }
-// }
+  pub fn interval<T, R, F>(&self, timeout: Duration, f: F) -> impl BackgroundThread<T, R>
+  where
+    T: Send + UnwindSafe + RefUnwindSafe + 'static,
+    R: Send + 'static,
+    F: Fn(Option<T>) -> R + Send + RefUnwindSafe + Sync + 'static,
+  {
+    IntervalWorkThread::new(
+      self.timer.clone(),
+      self.spawner.clone(),
+      timeout,
+      SharedFn::new(f.to_arc()),
+    )
+  }
 
-// unsafe impl Send for RuntimeInner {}
-// unsafe impl Sync for RuntimeInner {}
-
-// pub struct Runtime(Arc<RuntimeInner>);
-// impl Runtime {
-//   #[inline]
-//   pub fn new(size: usize, count: usize) -> Self {
-//     Self(RuntimeInner::new(size, count).to_arc())
-//   }
-
-//   #[inline]
-//   pub fn submit<T, F>(&self, task: F) -> TaskHandle<T>
-//   where
-//     T: Send + 'static,
-//     F: FnOnce() -> T + Send + UnwindSafe + 'static,
-//   {
-//     self.0.submit(task)
-//   }
-
-//   #[inline]
-//   pub fn close(&self) {
-//     self.0.close();
-//   }
-// }
+  pub fn sub_pool<T, R, F>(&self, count: usize, work: F) -> SubPool<'_, T, R>
+  where
+    T: Send + UnwindSafe + RefUnwindSafe + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
+  {
+    SubPool::new(&self.spawner, SharedFn::new(work.to_arc()), count)
+  }
+}

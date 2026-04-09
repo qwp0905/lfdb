@@ -1,17 +1,23 @@
 use std::{
   cell::UnsafeCell,
+  mem::ManuallyDrop,
   panic::{RefUnwindSafe, UnwindSafe},
-  thread::{Builder, JoinHandle},
+  sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+  },
   time::Duration,
 };
 
 use crate::{
-  utils::{AsTimer, UnsafeBorrowMut, UnwrappedSender},
+  thread::SharedFn,
+  utils::{DoubleBuffer, ToArc, UnsafeBorrow, UnsafeBorrowMut},
   Result,
 };
 
-use super::{BackgroundThread, Context, OneshotFulfill, SingleFn};
-use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
+use super::{
+  BackgroundThread, Context, IntervalWorkThread, OneshotFulfill, Spawner, TimerThread,
+};
 
 /**
  * A background thread that buffers incoming work items and flushes them
@@ -23,65 +29,61 @@ use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
  * burst throughput.
  */
 pub struct LazyBufferingThread<T, R> {
-  threads: UnsafeCell<Option<JoinHandle<()>>>,
-  channel: Sender<Context<T, R>>,
+  queue: Arc<DoubleBuffer<(T, OneshotFulfill<Result<R>>)>>,
+  flush: IntervalWorkThread<(), ()>,
+  counter: Arc<AtomicUsize>,
+  max_buffering_count: usize,
+  when_buffered: UnsafeCell<ManuallyDrop<SharedFn<'static, Vec<T>, R>>>,
+  closed: AtomicBool,
 }
 impl<T, R> LazyBufferingThread<T, R>
 where
   T: Send + UnwindSafe + 'static,
   R: Send + Clone + 'static,
 {
-  pub fn new<S: ToString>(
-    name: S,
-    size: usize,
+  pub fn new(
+    timer: Arc<TimerThread>,
+    spawner: Arc<Spawner>,
     max_buffering_count: usize,
     timeout: Duration,
-    mut when_buffered: SingleFn<'static, Vec<T>, R>,
+    when_buffered: SharedFn<'static, Vec<T>, R>,
   ) -> Self {
-    let (tx, rx) = unbounded();
+    let queue = DoubleBuffer::new().to_arc();
+    let queue_c = queue.clone();
+    let counter = AtomicUsize::new(0).to_arc();
+    let counter_c = counter.clone();
+    let when_buffered_c = when_buffered.clone();
 
-    let th = Builder::new()
-      .name(name.to_string())
-      .stack_size(size)
-      .spawn(move || {
-        let mut buffered = Vec::with_capacity(max_buffering_count);
-        let mut timer = timeout.as_timer();
+    let work = move |_: _| {
+      counter_c.store(0, Ordering::Release);
+      let queue = queue_c.switch();
+      let mut values = Vec::with_capacity(queue.len());
+      let mut waiting = Vec::with_capacity(queue.len());
+      while let Some((v, done)) = queue.pop() {
+        values.push(v);
+        waiting.push(done);
+      }
 
-        let mut flush = |buffer: &mut Vec<(T, OneshotFulfill<Result<R>>)>| {
-          if buffer.is_empty() {
-            return;
-          }
+      if values.is_empty() {
+        return;
+      }
 
-          let (values, waiting): (Vec<_>, Vec<_>) = buffer.drain(..).unzip();
-          let result = when_buffered.call(values).map(Ok).unwrap_or_else(Err);
-          waiting
-            .into_iter()
-            .for_each(|done| done.fulfill(result.clone()));
-        };
+      let result = when_buffered_c.call(values).map(Ok).unwrap_or_else(Err);
+      waiting
+        .into_iter()
+        .for_each(|done: OneshotFulfill<Result<R>>| done.fulfill(result.clone()));
+    };
 
-        loop {
-          match rx.recv_timeout(timer.get_remain()) {
-            Ok(Context::Work(v, done)) => {
-              buffered.push((v, done));
-              if buffered.len() < max_buffering_count {
-                timer.check();
-                continue;
-              }
-            }
-            Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
-              return flush(&mut buffered)
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-          }
+    let flush =
+      IntervalWorkThread::new(timer, spawner, timeout, SharedFn::new(work.to_arc()));
 
-          flush(&mut buffered);
-          timer.reset();
-        }
-      })
-      .unwrap();
     Self {
-      threads: UnsafeCell::new(Some(th)),
-      channel: tx,
+      flush,
+      max_buffering_count,
+      queue,
+      counter,
+      when_buffered: UnsafeCell::new(ManuallyDrop::new(when_buffered)),
+      closed: AtomicBool::new(false),
     }
   }
 }
@@ -89,17 +91,71 @@ unsafe impl<T, R> Send for LazyBufferingThread<T, R> {}
 unsafe impl<T, R> Sync for LazyBufferingThread<T, R> {}
 impl<T, R> UnwindSafe for LazyBufferingThread<T, R> {}
 impl<T, R> RefUnwindSafe for LazyBufferingThread<T, R> {}
-impl<T, R> BackgroundThread<T, R> for LazyBufferingThread<T, R> {
+
+impl<T, R> BackgroundThread<T, R> for LazyBufferingThread<T, R>
+where
+  T: Send + UnwindSafe + 'static,
+  R: Send + Clone + 'static,
+{
   fn register(&self, ctx: Context<T, R>) -> bool {
-    match self.channel.try_send(ctx) {
-      Err(TrySendError::Disconnected(_)) => false,
-      _ => true,
+    if self.closed.load(Ordering::Acquire) {
+      return false;
     }
+    let (v, done) = match ctx {
+      Context::Work(v, done) => (v, done),
+      Context::Term => {
+        self.flush.close();
+        return true;
+      }
+    };
+
+    self.queue.push((v, done));
+    let current = self.counter.fetch_add(1, Ordering::Release);
+    if current != self.max_buffering_count - 1 {
+      return true;
+    }
+
+    self.flush.send(());
+    true
   }
-  fn close(&self) {
-    if let Some(v) = self.threads.get().borrow_mut_unsafe().take() {
-      self.channel.must_send(Context::Term);
-      let _ = v.join();
+  fn terminate(&self) {
+    if self.closed.fetch_or(true, Ordering::Release) {
+      return;
     }
+
+    let mut values = Vec::new();
+    let mut waiting = Vec::new();
+    let q1 = self.queue.switch();
+    while let Some((v, done)) = q1.pop() {
+      values.push(v);
+      waiting.push(done);
+    }
+
+    let q2 = self.queue.switch();
+    while let Some((v, done)) = q2.pop() {
+      values.push(v);
+      waiting.push(done);
+    }
+
+    if values.is_empty() {
+      return;
+    }
+
+    let result = self
+      .when_buffered
+      .get()
+      .borrow_unsafe()
+      .call(values)
+      .map(Ok)
+      .unwrap_or_else(Err);
+    waiting
+      .into_iter()
+      .for_each(|done: OneshotFulfill<Result<R>>| done.fulfill(result.clone()));
+
+    unsafe { ManuallyDrop::drop(self.when_buffered.get().borrow_mut_unsafe()) };
   }
 }
+
+#[cfg(test)]
+#[path = "tests/lazy.rs"]
+mod tests;

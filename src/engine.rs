@@ -17,7 +17,7 @@ use crate::{
   error::{Error, Result},
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableConfig, TableMapper, META_TABLE_ID},
-  thread::WorkInput,
+  thread::{Runtime, RuntimeConfig},
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
@@ -42,6 +42,7 @@ where
   pub transaction_timeout: Duration,
   pub logger: Arc<dyn Logger>,
   pub log_level: LogLevel,
+  pub max_threads_count: usize,
 }
 
 pub struct Engine {
@@ -84,19 +85,28 @@ impl Engine {
     let table_config = TableConfig {
       base_path: config.base_path.as_ref().into(),
     };
+    let runtime_config = RuntimeConfig {
+      count: config.max_threads_count,
+    };
 
-    let buffer_pool =
-      BufferPool::open(buffer_pool_config, logger.clone(), metrics_registry.clone())?
-        .to_arc();
+    let runtime = Runtime::new(runtime_config).to_arc();
+
+    let buffer_pool = BufferPool::open(
+      buffer_pool_config,
+      runtime.clone(),
+      logger.clone(),
+      metrics_registry.clone(),
+    )?
+    .to_arc();
     let tables = TableMapper::new(
       table_config,
+      runtime.clone(),
       buffer_pool.page_pool(),
       metrics_registry.clone(),
     )?
     .to_arc();
-    let checkpoint_ch = WorkInput::new();
 
-    let (wal, replay) = WAL::replay(wal_config, checkpoint_ch.copy(), logger.clone())?;
+    let (wal, replay) = WAL::replay(wal_config, runtime.clone(), logger.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -104,6 +114,7 @@ impl Engine {
       VersionVisibility::new(replay.aborted, replay.last_tx_id).to_arc();
 
     let gc = GarbageCollector::start(
+      runtime.clone(),
       buffer_pool.clone(),
       version_visibility.clone(),
       recorder.clone(),
@@ -115,6 +126,7 @@ impl Engine {
     if tables.is_new() {
       logger.info(|| "engine initial state.");
       let tree_manager = TreeManager::initialize(
+        &runtime,
         buffer_pool.clone(),
         tables.clone(),
         recorder.clone(),
@@ -124,6 +136,7 @@ impl Engine {
       )?;
       let orchestrator = TxOrchestrator::new(
         tx_config,
+        runtime,
         wal,
         buffer_pool,
         tables,
@@ -133,7 +146,6 @@ impl Engine {
         logger.clone(),
         tree_manager,
         metrics_registry.clone(),
-        checkpoint_ch,
       )?
       .to_arc();
 
@@ -194,6 +206,7 @@ impl Engine {
     tables.replay(handles.into_values())?;
 
     let tree_manager = TreeManager::clean_and_start(
+      &runtime,
       buffer_pool.clone(),
       tables.clone(),
       recorder.clone(),
@@ -204,6 +217,7 @@ impl Engine {
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
+      runtime,
       wal,
       buffer_pool,
       tables,
@@ -213,7 +227,6 @@ impl Engine {
       logger.clone(),
       tree_manager,
       metrics_registry.clone(),
-      checkpoint_ch,
       replay.segments,
     )?
     .to_arc();

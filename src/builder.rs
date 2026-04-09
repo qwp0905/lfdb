@@ -28,6 +28,7 @@ where
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
       log_level: DEFAULT_LOG_LEVEL,
       logger: DEFAULT_LOGGER.to_arc(),
+      max_threads_count: DEFAULT_MAX_THREADS_COUNT,
     })
   }
 
@@ -127,6 +128,11 @@ where
     self
   }
 
+  pub fn max_threads_count(mut self, count: usize) -> Self {
+    self.0.max_threads_count = count;
+    self
+  }
+
   pub fn build(self) -> Result<Engine> {
     Engine::bootstrap(self.0)
   }
@@ -144,3 +150,4 @@ const DEFAULT_BUFFER_POOL_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_LOGGER: NoneLogger = NoneLogger;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
+const DEFAULT_MAX_THREADS_COUNT: usize = 64;

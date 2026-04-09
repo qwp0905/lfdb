@@ -213,8 +213,3 @@ impl<'a, const T: usize> PageWriter<'a, T> {
 #[cfg(test)]
 #[path = "tests/page.rs"]
 mod tests;
-
-#[test]
-fn sdf() {
-  println!("{}", size_of::<Page<4096>>())
-}

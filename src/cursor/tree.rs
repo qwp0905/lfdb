@@ -1,8 +1,4 @@
-use std::{
-  collections::HashSet,
-  sync::{Arc, Mutex},
-  time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use super::{
   CursorNode, DataEntry, GarbageCollector, RecordData, TreeHeader, HEADER_POINTER,
@@ -11,11 +7,11 @@ use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
   table::{TableHandle, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder},
+  thread::{BackgroundThread, Runtime},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
+  utils::{LogFilter, ToBox},
   wal::RESERVED_TX,
-  Error, Result,
+  Result,
 };
 
 pub struct TreeManagerConfig {
@@ -31,6 +27,7 @@ pub struct TreeManager {
 }
 impl TreeManager {
   fn new(
+    runtime: &Runtime,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
@@ -38,9 +35,7 @@ impl TreeManager {
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Self {
-    let merge_leaf = WorkBuilder::new()
-      .name("merge leaf nodes")
-      .single()
+    let merge_leaf = runtime
       .interval(
         config.merge_interval,
         run_merge_leaf(
@@ -57,6 +52,7 @@ impl TreeManager {
   }
 
   pub fn initialize(
+    runtime: &Runtime,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
@@ -85,7 +81,15 @@ impl TreeManager {
       )?;
     }
 
-    Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
+    Ok(Self::new(
+      runtime,
+      buffer_pool,
+      tables,
+      recorder,
+      gc,
+      logger,
+      config,
+    ))
   }
 
   pub fn open_handles(
@@ -171,6 +175,7 @@ impl TreeManager {
    * WAL record was written. Orphans are reclaimed via lazy_release.
    */
   pub fn clean_and_start(
+    runtime: &Runtime,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
@@ -178,31 +183,37 @@ impl TreeManager {
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
-    let open_handles = Mutex::new(tables.get_all()).to_arc();
+    let open_handles = tables.get_all();
 
-    let threads = (0..5)
-      .map(|_| {
-        let buffer_pool = buffer_pool.clone();
-        let gc = gc.clone();
-        let logger = logger.clone();
-        let open_handles = open_handles.clone();
-        std::thread::spawn(move || {
-          while let Some((name, table)) = open_handles.l().pop() {
-            logger.debug(|| format!("{name} table start to collect orphand blocks."));
-            release_orphand(&buffer_pool, &gc, &logger, table)?;
-          }
-          Ok(())
-        })
-      })
-      .collect::<Vec<_>>();
+    let buffer_pool_c = buffer_pool.clone();
+    let gc_c = gc.clone();
+    let logger_c = logger.clone();
+    let sub_pool = runtime.sub_pool(5, move |(name, table)| {
+      logger_c.debug(|| format!("{name} table start to collect orphand blocks."));
+      release_orphand(&buffer_pool_c, &gc_c, &logger_c, table)
+    });
 
-    threads
+    let mut waits = Vec::with_capacity(open_handles.len());
+    for (name, table) in open_handles {
+      waits.push(sub_pool.push((name, table)))
+    }
+
+    waits
       .into_iter()
-      .map(|th| th.join().map_err(Arc::from).map_err(Error::panic))
-      .collect::<Result<Result>>()??;
+      .map(|handle| handle.wait().flatten())
+      .collect::<Result>()?;
+    sub_pool.join()?;
 
     logger.info(|| "orphand block has released successfully.");
-    Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
+    Ok(Self::new(
+      runtime,
+      buffer_pool,
+      tables,
+      recorder,
+      gc,
+      logger,
+      config,
+    ))
   }
 
   pub fn close(&self) {
@@ -248,14 +259,9 @@ fn run_merge_leaf(
             .deserialize::<CursorNode>()?
             .as_leaf()?;
           if !gc
-            .batch_check_empty(
-              leaf
-                .get_entry_pointers()
-                .map(|p| (handle.clone(), p))
-                .collect(),
-            )
-            .wait()?
+            .batch_check_empty(leaf.get_entry_pointers().map(|p| (handle.clone(), p)))
             .into_iter()
+            .map(|h| h.wait().flatten())
             .fold(Ok(false), |a, c| a.and_then(|a| c.map(|c| a || c)))?
           {
             index = leaf.get_next();
@@ -276,7 +282,7 @@ fn run_merge_leaf(
           .map(|(key, ptr)| (key, ptr, gc.check_empty(handle.clone(), ptr)))
           .collect::<Vec<_>>();
         for (key, ptr, r) in found.into_iter() {
-          match r.wait_flatten()? {
+          match r.wait().flatten()? {
             true => orphand.push(ptr),
             false => new_entries.push((key, ptr)),
           }

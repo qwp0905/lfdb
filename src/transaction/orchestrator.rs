@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::{cell::UnsafeCell, sync::Arc, time::Duration};
 
-use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
+use super::{PageRecorder, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
   buffer_pool::{BufferPool, Slot, WritableSlot},
@@ -10,8 +10,8 @@ use crate::{
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{ReserveResult, TableHandle, TableId, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder, WorkInput},
-  utils::{LogFilter, ToBox},
+  thread::{BackgroundThread, Runtime, TaskHandle},
+  utils::{LogFilter, ToArc, UnsafeBorrowMut},
   wal::{TxId, WALSegment, WAL},
 };
 
@@ -29,19 +29,21 @@ pub struct TxOrchestrator {
   wal: Arc<WAL>,
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
-  checkpoint: Box<dyn BackgroundThread<(), Result>>,
+  checkpoint: Arc<dyn BackgroundThread<(), Result>>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
   logger: LogFilter,
-  timeout_thread: TimeoutThread,
+  runtime: Arc<Runtime>,
   tx_timeout: Duration,
   tree_manager: TreeManager,
   metrics: Arc<MetricsRegistry>,
+  initial_checkpoint: UnsafeCell<Option<TaskHandle<Result>>>,
 }
 impl TxOrchestrator {
-  pub fn new(
+  fn create(
     config: TransactionConfig,
+    runtime: Arc<Runtime>,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -51,13 +53,9 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
+    initial_checkpoint: Option<TaskHandle<Result>>,
   ) -> Result<Self> {
-    let checkpoint = WorkBuilder::new()
-      .name("checkpoint")
-      .stack_size(64 << 10)
-      .single()
-      .from_channel(checkpoint_ch)
+    let checkpoint = runtime
       .interval(
         config.checkpoint_interval,
         handle_checkpoint(
@@ -67,9 +65,10 @@ impl TxOrchestrator {
           version_visibility.clone(),
           logger.clone(),
         ),
-      )?
-      .to_box();
-    let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
+      )
+      .to_arc();
+    wal.start_rotate(&runtime, Arc::downgrade(&checkpoint));
+
     Ok(Self {
       wal,
       tables,
@@ -79,15 +78,16 @@ impl TxOrchestrator {
       gc,
       recorder,
       logger,
-      timeout_thread,
+      runtime,
       tx_timeout: config.timeout,
       tree_manager,
       metrics,
+      initial_checkpoint: UnsafeCell::new(initial_checkpoint),
     })
   }
-
-  pub fn initial_checkpoint(
+  pub fn new(
     config: TransactionConfig,
+    runtime: Arc<Runtime>,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -97,17 +97,10 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
-    segments: Vec<WALSegment>,
   ) -> Result<Self> {
-    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
-    segments
-      .into_iter()
-      .map(|seg| seg.truncate())
-      .collect::<Result>()?;
-
-    Self::new(
+    Self::create(
       config,
+      runtime,
       wal,
       buffer_pool,
       tables,
@@ -117,7 +110,51 @@ impl TxOrchestrator {
       logger,
       tree_manager,
       metrics,
-      checkpoint_ch,
+      None,
+    )
+  }
+
+  pub fn initial_checkpoint(
+    config: TransactionConfig,
+    runtime: Arc<Runtime>,
+    wal: Arc<WAL>,
+    buffer_pool: Arc<BufferPool>,
+    tables: Arc<TableMapper>,
+    version_visibility: Arc<VersionVisibility>,
+    gc: Arc<GarbageCollector>,
+    recorder: Arc<PageRecorder>,
+    logger: LogFilter,
+    tree_manager: TreeManager,
+    metrics: Arc<MetricsRegistry>,
+    segments: Vec<WALSegment>,
+  ) -> Result<Self> {
+    let wal_c = wal.clone();
+    let buffer_pool_c = buffer_pool.clone();
+    let gc_c = gc.clone();
+    let version_c = version_visibility.clone();
+    let logger_c = logger.clone();
+    let handle = runtime.submit(move || {
+      run_checkpoint(&wal_c, &buffer_pool_c, &gc_c, &version_c, &logger_c)?;
+      segments
+        .into_iter()
+        .map(|seg| seg.truncate())
+        .collect::<Result>()?;
+      Ok(()) as Result
+    });
+
+    Self::create(
+      config,
+      runtime,
+      wal,
+      buffer_pool,
+      tables,
+      version_visibility,
+      gc,
+      recorder,
+      logger,
+      tree_manager,
+      metrics,
+      Some(handle),
     )
   }
 
@@ -151,6 +188,27 @@ impl TxOrchestrator {
     self.gc.mark(handle, pointer);
   }
 
+  fn register_timeout(&self, tx_id: TxId, timeout: Option<Duration>) {
+    let version_visibility = self.version_visibility.clone();
+    let logger = self.logger.clone();
+    self.runtime.reserve_submit(
+      move || {
+        let state = match version_visibility.get_active_state(tx_id) {
+          Some(s) => s,
+          None => return,
+        };
+        if !state.try_timeout() {
+          return;
+        }
+        logger.trace(|| format!("tx {} timeout reached", state.get_id()));
+
+        version_visibility.set_abort(state.get_id());
+        state.deactive();
+      },
+      timeout.unwrap_or(self.tx_timeout),
+    );
+  }
+
   #[inline]
   pub fn start_tx(
     &self,
@@ -159,9 +217,7 @@ impl TxOrchestrator {
     let (state, snapshot) = self.version_visibility.new_transaction();
     let tx_id = state.get_id();
     self.wal.append_start(state.get_id())?;
-    self
-      .timeout_thread
-      .register(tx_id, timeout.unwrap_or(self.tx_timeout));
+    self.register_timeout(tx_id, timeout);
     Ok((state, snapshot))
   }
 
@@ -221,17 +277,21 @@ impl TxOrchestrator {
    * performs the final checkpoint; step 2 (wal_close) finalizes the WAL.
    */
   pub fn close(&self) -> Result {
+    if let Some(handle) = self.initial_checkpoint.get().borrow_mut_unsafe().take() {
+      self.logger.info(|| "waiting for checkpoint complete.");
+      handle.wait().flatten()?;
+    }
     self.tree_manager.close();
-    self.timeout_thread.close();
     let wal_close = self.wal.twostep_close();
     self.checkpoint.close();
     self.logger.info(|| "last checkpoint completed.");
 
-    self.gc.close();
     self.tables.close();
-    self.logger.info(|| "buffer pool closed.");
+    self.logger.info(|| "table handles closed.");
     wal_close();
     self.logger.info(|| "wal closed.");
+
+    self.runtime.close();
     Ok(())
   }
 }

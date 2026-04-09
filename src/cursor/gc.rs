@@ -10,7 +10,7 @@ use crate::{
   disk::Pointer,
   error::Result,
   table::TableHandle,
-  thread::{BackgroundThread, BatchWorkResult, WorkBuilder, WorkResult},
+  thread::{Runtime, TaskHandle},
   transaction::{PageRecorder, VersionVisibility},
   utils::{DoubleBuffer, LogFilter, ToArc},
   wal::RESERVED_TX,
@@ -42,9 +42,12 @@ enum GcPointer {
  * emptiness queries, entry does version reclamation.
  */
 pub struct GarbageCollector {
-  check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
-  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
+  runtime: Arc<Runtime>,
+  thread_count: usize,
+  recorder: Arc<PageRecorder>,
+  buffer_pool: Arc<BufferPool>,
+  version_visibility: Arc<VersionVisibility>,
   logger: LogFilter,
 }
 impl GarbageCollector {
@@ -53,6 +56,16 @@ impl GarbageCollector {
     self
       .logger
       .debug(|| format!("{} data will check version in this scope.", queue.len()));
+
+    let sub_pool = self.runtime.sub_pool(
+      self.thread_count,
+      run_entry(
+        self.buffer_pool.clone(),
+        self.version_visibility.clone(),
+        self.recorder.clone(),
+      ),
+    );
+
     let mut waiting = Vec::new();
     let mut release = BTreeMap::new();
     let mut dedup = HashSet::new();
@@ -62,7 +75,7 @@ impl GarbageCollector {
           if !dedup.insert((table.metadata().get_id(), ptr)) {
             continue;
           }
-          waiting.push(self.entry.send((table, ptr)));
+          waiting.push(sub_pool.push((table, ptr)));
         }
         GcPointer::Release(table, ptr) => {
           release.insert((table.metadata().get_id(), ptr), table);
@@ -73,8 +86,10 @@ impl GarbageCollector {
 
     waiting
       .into_iter()
-      .map(|v| v.wait_flatten())
+      .map(|v| v.wait().flatten())
       .collect::<Result>()?;
+    sub_pool.join()?;
+
     self.logger.debug(|| "unreachable versions all collected.");
 
     // must release after triming because of trim type can contain release type.
@@ -94,19 +109,31 @@ impl GarbageCollector {
 
   pub fn batch_check_empty(
     &self,
-    pointers: Vec<(Arc<TableHandle>, Pointer)>,
-  ) -> BatchWorkResult<Result<bool>> {
-    self.check.send_batch(pointers)
+    pointers: impl Iterator<Item = (Arc<TableHandle>, Pointer)>,
+  ) -> Vec<TaskHandle<Result<bool>>> {
+    pointers.map(|(t, p)| self.check_empty(t, p)).collect()
   }
+
   pub fn check_empty(
     &self,
     table: Arc<TableHandle>,
     pointer: Pointer,
-  ) -> WorkResult<Result<bool>> {
-    self.check.send((table, pointer))
+  ) -> TaskHandle<Result<bool>> {
+    let buffer_pool = self.buffer_pool.clone();
+    self.runtime.submit(move || {
+      Ok(
+        buffer_pool
+          .peek(pointer, table)?
+          .for_read()
+          .as_ref()
+          .deserialize::<DataEntry>()?
+          .is_empty(),
+      )
+    })
   }
 
   pub fn start(
+    runtime: Arc<Runtime>,
     buffer_pool: Arc<BufferPool>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
@@ -115,32 +142,15 @@ impl GarbageCollector {
   ) -> Self {
     let queue = DoubleBuffer::new().to_arc();
 
-    let entry = WorkBuilder::new()
-      .name("gc found entry")
-      .multi(config.thread_count)
-      .shared(run_entry(
-        buffer_pool.clone(),
-        version_visibility,
-        recorder.clone(),
-      ))
-      .to_arc();
-    let check = WorkBuilder::new()
-      .name("gc check top entry")
-      .multi(config.thread_count)
-      .shared(run_check(buffer_pool.clone()))
-      .to_arc();
-
     Self {
-      check,
-      entry,
       queue,
       logger,
+      buffer_pool,
+      version_visibility,
+      recorder,
+      runtime,
+      thread_count: config.thread_count,
     }
-  }
-
-  pub fn close(&self) {
-    self.check.close();
-    self.entry.close();
   }
 }
 
@@ -234,20 +244,5 @@ fn run_entry(
       table.free().dealloc(next);
     }
     Ok(())
-  }
-}
-
-fn run_check(
-  buffer_pool: Arc<BufferPool>,
-) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
-  move |(table, pointer)| {
-    Ok(
-      buffer_pool
-        .peek(pointer, table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntry>()?
-        .is_empty(),
-    )
   }
 }

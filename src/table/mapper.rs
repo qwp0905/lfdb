@@ -12,6 +12,7 @@ use super::{TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
+  thread::Runtime,
   utils::{SpinRwLock, ToArc},
   Error, Result,
 };
@@ -43,6 +44,7 @@ pub struct TableConfig {
 pub struct TableMapper {
   mapping: SpinRwLock<HashMap<String, Slot>>,
   base_path: PathBuf,
+  runtime: Arc<Runtime>,
   metadata: Arc<TableHandle>,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   metrics: Arc<MetricsRegistry>,
@@ -52,12 +54,14 @@ pub struct TableMapper {
 impl TableMapper {
   pub fn new(
     config: TableConfig,
+    runtime: Arc<Runtime>,
     page_pool: Arc<PagePool<PAGE_SIZE>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
     let path = to_path(&config.base_path, META_TABLE);
     let is_new = !exists(&path).map_err(Error::IO)?;
     let metadata = TableHandle::open(
+      &runtime,
       TableMetadata::new(META_TABLE_ID, path),
       page_pool.clone(),
       metrics.clone(),
@@ -67,6 +71,7 @@ impl TableMapper {
     Ok(Self {
       mapping: Default::default(),
       base_path: config.base_path,
+      runtime,
       metadata,
       page_pool,
       metrics,
@@ -77,8 +82,13 @@ impl TableMapper {
 
   pub fn create_handle(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
     Ok(
-      TableHandle::open(table_meta, self.page_pool.clone(), self.metrics.clone())?
-        .to_arc(),
+      TableHandle::open(
+        &self.runtime,
+        table_meta,
+        self.page_pool.clone(),
+        self.metrics.clone(),
+      )?
+      .to_arc(),
     )
   }
 

@@ -1,6 +1,7 @@
 use std::{
   cell::UnsafeCell,
   mem::replace,
+  panic::{catch_unwind, RefUnwindSafe, UnwindSafe},
   sync::Arc,
   thread::{Builder, JoinHandle},
   time::{Duration, Instant},
@@ -11,14 +12,81 @@ use crossbeam::{
   select,
 };
 
+use super::{oneshot, Spawner, Task, TaskHandle};
 use crate::{
-  utils::{LogFilter, UnsafeBorrowMut},
-  wal::TxId,
+  utils::{ToBox, UnsafeBorrowMut, UnwrappedSender},
+  Error,
 };
 
-use super::VersionVisibility;
-
 const TICK_SIZE: Duration = Duration::from_millis(1);
+enum Msg {
+  Register(Box<dyn FnOnce() + Send>, Duration),
+  Done,
+}
+impl Msg {
+  #[inline]
+  fn register<F: FnOnce() + Send + 'static>(f: F, duration: Duration) -> Self {
+    Msg::Register(f.to_box(), duration)
+  }
+}
+
+pub struct TimerThread {
+  handle: UnsafeCell<Option<JoinHandle<()>>>,
+  channel: Sender<Msg>,
+}
+impl TimerThread {
+  pub fn new(spawner: Arc<Spawner>) -> Self {
+    let (tx, rx) = unbounded();
+    let th = Builder::new()
+      .name("timer thread".to_string())
+      .spawn(move || {
+        let mut wheel = TimingWheel::new(|task| spawner.register(Task::Work(task)));
+        let ticker = tick(TICK_SIZE);
+
+        while let Ok(ctx) = rx.recv() {
+          match ctx {
+            Msg::Register(task, timeout) => wheel.register(task, timeout),
+            Msg::Done => return,
+          }
+
+          while !wheel.is_empty() {
+            select! {
+              recv(ticker) -> _ => wheel.tick(),
+              recv(rx) -> msg => match msg {
+                Ok(Msg::Register(task, timeout)) => wheel.register(task, timeout),
+                Err(_) | Ok(Msg::Done) => return,
+              }
+            }
+          }
+        }
+      })
+      .unwrap();
+
+    Self {
+      handle: UnsafeCell::new(Some(th)),
+      channel: tx,
+    }
+  }
+
+  pub fn register<T, F>(&self, f: F, duration: Duration) -> TaskHandle<T>
+  where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + UnwindSafe + 'static,
+  {
+    let work = || catch_unwind(f).map_err(Arc::from).map_err(Error::panic);
+    let (oneshot, fulfill) = oneshot();
+    let task = Msg::register(|| fulfill.fulfill(work()), duration);
+    self.channel.must_send(task);
+    TaskHandle::new(oneshot)
+  }
+
+  pub fn close(&self) {
+    if let Some(th) = self.handle.get().borrow_mut_unsafe().take() {
+      let _ = self.channel.send(Msg::Done);
+      let _ = th.join();
+    }
+  }
+}
 
 const LAYER_PER_BUCKET_BIT: u64 = 6;
 const LAYER_PER_BUCKET: usize = 1 << LAYER_PER_BUCKET_BIT as usize;
@@ -44,11 +112,11 @@ impl SystemTimer {
   }
 }
 
-struct Task<T> {
+struct TimeoutTask<T> {
   execute_at: u64,
   data: T,
 }
-impl<T> Task<T> {
+impl<T> TimeoutTask<T> {
   fn new(data: T, execute_at: u64) -> Self {
     Self { execute_at, data }
   }
@@ -65,7 +133,7 @@ impl<T> Task<T> {
   }
 }
 
-type Bucket<T> = Vec<Task<T>>;
+type Bucket<T> = Vec<TimeoutTask<T>>;
 
 struct BucketLayer<T> {
   buckets: [Option<Bucket<T>>; LAYER_PER_BUCKET],
@@ -83,7 +151,7 @@ impl<T> BucketLayer<T> {
   }
 
   #[inline]
-  fn insert(&mut self, task: Task<T>) {
+  fn insert(&mut self, task: TimeoutTask<T>) {
     let bucket = task.get_bucket_index(self.layer_index) as usize;
     self.buckets[bucket].get_or_insert_default().push(task);
     self.size += 1;
@@ -144,7 +212,7 @@ where
       return (self.handle)(data);
     }
 
-    let task = Task::new(data, execute_at);
+    let task = TimeoutTask::new(data, execute_at);
     let layer_size = task.layer_size();
     for len in self.layers.len()..layer_size {
       self.layers.push(BucketLayer::new(len as u64));
@@ -198,79 +266,10 @@ where
   }
 }
 
-enum Msg {
-  Register(TxId, Duration),
-  Term,
-}
+unsafe impl Send for TimerThread {}
+unsafe impl Sync for TimerThread {}
+impl RefUnwindSafe for TimerThread {}
 
-/**
- * Aborts transactions that exceed their timeout.
- * Uses a timing wheel internally to schedule abort callbacks efficiently.
- * The thread idles when no transactions are registered, waking on the first registration.
- */
-pub struct TimeoutThread {
-  handle: UnsafeCell<Option<JoinHandle<()>>>,
-  channel: Sender<Msg>,
-}
-impl TimeoutThread {
-  pub fn new(version_visibility: Arc<VersionVisibility>, logger: LogFilter) -> Self {
-    let (tx, rx) = unbounded();
-    let th = Builder::new()
-      .name("timeout".to_string())
-      .spawn(move || {
-        let logger_c = logger.clone();
-        let mut wheel = TimingWheel::new(move |tx_id: TxId| {
-          let state = match version_visibility.get_active_state(tx_id) {
-            Some(s) => s,
-            None => return,
-          };
-          if !state.try_timeout() {
-            return;
-          }
-          logger_c.trace(|| format!("tx {} timeout reached", state.get_id()));
-
-          version_visibility.set_abort(state.get_id());
-          state.deactive();
-        });
-        let ticker = tick(TICK_SIZE);
-
-        while let Ok(ctx) = rx.recv() {
-          match ctx {
-            Msg::Register(id, timeout) => wheel.register(id, timeout),
-            Msg::Term => return,
-          }
-          logger.debug(|| "timeout thread wake up.");
-
-          while !wheel.is_empty() {
-            select! {
-              recv(ticker) -> _ => wheel.tick(),
-              recv(rx) -> msg => match msg {
-                Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
-                Err(_) | Ok(Msg::Term) => return,
-              }
-            }
-          }
-          logger.debug(|| "timeout thread switches to idle.");
-        }
-      })
-      .unwrap();
-
-    Self {
-      handle: UnsafeCell::new(Some(th)),
-      channel: tx,
-    }
-  }
-
-  pub fn register(&self, id: TxId, timeout: Duration) {
-    self.channel.send(Msg::Register(id, timeout)).unwrap();
-  }
-
-  pub fn close(&self) {
-    if let Some(th) = self.handle.get().borrow_mut_unsafe().take() {
-      let _ = self.channel.send(Msg::Term);
-      let _ = th.join();
-    }
-  }
-}
-unsafe impl Send for TimeoutThread {}
-unsafe impl Sync for TimeoutThread {}
+#[cfg(test)]
+#[path = "tests/timer.rs"]
+mod timer;

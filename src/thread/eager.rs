@@ -1,16 +1,20 @@
 use std::{
   cell::UnsafeCell,
+  mem::ManuallyDrop,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
-  thread::{park, Builder, JoinHandle, Thread},
+  sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+  },
 };
 
 use crate::{
+  thread::{SharedFn, TaskHandle},
   utils::{ToArc, UnsafeBorrow, UnsafeBorrowMut},
   Result,
 };
 
-use super::{BackgroundThread, Context, OneshotFulfill, SingleFn};
+use super::{BackgroundThread, Context, OneshotFulfill, Spawner};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 /**
@@ -18,15 +22,15 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
  * waiter — hence R: Clone.
  */
 fn make_flush<'a, T, R>(
-  mut when_buffered: SingleFn<'a, Vec<T>, R>,
-) -> impl FnMut(&mut Vec<(T, OneshotFulfill<Result<R>>)>) -> bool + 'a
+  when_buffered: SharedFn<'a, Vec<T>, R>,
+) -> impl Fn(&mut Vec<(T, OneshotFulfill<Result<R>>)>) + 'a
 where
   T: Send + UnwindSafe + 'static,
   R: Send + Clone + 'static,
 {
   move |buffered| {
     if buffered.is_empty() {
-      return false;
+      return;
     }
 
     let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
@@ -34,7 +38,6 @@ where
     waiting
       .into_iter()
       .for_each(|done| done.fulfill(result.clone()));
-    true
   }
 }
 
@@ -52,67 +55,78 @@ where
  */
 pub struct EagerBufferingThread<T, R> {
   queue: Arc<SegQueue<Context<T, R>>>,
-  waker: Thread,
-  /**
-   * UnsafeCell allows taking the JoinHandle in close(&self).
-   * Safe because close() is called at most once during shutdown.
-   */
-  handle: UnsafeCell<Option<JoinHandle<()>>>,
+  count: usize,
+  work: UnsafeCell<ManuallyDrop<SharedFn<'static, Vec<T>, R>>>,
+  spawner: Arc<Spawner>,
+  alive: Arc<AtomicUsize>,
+  current: UnsafeCell<Option<TaskHandle<()>>>,
+  closed: AtomicBool,
 }
 impl<T, R> EagerBufferingThread<T, R>
 where
   T: Send + UnwindSafe + 'static,
   R: Send + Clone + 'static,
 {
-  pub fn new<S: ToString>(
-    name: S,
-    size: usize,
+  pub fn new(
+    spawner: Arc<Spawner>,
     count: usize,
-    when_buffered: SingleFn<'static, Vec<T>, R>,
+    when_buffered: SharedFn<'static, Vec<T>, R>,
   ) -> Self {
-    let queue = SegQueue::new().to_arc();
-    let queue_c = Arc::clone(&queue);
+    Self {
+      queue: SegQueue::new().to_arc(),
+      work: UnsafeCell::new(ManuallyDrop::new(when_buffered)),
+      count,
+      alive: AtomicUsize::new(0).to_arc(),
+      spawner,
+      current: UnsafeCell::new(None),
+      closed: AtomicBool::new(false),
+    }
+  }
 
-    let handle = Builder::new()
-      .name(name.to_string())
-      .stack_size(size)
-      .spawn(move || {
-        let backoff = Backoff::new();
-        let mut buffered = Vec::with_capacity(count);
-        let mut flush = make_flush(when_buffered);
+  fn spawn(&self) {
+    let alive = self.alive.clone();
+    let count = self.count;
+    let queue = self.queue.clone();
+    let flush = make_flush(SharedFn::clone(self.work.get().borrow_unsafe()));
+
+    let handle = self.spawner.spawn(move || {
+      let backoff = Backoff::new();
+      let mut buffered = Vec::with_capacity(count);
+
+      loop {
+        'inner: while buffered.len() < count {
+          match queue.pop() {
+            Some(Context::Work(v, done)) => {
+              alive.fetch_sub(1, Ordering::Release);
+              buffered.push((v, done));
+            }
+            Some(Context::Term) => return flush(&mut buffered),
+            None => break 'inner,
+          }
+        }
+
+        flush(&mut buffered);
 
         loop {
-          'burst: while !backoff.is_completed() {
-            'inner: while buffered.len() < count {
-              match queue_c.pop() {
-                Some(Context::Work(v, done)) => buffered.push((v, done)),
-                None => break 'inner,
-                Some(Context::Term) => {
-                  flush(&mut buffered);
-                  return;
-                }
-              }
-            }
-
-            if flush(&mut buffered) {
-              backoff.reset();
-              continue 'burst;
-            };
-            backoff.snooze();
+          let current = alive.load(Ordering::Acquire);
+          if current & !ALIVE_BIT > 0 {
+            break;
           }
 
-          park();
-          backoff.reset();
-        }
-      })
-      .unwrap();
-    let waker = handle.thread().clone();
+          if alive
+            .compare_exchange(current, 0, Ordering::Release, Ordering::Acquire)
+            .is_ok()
+          {
+            return;
+          }
 
-    Self {
-      queue,
-      waker,
-      handle: UnsafeCell::new(Some(handle)),
-    }
+          backoff.spin()
+        }
+        backoff.reset()
+      }
+    });
+
+    unsafe { self.current.get().write(Some(handle)) };
   }
 }
 impl<T, R> UnwindSafe for EagerBufferingThread<T, R> {}
@@ -120,22 +134,46 @@ impl<T, R> RefUnwindSafe for EagerBufferingThread<T, R> {}
 unsafe impl<T, R> Send for EagerBufferingThread<T, R> {}
 unsafe impl<T, R> Sync for EagerBufferingThread<T, R> {}
 
-impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
+const ALIVE_BIT: usize = 1 << (usize::BITS - 1);
+
+impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R>
+where
+  T: Send + UnwindSafe + 'static,
+  R: Send + Clone + 'static,
+{
   fn register(&self, ctx: Context<T, R>) -> bool {
-    if self.handle.get().borrow_unsafe().is_none() {
+    if self.closed.load(Ordering::Acquire) {
       return false;
     }
+
     self.queue.push(ctx);
-    self.waker.unpark();
-    true
+    let backoff = Backoff::new();
+    loop {
+      let cur = self.alive.load(Ordering::Acquire);
+      let new = (cur + 1) | ALIVE_BIT;
+      if let Ok(old) =
+        self
+          .alive
+          .compare_exchange(cur, new, Ordering::Release, Ordering::Acquire)
+      {
+        if old & ALIVE_BIT == 0 {
+          self.spawn();
+        }
+        return true;
+      }
+
+      backoff.spin()
+    }
   }
 
-  fn close(&self) {
-    if let Some(th) = self.handle.get().borrow_mut_unsafe().take() {
-      self.queue.push(Context::Term);
-      self.waker.unpark();
-      let _ = th.join();
+  fn terminate(&self) {
+    if self.closed.fetch_or(true, Ordering::Release) {
+      return;
+    };
+    if let Some(handle) = self.current.get().borrow_mut_unsafe().take() {
+      let _ = handle.wait();
     }
+    unsafe { ManuallyDrop::drop(self.work.get().borrow_mut_unsafe()) }
   }
 }
 

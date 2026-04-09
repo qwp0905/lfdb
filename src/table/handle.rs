@@ -7,6 +7,7 @@ use super::TableMetadata;
 use crate::{
   disk::{DiskController, FreeList, PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
+  thread::Runtime,
   Error, Result,
 };
 
@@ -18,11 +19,12 @@ pub struct TableHandle {
 }
 impl TableHandle {
   pub fn open(
+    runtime: &Runtime,
     metadata: TableMetadata,
     page_pool: Arc<PagePool<PAGE_SIZE>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let disk = DiskController::open(metadata.get_path(), page_pool, metrics)?;
+    let disk = DiskController::open(metadata.get_path(), runtime, page_pool, metrics)?;
     Ok(Self {
       metadata,
       disk,

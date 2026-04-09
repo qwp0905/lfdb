@@ -10,6 +10,7 @@ use crate::{
   disk::{PagePool, Pointer},
   error::{Error, Result},
   table::TableId,
+  thread::Runtime,
 };
 
 pub const RESERVED_TX: TxId = 0;
@@ -49,6 +50,7 @@ impl ReplayResult {
 }
 
 pub fn replay(
+  runtime: &Runtime,
   base_dir: &str,
   flush_count: usize,
   page_pool: &PagePool<WAL_BLOCK_SIZE>,
@@ -82,7 +84,7 @@ pub fn replay(
   let mut last_checkpoint = None as Option<LogId>;
   let mut last_min_active = None as Option<TxId>;
   for path in files.into_iter() {
-    let wal = WALSegment::open_exists(&path, flush_count)?;
+    let wal = WALSegment::open_exists(runtime, &path, flush_count)?;
     let len = wal.len()?;
     let mut records = vec![];
 

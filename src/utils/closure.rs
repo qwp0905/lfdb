@@ -20,20 +20,20 @@ where
   }
 }
 
-pub trait SafeCallableMut<T, R> {
-  type Error;
-  fn safe_call_mut(&mut self, v: T) -> std::result::Result<R, Self::Error>;
-}
-impl<T, R, F> SafeCallableMut<T, R> for F
-where
-  T: UnwindSafe,
-  F: FnMut(T) -> R + RefUnwindSafe,
-{
-  type Error = Arc<dyn std::any::Any + Send>;
+// pub trait SafeCallableMut<T, R> {
+//   type Error;
+//   fn safe_call_mut(&mut self, v: T) -> std::result::Result<R, Self::Error>;
+// }
+// impl<T, R, F> SafeCallableMut<T, R> for F
+// where
+//   T: UnwindSafe,
+//   F: FnMut(T) -> R + RefUnwindSafe,
+// {
+//   type Error = Arc<dyn std::any::Any + Send>;
 
-  #[inline(always)]
-  fn safe_call_mut(&mut self, v: T) -> std::result::Result<R, Self::Error> {
-    let ptr = self as *mut Self;
-    std::panic::catch_unwind(|| unsafe { &mut *ptr }(v)).map_err(Arc::from)
-  }
-}
+//   #[inline(always)]
+//   fn safe_call_mut(&mut self, v: T) -> std::result::Result<R, Self::Error> {
+//     let ptr = self as *mut Self;
+//     std::panic::catch_unwind(|| unsafe { &mut *ptr }(v)).map_err(Arc::from)
+//   }
+// }

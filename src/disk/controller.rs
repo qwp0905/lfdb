@@ -9,11 +9,11 @@ use super::{max_iov, DirectIO, PagePool, PageRef, Pointer, Pread, Pwrite, Pwrite
 use crate::{
   error::{Error, Result},
   metrics::MetricsRegistry,
-  thread::{BackgroundThread, WorkBuilder, WorkResult},
+  thread::{BackgroundThread, Runtime, TaskHandle},
   utils::{ToArc, ToBox},
 };
 
-pub struct WriteAsync<const N: usize>(WorkResult<Result>);
+pub struct WriteAsync<const N: usize>(TaskHandle<Result>);
 impl<const N: usize> WriteAsync<N> {
   pub fn wait(self) -> Result {
     self.0.wait()?
@@ -37,7 +37,7 @@ impl<const N: usize> DiskController<N> {
   fn handle_write(
     file: Arc<File>,
     metrics: Arc<MetricsRegistry>,
-  ) -> impl FnMut(Vec<(Pointer, PageRef<N>)>) -> Result {
+  ) -> impl Fn(Vec<(Pointer, PageRef<N>)>) -> Result {
     move |mut buffered| {
       if buffered.len() == 1 {
         let (p, slice) = &buffered[0];
@@ -63,6 +63,7 @@ impl<const N: usize> DiskController<N> {
 
   pub fn open<P: AsRef<Path>>(
     path: P,
+    runtime: &Runtime,
     page_pool: Arc<PagePool<N>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
@@ -77,12 +78,7 @@ impl<const N: usize> DiskController<N> {
       .direct_io(path.as_ref())
       .map_err(Error::IO)?
       .to_arc();
-    let writer = WorkBuilder::new()
-      .name(format!(
-        "{} write buffering",
-        path.as_ref().to_string_lossy()
-      ))
-      .single()
+    let writer = runtime
       .eager_buffering(max_iov(), Self::handle_write(file.clone(), metrics.clone()))
       .to_box();
 
