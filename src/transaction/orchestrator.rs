@@ -10,9 +10,9 @@ use crate::{
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{ReserveResult, TableHandle, TableId, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder, WorkInput},
-  utils::{LogFilter, ToBox},
-  wal::{TxId, WALSegment, WAL},
+  thread::{BackgroundThread, WorkBuilder},
+  utils::{LogFilter, ToArc},
+  wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
 pub struct TransactionConfig {
@@ -29,7 +29,7 @@ pub struct TxOrchestrator {
   wal: Arc<WAL>,
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
-  checkpoint: Box<dyn BackgroundThread<(), Result>>,
+  checkpoint: Arc<dyn BackgroundThread<(), Result>>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
@@ -42,6 +42,7 @@ pub struct TxOrchestrator {
 impl TxOrchestrator {
   pub fn new(
     config: TransactionConfig,
+    wal_config: &WALConfig,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -51,13 +52,11 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
-  ) -> Result<Self> {
+  ) -> Self {
     let checkpoint = WorkBuilder::new()
       .name("checkpoint")
       .stack_size(64 << 10)
       .single()
-      .from_channel(checkpoint_ch)
       .interval(
         config.checkpoint_interval,
         handle_checkpoint(
@@ -67,10 +66,11 @@ impl TxOrchestrator {
           version_visibility.clone(),
           logger.clone(),
         ),
-      )?
-      .to_box();
+      )
+      .to_arc();
+    wal.initialize(wal_config, Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
-    Ok(Self {
+    Self {
       wal,
       tables,
       buffer_pool,
@@ -83,11 +83,12 @@ impl TxOrchestrator {
       tx_timeout: config.timeout,
       tree_manager,
       metrics,
-    })
+    }
   }
 
   pub fn initial_checkpoint(
     config: TransactionConfig,
+    wal_config: &WALConfig,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -97,7 +98,6 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
     run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
@@ -106,8 +106,9 @@ impl TxOrchestrator {
       .map(|seg| seg.truncate())
       .collect::<Result>()?;
 
-    Self::new(
+    Ok(Self::new(
       config,
+      wal_config,
       wal,
       buffer_pool,
       tables,
@@ -117,8 +118,7 @@ impl TxOrchestrator {
       logger,
       tree_manager,
       metrics,
-      checkpoint_ch,
-    )
+    ))
   }
 
   #[inline]

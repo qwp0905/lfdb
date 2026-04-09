@@ -11,11 +11,11 @@ use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
   table::{TableHandle, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder},
+  thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
   wal::RESERVED_TX,
-  Error, Result,
+  Result,
 };
 
 pub struct TreeManagerConfig {
@@ -186,7 +186,7 @@ impl TreeManager {
         let gc = gc.clone();
         let logger = logger.clone();
         let open_handles = open_handles.clone();
-        std::thread::spawn(move || {
+        once(move || {
           while let Some((name, table)) = open_handles.l().pop() {
             logger.debug(|| format!("{name} table start to collect orphand blocks."));
             release_orphand(&buffer_pool, &gc, &logger, table)?;
@@ -198,8 +198,8 @@ impl TreeManager {
 
     threads
       .into_iter()
-      .map(|th| th.join().map_err(Arc::from).map_err(Error::panic))
-      .collect::<Result<Result>>()??;
+      .map(|th| th.wait().flatten())
+      .collect::<Result>()?;
 
     logger.info(|| "orphand block has released successfully.");
     Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
@@ -276,7 +276,7 @@ fn run_merge_leaf(
           .map(|(key, ptr)| (key, ptr, gc.check_empty(handle.clone(), ptr)))
           .collect::<Vec<_>>();
         for (key, ptr, r) in found.into_iter() {
-          match r.wait_flatten()? {
+          match r.wait().flatten()? {
             true => orphand.push(ptr),
             false => new_entries.push((key, ptr)),
           }

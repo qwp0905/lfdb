@@ -10,6 +10,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
+  thread::once,
   utils::{
     AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, UnsafeBorrow,
   },
@@ -176,9 +177,13 @@ impl BufferPool {
       waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
       self.logger.debug(|| "buffer pool flushed all pages.");
 
-      for handle in handles.into_values() {
-        handle.disk().fsync()?;
-      }
+      handles
+        .into_values()
+        .map(|handle| once(move || handle.disk().fsync()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|th| th.wait().flatten())
+        .collect::<Result>()?;
 
       Ok(())
     })?;

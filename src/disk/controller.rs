@@ -9,11 +9,11 @@ use super::{max_iov, DirectIO, PagePool, PageRef, Pointer, Pread, Pwrite, Pwrite
 use crate::{
   error::{Error, Result},
   metrics::MetricsRegistry,
-  thread::{BackgroundThread, WorkBuilder, WorkResult},
+  thread::{BackgroundThread, TaskHandle, WorkBuilder},
   utils::{ToArc, ToBox},
 };
 
-pub struct WriteAsync<const N: usize>(WorkResult<Result>);
+pub struct WriteAsync<const N: usize>(TaskHandle<Result>);
 impl<const N: usize> WriteAsync<N> {
   pub fn wait(self) -> Result {
     self.0.wait()?

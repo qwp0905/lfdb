@@ -2,7 +2,7 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, OnceLock, Weak,
   },
   time::Duration,
 };
@@ -17,7 +17,7 @@ use crate::{
   disk::{PagePool, Pointer},
   error::Result,
   table::TableId,
-  thread::{BackgroundThread, WorkBuilder, WorkInput},
+  thread::{BackgroundThread, WorkBuilder},
   utils::{LogFilter, ToArc, ToBox, UnsafeBorrow},
 };
 
@@ -78,7 +78,7 @@ pub struct WAL {
    * rotation and hurt write throughput. Lazy buffering amortizes checkpoint cost
    * by accumulating segments and triggering once per batch.
    */
-  wait_checkpoint: Box<dyn BackgroundThread<WALSegment>>,
+  wait_checkpoint: OnceLock<Box<dyn BackgroundThread<WALSegment>>>,
   /**
    * Segments whose checkpoint has not yet succeeded. These cannot be deleted or
    * reused until a checkpoint completes — they still contain records that must
@@ -99,11 +99,7 @@ pub struct WAL {
   syned_count: AtomicU64,
 }
 impl WAL {
-  pub fn replay(
-    config: WALConfig,
-    checkpoint: WorkInput<(), Result>,
-    logger: LogFilter,
-  ) -> Result<(Self, ReplayResult)> {
+  pub fn replay(config: &WALConfig, logger: LogFilter) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(max_len);
     logger.info(|| "start to replay wal segments");
@@ -126,7 +122,7 @@ impl WAL {
     });
 
     let preloader = SegmentPreload::new(
-      config.base_dir,
+      config.base_dir.to_path_buf(),
       replay_result.generation,
       config.group_commit_count,
       max_len as Pointer,
@@ -134,16 +130,6 @@ impl WAL {
     .to_arc();
 
     let not_flushed = SegQueue::new().to_arc();
-    let wait_checkpoint = WorkBuilder::new()
-      .name("wal checkpoint buffering")
-      .single()
-      .lazy_buffering(
-        config.segment_flush_delay,
-        config.segment_flush_count,
-        waiting_checkpoint(checkpoint, preloader.clone(), not_flushed.clone()),
-      )
-      .to_box();
-
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((
@@ -153,13 +139,35 @@ impl WAL {
         buffer: Atomic::new(buffer),
         page_pool,
         max_len: max_len as Pointer,
-        wait_checkpoint,
+        wait_checkpoint: OnceLock::new(),
         checkpoint_failed: not_flushed,
         fsync_queue: SegQueue::new(),
         syned_count: AtomicU64::new(0),
       },
       replay_result,
     ))
+  }
+
+  pub fn initialize(
+    &self,
+    config: &WALConfig,
+    checkpoint: Weak<impl BackgroundThread<(), Result> + 'static>,
+  ) {
+    let wait_checkpoint = WorkBuilder::new()
+      .name("wal checkpoint buffering")
+      .single()
+      .lazy_buffering(
+        config.segment_flush_delay,
+        config.segment_flush_count,
+        waiting_checkpoint(
+          checkpoint,
+          self.preloader.clone(),
+          self.checkpoint_failed.clone(),
+        ),
+      )
+      .to_box();
+
+    let _ = self.wait_checkpoint.set(wait_checkpoint);
   }
 
   /**
@@ -301,7 +309,7 @@ impl WAL {
 
       let segment = buffer.take_segment();
       self.fsync_queue.push(segment.fsync());
-      self.wait_checkpoint.send(segment);
+      self.wait_checkpoint.wait().send(segment);
     }
   }
 
@@ -364,7 +372,7 @@ impl WAL {
    * the current segment. Called after the final checkpoint completes.
    */
   pub fn twostep_close<'a>(&'a self) -> impl Fn() + 'a {
-    self.wait_checkpoint.close();
+    self.wait_checkpoint.wait().close();
 
     while let Some(f) = self.fsync_queue.pop() {
       let _ = f.wait();
@@ -401,17 +409,24 @@ unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
 
 fn waiting_checkpoint(
-  checkpoint: WorkInput<(), Result>,
+  checkpoint: Weak<impl BackgroundThread<(), Result>>,
   preloader: Arc<SegmentPreload>,
   failed: Arc<SegQueue<WALSegment>>,
 ) -> impl Fn(Vec<WALSegment>) {
-  move |segments| match checkpoint.send(()).wait_flatten() {
-    Ok(_) => {
-      while let Some(buffered) = failed.pop() {
-        preloader.reuse(buffered);
+  move |segments| {
+    let checkpoint = match checkpoint.upgrade() {
+      Some(c) => c,
+      None => return segments.into_iter().for_each(|seg| seg.close()),
+    };
+
+    match checkpoint.send(()).wait().flatten() {
+      Ok(_) => {
+        while let Some(buffered) = failed.pop() {
+          preloader.reuse(buffered);
+        }
+        segments.into_iter().for_each(|s| preloader.reuse(s));
       }
-      segments.into_iter().for_each(|s| preloader.reuse(s));
+      Err(_) => segments.into_iter().for_each(|s| failed.push(s)),
     }
-    Err(_) => segments.into_iter().for_each(|s| failed.push(s)),
   }
 }

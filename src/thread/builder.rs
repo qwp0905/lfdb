@@ -1,14 +1,27 @@
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
+  thread::Builder,
   time::Duration,
 };
 
-use crate::Result;
-
 use super::{
   BackgroundThread, EagerBufferingThread, IntervalWorkThread, LazyBufferingThread,
-  SharedWorkThread, SingleFn, WorkInput,
+  OnceHandle, SharedWorkThread, SingleFn,
 };
+
+const DEFAULT_STACK_SIZE: usize = 16 << 10;
+
+pub fn once<F, T>(f: F) -> OnceHandle<T>
+where
+  T: Send + 'static,
+  F: FnOnce() -> T + Send + 'static,
+{
+  let handle = Builder::new()
+    .stack_size(DEFAULT_STACK_SIZE << 2)
+    .spawn(f)
+    .unwrap();
+  OnceHandle::new(handle)
+}
 
 pub struct WorkBuilder {
   name: String,
@@ -18,7 +31,7 @@ impl WorkBuilder {
   pub fn new() -> Self {
     WorkBuilder {
       name: Default::default(),
-      stack_size: 16 << 10,
+      stack_size: DEFAULT_STACK_SIZE,
     }
   }
   pub fn name<S: ToString>(mut self, name: S) -> Self {
@@ -76,12 +89,6 @@ impl SingleThreadBuilder {
       SingleFn::new(f),
     )
   }
-  pub fn from_channel<T, R>(self, channel: WorkInput<T, R>) -> FromChannelBuilder<T, R> {
-    FromChannelBuilder {
-      builder: self.builder,
-      input: channel,
-    }
-  }
 
   pub fn eager_buffering<F, T, R>(
     self,
@@ -118,27 +125,6 @@ impl SingleThreadBuilder {
       count,
       timeout,
       SingleFn::new(when_buffered),
-    )
-  }
-}
-
-pub struct FromChannelBuilder<T, R> {
-  builder: WorkBuilder,
-  input: WorkInput<T, R>,
-}
-impl<T, R> FromChannelBuilder<T, R> {
-  pub fn interval<F>(self, timeout: Duration, f: F) -> Result<impl BackgroundThread<T, R>>
-  where
-    T: Send + UnwindSafe + RefUnwindSafe + 'static,
-    R: Send + 'static,
-    F: FnMut(Option<T>) -> R + Send + RefUnwindSafe + Sync + 'static,
-  {
-    IntervalWorkThread::from_channel(
-      self.builder.name,
-      self.builder.stack_size,
-      timeout,
-      self.input,
-      SingleFn::new(f),
     )
   }
 }

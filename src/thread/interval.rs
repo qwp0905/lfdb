@@ -8,10 +8,9 @@ use std::{
 use crate::{
   thread::SingleFn,
   utils::{UnsafeBorrowMut, UnwrappedSender},
-  Error, Result,
 };
 
-use super::{BackgroundThread, Context, WorkInput};
+use super::{BackgroundThread, Context};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 
 /**
@@ -62,20 +61,6 @@ where
   ) -> Self {
     let (tx, rx) = unbounded();
     Self::build(name, size, timeout, work, tx, rx)
-  }
-
-  pub fn from_channel<S: ToString>(
-    name: S,
-    size: usize,
-    timeout: Duration,
-    input: WorkInput<T, R>,
-    work: SingleFn<'static, Option<T>, R>,
-  ) -> Result<Self> {
-    let (tx, rx) = match input.take() {
-      Some(rx) => rx,
-      None => return Err(Error::ThreadConflict),
-    };
-    Ok(Self::build(name, size, timeout, work, tx, rx))
   }
 }
 unsafe impl<T, R> Send for IntervalWorkThread<T, R> {}
