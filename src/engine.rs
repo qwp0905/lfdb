@@ -213,7 +213,7 @@ impl Engine {
       tree_manager,
       metrics_registry.clone(),
       replay.segments,
-    )
+    )?
     .to_arc();
 
     logger.info(|| "engine bootstrapped.");
