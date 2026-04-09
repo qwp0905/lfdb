@@ -10,7 +10,7 @@ use crate::{
   disk::Pointer,
   error::Result,
   table::TableHandle,
-  thread::{BackgroundThread, BatchWorkResult, WorkBuilder, WorkResult},
+  thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{DoubleBuffer, LogFilter, ToArc},
   wal::RESERVED_TX,
@@ -73,7 +73,7 @@ impl GarbageCollector {
 
     waiting
       .into_iter()
-      .map(|v| v.wait_flatten())
+      .map(|v| v.wait().flatten())
       .collect::<Result>()?;
     self.logger.debug(|| "unreachable versions all collected.");
 
@@ -95,14 +95,14 @@ impl GarbageCollector {
   pub fn batch_check_empty(
     &self,
     pointers: Vec<(Arc<TableHandle>, Pointer)>,
-  ) -> BatchWorkResult<Result<bool>> {
+  ) -> BatchTaskHandle<Result<bool>> {
     self.check.send_batch(pointers)
   }
   pub fn check_empty(
     &self,
     table: Arc<TableHandle>,
     pointer: Pointer,
-  ) -> WorkResult<Result<bool>> {
+  ) -> TaskHandle<Result<bool>> {
     self.check.send((table, pointer))
   }
 
