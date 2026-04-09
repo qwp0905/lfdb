@@ -1,6 +1,7 @@
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
   sync::Arc,
+  thread::JoinHandle,
 };
 
 use super::{Oneshot, OneshotFulfill};
@@ -56,25 +57,20 @@ where
   }
 }
 
-pub struct WorkResult<R>(Oneshot<Result<R>>);
-impl<R> WorkResult<R> {
+pub struct TaskHandle<R>(Oneshot<Result<R>>);
+impl<R> TaskHandle<R> {
   pub fn wait(self) -> Result<R> {
     self.0.wait()?
   }
 }
-impl<R> From<Oneshot<Result<R>>> for WorkResult<R> {
+impl<R> From<Oneshot<Result<R>>> for TaskHandle<R> {
   fn from(v: Oneshot<Result<R>>) -> Self {
-    WorkResult(v)
-  }
-}
-impl<R> WorkResult<Result<R>> {
-  pub fn wait_flatten(self) -> Result<R> {
-    self.wait()?
+    TaskHandle(v)
   }
 }
 
-pub struct BatchWorkResult<R>(Vec<Oneshot<Result<R>>>);
-impl<R> BatchWorkResult<R> {
+pub struct BatchTaskHandle<R>(Vec<Oneshot<Result<R>>>);
+impl<R> BatchTaskHandle<R> {
   pub fn from(v: impl Iterator<Item = Oneshot<Result<R>>>) -> Self {
     Self(v.collect())
   }
@@ -84,5 +80,17 @@ impl<R> BatchWorkResult<R> {
       results.push(o.wait()??);
     }
     Ok(results)
+  }
+}
+
+pub struct OnceHandle<T>(JoinHandle<T>);
+impl<T> OnceHandle<T> {
+  pub fn wait(self) -> Result<T> {
+    self.0.join().map_err(Error::panic)
+  }
+
+  #[inline]
+  pub fn new(handle: JoinHandle<T>) -> Self {
+    Self(handle)
   }
 }
