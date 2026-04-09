@@ -10,14 +10,14 @@ use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
-  thread::{BackgroundThread, WorkBuilder, WorkResult},
+  thread::{BackgroundThread, TaskHandle, WorkBuilder},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
 
 pub const FILE_SUFFIX: &str = ".wal";
 
-pub struct FsyncResult(WorkResult<bool>);
+pub struct FsyncResult(TaskHandle<bool>);
 impl FsyncResult {
   pub fn wait(self) -> Result {
     self
@@ -106,12 +106,13 @@ impl WALSegment {
     page: &P,
   ) -> Result {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
-    // type bound. Safe because wait_flatten() blocks until the write completes, ensuring
+    // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
     self
       .io
       .send((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
-      .wait_flatten()
+      .wait()
+      .flatten()
   }
   #[inline]
   pub fn len(&self) -> Result<Pointer> {
