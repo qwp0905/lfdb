@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{cell::UnsafeCell, sync::Arc, time::Duration};
 
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
@@ -10,9 +10,9 @@ use crate::{
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{ReserveResult, TableHandle, TableId, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder, WorkInput},
-  utils::{LogFilter, ToBox},
-  wal::{TxId, WALSegment, WAL},
+  thread::{once, BackgroundThread, OnceHandle, WorkBuilder},
+  utils::{LogFilter, ToArc, UnsafeBorrowMut},
+  wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
 pub struct TransactionConfig {
@@ -29,7 +29,7 @@ pub struct TxOrchestrator {
   wal: Arc<WAL>,
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
-  checkpoint: Box<dyn BackgroundThread<(), Result>>,
+  checkpoint: Arc<dyn BackgroundThread<(), Result>>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
@@ -38,10 +38,12 @@ pub struct TxOrchestrator {
   tx_timeout: Duration,
   tree_manager: TreeManager,
   metrics: Arc<MetricsRegistry>,
+  initial_checkpoint: UnsafeCell<Option<OnceHandle<Result>>>,
 }
 impl TxOrchestrator {
-  pub fn new(
+  fn construct(
     config: TransactionConfig,
+    wal_config: &WALConfig,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -51,13 +53,12 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
-  ) -> Result<Self> {
+    initial_checkpoint: Option<OnceHandle<Result>>,
+  ) -> Self {
     let checkpoint = WorkBuilder::new()
       .name("checkpoint")
       .stack_size(64 << 10)
       .single()
-      .from_channel(checkpoint_ch)
       .interval(
         config.checkpoint_interval,
         handle_checkpoint(
@@ -67,10 +68,11 @@ impl TxOrchestrator {
           version_visibility.clone(),
           logger.clone(),
         ),
-      )?
-      .to_box();
+      )
+      .to_arc();
+    wal.initialize(wal_config, Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
-    Ok(Self {
+    Self {
       wal,
       tables,
       buffer_pool,
@@ -83,11 +85,13 @@ impl TxOrchestrator {
       tx_timeout: config.timeout,
       tree_manager,
       metrics,
-    })
+      initial_checkpoint: UnsafeCell::new(initial_checkpoint),
+    }
   }
 
-  pub fn initial_checkpoint(
+  pub fn new(
     config: TransactionConfig,
+    wal_config: &WALConfig,
     wal: Arc<WAL>,
     buffer_pool: Arc<BufferPool>,
     tables: Arc<TableMapper>,
@@ -97,17 +101,10 @@ impl TxOrchestrator {
     logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
-    checkpoint_ch: WorkInput<(), Result>,
-    segments: Vec<WALSegment>,
-  ) -> Result<Self> {
-    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
-    segments
-      .into_iter()
-      .map(|seg| seg.truncate())
-      .collect::<Result>()?;
-
-    Self::new(
+  ) -> Self {
+    Self::construct(
       config,
+      wal_config,
       wal,
       buffer_pool,
       tables,
@@ -117,8 +114,64 @@ impl TxOrchestrator {
       logger,
       tree_manager,
       metrics,
-      checkpoint_ch,
+      None,
     )
+  }
+
+  pub fn initial_checkpoint(
+    config: TransactionConfig,
+    wal_config: &WALConfig,
+    wal: Arc<WAL>,
+    buffer_pool: Arc<BufferPool>,
+    tables: Arc<TableMapper>,
+    version_visibility: Arc<VersionVisibility>,
+    gc: Arc<GarbageCollector>,
+    recorder: Arc<PageRecorder>,
+    logger: LogFilter,
+    tree_manager: TreeManager,
+    metrics: Arc<MetricsRegistry>,
+    segments: Vec<WALSegment>,
+  ) -> Self {
+    let handle = Self::create_initial_checkpoint(
+      wal.clone(),
+      buffer_pool.clone(),
+      gc.clone(),
+      version_visibility.clone(),
+      logger.clone(),
+      segments,
+    );
+
+    Self::construct(
+      config,
+      wal_config,
+      wal,
+      buffer_pool,
+      tables,
+      version_visibility,
+      gc,
+      recorder,
+      logger,
+      tree_manager,
+      metrics,
+      Some(handle),
+    )
+  }
+
+  fn create_initial_checkpoint(
+    wal: Arc<WAL>,
+    buffer_pool: Arc<BufferPool>,
+    gc: Arc<GarbageCollector>,
+    version_visibility: Arc<VersionVisibility>,
+    logger: LogFilter,
+    segments: Vec<WALSegment>,
+  ) -> OnceHandle<Result> {
+    once(move || {
+      run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
+      segments
+        .into_iter()
+        .map(|seg| seg.truncate())
+        .collect::<Result>()
+    })
   }
 
   #[inline]
@@ -221,6 +274,10 @@ impl TxOrchestrator {
    * performs the final checkpoint; step 2 (wal_close) finalizes the WAL.
    */
   pub fn close(&self) -> Result {
+    if let Some(handle) = self.initial_checkpoint.get().borrow_mut_unsafe().take() {
+      handle.wait().flatten()?;
+    }
+
     self.tree_manager.close();
     self.timeout_thread.close();
     let wal_close = self.wal.twostep_close();
