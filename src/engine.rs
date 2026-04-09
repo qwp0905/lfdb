@@ -17,7 +17,6 @@ use crate::{
   error::{Error, Result},
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableConfig, TableMapper, META_TABLE_ID},
-  thread::WorkInput,
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
@@ -94,9 +93,8 @@ impl Engine {
       metrics_registry.clone(),
     )?
     .to_arc();
-    let checkpoint_ch = WorkInput::new();
 
-    let (wal, replay) = WAL::replay(wal_config, checkpoint_ch.copy(), logger.clone())?;
+    let (wal, replay) = WAL::replay(&wal_config, logger.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -124,6 +122,7 @@ impl Engine {
       )?;
       let orchestrator = TxOrchestrator::new(
         tx_config,
+        &wal_config,
         wal,
         buffer_pool,
         tables,
@@ -133,8 +132,7 @@ impl Engine {
         logger.clone(),
         tree_manager,
         metrics_registry.clone(),
-        checkpoint_ch,
-      )?
+      )
       .to_arc();
 
       logger.info(|| "engine bootstrapped.");
@@ -204,6 +202,7 @@ impl Engine {
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
+      &wal_config,
       wal,
       buffer_pool,
       tables,
@@ -213,9 +212,8 @@ impl Engine {
       logger.clone(),
       tree_manager,
       metrics_registry.clone(),
-      checkpoint_ch,
       replay.segments,
-    )?
+    )
     .to_arc();
 
     logger.info(|| "engine bootstrapped.");
