@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
@@ -9,9 +9,12 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{ReserveResult, TableHandle, TableId, TableMapper, TableMetadata},
+  table::{
+    DropResult, PinnedHandle, ReserveResult, TableHandle, TableId, TableMapper,
+    TableMetadata,
+  },
   thread::{BackgroundThread, WorkBuilder},
-  utils::{LogFilter, ToArc},
+  utils::{LogFilter, ToArc, ToBox},
   wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
@@ -19,6 +22,8 @@ pub struct TransactionConfig {
   pub timeout: Duration,
   pub checkpoint_interval: Duration,
 }
+
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /**
  * Composes WAL, buffer pool, GC, version visibility, and tree manager into a
@@ -38,6 +43,7 @@ pub struct TxOrchestrator {
   tx_timeout: Duration,
   tree_manager: TreeManager,
   metrics: Arc<MetricsRegistry>,
+  release_table: Box<dyn BackgroundThread<(String, Arc<TableHandle>), ()>>,
 }
 impl TxOrchestrator {
   pub fn new(
@@ -70,6 +76,12 @@ impl TxOrchestrator {
       .to_arc();
     wal.initialize(wal_config, Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
+
+    let release_table = WorkBuilder::new()
+      .name("lazy release table")
+      .single()
+      .interval(RELEASE_CHECK_INTERVAL, handle_table(tables.clone()))
+      .to_box();
     Self {
       wal,
       tables,
@@ -83,6 +95,7 @@ impl TxOrchestrator {
       tx_timeout: config.timeout,
       tree_manager,
       metrics,
+      release_table,
     }
   }
 
@@ -192,26 +205,34 @@ impl TxOrchestrator {
     self.tables.get_or_reserve(name)
   }
   #[inline]
-  pub fn get_table(&self, name: &str) -> Option<Arc<TableHandle>> {
+  pub fn get_table(&self, name: &str) -> Option<PinnedHandle> {
     self.tables.get(name)
   }
   #[inline]
   pub fn open_table(&self, name: String, table: Arc<TableHandle>) {
     self.tables.insert(name, table);
   }
+  #[inline]
   pub fn create_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
     self.tables.create_handle(table_meta)
   }
+  #[inline]
   pub fn create_table_metadata(&self, name: &str) -> TableMetadata {
     self.tables.create_metadata(name)
   }
   #[inline]
-  pub fn drop_table(&self, name: &str, table: Arc<TableHandle>) -> Result {
-    self.tables.remove(name);
-    table.truncate()?;
-    Ok(())
+  pub fn try_drop_table(&self, name: &str) -> DropResult {
+    self.tables.try_drop(name)
   }
-  pub fn get_metadata_table(&self) -> Arc<TableHandle> {
+
+  #[inline]
+  pub fn drop_table(&self, name: &str, table: Arc<TableHandle>) {
+    let table_id = table.metadata().get_id();
+    let h = self.release_table.send((name.to_string(), table));
+    self.tables.remove_reserve(table_id, name, h);
+  }
+  #[inline]
+  pub fn get_metadata_table(&self) -> PinnedHandle {
     self.tables.meta_table()
   }
 
@@ -228,8 +249,9 @@ impl TxOrchestrator {
     self.logger.info(|| "last checkpoint completed.");
 
     self.gc.close();
+    self.release_table.close();
     self.tables.close();
-    self.logger.info(|| "buffer pool closed.");
+    self.logger.info(|| "tables closed.");
     wal_close();
     self.logger.info(|| "wal closed.");
     Ok(())
@@ -265,4 +287,21 @@ fn run_checkpoint(
   wal.checkpoint_and_flush(log_id, min_version)?;
   logger.debug(|| format!("checkpoint complete id {log_id}"));
   Ok(())
+}
+
+fn handle_table(
+  mapper: Arc<TableMapper>,
+) -> impl FnMut(Option<(String, Arc<TableHandle>)>) -> () {
+  let mut tables = BTreeMap::new();
+  move |recv| {
+    if let Some((name, table)) = recv {
+      tables.insert(name, table);
+    }
+
+    for (name, table) in tables.extract_if(.., |_, table| {
+      !table.is_pinned() && table.truncate().is_ok()
+    }) {
+      mapper.remove(table.metadata().get_id(), &name);
+    }
+  }
 }
