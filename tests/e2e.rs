@@ -32,7 +32,7 @@ fn build_engine(dir: &TempDir) -> Engine {
 const TEST_TABLE: &str = "test";
 
 fn create_table(engine: &Engine, name: &str) {
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   tx.open_table(name).unwrap();
   tx.commit().unwrap();
 }
@@ -45,7 +45,7 @@ fn test_basic_crud() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   let table = tx.open_table(TEST_TABLE).unwrap();
 
   table.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
@@ -70,7 +70,7 @@ fn test_commit_visibility() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let mut tx1 = engine.new_tx().unwrap();
+  let tx1 = engine.new_tx().unwrap();
   tx1
     .open_table(TEST_TABLE)
     .unwrap()
@@ -96,7 +96,7 @@ fn test_abort_invisibility() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx1 = engine.new_tx().unwrap();
+  let tx1 = engine.new_tx().unwrap();
   let t1 = tx1.table(TEST_TABLE).unwrap();
   t1.insert(b"ghost".to_vec(), b"data".to_vec()).unwrap();
   tx1.abort().unwrap();
@@ -138,7 +138,7 @@ fn test_write_conflict() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
   {
-    let mut tx1 = engine.new_tx().unwrap();
+    let tx1 = engine.new_tx().unwrap();
     let t1 = tx1.table(TEST_TABLE).unwrap();
     t1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
     // tx1 NOT committed — still active
@@ -158,7 +158,7 @@ fn test_write_conflict() {
 
   {
     let key = b"key";
-    let mut tx1 = engine.new_tx().unwrap();
+    let tx1 = engine.new_tx().unwrap();
     let t1 = tx1.table(TEST_TABLE).unwrap();
     t1.insert(key.to_vec(), b"value1".to_vec()).unwrap();
 
@@ -185,7 +185,7 @@ fn test_transaction_closed_after_commit() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   {
     let table = tx.table(TEST_TABLE).unwrap();
     table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -206,7 +206,7 @@ fn test_transaction_closed_after_abort() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   {
     let table = tx.table(TEST_TABLE).unwrap();
     table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -228,7 +228,7 @@ fn test_scan_range() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..10 {
     table.insert(vec![i], vec![i * 10]).unwrap();
@@ -255,7 +255,7 @@ fn test_scan_all() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx = engine.new_tx().unwrap();
+  let tx = engine.new_tx().unwrap();
   let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..5 {
     table.insert(vec![i], vec![i]).unwrap();
@@ -284,12 +284,12 @@ fn test_overwrite() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx1 = engine.new_tx().unwrap();
+  let tx1 = engine.new_tx().unwrap();
   let t1 = tx1.table(TEST_TABLE).unwrap();
   t1.insert(b"key".to_vec(), b"v1".to_vec()).unwrap();
   tx1.commit().unwrap();
 
-  let mut tx2 = engine.new_tx().unwrap();
+  let tx2 = engine.new_tx().unwrap();
   let t2 = tx2.table(TEST_TABLE).unwrap();
   t2.insert(b"key".to_vec(), b"v2".to_vec()).unwrap();
   tx2.commit().unwrap();
@@ -327,7 +327,7 @@ fn test_crash_recovery() {
           }
           let key = vec![t, i];
           let value = vec![t, i, 0xFF];
-          let mut tx = match engine.new_tx() {
+          let tx = match engine.new_tx() {
             Ok(tx) => tx,
             Err(_) => break,
           };
@@ -386,19 +386,24 @@ fn test_snapshot_isolation() {
   create_table(&engine, TEST_TABLE);
 
   // tx1 and tx2 both start
-  let mut tx1 = engine.new_tx().unwrap();
-  let t1 = tx1.table(TEST_TABLE).unwrap();
+  let tx1 = engine.new_tx().unwrap();
   let tx2 = engine.new_tx().unwrap();
-  let t2 = tx2.table(TEST_TABLE).unwrap();
 
   // tx1 inserts and commits AFTER tx2 started
-  t1.insert(b"after".to_vec(), b"should-not-see".to_vec())
-    .unwrap();
+  {
+    let t1 = tx1.table(TEST_TABLE).unwrap();
+    t1.insert(b"after".to_vec(), b"should-not-see".to_vec())
+      .unwrap();
+  }
   tx1.commit().unwrap();
 
   // tx2 should NOT see tx1's write (snapshot isolation)
-  let val = t2.get(&b"after".to_vec()).unwrap();
-  assert_eq!(val, None, "tx2 should not see tx1's post-start commit");
+  {
+    let t2 = tx2.table(TEST_TABLE).unwrap();
+    let val = t2.get(&b"after".to_vec()).unwrap();
+    assert_eq!(val, None, "tx2 should not see tx1's post-start commit");
+  }
+
   drop(tx2);
 
   // tx3 starts AFTER tx1 committed — should see it
@@ -422,7 +427,7 @@ fn test_entry_split() {
   let iterations = 50;
 
   for i in 0..iterations {
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     let value = vec![i as u8; 100];
     table.insert(key.clone(), value).unwrap();
@@ -464,7 +469,7 @@ fn test_btree_node_split_and_recovery() {
       let e = engine.clone();
       workers.push(thread::spawn(move || {
         while let Ok((i, done)) = rx.recv() {
-          let mut cursor = e.new_tx().unwrap();
+          let cursor = e.new_tx().unwrap();
           let table = cursor.table(TEST_TABLE).unwrap();
           let key = format!("key-{:06}", i).into_bytes();
           let value = format!("val-{:06}", i).into_bytes();
@@ -602,7 +607,7 @@ fn crash_writer() {
     thread::spawn(move || {
       while let Ok((i, done)) = rx.recv() {
         let table_name = &names[i % names.len()];
-        let mut cursor = e.new_tx().unwrap();
+        let cursor = e.new_tx().unwrap();
         let table = cursor.table(table_name).unwrap();
         let key = format!("key-{:06}", i).into_bytes();
         let value = format!("val-{:06}", i).into_bytes();
@@ -757,7 +762,7 @@ fn test_hard_workload() {
     let rx = rx.clone();
     let th = std::thread::spawn(move || {
       while let Ok((table_name, vec, t)) = rx.recv() {
-        let mut r = e.new_tx().expect("start error");
+        let r = e.new_tx().expect("start error");
         let table = r.table(&table_name).expect("table error");
         table.insert(vec.clone(), vec).expect("insert error");
         r.commit().expect("commit error");
@@ -838,7 +843,7 @@ fn test_heavy_gc_single_key() {
       if writer_stop.load(Ordering::Acquire) {
         break;
       }
-      let mut tx = writer_engine.new_tx().unwrap();
+      let tx = writer_engine.new_tx().unwrap();
       let table = tx.table(TEST_TABLE).unwrap();
       let value = (i as u32).to_le_bytes().to_vec();
       table.insert(writer_key.clone(), value).unwrap();
@@ -868,14 +873,17 @@ fn test_heavy_gc_single_key() {
 
   // phase 1: verify final value
   let final_val = *last_value.lock().unwrap();
-  let tx = engine.new_tx().unwrap();
-  let table = tx.table(TEST_TABLE).unwrap();
-  let val = table.get(&key).unwrap();
-  assert!(val.is_some(), "key should exist after heavy writes");
-  let bytes = val.unwrap();
-  let stored = u32::from_le_bytes(bytes.try_into().unwrap());
-  assert_eq!(stored, final_val, "final value mismatch");
-  drop(tx);
+  {
+    let tx = engine.new_tx().unwrap();
+    {
+      let table = tx.table(TEST_TABLE).unwrap();
+      let val = table.get(&key).unwrap();
+      assert!(val.is_some(), "key should exist after heavy writes");
+      let bytes = val.unwrap();
+      let stored = u32::from_le_bytes(bytes.try_into().unwrap());
+      assert_eq!(stored, final_val, "final value mismatch");
+    }
+  }
 
   eprintln!(
     "heavy gc: {} writes, {} reads, final value = {}",
@@ -905,7 +913,7 @@ fn insert_and_remove_and_gc() {
 
   let count: usize = 1000;
   for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
+    let t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.insert(bytes.clone(), bytes).expect("insert error");
@@ -913,7 +921,7 @@ fn insert_and_remove_and_gc() {
   }
 
   for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
+    let t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.remove(&bytes).expect("remove error");
@@ -931,7 +939,7 @@ fn insert_and_remove_and_gc() {
   std::thread::sleep(Duration::from_secs(60));
 
   for i in count..count << 1 {
-    let mut t = engine.new_tx().expect("tx start error");
+    let t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.insert(bytes.clone(), bytes).expect("insert error");
@@ -941,7 +949,7 @@ fn insert_and_remove_and_gc() {
 
   let engine = build_engine(&dir);
 
-  let mut t = engine.new_tx().expect("tx start error");
+  let t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   let mut iter = table.scan_all().expect("scan start error");
 
@@ -958,7 +966,7 @@ fn insert_and_remove_and_gc() {
 
   t.commit().expect("commit error");
 
-  let mut t = engine.new_tx().expect("tx start error");
+  let t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   let mut iter = table.scan_all().expect("scan start error");
 
@@ -990,7 +998,7 @@ fn write_not_commit() {
     .insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
     .expect("insert failed");
 
-  let mut t2 = engine.new_tx().expect("start failed.");
+  let t2 = engine.new_tx().expect("start failed.");
   let table2 = t2.table(TEST_TABLE).expect("table failed");
   table2
     .insert(vec![1, 2, 3], vec![1, 2, 3])
@@ -1027,7 +1035,7 @@ fn test_start_not_commit() {
 
   let engine = build_engine(&dir);
 
-  let mut t = engine.new_tx().expect("tx start error");
+  let t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   assert_eq!(table.get(&key.into_bytes()).expect("find error"), None);
   t.commit().expect("commit error")
@@ -1046,7 +1054,7 @@ fn test_timeout() {
     .build()
     .unwrap();
   {
-    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
 
     std::thread::sleep(Duration::from_secs(5));
@@ -1058,7 +1066,7 @@ fn test_timeout() {
   }
 
   {
-    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
     let _ = table.get(b"123123");
   }
@@ -1105,21 +1113,21 @@ fn test_large_key_value_gc() {
     let engine = build_engine(&dir);
     create_table(&engine, TEST_TABLE);
 
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
       table.insert(keys[i].clone(), values[i].clone()).unwrap();
     }
     tx.commit().unwrap();
 
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
       table.remove(&keys[i]).unwrap();
     }
     tx.commit().unwrap();
 
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
       table.insert(keys[i].clone(), values[i].clone()).unwrap();
@@ -1140,7 +1148,7 @@ fn test_large_key_value_gc() {
     }
     assert_eq!(found, count / 2);
 
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
       assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
@@ -1158,7 +1166,7 @@ fn test_isolation() {
   let e = build_engine(&dir);
   create_table(&e, TEST_TABLE);
 
-  let mut t1 = e.new_tx().unwrap();
+  let t1 = e.new_tx().unwrap();
   let tab1 = t1.table(TEST_TABLE).unwrap();
   tab1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
 
@@ -1180,7 +1188,7 @@ fn test_abort_open_table() {
   let engine = build_engine(&dir);
 
   {
-    let mut tx = engine.new_tx().unwrap();
+    let tx = engine.new_tx().unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
     for i in 0..100 {
       let key = format!("123{:06}", i).as_bytes().to_vec();
@@ -1195,4 +1203,221 @@ fn test_abort_open_table() {
     Err(_) => {}
     Ok(_) => panic!("must error."),
   };
+}
+
+// ============================================================
+// 23. Drop table commit makes it invisible
+// ============================================================
+#[test]
+fn test_drop_then_commit_makes_invisible() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  // populate
+  {
+    let tx = engine.new_tx().unwrap();
+    let t = tx.open_table(TEST_TABLE).unwrap();
+    t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit().unwrap();
+  }
+
+  // drop
+  {
+    let tx = engine.new_tx().unwrap();
+    tx.drop_table(TEST_TABLE).unwrap();
+    tx.commit().unwrap();
+  }
+
+  // dropped table must not be visible to subsequent transactions
+  let tx = engine.new_tx().unwrap();
+  match tx.table(TEST_TABLE) {
+    Err(_) => {}
+    Ok(_) => panic!("dropped table must not be visible"),
+  }
+}
+
+// ============================================================
+// 24. Drop table aborted keeps the table alive
+// ============================================================
+#[test]
+fn test_drop_then_abort_keeps_table() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  // populate
+  {
+    let tx = engine.new_tx().unwrap();
+    let t = tx.open_table(TEST_TABLE).unwrap();
+    t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit().unwrap();
+  }
+
+  // drop then abort
+  {
+    let tx = engine.new_tx().unwrap();
+    tx.drop_table(TEST_TABLE).unwrap();
+    tx.abort().unwrap();
+  }
+
+  // data must remain intact
+  let tx = engine.new_tx().unwrap();
+  let t = tx.table(TEST_TABLE).unwrap();
+  assert_eq!(t.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+}
+
+// ============================================================
+// 25. Create and drop within the same transaction
+// ============================================================
+#[test]
+fn test_create_then_drop_in_same_tx_commit() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  {
+    let tx = engine.new_tx().unwrap();
+    tx.open_table(TEST_TABLE).unwrap();
+    tx.drop_table(TEST_TABLE).unwrap();
+    tx.commit().unwrap();
+  }
+
+  let tx = engine.new_tx().unwrap();
+  match tx.table(TEST_TABLE) {
+    Err(_) => {}
+    Ok(_) => panic!("table created and dropped in same tx must not exist"),
+  }
+}
+
+// ============================================================
+// 26. Reopen after drop starts fresh
+// ============================================================
+#[test]
+fn test_reopen_after_drop_starts_fresh() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  // first generation: insert data
+  {
+    let tx = engine.new_tx().unwrap();
+    let t = tx.open_table(TEST_TABLE).unwrap();
+    t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
+    tx.commit().unwrap();
+  }
+
+  // drop the table
+  {
+    let tx = engine.new_tx().unwrap();
+    tx.drop_table(TEST_TABLE).unwrap();
+    tx.commit().unwrap();
+  }
+
+  // reopen with the same name and write fresh data
+  {
+    let tx = engine.new_tx().unwrap();
+    let t = tx.open_table(TEST_TABLE).unwrap();
+    // old data must be gone
+    assert_eq!(t.get(&b"k".to_vec()).unwrap(), None);
+    t.insert(b"k2".to_vec(), b"v2".to_vec()).unwrap();
+    tx.commit().unwrap();
+  }
+
+  let tx = engine.new_tx().unwrap();
+  let t = tx.table(TEST_TABLE).unwrap();
+  assert_eq!(t.get(&b"k".to_vec()).unwrap(), None);
+  assert_eq!(t.get(&b"k2".to_vec()).unwrap(), Some(b"v2".to_vec()));
+}
+
+// ============================================================
+// 27. Concurrent drop returns WriteConflict
+// ============================================================
+#[test]
+fn test_concurrent_drop_returns_conflict() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
+
+  let tx1 = engine.new_tx().unwrap();
+  let tx2 = engine.new_tx().unwrap();
+
+  tx1.drop_table(TEST_TABLE).unwrap();
+  match tx2.drop_table(TEST_TABLE) {
+    Err(Error::WriteConflict) => {}
+    Err(e) => panic!("expected WriteConflict, got {:?}", e),
+    Ok(_) => panic!("expected WriteConflict, got Ok"),
+  }
+}
+
+// ============================================================
+// 28. Drop and recreate many tables
+// ============================================================
+#[test]
+fn test_drop_and_recreate_many_tables() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  let table_names: Vec<String> = (0..10).map(|i| format!("table_{}", i)).collect();
+
+  // first generation: create 10 tables and write 100 keys each
+  {
+    let tx = engine.new_tx().unwrap();
+    for name in &table_names {
+      let t = tx.open_table(name).unwrap();
+      for i in 0..100 {
+        let key = format!("k{:04}", i).into_bytes();
+        let val = format!("v1-{}-{}", name, i).into_bytes();
+        t.insert(key, val).unwrap();
+      }
+    }
+    tx.commit().unwrap();
+  }
+
+  // drop all 10
+  {
+    let tx = engine.new_tx().unwrap();
+    for name in &table_names {
+      tx.drop_table(name).unwrap();
+    }
+    tx.commit().unwrap();
+  }
+
+  // dropped tables must not be visible
+  {
+    let tx = engine.new_tx().unwrap();
+    for name in &table_names {
+      assert!(tx.table(name).is_err(), "{} must not be visible", name);
+    }
+  }
+
+  let kvs = (0..100)
+    .map(|i| {
+      (
+        format!("k{:04}", i).into_bytes(),
+        format!("v2-{}", i).into_bytes(),
+      )
+    })
+    .collect::<Vec<_>>();
+  // second generation: recreate the same names with fresh data
+  {
+    let tx = engine.new_tx().unwrap();
+    for name in &table_names {
+      let t = tx.open_table(name).unwrap();
+      for (k, v) in kvs.iter() {
+        t.insert(k.clone(), v.clone()).unwrap();
+      }
+    }
+    tx.commit().unwrap();
+  }
+
+  // verify only the new generation is visible
+  let tx = engine.new_tx().unwrap();
+  for name in &table_names {
+    let t = tx.table(name).unwrap();
+    for (k, v) in kvs.iter() {
+      assert_eq!(
+        t.get(k).unwrap(),
+        Some(v.clone()),
+        "table {} key {k:?} should hold the second-generation value",
+        name,
+      );
+    }
+  }
 }

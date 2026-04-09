@@ -14,18 +14,18 @@ fn main() {
     .build()
     .expect("bootstrap error");
 
-  let mut t = engine.new_tx().unwrap();
+  let t = engine.new_tx().unwrap();
   t.open_table("test").unwrap();
   t.commit().unwrap();
 
-  let mut w = engine.new_tx().expect("write tx error");
+  let w = engine.new_tx().expect("write tx error");
   w.table("test")
     .unwrap()
     .insert(b"123".to_vec(), b"456".to_vec())
     .expect("insert error");
   w.commit().expect("write commit error");
 
-  let mut r = engine.new_tx().expect("read tx error");
+  let r = engine.new_tx().expect("read tx error");
   println!(
     "{:?}",
     r.table("test")
