@@ -62,6 +62,23 @@ while let Some((key, value)) = iter.try_next()? {
 tx.commit()?;
 ```
 
+### Drop Table
+
+```rust
+let mut tx = engine.new_tx()?;
+tx.drop_table("users")?;
+tx.commit()?;
+```
+
+`drop_table` is transactional. The drop only takes effect after `commit()` — until then, other transactions still see the table through their own snapshot. On `abort()` (or implicit abort via drop), the table remains intact.
+
+The physical data file is removed in the background after commit, once any in-flight cursors on the table have finished.
+
+**Restrictions:**
+- Concurrent drops on the same table return `WriteConflict`. The first transaction to call `drop_table` wins; the second must retry.
+- Re-opening the same name after a drop within the same transaction is not allowed and returns `TableAlreadyDropped`. Drop and re-create must happen in separate transactions.
+- A table created and dropped within the same transaction is never persisted — neither commit nor abort leaves anything on disk.
+
 ### Multi-Table Transaction
 
 ```rust
@@ -143,7 +160,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 
 ### Transaction Lifecycle and Isolation
 
-LFDB provides **Snapshot Isolation**. Each transaction reads from a consistent snapshot taken at the moment it starts — concurrent writes by other transactions are invisible until they commit, and only to transactions that begin after the commit.
+LFDB provides **Snapshot Isolation**. Each transaction reads from a consistent snapshot taken at the moment it starts — concurrent writes by other transactions are invisible until they commit, and only to transactions that begin after the commit. The same rules apply uniformly to every operation, including DDL such as `open_table` and `drop_table`.
 
 **Visibility rules:**
 - A transaction always sees its own writes
@@ -151,7 +168,13 @@ LFDB provides **Snapshot Isolation**. Each transaction reads from a consistent s
 - A transaction started before a commit will never see that commit's writes — even if the commit completes before the transaction ends
 
 **Write conflicts:**
-If two concurrent transactions attempt to write to the same key, the second writer receives a `WriteConflict` error immediately at insert time. The application is responsible for retrying.
+A `WriteConflict` is returned immediately whenever two concurrent transactions race on the same resource. It applies uniformly to every mutating operation:
+
+- **Row writes** — two transactions inserting or removing the same key
+- **Table creation** — two transactions calling `open_table` with the same name on a table that does not yet exist
+- **Table drop** — two transactions calling `drop_table` on the same table
+
+In every case the loser gets `WriteConflict` at the call site (not at commit). The application is responsible for retrying.
 
 Optimistic locking is straightforward — read, compute, write, and retry on conflict:
 
