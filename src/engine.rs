@@ -154,7 +154,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
       buffer_pool
-        .read(*ptr, meta_table.clone())?
+        .read(*ptr, meta_table.handle())?
         .for_write()
         .as_mut()
         .writer()
