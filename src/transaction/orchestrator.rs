@@ -229,7 +229,7 @@ impl TxOrchestrator {
   pub fn drop_table(&self, name: &str, table: Arc<TableHandle>) {
     let table_id = table.metadata().get_id();
     let h = self.release_table.send((name.to_string(), table));
-    self.tables.remove_reserve(table_id, name, h);
+    self.tables.drop_reserve(table_id, name, h);
   }
   #[inline]
   pub fn get_metadata_table(&self) -> PinnedHandle {
@@ -293,14 +293,17 @@ fn handle_table(
   mapper: Arc<TableMapper>,
 ) -> impl FnMut(Option<(String, Arc<TableHandle>)>) -> () {
   let mut tables = BTreeMap::new();
+  let mut unpinned = BTreeMap::new();
   move |recv| {
     if let Some((name, table)) = recv {
       tables.insert(name, table);
     }
 
-    for (name, table) in tables.extract_if(.., |_, table| {
-      !table.is_pinned() && table.truncate().is_ok()
-    }) {
+    for (name, table) in tables.extract_if(.., |_, table| table.try_close()) {
+      unpinned.insert(name, table);
+    }
+
+    for (name, table) in unpinned.extract_if(.., |_, table| table.truncate().is_ok()) {
       mapper.remove(table.metadata().get_id(), &name);
     }
   }
