@@ -168,7 +168,7 @@ impl TableMapper {
       }
     }
   }
-  pub fn remove_reserve(&self, id: TableId, name: &str, handle: TaskHandle<()>) {
+  pub fn drop_reserve(&self, id: TableId, name: &str, handle: TaskHandle<()>) {
     self
       .mapping
       .write()
@@ -186,7 +186,7 @@ impl TableMapper {
     PinnedHandle::new(self.metadata.clone())
   }
 
-  pub fn get_all(&self) -> Vec<(String, PinnedHandle)> {
+  pub fn get_all(&self) -> Vec<(String, Arc<TableHandle>)> {
     self
       .mapping
       .read()
@@ -194,10 +194,10 @@ impl TableMapper {
       .filter_map(|(k, v)| match v {
         Slot::Reserved => None,
         Slot::InDrop(_, _) => None,
-        Slot::Occupied(i) => Some((k.clone(), PinnedHandle::new(i.clone()))),
-        Slot::PendingDrop(i) => Some((k.clone(), PinnedHandle::new(i.clone()))),
+        Slot::Occupied(i) => Some((k.clone(), i.clone())),
+        Slot::PendingDrop(i) => Some((k.clone(), i.clone())),
       })
-      .chain([(META_TABLE.to_string(), self.meta_table())])
+      .chain([(META_TABLE.to_string(), self.metadata.clone())])
       .collect()
   }
 

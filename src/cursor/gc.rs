@@ -81,6 +81,7 @@ impl GarbageCollector {
     // it could occur dangling pointer reference.
     release
       .into_iter()
+      .filter(|(_, table)| !table.closed())
       .for_each(|((_, ptr), table)| table.free().dealloc(ptr));
     Ok(())
   }
@@ -150,6 +151,11 @@ fn run_entry(
   recorder: Arc<PageRecorder>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
   move |(table, pointer)| {
+    let table = match table.try_pin() {
+      Some(table) => table,
+      None => return Ok(()),
+    };
+
     let table_id = table.metadata().get_id();
     let mut ptr = Some(pointer);
     let mut max_found = false;
@@ -161,7 +167,7 @@ fn run_entry(
     };
 
     while let Some(i) = ptr.take() {
-      let mut slot = buffer_pool.peek(i, table.clone())?.for_write();
+      let mut slot = buffer_pool.peek(i, table.handle())?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -224,7 +230,7 @@ fn run_entry(
       };
 
       let next_entry: DataEntry = buffer_pool
-        .peek(next, table.clone())?
+        .peek(next, table.handle())?
         .for_read()
         .as_ref()
         .deserialize()?;

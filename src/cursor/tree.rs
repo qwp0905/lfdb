@@ -1,8 +1,6 @@
-use std::{
-  collections::HashSet,
-  sync::{Arc, Mutex},
-  time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
+
+use crossbeam::queue::SegQueue;
 
 use super::{
   CursorNode, DataEntry, GarbageCollector, RecordData, TreeHeader, HEADER_POINTER,
@@ -10,10 +8,10 @@ use super::{
 use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
-  table::{PinnedHandle, TableHandle, TableMapper, TableMetadata},
+  table::{TableHandle, TableMapper, TableMetadata},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{LogFilter, ShortenedMutex, ToArc, ToBox},
+  utils::{LogFilter, ToArc, ToBox},
   wal::RESERVED_TX,
   Result,
 };
@@ -180,7 +178,11 @@ impl TreeManager {
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
-    let open_handles = Mutex::new(tables.get_all()).to_arc();
+    let open_handles = SegQueue::new().to_arc();
+    tables
+      .get_all()
+      .into_iter()
+      .for_each(|v| open_handles.push(v));
 
     let threads = (0..5)
       .map(|_| {
@@ -189,7 +191,7 @@ impl TreeManager {
         let logger = logger.clone();
         let open_handles = open_handles.clone();
         once(move || {
-          while let Some((name, table)) = open_handles.l().pop() {
+          while let Some((name, table)) = open_handles.pop() {
             logger.debug(|| format!("{name} table start to collect orphand blocks."));
             release_orphand(&buffer_pool, &gc, &logger, table)?;
           }
@@ -221,6 +223,11 @@ fn run_merge_leaf(
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
     for (name, table) in tables.get_all().into_iter() {
+      let table = match table.try_pin() {
+        Some(table) => table,
+        None => continue,
+      };
+
       logger.debug(|| format!("clean leaf {name} collect start."));
       let table_id = table.metadata().get_id();
 
@@ -341,11 +348,11 @@ fn release_orphand(
   buffer_pool: &BufferPool,
   gc: &GarbageCollector,
   logger: &LogFilter,
-  table: PinnedHandle,
+  table: Arc<TableHandle>,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = buffer_pool
-    .read(HEADER_POINTER, table.handle())?
+    .read(HEADER_POINTER, table.clone())?
     .for_read()
     .as_ref()
     .deserialize::<TreeHeader>()?
@@ -356,7 +363,7 @@ fn release_orphand(
   while let Some(ptr) = node_stack.pop() {
     visited.insert(ptr);
     match buffer_pool
-      .read(ptr, table.handle())?
+      .read(ptr, table.clone())?
       .for_read()
       .as_ref()
       .deserialize::<CursorNode>()?
@@ -369,13 +376,13 @@ fn release_orphand(
   // push to queue for initial checkpoint
   entry_stack
     .iter()
-    .for_each(|&ptr| gc.mark(table.handle(), ptr));
+    .for_each(|&ptr| gc.mark(table.clone(), ptr));
   logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
     let entry: DataEntry = buffer_pool
-      .read(ptr, table.handle())?
+      .read(ptr, table.clone())?
       .for_read()
       .as_ref()
       .deserialize()?;
@@ -393,7 +400,7 @@ fn release_orphand(
 
   (0..file_end)
     .filter(|i| !visited.remove(i))
-    .for_each(|i| gc.lazy_release(table.handle(), i));
+    .for_each(|i| gc.lazy_release(table.clone(), i));
 
   Ok(())
 }
