@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, mem::replace, sync::Arc};
 
 use super::{
-  CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, Key, KeyRef,
+  CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, Key, KeyRef, LeafNode,
   NodeFindResult, RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, HEADER_POINTER,
   LARGE_VALUE, MAX_KEY, MAX_VALUE,
 };
@@ -87,7 +87,10 @@ impl<'a> Cursor<'a> {
     }
   }
 
-  fn find_leaf(&self, key: KeyRef) -> Result<Pointer> {
+  fn find_leaf<'b>(&'a self, key: KeyRef) -> Result<LeafNode>
+  where
+    'a: 'b,
+  {
     let mut ptr = self
       .orchestrator
       .fetch(HEADER_POINTER, self.table.clone())?
@@ -96,34 +99,37 @@ impl<'a> Cursor<'a> {
       .deserialize::<TreeHeader>()?
       .get_root();
 
-    while let CursorNode::Internal(node) = self
-      .orchestrator
-      .fetch(ptr, self.table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize()?
-    {
-      ptr = node.find(key).unwrap_or_else(|i| i);
-    }
-    Ok(ptr)
-  }
-
-  fn __get(&self, key: KeyRef) -> Result<Option<Vec<u8>>> {
-    let mut ptr = self.find_leaf(key)?;
     loop {
-      let node = self
+      match self
         .orchestrator
         .fetch(ptr, self.table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<CursorNode>()?
-        .as_leaf()?;
-      match node.find(key) {
-        NodeFindResult::Found(_, i) => break ptr = i,
-        NodeFindResult::Move(i) => ptr = i,
-        NodeFindResult::NotFound(_) => return Ok(None),
+      {
+        CursorNode::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        CursorNode::Leaf(node) => return Ok(node),
       }
     }
+  }
+
+  fn __get(&self, key: KeyRef) -> Result<Option<Vec<u8>>> {
+    let mut node = self.find_leaf(key)?;
+    let ptr = loop {
+      match node.find(key) {
+        NodeFindResult::Found(_, i) => break i,
+        NodeFindResult::NotFound(_) => return Ok(None),
+        NodeFindResult::Move(i) => {
+          node = self
+            .orchestrator
+            .fetch(i, self.table.clone())?
+            .for_read()
+            .as_ref()
+            .deserialize::<CursorNode>()?
+            .as_leaf()?
+        }
+      }
+    };
 
     let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
     loop {
@@ -397,15 +403,32 @@ impl<'a> Cursor<'a> {
   }
 
   fn __remove(&self, key: KeyRef) -> Result {
-    let mut ptr = self.find_leaf(key.as_ref())?;
-    loop {
+    let mut ptr = self
+      .orchestrator
+      .fetch(HEADER_POINTER, self.table.clone())?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let (mut slot, mut node) = loop {
       let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
-      let node = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
+      match slot.as_ref().deserialize::<CursorNode>()? {
+        CursorNode::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        CursorNode::Leaf(node) => break (slot, node),
+      }
+    };
+
+    loop {
       match node.find(key.as_ref()) {
         NodeFindResult::Found(_, i) => {
           return self.insert_at(i, RecordData::Tombstone, slot)
         }
-        NodeFindResult::Move(i) => ptr = i,
+        NodeFindResult::Move(i) => {
+          drop(slot);
+          slot = self.orchestrator.fetch(i, self.table.clone())?.for_read();
+          node = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
+        }
         NodeFindResult::NotFound(_) => return Ok(()),
       }
     }
@@ -443,19 +466,20 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, end.as_ref().len()));
     }
 
-    let mut ptr = self.find_leaf(start.as_ref())?;
+    let mut node = self.find_leaf(start.as_ref())?;
     let (leaf, pos) = loop {
-      let node = self
-        .orchestrator
-        .fetch(ptr, self.table.clone())?
-        .for_read()
-        .as_ref()
-        .deserialize::<CursorNode>()?
-        .as_leaf()?;
       match node.find(start.as_ref()) {
         NodeFindResult::Found(pos, _) => break (node, pos),
-        NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(pos) => break (node, pos),
+        NodeFindResult::Move(i) => {
+          node = self
+            .orchestrator
+            .fetch(i, self.table.clone())?
+            .for_read()
+            .as_ref()
+            .deserialize::<CursorNode>()?
+            .as_leaf()?
+        }
       }
     };
 
