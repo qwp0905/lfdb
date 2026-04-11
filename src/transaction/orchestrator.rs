@@ -217,8 +217,8 @@ impl TxOrchestrator {
     self.tables.create_handle(table_meta)
   }
   #[inline]
-  pub fn create_table_metadata(&self, name: &str) -> TableMetadata {
-    self.tables.create_metadata(name)
+  pub fn create_table_metadata(&self) -> TableMetadata {
+    self.tables.create_metadata()
   }
   #[inline]
   pub fn try_drop_table(&self, name: &str) -> DropResult {

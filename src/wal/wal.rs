@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::{
-  replay, FsyncResult, LogBuffer, LogId, LogRecord, ReplayResult, SegmentPreload, TxId,
-  WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, FsyncResult, LogBuffer, LogId, LogRecord, ReplayResult,
+  SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -57,7 +57,7 @@ pub struct WAL {
   /**
    * last log id (LSN)
    */
-  last_log_id: AtomicU64,
+  last_log_id: AtomicLogId,
   /**
    * Current log buffer, managed via epoch GC. Epoch pinning guarantees the buffer
    * pointer remains valid for the duration of a guard — preventing use-after-free
@@ -96,7 +96,7 @@ pub struct WAL {
    * Number of segments whose fsync has completed. Used by commit_and_flush to
    * verify that all segments up to the current generation have been persisted.
    */
-  syned_count: AtomicU64,
+  synced_count: AtomicU64,
 }
 impl WAL {
   pub fn replay(config: &WALConfig, logger: LogFilter) -> Result<(Self, ReplayResult)> {
@@ -134,7 +134,7 @@ impl WAL {
 
     Ok((
       Self {
-        last_log_id: AtomicU64::new(replay_result.last_log_id),
+        last_log_id: AtomicLogId::new(replay_result.last_log_id),
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
@@ -142,7 +142,7 @@ impl WAL {
         wait_checkpoint: OnceLock::new(),
         checkpoint_failed: not_flushed,
         fsync_queue: SegQueue::new(),
-        syned_count: AtomicU64::new(0),
+        synced_count: AtomicU64::new(0),
       },
       replay_result,
     ))
@@ -242,10 +242,10 @@ impl WAL {
         let f = buffer.flush();
         buffer.unpin_segment();
 
-        while buffer.get_generation() > self.syned_count.load(Ordering::Acquire) {
+        while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           if let Some(f) = self.fsync_queue.pop() {
             f.wait()?;
-            self.syned_count.fetch_add(1, Ordering::Release);
+            self.synced_count.fetch_add(1, Ordering::Release);
           }
           backoff.snooze()
         }
@@ -282,7 +282,7 @@ impl WAL {
         }
 
         let segment = failed.new.take_segment();
-        self.syned_count.fetch_add(1, Ordering::Release);
+        self.synced_count.fetch_add(1, Ordering::Release);
         self.preloader.reuse(segment);
         continue;
       }
@@ -376,7 +376,7 @@ impl WAL {
 
     while let Some(f) = self.fsync_queue.pop() {
       let _ = f.wait();
-      self.syned_count.fetch_add(1, Ordering::Release);
+      self.synced_count.fetch_add(1, Ordering::Release);
     }
     while let Some(seg) = self.checkpoint_failed.pop() {
       self.preloader.reuse(seg);

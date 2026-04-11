@@ -2,8 +2,9 @@ use std::{ptr::copy_nonoverlapping, slice::from_raw_parts};
 
 use super::{LogId, TxId};
 use crate::{
-  disk::{Page, Pointer},
-  table::TableId,
+  disk::{Page, Pointer, POINTER_BYTES},
+  table::{TableId, TABLE_ID_BYTES},
+  wal::{LOG_ID_BYTES, TX_ID_BYTES},
   Error,
 };
 
@@ -57,16 +58,21 @@ impl Operation {
     }
   }
 
-  const CHECKPOINT_LEN: u16 = 1 + 8 + 8;
-  const OTHER_LEN: u16 = 1;
+  const CHECKPOINT_LEN: u16 = TX_ID_BYTES as u16 + LOG_ID_BYTES as u16;
   fn byte_len(&self) -> u16 {
-    match self {
-      Operation::Insert(_, _, data) => 1 + 8 + 2 + data.len() as u16,
+    1 + match self {
+      Operation::Insert(_, _, data) => {
+        POINTER_BYTES as u16 + TABLE_ID_BYTES as u16 + data.len() as u16
+      }
       Operation::Multi(_, _, d1, _, d2) => {
-        1 + 16 + 2 + 2 + d1.len() as u16 + d2.len() as u16
+        ((POINTER_BYTES as u16) << 1)
+          + TABLE_ID_BYTES as u16
+          + 2
+          + d1.len() as u16
+          + d2.len() as u16
       }
       Operation::Checkpoint(_, _) => Self::CHECKPOINT_LEN,
-      _ => Self::OTHER_LEN,
+      _ => 0,
     }
   }
 }
@@ -133,39 +139,63 @@ impl LogRecord {
 
   unsafe fn write_at(&self, ptr: *mut u8) {
     let mut offset = 4;
-    copy_nonoverlapping(self.log_id.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-    offset += 8;
+    copy_nonoverlapping(
+      self.log_id.to_le_bytes().as_ptr(),
+      ptr.add(offset),
+      LOG_ID_BYTES,
+    );
+    offset += LOG_ID_BYTES;
 
-    copy_nonoverlapping(self.tx_id.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-    offset += 8;
+    copy_nonoverlapping(
+      self.tx_id.to_le_bytes().as_ptr(),
+      ptr.add(offset),
+      TX_ID_BYTES,
+    );
+    offset += TX_ID_BYTES;
 
     *ptr.add(offset) = self.operation.type_byte();
     offset += 1;
     match &self.operation {
       Operation::Insert(table_id, page_ptr, data) => {
-        copy_nonoverlapping(table_id.to_le_bytes().as_ptr(), ptr.add(offset), 2);
-        offset += 2;
-        copy_nonoverlapping(page_ptr.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-        offset += 8;
+        copy_nonoverlapping(
+          table_id.to_le_bytes().as_ptr(),
+          ptr.add(offset),
+          TABLE_ID_BYTES,
+        );
+        offset += TABLE_ID_BYTES;
+        copy_nonoverlapping(
+          page_ptr.to_le_bytes().as_ptr(),
+          ptr.add(offset),
+          POINTER_BYTES,
+        );
+        offset += POINTER_BYTES;
         let data_len = data.len();
         copy_nonoverlapping(data.as_ptr(), ptr.add(offset), data_len);
         offset += data_len;
       }
       Operation::Checkpoint(log_id, min_active) => {
-        copy_nonoverlapping(log_id.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-        offset += 8;
-        copy_nonoverlapping(min_active.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-        offset += 8;
+        copy_nonoverlapping(log_id.to_le_bytes().as_ptr(), ptr.add(offset), LOG_ID_BYTES);
+        offset += LOG_ID_BYTES;
+        copy_nonoverlapping(
+          min_active.to_le_bytes().as_ptr(),
+          ptr.add(offset),
+          TX_ID_BYTES,
+        );
+        offset += TX_ID_BYTES;
       }
       Operation::Start => {}
       Operation::Commit => {}
       Operation::Abort => {}
       Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
-        copy_nonoverlapping(table_id.to_le_bytes().as_ptr(), ptr.add(offset), 2);
-        offset += 2;
+        copy_nonoverlapping(
+          table_id.to_le_bytes().as_ptr(),
+          ptr.add(offset),
+          TABLE_ID_BYTES,
+        );
+        offset += TABLE_ID_BYTES;
 
-        copy_nonoverlapping(ptr1.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-        offset += 8;
+        copy_nonoverlapping(ptr1.to_le_bytes().as_ptr(), ptr.add(offset), POINTER_BYTES);
+        offset += POINTER_BYTES;
         let data_len = data1.len();
         copy_nonoverlapping((data_len as u16).to_le_bytes().as_ptr(), ptr.add(offset), 2);
         offset += 2;
@@ -173,8 +203,8 @@ impl LogRecord {
         copy_nonoverlapping(data1.as_ptr(), ptr.add(offset), data_len);
         offset += data_len;
 
-        copy_nonoverlapping(ptr2.to_le_bytes().as_ptr(), ptr.add(offset), 8);
-        offset += 8;
+        copy_nonoverlapping(ptr2.to_le_bytes().as_ptr(), ptr.add(offset), POINTER_BYTES);
+        offset += POINTER_BYTES;
         let data_len = data2.len();
         copy_nonoverlapping(data2.as_ptr(), ptr.add(offset), data_len);
         offset += data_len;
@@ -188,7 +218,7 @@ impl LogRecord {
   }
 
   fn byte_len(&self) -> u16 {
-    self.operation.byte_len() + 4 + 8 + 8
+    self.operation.byte_len() + 4 + LOG_ID_BYTES as u16 + TX_ID_BYTES as u16
   }
   pub fn to_bytes_with_len(&self) -> Vec<u8> {
     let len = self.byte_len();
@@ -224,15 +254,20 @@ impl TryFrom<&[u8]> for LogRecord {
       return Err(Error::InvalidFormat("checksum not matched."));
     }
 
-    let mut offset = 21;
-    let log_id = LogId::from_le_bytes(unsafe { (ptr.add(4) as *const [u8; 8]).read() });
-    let tx_id = TxId::from_le_bytes(unsafe { (ptr.add(12) as *const [u8; 8]).read() });
-    let operation = match unsafe { *ptr.add(20) } {
+    let mut offset = 5 + LOG_ID_BYTES + TX_ID_BYTES;
+    let log_id =
+      LogId::from_le_bytes(unsafe { (ptr.add(4) as *const [u8; LOG_ID_BYTES]).read() });
+    let tx_id = TxId::from_le_bytes(unsafe {
+      (ptr.add(4 + LOG_ID_BYTES) as *const [u8; TX_ID_BYTES]).read()
+    });
+    let operation = match unsafe { *ptr.add(offset - 1) } {
       1 => unsafe {
-        let table_id = TableId::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read());
-        offset += 2;
-        let page_ptr = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
-        offset += 8;
+        let table_id =
+          TableId::from_le_bytes((ptr.add(offset) as *const [u8; TABLE_ID_BYTES]).read());
+        offset += TABLE_ID_BYTES;
+        let page_ptr =
+          Pointer::from_le_bytes((ptr.add(offset) as *const [u8; POINTER_BYTES]).read());
+        offset += POINTER_BYTES;
 
         let mut data = vec![0; len - offset];
         copy_nonoverlapping(ptr.add(offset), data.as_mut_ptr(), data.len());
@@ -257,20 +292,24 @@ impl TryFrom<&[u8]> for LogRecord {
         Operation::Abort
       }
       5 => unsafe {
-        if len != offset + 16 {
+        if len != offset + LOG_ID_BYTES + TX_ID_BYTES {
           return Err(Error::InvalidFormat("invalid len for checkpoint log."));
         }
-        let log_id = LogId::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
-        offset += 8;
-        let min_active = TxId::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
+        let log_id =
+          LogId::from_le_bytes((ptr.add(offset) as *const [u8; LOG_ID_BYTES]).read());
+        offset += LOG_ID_BYTES;
+        let min_active =
+          TxId::from_le_bytes((ptr.add(offset) as *const [u8; TX_ID_BYTES]).read());
         Operation::Checkpoint(log_id, min_active)
       },
       6 => unsafe {
-        let table_id = TableId::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read());
-        offset += 2;
+        let table_id =
+          TableId::from_le_bytes((ptr.add(offset) as *const [u8; TABLE_ID_BYTES]).read());
+        offset += TABLE_ID_BYTES;
 
-        let ptr1 = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
-        offset += 8;
+        let ptr1 =
+          Pointer::from_le_bytes((ptr.add(offset) as *const [u8; POINTER_BYTES]).read());
+        offset += POINTER_BYTES;
 
         let data_len =
           u16::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read()) as usize;
@@ -280,8 +319,9 @@ impl TryFrom<&[u8]> for LogRecord {
         copy_nonoverlapping(ptr.add(offset), data1.as_mut_ptr(), data_len);
         offset += data_len;
 
-        let ptr2 = Pointer::from_le_bytes((ptr.add(offset) as *const [u8; 8]).read());
-        offset += 8;
+        let ptr2 =
+          Pointer::from_le_bytes((ptr.add(offset) as *const [u8; POINTER_BYTES]).read());
+        offset += POINTER_BYTES;
 
         let mut data2 = vec![0; len - offset];
         copy_nonoverlapping(ptr.add(offset), data2.as_mut_ptr(), data2.len());

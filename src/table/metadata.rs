@@ -2,11 +2,14 @@ use std::{
   path::{Path, PathBuf},
   ptr::copy_nonoverlapping,
   slice::from_raw_parts,
+  sync::atomic::AtomicU32,
 };
 
 use crate::{Error, Result};
 
-pub type TableId = u16;
+pub type TableId = u32;
+pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
+pub type AtomicTableId = AtomicU32;
 
 pub struct TableMetadata {
   id: TableId,
@@ -20,21 +23,23 @@ impl TableMetadata {
   pub fn to_vec(&self) -> Vec<u8> {
     let path = self.path.to_string_lossy();
     let len = path.len();
-    let mut vec = vec![0; len + 2];
+    let mut vec = vec![0; len + TABLE_ID_BYTES];
     let ptr = vec.as_mut_ptr();
-    unsafe { copy_nonoverlapping(self.id.to_le_bytes().as_ptr(), ptr, 2) };
-    unsafe { copy_nonoverlapping(path.as_ptr(), ptr.add(2), len) };
+    unsafe { copy_nonoverlapping(self.id.to_le_bytes().as_ptr(), ptr, TABLE_ID_BYTES) };
+    unsafe { copy_nonoverlapping(path.as_ptr(), ptr.add(TABLE_ID_BYTES), len) };
     vec
   }
 
   pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-    if bytes.len() < 2 {
+    if bytes.len() < TABLE_ID_BYTES {
       return Err(Error::InvalidFormat("metadata crashed."));
     }
 
     let ptr = bytes.as_ptr();
-    let id = TableId::from_le_bytes(unsafe { (ptr as *const [u8; 2]).read() });
-    let bytes = unsafe { from_raw_parts(ptr.add(2), bytes.len() - 2) };
+    let id =
+      TableId::from_le_bytes(unsafe { (ptr as *const [u8; TABLE_ID_BYTES]).read() });
+    let bytes =
+      unsafe { from_raw_parts(ptr.add(TABLE_ID_BYTES), bytes.len() - TABLE_ID_BYTES) };
     let name = unsafe { str::from_utf8_unchecked(bytes) };
     Ok(Self {
       id,
