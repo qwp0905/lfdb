@@ -37,7 +37,7 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 }
 
 fn create_table(engine: &lfdb::Engine) {
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.open_table(TABLE).unwrap();
   tx.commit().unwrap();
 }
@@ -45,7 +45,7 @@ fn create_table(engine: &lfdb::Engine) {
 fn pre_write_keys<P: AsRef<std::path::Path> + ?Sized>(dir: &P, count: usize) {
   let engine = build(dir).build().unwrap();
   create_table(&engine);
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   let table = tx.table(TABLE).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
@@ -69,7 +69,7 @@ fn bench_sequential_get(c: &mut Criterion) {
     .bench_function("bench", |b| {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
-          let tx = engine.new_tx().expect("start error");
+          let mut tx = engine.new_tx().expect("start error");
           let t = tx.table(TABLE).expect("table error");
           t.get(&keys[i]).expect("get error");
           tx.commit().expect("commit error");
@@ -98,7 +98,7 @@ fn bench_sequential_insert(c: &mut Criterion) {
         },
         |(_, engine)| {
           for i in 0..SEQ_SIZE {
-            let tx = engine.new_tx().expect("start error");
+            let mut tx = engine.new_tx().expect("start error");
             let t = tx.table(TABLE).expect("table error");
             t.insert(keys[i].clone(), values[i].clone())
               .expect("insert error");
@@ -128,7 +128,7 @@ fn bench_sequential_update(c: &mut Criterion) {
     .bench_function("bench", |b| {
       b.iter(|| {
         for i in 0..SEQ_SIZE {
-          let tx = engine.new_tx().expect("start error");
+          let mut tx = engine.new_tx().expect("start error");
           let t = tx.table(TABLE).expect("table error");
           t.insert(keys[i].clone(), values[i].clone())
             .expect("update error");
@@ -152,7 +152,7 @@ fn bench_concurrent_get(c: &mut Criterion) {
       let e = engine.clone();
       std::thread::spawn(move || {
         while let Ok((k, done)) = rx.recv() {
-          let tx = e.new_tx().expect("start error");
+          let mut tx = e.new_tx().expect("start error");
           let t = tx.table(TABLE).expect("table error");
           t.get(&k).expect("get error");
           tx.commit().expect("commit error");
@@ -206,7 +206,7 @@ fn bench_concurrent_insert(c: &mut Criterion) {
               let e = engine.clone();
               std::thread::spawn(move || {
                 while let Ok((k, v, done)) = rx.recv() {
-                  let tx = e.new_tx().expect("start error");
+                  let mut tx = e.new_tx().expect("start error");
                   let t = tx.table(TABLE).expect("table error");
                   t.insert(k, v).expect("insert error");
                   tx.commit().expect("commit error");
@@ -246,7 +246,7 @@ fn bench_concurrent_update(c: &mut Criterion) {
       let e = engine.clone();
       std::thread::spawn(move || {
         while let Ok((k, v, done)) = rx.recv() {
-          let tx = e.new_tx().expect("start error");
+          let mut tx = e.new_tx().expect("start error");
           let t = tx.table(TABLE).expect("table error");
           t.insert(k, v).expect("update error");
           tx.commit().expect("commit error");

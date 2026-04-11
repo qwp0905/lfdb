@@ -27,7 +27,7 @@ fn main() {
 
   let table = "test";
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     tx.open_table(table).unwrap();
     tx.commit().unwrap();
   }
@@ -50,7 +50,7 @@ fn main() {
       .stack_size(2 << 20)
       .spawn(move || {
         while let Ok((vec, t)) = rx.recv() {
-          let r = e.new_tx().expect("start error");
+          let mut r = e.new_tx().expect("start error");
           let ta = r.table(table).expect("table error");
           ta.insert(vec.clone(), vec).expect("insert error");
           r.commit().expect("commit error");
@@ -82,7 +82,7 @@ fn main() {
     let mut found_eq = 0;
     let mut found_ne = 0;
     let mut not_found = 0;
-    let t = engine.new_tx().expect("scan start error");
+    let mut t = engine.new_tx().expect("scan start error");
     let tt = t.table(table).expect("table error");
 
     let mut iter = tt.scan_all().expect("scan create error");

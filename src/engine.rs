@@ -105,6 +105,7 @@ impl Engine {
       buffer_pool.clone(),
       version_visibility.clone(),
       recorder.clone(),
+      tables.clone(),
       logger.clone(),
       gc_config,
     )
@@ -154,7 +155,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
       buffer_pool
-        .read(*ptr, meta_table.handle())?
+        .read(*ptr, meta_table.clone())?
         .for_write()
         .as_mut()
         .writer()
@@ -162,10 +163,8 @@ impl Engine {
     }
 
     let mut handles = HashMap::new();
-    for (name, table) in
-      TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)?
-    {
-      handles.insert(table.metadata().get_id(), (name, table));
+    for table in TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)? {
+      handles.insert(table.metadata().get_id(), table);
     }
 
     for (table_id, ptr, data) in replay
@@ -174,7 +173,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
     {
       let handle = match handles.get(table_id) {
-        Some((_, handle)) => handle.clone(),
+        Some(handle) => handle.clone(),
         None => continue,
       };
       buffer_pool

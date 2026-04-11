@@ -32,7 +32,7 @@ fn build_engine(dir: &TempDir) -> Engine {
 const TEST_TABLE: &str = "test";
 
 fn create_table(engine: &Engine, name: &str) {
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.open_table(name).unwrap();
   tx.commit().unwrap();
 }
@@ -45,7 +45,7 @@ fn test_basic_crud() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   let table = tx.open_table(TEST_TABLE).unwrap();
 
   table.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
@@ -70,7 +70,7 @@ fn test_commit_visibility() {
   let dir = tempdir_in(".").unwrap();
   let engine = build_engine(&dir);
 
-  let tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   tx1
     .open_table(TEST_TABLE)
     .unwrap()
@@ -96,7 +96,7 @@ fn test_abort_invisibility() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   let t1 = tx1.table(TEST_TABLE).unwrap();
   t1.insert(b"ghost".to_vec(), b"data".to_vec()).unwrap();
   tx1.abort().unwrap();
@@ -138,7 +138,7 @@ fn test_write_conflict() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
   {
-    let tx1 = engine.new_tx().unwrap();
+    let mut tx1 = engine.new_tx().unwrap();
     let t1 = tx1.table(TEST_TABLE).unwrap();
     t1.insert(b"contested".to_vec(), b"v1".to_vec()).unwrap();
     // tx1 NOT committed — still active
@@ -158,7 +158,7 @@ fn test_write_conflict() {
 
   {
     let key = b"key";
-    let tx1 = engine.new_tx().unwrap();
+    let mut tx1 = engine.new_tx().unwrap();
     let t1 = tx1.table(TEST_TABLE).unwrap();
     t1.insert(key.to_vec(), b"value1".to_vec()).unwrap();
 
@@ -185,7 +185,7 @@ fn test_transaction_closed_after_commit() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   {
     let table = tx.table(TEST_TABLE).unwrap();
     table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -206,7 +206,7 @@ fn test_transaction_closed_after_abort() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   {
     let table = tx.table(TEST_TABLE).unwrap();
     table.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
@@ -228,7 +228,7 @@ fn test_scan_range() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..10 {
     table.insert(vec![i], vec![i * 10]).unwrap();
@@ -255,7 +255,7 @@ fn test_scan_all() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   let table = tx.table(TEST_TABLE).unwrap();
   for i in 0u8..5 {
     table.insert(vec![i], vec![i]).unwrap();
@@ -284,12 +284,12 @@ fn test_overwrite() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   let t1 = tx1.table(TEST_TABLE).unwrap();
   t1.insert(b"key".to_vec(), b"v1".to_vec()).unwrap();
   tx1.commit().unwrap();
 
-  let tx2 = engine.new_tx().unwrap();
+  let mut tx2 = engine.new_tx().unwrap();
   let t2 = tx2.table(TEST_TABLE).unwrap();
   t2.insert(b"key".to_vec(), b"v2".to_vec()).unwrap();
   tx2.commit().unwrap();
@@ -327,7 +327,7 @@ fn test_crash_recovery() {
           }
           let key = vec![t, i];
           let value = vec![t, i, 0xFF];
-          let tx = match engine.new_tx() {
+          let mut tx = match engine.new_tx() {
             Ok(tx) => tx,
             Err(_) => break,
           };
@@ -386,7 +386,7 @@ fn test_snapshot_isolation() {
   create_table(&engine, TEST_TABLE);
 
   // tx1 and tx2 both start
-  let tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
   let tx2 = engine.new_tx().unwrap();
 
   // tx1 inserts and commits AFTER tx2 started
@@ -427,7 +427,7 @@ fn test_entry_split() {
   let iterations = 50;
 
   for i in 0..iterations {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     let value = vec![i as u8; 100];
     table.insert(key.clone(), value).unwrap();
@@ -469,7 +469,7 @@ fn test_btree_node_split_and_recovery() {
       let e = engine.clone();
       workers.push(thread::spawn(move || {
         while let Ok((i, done)) = rx.recv() {
-          let cursor = e.new_tx().unwrap();
+          let mut cursor = e.new_tx().unwrap();
           let table = cursor.table(TEST_TABLE).unwrap();
           let key = format!("key-{:06}", i).into_bytes();
           let value = format!("val-{:06}", i).into_bytes();
@@ -607,7 +607,7 @@ fn crash_writer() {
     thread::spawn(move || {
       while let Ok((i, done)) = rx.recv() {
         let table_name = &names[i % names.len()];
-        let cursor = e.new_tx().unwrap();
+        let mut cursor = e.new_tx().unwrap();
         let table = cursor.table(table_name).unwrap();
         let key = format!("key-{:06}", i).into_bytes();
         let value = format!("val-{:06}", i).into_bytes();
@@ -762,7 +762,7 @@ fn test_hard_workload() {
     let rx = rx.clone();
     let th = std::thread::spawn(move || {
       while let Ok((table_name, vec, t)) = rx.recv() {
-        let r = e.new_tx().expect("start error");
+        let mut r = e.new_tx().expect("start error");
         let table = r.table(&table_name).expect("table error");
         table.insert(vec.clone(), vec).expect("insert error");
         r.commit().expect("commit error");
@@ -843,7 +843,7 @@ fn test_heavy_gc_single_key() {
       if writer_stop.load(Ordering::Acquire) {
         break;
       }
-      let tx = writer_engine.new_tx().unwrap();
+      let mut tx = writer_engine.new_tx().unwrap();
       let table = tx.table(TEST_TABLE).unwrap();
       let value = (i as u32).to_le_bytes().to_vec();
       table.insert(writer_key.clone(), value).unwrap();
@@ -913,7 +913,7 @@ fn insert_and_remove_and_gc() {
 
   let count: usize = 1000;
   for i in 0..count {
-    let t = engine.new_tx().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.insert(bytes.clone(), bytes).expect("insert error");
@@ -921,7 +921,7 @@ fn insert_and_remove_and_gc() {
   }
 
   for i in 0..count {
-    let t = engine.new_tx().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.remove(&bytes).expect("remove error");
@@ -939,7 +939,7 @@ fn insert_and_remove_and_gc() {
   std::thread::sleep(Duration::from_secs(60));
 
   for i in count..count << 1 {
-    let t = engine.new_tx().expect("tx start error");
+    let mut t = engine.new_tx().expect("tx start error");
     let table = t.table(TEST_TABLE).expect("table error");
     let bytes: Vec<u8> = i.to_le_bytes().into();
     table.insert(bytes.clone(), bytes).expect("insert error");
@@ -949,7 +949,7 @@ fn insert_and_remove_and_gc() {
 
   let engine = build_engine(&dir);
 
-  let t = engine.new_tx().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   let mut iter = table.scan_all().expect("scan start error");
 
@@ -966,7 +966,7 @@ fn insert_and_remove_and_gc() {
 
   t.commit().expect("commit error");
 
-  let t = engine.new_tx().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   let mut iter = table.scan_all().expect("scan start error");
 
@@ -998,7 +998,7 @@ fn write_not_commit() {
     .insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
     .expect("insert failed");
 
-  let t2 = engine.new_tx().expect("start failed.");
+  let mut t2 = engine.new_tx().expect("start failed.");
   let table2 = t2.table(TEST_TABLE).expect("table failed");
   table2
     .insert(vec![1, 2, 3], vec![1, 2, 3])
@@ -1035,7 +1035,7 @@ fn test_start_not_commit() {
 
   let engine = build_engine(&dir);
 
-  let t = engine.new_tx().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
   assert_eq!(table.get(&key.into_bytes()).expect("find error"), None);
   t.commit().expect("commit error")
@@ -1054,7 +1054,7 @@ fn test_timeout() {
     .build()
     .unwrap();
   {
-    let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
 
     std::thread::sleep(Duration::from_secs(5));
@@ -1066,7 +1066,7 @@ fn test_timeout() {
   }
 
   {
-    let tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
+    let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
     let _ = table.get(b"123123");
   }
@@ -1113,21 +1113,21 @@ fn test_large_key_value_gc() {
     let engine = build_engine(&dir);
     create_table(&engine, TEST_TABLE);
 
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
       table.insert(keys[i].clone(), values[i].clone()).unwrap();
     }
     tx.commit().unwrap();
 
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in 0..(count / 2) {
       table.remove(&keys[i]).unwrap();
     }
     tx.commit().unwrap();
 
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
       table.insert(keys[i].clone(), values[i].clone()).unwrap();
@@ -1148,7 +1148,7 @@ fn test_large_key_value_gc() {
     }
     assert_eq!(found, count / 2);
 
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
       assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
@@ -1166,7 +1166,7 @@ fn test_isolation() {
   let e = build_engine(&dir);
   create_table(&e, TEST_TABLE);
 
-  let t1 = e.new_tx().unwrap();
+  let mut t1 = e.new_tx().unwrap();
   let tab1 = t1.table(TEST_TABLE).unwrap();
   tab1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
 
@@ -1188,7 +1188,7 @@ fn test_abort_open_table() {
   let engine = build_engine(&dir);
 
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let table = tx.open_table(TEST_TABLE).unwrap();
     for i in 0..100 {
       let key = format!("123{:06}", i).as_bytes().to_vec();
@@ -1215,7 +1215,7 @@ fn test_drop_then_commit_makes_invisible() {
 
   // populate
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let t = tx.open_table(TEST_TABLE).unwrap();
     t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
     tx.commit().unwrap();
@@ -1223,7 +1223,7 @@ fn test_drop_then_commit_makes_invisible() {
 
   // drop
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     tx.drop_table(TEST_TABLE).unwrap();
     tx.commit().unwrap();
   }
@@ -1246,7 +1246,7 @@ fn test_drop_then_abort_keeps_table() {
 
   // populate
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let t = tx.open_table(TEST_TABLE).unwrap();
     t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
     tx.commit().unwrap();
@@ -1254,7 +1254,7 @@ fn test_drop_then_abort_keeps_table() {
 
   // drop then abort
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     tx.drop_table(TEST_TABLE).unwrap();
     tx.abort().unwrap();
   }
@@ -1274,7 +1274,7 @@ fn test_create_then_drop_in_same_tx_commit() {
   let engine = build_engine(&dir);
 
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     tx.open_table(TEST_TABLE).unwrap();
     tx.drop_table(TEST_TABLE).unwrap();
     tx.commit().unwrap();
@@ -1297,7 +1297,7 @@ fn test_reopen_after_drop_starts_fresh() {
 
   // first generation: insert data
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let t = tx.open_table(TEST_TABLE).unwrap();
     t.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
     tx.commit().unwrap();
@@ -1305,14 +1305,14 @@ fn test_reopen_after_drop_starts_fresh() {
 
   // drop the table
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     tx.drop_table(TEST_TABLE).unwrap();
     tx.commit().unwrap();
   }
 
   // reopen with the same name and write fresh data
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     let t = tx.open_table(TEST_TABLE).unwrap();
     // old data must be gone
     assert_eq!(t.get(&b"k".to_vec()).unwrap(), None);
@@ -1335,8 +1335,8 @@ fn test_concurrent_drop_returns_conflict() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let tx1 = engine.new_tx().unwrap();
-  let tx2 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx().unwrap();
+  let mut tx2 = engine.new_tx().unwrap();
 
   tx1.drop_table(TEST_TABLE).unwrap();
   match tx2.drop_table(TEST_TABLE) {
@@ -1358,7 +1358,7 @@ fn test_drop_and_recreate_many_tables() {
 
   // first generation: create 10 tables and write 100 keys each
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     for name in &table_names {
       let t = tx.open_table(name).unwrap();
       for i in 0..100 {
@@ -1372,7 +1372,7 @@ fn test_drop_and_recreate_many_tables() {
 
   // drop all 10
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     for name in &table_names {
       tx.drop_table(name).unwrap();
     }
@@ -1397,7 +1397,7 @@ fn test_drop_and_recreate_many_tables() {
     .collect::<Vec<_>>();
   // second generation: recreate the same names with fresh data
   {
-    let tx = engine.new_tx().unwrap();
+    let mut tx = engine.new_tx().unwrap();
     for name in &table_names {
       let t = tx.open_table(name).unwrap();
       for (k, v) in kvs.iter() {

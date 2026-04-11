@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
@@ -9,12 +9,9 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{
-    DropResult, PinnedHandle, ReserveResult, TableHandle, TableId, TableMapper,
-    TableMetadata,
-  },
+  table::{TableHandle, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
-  utils::{LogFilter, ToArc, ToBox},
+  utils::{LogFilter, ToArc},
   wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
@@ -22,8 +19,6 @@ pub struct TransactionConfig {
   pub timeout: Duration,
   pub checkpoint_interval: Duration,
 }
-
-const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /**
  * Composes WAL, buffer pool, GC, version visibility, and tree manager into a
@@ -43,7 +38,6 @@ pub struct TxOrchestrator {
   tx_timeout: Duration,
   tree_manager: TreeManager,
   metrics: Arc<MetricsRegistry>,
-  release_table: Box<dyn BackgroundThread<(String, Arc<TableHandle>), ()>>,
 }
 impl TxOrchestrator {
   pub fn new(
@@ -77,11 +71,6 @@ impl TxOrchestrator {
     wal.initialize(wal_config, Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
 
-    let release_table = WorkBuilder::new()
-      .name("lazy release table")
-      .single()
-      .interval(RELEASE_CHECK_INTERVAL, handle_table(tables.clone()))
-      .to_box();
     Self {
       wal,
       tables,
@@ -95,7 +84,6 @@ impl TxOrchestrator {
       tx_timeout: config.timeout,
       tree_manager,
       metrics,
-      release_table,
     }
   }
 
@@ -201,38 +189,28 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn reserve_table(&self, name: &str) -> Result<ReserveResult> {
-    self.tables.get_or_reserve(name)
+  pub fn get_table(&self, table_id: TableId) -> Option<Arc<TableHandle>> {
+    self.tables.get(table_id)
   }
   #[inline]
-  pub fn get_table(&self, name: &str) -> Option<PinnedHandle> {
-    self.tables.get(name)
+  pub fn commit_table(&self, table: Arc<TableHandle>) {
+    self.tables.insert(table);
   }
   #[inline]
-  pub fn open_table(&self, name: String, table: Arc<TableHandle>) {
-    self.tables.insert(name, table);
-  }
-  #[inline]
-  pub fn create_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn open_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
     self.tables.create_handle(table_meta)
   }
   #[inline]
-  pub fn create_table_metadata(&self) -> TableMetadata {
-    self.tables.create_metadata()
-  }
-  #[inline]
-  pub fn try_drop_table(&self, name: &str) -> DropResult {
-    self.tables.try_drop(name)
+  pub fn create_table_metadata(&self, name: &str) -> TableMetadata {
+    self.tables.create_metadata(name)
   }
 
   #[inline]
-  pub fn drop_table(&self, name: &str, table: Arc<TableHandle>) {
-    let table_id = table.metadata().get_id();
-    let h = self.release_table.send((name.to_string(), table));
-    self.tables.drop_reserve(table_id, name, h);
+  pub fn drop_table(&self, table: Arc<TableHandle>, version: TxId) {
+    self.gc.release_table(table, version);
   }
   #[inline]
-  pub fn get_metadata_table(&self) -> PinnedHandle {
+  pub fn get_metadata_table(&self) -> Arc<TableHandle> {
     self.tables.meta_table()
   }
 
@@ -249,7 +227,6 @@ impl TxOrchestrator {
     self.logger.info(|| "last checkpoint completed.");
 
     self.gc.close();
-    self.release_table.close();
     self.tables.close();
     self.logger.info(|| "tables closed.");
     wal_close();
@@ -287,24 +264,4 @@ fn run_checkpoint(
   wal.checkpoint_and_flush(log_id, min_version)?;
   logger.debug(|| format!("checkpoint complete id {log_id}"));
   Ok(())
-}
-
-fn handle_table(
-  mapper: Arc<TableMapper>,
-) -> impl FnMut(Option<(String, Arc<TableHandle>)>) -> () {
-  let mut tables = BTreeMap::new();
-  let mut unpinned = BTreeMap::new();
-  move |recv| {
-    if let Some((name, table)) = recv {
-      tables.insert(name, table);
-    }
-
-    for (name, table) in tables.extract_if(.., |_, table| table.try_close()) {
-      unpinned.insert(name, table);
-    }
-
-    for (name, table) in unpinned.extract_if(.., |_, table| table.truncate().is_ok()) {
-      mapper.remove(table.metadata().get_id(), &name);
-    }
-  }
 }
