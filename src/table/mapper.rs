@@ -3,13 +3,10 @@ use std::{
   fs::exists,
   mem::replace,
   path::{Path, PathBuf},
-  sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-  },
+  sync::{atomic::Ordering, Arc},
 };
 
-use super::{PinnedHandle, TableHandle, TableId, TableMetadata};
+use super::{AtomicTableId, PinnedHandle, TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
@@ -55,7 +52,7 @@ pub struct TableMapper {
   metadata: Arc<TableHandle>,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   metrics: Arc<MetricsRegistry>,
-  last_table_id: AtomicU32,
+  last_table_id: AtomicTableId,
   is_new: bool,
 }
 impl TableMapper {
@@ -79,7 +76,7 @@ impl TableMapper {
       metadata,
       page_pool,
       metrics,
-      last_table_id: AtomicU32::new(META_TABLE_ID + 1),
+      last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
       is_new,
     })
   }

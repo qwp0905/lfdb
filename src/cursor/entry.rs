@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::{
-  disk::Pointer,
+  disk::{Pointer, POINTER_BYTES},
   serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
   wal::TxId,
   Error, Result,
@@ -31,7 +31,7 @@ impl RecordData {
   pub fn len(&self) -> usize {
     match self {
       RecordData::Data(data) => 1 + 2 + data.len(),
-      RecordData::Chunked(pointers) => 1 + 1 + 8 * pointers.len(),
+      RecordData::Chunked(pointers) => 1 + 1 + POINTER_BYTES * pointers.len(),
       RecordData::Tombstone => 1,
     }
   }

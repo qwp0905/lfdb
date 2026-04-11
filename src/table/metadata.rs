@@ -2,12 +2,14 @@ use std::{
   path::{Path, PathBuf},
   ptr::copy_nonoverlapping,
   slice::from_raw_parts,
+  sync::atomic::AtomicU32,
 };
 
 use crate::{Error, Result};
 
 pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
+pub type AtomicTableId = AtomicU32;
 
 pub struct TableMetadata {
   id: TableId,

@@ -1,11 +1,14 @@
 use std::{
   panic::RefUnwindSafe,
-  sync::atomic::{AtomicU64, AtomicU8, Ordering},
+  sync::atomic::{AtomicU8, Ordering},
 };
 
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
-use crate::{utils::OffsetBitmap, wal::TxId};
+use crate::{
+  utils::OffsetBitmap,
+  wal::{AtomicTxId, TxId},
+};
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
@@ -135,7 +138,7 @@ impl<'a> TxSnapshot<'a> {
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: SkipMap<TxId, AtomicU8>,
-  last_tx_id: AtomicU64,
+  last_tx_id: AtomicTxId,
 }
 impl VersionVisibility {
   pub fn new<T>(aborted: T, last_tx_id: TxId) -> Self
@@ -145,7 +148,7 @@ impl VersionVisibility {
     Self {
       active: Default::default(),
       aborted: SkipSet::from_iter(aborted),
-      last_tx_id: AtomicU64::new(last_tx_id),
+      last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
 
