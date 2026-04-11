@@ -66,7 +66,7 @@ impl TreeManager {
     let table_id = table.metadata().get_id();
     {
       let root_ptr = table.free().alloc();
-      let mut root = buffer_pool.read(root_ptr, table.handle())?.for_write();
+      let mut root = buffer_pool.read(root_ptr, table.clone())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -74,9 +74,7 @@ impl TreeManager {
         &CursorNode::initial_state(),
       )?;
 
-      let mut header = buffer_pool
-        .read(HEADER_POINTER, table.handle())?
-        .for_write();
+      let mut header = buffer_pool.read(HEADER_POINTER, table.clone())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -92,13 +90,13 @@ impl TreeManager {
     buffer_pool: &BufferPool,
     version_visibility: &VersionVisibility,
     tables: &TableMapper,
-  ) -> Result<Vec<(String, Arc<TableHandle>)>> {
+  ) -> Result<Vec<Arc<TableHandle>>> {
     let mut handles = vec![];
     let current_version = version_visibility.current_version();
     let meta_table = tables.meta_table();
 
     let mut ptr = buffer_pool
-      .read(HEADER_POINTER, meta_table.handle())?
+      .read(HEADER_POINTER, meta_table.clone())?
       .for_read()
       .as_ref()
       .deserialize::<TreeHeader>()?
@@ -106,7 +104,7 @@ impl TreeManager {
 
     let leaf = loop {
       let node: CursorNode = buffer_pool
-        .read(ptr, meta_table.handle())?
+        .read(ptr, meta_table.clone())?
         .for_read()
         .as_ref()
         .deserialize()?;
@@ -120,7 +118,7 @@ impl TreeManager {
     while let Some(leaf) = next.take() {
       if let Some(ptr) = leaf.get_next() {
         next = buffer_pool
-          .read(ptr, meta_table.handle())?
+          .read(ptr, meta_table.clone())?
           .for_read()
           .as_ref()
           .deserialize::<CursorNode>()?
@@ -128,12 +126,11 @@ impl TreeManager {
           .map(Some)?;
       }
 
-      'outer: for (key, ptr) in leaf.get_entries() {
-        let key = unsafe { String::from_utf8_unchecked(key.clone()) };
-        let mut ptr = Some(*ptr);
+      'outer: for ptr in leaf.get_entry_pointers() {
+        let mut ptr = Some(ptr);
         while let Some(p) = ptr.take() {
           let entry = buffer_pool
-            .read(p, meta_table.handle())?
+            .read(p, meta_table.clone())?
             .for_read()
             .as_ref()
             .deserialize::<DataEntry>()?;
@@ -143,14 +140,14 @@ impl TreeManager {
           {
             if let Some(bytes) = record.read_data(|i| {
               buffer_pool
-                .read(i, meta_table.handle())?
+                .read(i, meta_table.clone())?
                 .for_read()
                 .as_ref()
                 .deserialize()
             })? {
               let metadata = TableMetadata::from_bytes(&bytes)?;
               let handle = tables.create_handle(metadata)?;
-              handles.push((key, handle));
+              handles.push(handle);
               continue 'outer;
             }
           };
@@ -191,8 +188,13 @@ impl TreeManager {
         let logger = logger.clone();
         let open_handles = open_handles.clone();
         once(move || {
-          while let Some((name, table)) = open_handles.pop() {
-            logger.debug(|| format!("{name} table start to collect orphand blocks."));
+          while let Some(table) = open_handles.pop() {
+            logger.debug(|| {
+              format!(
+                "table {} start to collect orphand blocks.",
+                table.metadata().get_id()
+              )
+            });
             release_orphand(&buffer_pool, &gc, &logger, table)?;
           }
           Ok(())
@@ -222,13 +224,18 @@ fn run_merge_leaf(
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
-    for (name, table) in tables.get_all().into_iter() {
+    for table in tables.get_all().into_iter() {
       let table = match table.try_pin() {
         Some(table) => table,
         None => continue,
       };
 
-      logger.debug(|| format!("clean leaf {name} collect start."));
+      logger.debug(|| {
+        format!(
+          "clean leaf table {} collect start.",
+          table.metadata().get_name()
+        )
+      });
       let table_id = table.metadata().get_id();
 
       let mut ptr = buffer_pool
@@ -338,7 +345,12 @@ fn run_merge_leaf(
           .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
       }
 
-      logger.debug(|| format!("clean leaf {name} collect end."));
+      logger.debug(|| {
+        format!(
+          "clean leaf table {} collect end.",
+          table.metadata().get_name()
+        )
+      });
     }
     Ok(())
   }

@@ -2,6 +2,7 @@ use std::{
   collections::{BTreeMap, HashSet, VecDeque},
   mem::replace,
   sync::Arc,
+  time::Duration,
 };
 
 use super::{DataEntry, RecordData, VersionRecord};
@@ -9,16 +10,18 @@ use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
   error::Result,
-  table::TableHandle,
+  table::{TableHandle, TableMapper},
   thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, LogFilter, ToArc},
-  wal::RESERVED_TX,
+  utils::{DoubleBuffer, LogFilter, ToArc, ToBox},
+  wal::{TxId, RESERVED_TX},
 };
 
 pub struct GarbageCollectionConfig {
   pub thread_count: usize,
 }
+
+const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /**
  * Trim: walk the version chain and discard expired or aborted versions.
@@ -45,6 +48,7 @@ pub struct GarbageCollector {
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
+  table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId), ()>>,
   logger: LogFilter,
 }
 impl GarbageCollector {
@@ -92,6 +96,9 @@ impl GarbageCollector {
   pub fn lazy_release(&self, table: Arc<TableHandle>, pointer: Pointer) {
     self.queue.push(GcPointer::Release(table, pointer))
   }
+  pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId) {
+    self.table.send((table, tx_id));
+  }
 
   pub fn batch_check_empty(
     &self,
@@ -111,6 +118,7 @@ impl GarbageCollector {
     buffer_pool: Arc<BufferPool>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
+    mapper: Arc<TableMapper>,
     logger: LogFilter,
     config: GarbageCollectionConfig,
   ) -> Self {
@@ -121,7 +129,7 @@ impl GarbageCollector {
       .multi(config.thread_count)
       .shared(run_entry(
         buffer_pool.clone(),
-        version_visibility,
+        version_visibility.clone(),
         recorder.clone(),
       ))
       .to_arc();
@@ -131,15 +139,26 @@ impl GarbageCollector {
       .shared(run_check(buffer_pool.clone()))
       .to_arc();
 
+    let table = WorkBuilder::new()
+      .name("gc release tables")
+      .single()
+      .interval(
+        RELEASE_CHECK_INTERVAL,
+        run_release_table(mapper, version_visibility),
+      )
+      .to_box();
+
     Self {
       check,
       entry,
       queue,
+      table,
       logger,
     }
   }
 
   pub fn close(&self) {
+    self.table.close();
     self.check.close();
     self.entry.close();
   }
@@ -255,5 +274,34 @@ fn run_check(
         .deserialize::<DataEntry>()?
         .is_empty(),
     )
+  }
+}
+
+fn run_release_table(
+  mapper: Arc<TableMapper>,
+  version_visibility: Arc<VersionVisibility>,
+) -> impl FnMut(Option<(Arc<TableHandle>, TxId)>) {
+  let mut tables = Vec::new();
+  let mut unpinned = Vec::new();
+  let mut unreachable = Vec::new();
+  move |recv| {
+    if let Some((table, tx_id)) = recv {
+      tables.push((table, tx_id));
+    }
+
+    let min_version = version_visibility.min_version();
+    for (table, _) in tables.extract_if(.., |(_, tx_id)| {
+      version_visibility.is_aborted(tx_id) || min_version > *tx_id
+    }) {
+      unpinned.push(table)
+    }
+
+    for table in unpinned.extract_if(.., |table| table.try_close()) {
+      unreachable.push(table);
+    }
+
+    for table in unreachable.extract_if(.., |table| table.truncate().is_ok()) {
+      mapper.remove(table.metadata().get_id());
+    }
   }
 }

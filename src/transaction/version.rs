@@ -170,6 +170,10 @@ impl VersionVisibility {
   pub fn is_aborted(&self, tx_id: &TxId) -> bool {
     self.aborted.contains(tx_id)
   }
+  #[inline]
+  pub fn is_active(&self, tx_id: &TxId) -> bool {
+    self.active.contains_key(tx_id)
+  }
   /**
    * Returns the oldest active tx_id, or the current version if no transaction is active.
    * Called before GC to determine the safe cleanup boundary — versions older than this
