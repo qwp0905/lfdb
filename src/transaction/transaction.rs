@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
-  table::{DropResult, PinnedHandle, ReserveResult, TableHandle},
+  table::{TableHandle, TableMetadata},
   transaction::{TxOrchestrator, TxSnapshot, TxState},
   utils::SpinRwLock,
   Error, Result,
@@ -47,7 +47,7 @@ impl<'a> Transaction<'a> {
   }
 
   #[inline]
-  fn open_cursor(&self, table: PinnedHandle) -> Cursor<'_> {
+  fn open_cursor(&self, table: Arc<TableHandle>) -> Cursor<'_> {
     Cursor::new(
       table,
       &self.orchestrator,
@@ -64,18 +64,21 @@ impl<'a> Transaction<'a> {
 
     if let Some(entry) = self.modified_tables.read().get(name) {
       match entry {
-        TableEntry::Created(table) => {
-          return Ok(self.open_cursor(PinnedHandle::new(table.clone())))
-        }
+        TableEntry::Created(table) => return Ok(self.open_cursor(table.clone())),
         TableEntry::Dropped(_) | TableEntry::DroppedInMemory(_) => {
           return Err(Error::TableNotFound(name.to_string()))
         }
       }
     }
 
-    if let Some(table) = self.orchestrator.get_table(name) {
-      return Ok(self.open_cursor(table));
+    let cursor = self.open_cursor(self.orchestrator.get_metadata_table());
+    if let Some(bytes) = cursor.get(&name.as_bytes())? {
+      let metadata = TableMetadata::from_bytes(&bytes)?;
+      if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
+        return Ok(self.open_cursor(table));
+      }
     }
+
     Err(Error::TableNotFound(name.to_string()))
   }
 
@@ -86,28 +89,27 @@ impl<'a> Transaction<'a> {
 
     if let Some(entry) = self.modified_tables.read().get(name) {
       match entry {
-        TableEntry::Created(table) => {
-          return Ok(self.open_cursor(PinnedHandle::new(table.clone())))
-        }
+        TableEntry::Created(table) => return Ok(self.open_cursor(table.clone())),
         TableEntry::Dropped(_) | TableEntry::DroppedInMemory(_) => {
           return Err(Error::TableAlreadyDropped(name.to_string()))
         }
       }
     }
 
-    match self.orchestrator.reserve_table(name)? {
-      ReserveResult::Found(table) => return Ok(self.open_cursor(table)),
-      ReserveResult::Reserved => return Err(Error::WriteConflict),
-      ReserveResult::New => {}
-    };
-
-    let table_meta = self.orchestrator.create_table_metadata();
     let meta_cursor = self.open_cursor(self.orchestrator.get_metadata_table());
+    if let Some(bytes) = meta_cursor.get(&name.as_bytes())? {
+      let metadata = TableMetadata::from_bytes(&bytes)?;
+      if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
+        return Ok(self.open_cursor(table));
+      }
+    }
+
+    let table_meta = self.orchestrator.create_table_metadata(name);
     meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
 
-    let table = self.orchestrator.create_table(table_meta)?;
+    let table = self.orchestrator.open_table(table_meta)?;
     let cursor = Cursor::initialize(
-      PinnedHandle::new(table.clone()),
+      table.clone(),
       &self.orchestrator,
       &self.state,
       &self.snapshot,
@@ -124,22 +126,27 @@ impl<'a> Transaction<'a> {
   pub fn drop_table(&self, name: &str) -> Result {
     {
       let mut tables = self.modified_tables.write();
-      match (tables.get(name), self.orchestrator.try_drop_table(name)) {
-        (Some(TableEntry::Created(table)), _) => {
-          let cloned = table.clone();
-          tables.insert(name.to_string(), TableEntry::DroppedInMemory(cloned));
+      if let Some(entry) = tables.get_mut(name) {
+        match entry {
+          TableEntry::Created(table) => {
+            *entry = TableEntry::DroppedInMemory(table.clone());
+            return Ok(());
+          }
+          TableEntry::Dropped(_) | TableEntry::DroppedInMemory(_) => return Ok(()),
         }
-        (Some(TableEntry::Dropped(_)), _)
-        | (Some(TableEntry::DroppedInMemory(_)), _)
-        | (None, DropResult::NotFound) => return Ok(()),
-        (None, DropResult::Reserved(table)) => {
-          tables.insert(name.to_string(), TableEntry::Dropped(table));
-        }
-        (None, DropResult::Conflict) => return Err(Error::WriteConflict),
       }
     }
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table());
+    if let Some(bytes) = cursor.get(&name.as_bytes())? {
+      let metadata = TableMetadata::from_bytes(&bytes)?;
+      if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
+        self
+          .modified_tables
+          .write()
+          .insert(name.to_string(), TableEntry::Dropped(table.clone()));
+      }
+    }
     cursor.remove(&name.as_bytes())?;
 
     Ok(())
@@ -154,11 +161,15 @@ impl<'a> Transaction<'a> {
       return Err(err);
     }
 
-    for (name, entry) in self.modified_tables.write().drain() {
+    for (_, entry) in self.modified_tables.write().drain() {
       match entry {
-        TableEntry::Created(table) => self.orchestrator.open_table(name, table),
-        TableEntry::Dropped(table) => self.orchestrator.drop_table(&name, table),
-        TableEntry::DroppedInMemory(table) => self.orchestrator.drop_table(&name, table),
+        TableEntry::Created(table) => self.orchestrator.commit_table(table),
+        TableEntry::Dropped(table) => {
+          self.orchestrator.drop_table(table, self.state.get_id())
+        }
+        TableEntry::DroppedInMemory(table) => {
+          self.orchestrator.drop_table(table, self.state.get_id())
+        }
       }
     }
 
@@ -172,11 +183,15 @@ impl<'a> Transaction<'a> {
     }
     self.orchestrator.abort_tx(self.state.get_id())?;
 
-    for (name, entry) in self.modified_tables.write().drain() {
+    for (_, entry) in self.modified_tables.write().drain() {
       match entry {
-        TableEntry::Created(table) => self.orchestrator.drop_table(&name, table),
-        TableEntry::Dropped(table) => self.orchestrator.open_table(name, table),
-        TableEntry::DroppedInMemory(table) => self.orchestrator.drop_table(&name, table),
+        TableEntry::Created(table) => {
+          self.orchestrator.drop_table(table, self.state.get_id())
+        }
+        TableEntry::Dropped(table) => self.orchestrator.commit_table(table),
+        TableEntry::DroppedInMemory(table) => {
+          self.orchestrator.drop_table(table, self.state.get_id())
+        }
       };
     }
     self.state.deactive();
