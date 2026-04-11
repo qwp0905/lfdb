@@ -4,7 +4,7 @@ use std::{
   mem::replace,
   path::{Path, PathBuf},
   sync::{
-    atomic::{AtomicU16, Ordering},
+    atomic::{AtomicU32, Ordering},
     Arc,
   },
 };
@@ -41,8 +41,8 @@ pub enum DropResult {
 pub const META_TABLE: &str = "__meta";
 pub const META_TABLE_ID: TableId = 0;
 
-fn to_path(base: &Path, name: &str) -> PathBuf {
-  base.join(format!("{name}{FILE_SUFFIX}"))
+fn to_path(base: &Path, id: TableId) -> PathBuf {
+  base.join(format!("{id}{FILE_SUFFIX}"))
 }
 
 pub struct TableConfig {
@@ -55,7 +55,7 @@ pub struct TableMapper {
   metadata: Arc<TableHandle>,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   metrics: Arc<MetricsRegistry>,
-  last_table_id: AtomicU16,
+  last_table_id: AtomicU32,
   is_new: bool,
 }
 impl TableMapper {
@@ -64,7 +64,7 @@ impl TableMapper {
     page_pool: Arc<PagePool<PAGE_SIZE>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let path = to_path(&config.base_path, META_TABLE);
+    let path = to_path(&config.base_path, META_TABLE_ID);
     let is_new = !exists(&path).map_err(Error::IO)?;
     let metadata = TableHandle::open(
       TableMetadata::new(META_TABLE_ID, path),
@@ -79,7 +79,7 @@ impl TableMapper {
       metadata,
       page_pool,
       metrics,
-      last_table_id: AtomicU16::new(META_TABLE_ID + 1),
+      last_table_id: AtomicU32::new(META_TABLE_ID + 1),
       is_new,
     })
   }
@@ -175,11 +175,9 @@ impl TableMapper {
       .insert(name.to_string(), Slot::InDrop(id, handle));
   }
 
-  pub fn create_metadata(&self, name: &str) -> TableMetadata {
-    TableMetadata::new(
-      self.last_table_id.fetch_add(1, Ordering::Relaxed),
-      to_path(&self.base_path, name),
-    )
+  pub fn create_metadata(&self) -> TableMetadata {
+    let id = self.last_table_id.fetch_add(1, Ordering::Relaxed);
+    TableMetadata::new(id, to_path(&self.base_path, id))
   }
 
   pub fn meta_table(&self) -> PinnedHandle {
