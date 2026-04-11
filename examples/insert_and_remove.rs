@@ -15,7 +15,7 @@ fn main() {
 
   let table = "test";
   {
-    let t = engine.new_tx().unwrap();
+    let mut t = engine.new_tx().unwrap();
     t.open_table(table).unwrap();
     t.commit().unwrap();
   }
@@ -23,7 +23,7 @@ fn main() {
   let count = 1_000_usize;
   {
     for i in 0..count {
-      let t = engine.new_tx().expect("tx start error");
+      let mut t = engine.new_tx().expect("tx start error");
       let bytes: Vec<u8> = i.to_le_bytes().into();
       t.table(table)
         .unwrap()
@@ -35,7 +35,7 @@ fn main() {
     println!("insert done");
 
     for i in 0..count {
-      let t = engine.new_tx().expect("tx start error");
+      let mut t = engine.new_tx().expect("tx start error");
       let bytes: Vec<u8> = i.to_le_bytes().into();
       t.table(table)
         .unwrap()
@@ -45,7 +45,7 @@ fn main() {
     }
     println!("remove done");
 
-    let tt = engine.new_tx().expect("tx start error");
+    let mut tt = engine.new_tx().expect("tx start error");
     tt.table(table)
       .unwrap()
       .insert(count.to_le_bytes().into(), count.to_le_bytes().into())
@@ -58,7 +58,7 @@ fn main() {
     .build()
     .expect("bootstrap error");
 
-  let t = engine.new_tx().expect("tx start error");
+  let mut t = engine.new_tx().expect("tx start error");
   let tt = t.table(table).unwrap();
   let mut iter = tt.scan_all().expect("scan start error");
 

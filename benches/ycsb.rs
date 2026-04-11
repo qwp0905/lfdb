@@ -61,7 +61,7 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 }
 
 fn create_table(engine: &lfdb::Engine) {
-  let tx = engine.new_tx().unwrap();
+  let mut tx = engine.new_tx().unwrap();
   tx.open_table(TABLE).unwrap();
   tx.commit().unwrap();
 }
@@ -69,7 +69,7 @@ fn create_table(engine: &lfdb::Engine) {
 fn pre_load(dir: &std::path::Path, count: usize) {
   let engine = build(dir).build().unwrap();
   create_table(&engine);
-  let tx = engine.new_tx_timeout(Duration::from_mins(10)).unwrap();
+  let mut tx = engine.new_tx_timeout(Duration::from_mins(10)).unwrap();
   let table = tx.table(TABLE).unwrap();
   (0..count)
     .map(|i| (make_key(i), make_value(i)))
@@ -104,7 +104,7 @@ fn spawn_workers(
       std::thread::spawn(move || {
         while let Ok(op) = rx.recv() {
           loop {
-            let tx = e.new_tx().expect("start error");
+            let mut tx = e.new_tx().expect("start error");
             let t = tx.table(TABLE).expect("table error");
             let conflict = match &op {
               Op::Get(k) => {
