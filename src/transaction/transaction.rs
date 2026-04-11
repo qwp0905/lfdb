@@ -101,7 +101,7 @@ impl<'a> Transaction<'a> {
       ReserveResult::New => {}
     };
 
-    let table_meta = self.orchestrator.create_table_metadata(name);
+    let table_meta = self.orchestrator.create_table_metadata();
     let meta_cursor = self.open_cursor(self.orchestrator.get_metadata_table());
     meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
 
