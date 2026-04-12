@@ -29,6 +29,10 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe 
     TaskHandle::from(done_r)
   }
 
+  fn dispatch(&self, v: T) {
+    self.register(Context::Dispatch(v));
+  }
+
   fn execute_batch(&self, v: Vec<T>) -> BatchTaskHandle<R> {
     BatchTaskHandle::from(v.into_iter().map(|i| {
       let (done_r, done_t) = oneshot();

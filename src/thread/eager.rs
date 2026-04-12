@@ -19,7 +19,7 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
  */
 fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
-) -> impl FnMut(&mut Vec<(T, OneshotFulfill<Result<R>>)>) -> bool + 'a
+) -> impl FnMut(&mut Vec<(T, Option<OneshotFulfill<Result<R>>>)>) -> bool + 'a
 where
   T: Send + UnwindSafe + 'static,
   R: Send + Clone + 'static,
@@ -33,6 +33,7 @@ where
     let result = when_buffered.call(values).map(Ok).unwrap_or_else(Err);
     waiting
       .into_iter()
+      .flatten()
       .for_each(|done| done.fulfill(result.clone()));
     true
   }
@@ -85,7 +86,8 @@ where
           'burst: while !backoff.is_completed() {
             'inner: while buffered.len() < count {
               match queue_c.pop() {
-                Some(Context::Work(v, done)) => buffered.push((v, done)),
+                Some(Context::Work(v, done)) => buffered.push((v, Some(done))),
+                Some(Context::Dispatch(v)) => buffered.push((v, None)),
                 None => break 'inner,
                 Some(Context::Term) => {
                   flush(&mut buffered);
