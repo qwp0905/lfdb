@@ -38,6 +38,7 @@ impl WorkBuilder {
     self.name = name.to_string();
     self
   }
+  #[allow(dead_code)]
   pub fn stack_size(mut self, size: usize) -> Self {
     self.stack_size = size;
     self
