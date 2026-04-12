@@ -118,7 +118,12 @@ impl<const N: usize> IOPool<N> {
         .map(drop);
     }
 
+    // last caller wins on duplicate pointers
     buffered.sort_by_key(|(i, _)| *i);
+    buffered.reverse();
+    buffered.dedup_by_key(|(i, _)| *i);
+    buffered.reverse();
+
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
       .map(|g| g.into_iter())

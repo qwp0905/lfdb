@@ -193,8 +193,8 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result 
 
     // Duplicate indexes all point to the same underlying page memory (same PageRef),
     // so writing once is equivalent — no data is lost by deduplicating.
-    buffered.dedup_by_key(|(i, _)| *i);
     buffered.sort_by_key(|(i, _)| *i);
+    buffered.dedup_by_key(|(i, _)| *i);
 
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
