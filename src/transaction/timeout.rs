@@ -12,7 +12,7 @@ use crossbeam::{
 };
 
 use crate::{
-  utils::{LogFilter, UnsafeBorrowMut},
+  utils::{LogFilter, UnsafeBorrowMut, UnwrappedSender},
   wal::TxId,
 };
 
@@ -262,7 +262,7 @@ impl TimeoutThread {
   }
 
   pub fn register(&self, id: TxId, timeout: Duration) {
-    self.channel.send(Msg::Register(id, timeout)).unwrap();
+    self.channel.must_send(Msg::Register(id, timeout));
   }
 
   pub fn close(&self) {

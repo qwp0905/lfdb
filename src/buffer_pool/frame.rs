@@ -1,8 +1,9 @@
 use std::{mem::replace, sync::Arc};
 
 use crate::{
-  disk::{PageRef, Pointer, WriteAsync, PAGE_SIZE},
+  disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
+  thread::TaskHandle,
 };
 
 pub struct Frame {
@@ -53,10 +54,12 @@ impl Frame {
     &mut self.page
   }
 
-  pub fn flush_async(&self) -> WriteAsync<PAGE_SIZE> {
+  #[inline]
+  pub fn flush_async(&self) -> TaskHandle<()> {
     self.handle.disk().write_async(self.pointer, &self.page)
   }
 
+  #[inline]
   pub fn handle(&self) -> Arc<TableHandle> {
     self.handle.clone()
   }
