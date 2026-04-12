@@ -7,7 +7,7 @@ use std::{
 
 use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
 use crate::{
-  disk::{PagePool, PAGE_SIZE},
+  disk::{IOPool, PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
   utils::{SpinRwLock, ToArc},
   Error, Result,
@@ -24,14 +24,14 @@ fn to_path(base: &Path, id: TableId) -> PathBuf {
 
 pub struct TableConfig {
   pub base_path: PathBuf,
+  pub io_thread_count: usize,
 }
 
 pub struct TableMapper {
   open_handles: SpinRwLock<HashMap<TableId, Arc<TableHandle>>>,
   base_path: PathBuf,
   metadata: Arc<TableHandle>,
-  page_pool: Arc<PagePool<PAGE_SIZE>>,
-  metrics: Arc<MetricsRegistry>,
+  io_pool: IOPool<PAGE_SIZE>,
   last_table_id: AtomicTableId,
   is_new: bool,
 }
@@ -41,31 +41,31 @@ impl TableMapper {
     page_pool: Arc<PagePool<PAGE_SIZE>>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
+    let io_pool = IOPool::new(config.io_thread_count, page_pool, metrics.clone());
+
     let path = to_path(&config.base_path, META_TABLE_ID);
     let is_new = !exists(&path).map_err(Error::IO)?;
-    let metadata = TableHandle::open(
+
+    let disk = io_pool.open_controller(&path)?;
+    let metadata = TableHandle::new(
       TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
-      page_pool.clone(),
-      metrics.clone(),
-    )?
+      disk,
+    )
     .to_arc();
 
     Ok(Self {
       open_handles: Default::default(),
       base_path: config.base_path,
       metadata,
-      page_pool,
-      metrics,
+      io_pool,
       last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
       is_new,
     })
   }
 
   pub fn create_handle(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
-    Ok(
-      TableHandle::open(table_meta, self.page_pool.clone(), self.metrics.clone())?
-        .to_arc(),
-    )
+    let disk = self.io_pool.open_controller(table_meta.get_path())?;
+    Ok(TableHandle::new(table_meta, disk).to_arc())
   }
 
   pub fn replay<Iter: Iterator<Item = Arc<TableHandle>>>(&self, iter: Iter) -> Result {
@@ -122,9 +122,6 @@ impl TableMapper {
   }
 
   pub fn close(&self) {
-    for handle in self.open_handles.read().values() {
-      handle.disk().close();
-    }
-    self.metadata.disk().close();
+    self.io_pool.close();
   }
 }
