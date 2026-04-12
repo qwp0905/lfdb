@@ -9,7 +9,7 @@ use super::{
   OnceHandle, SharedWorkThread, SingleFn,
 };
 
-const DEFAULT_STACK_SIZE: usize = 16 << 10;
+const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
 pub fn once<F, T>(f: F) -> OnceHandle<T>
 where
@@ -17,7 +17,7 @@ where
   F: FnOnce() -> T + Send + 'static,
 {
   let handle = Builder::new()
-    .stack_size(DEFAULT_STACK_SIZE << 2)
+    .stack_size(DEFAULT_STACK_SIZE)
     .spawn(f)
     .unwrap();
   OnceHandle::new(handle)
