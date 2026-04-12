@@ -30,7 +30,7 @@ fn test_no_timeout() {
     SharedWorkThread::new("test-no-timeout", DEFAULT_STACK_SIZE, thread_count, work);
 
   // Send multiple tasks
-  let receivers: Vec<_> = (1..=thread_count).map(|i| thread.send(i)).collect();
+  let receivers: Vec<_> = (1..=thread_count).map(|i| thread.execute(i)).collect();
   let results = receivers
     .into_iter()
     .map(|receiver| receiver.wait().expect("closed"))
@@ -62,7 +62,9 @@ fn test_multiple_threads() {
   let thread =
     SharedWorkThread::new("test-multi", DEFAULT_STACK_SIZE, thread_count, work);
 
-  let receivers: Vec<_> = (0..(thread_count << 1)).map(|i| thread.send(i)).collect();
+  let receivers: Vec<_> = (0..(thread_count << 1))
+    .map(|i| thread.execute(i))
+    .collect();
 
   // Collect all results
   for receiver in receivers.into_iter() {
