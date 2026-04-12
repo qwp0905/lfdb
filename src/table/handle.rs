@@ -10,8 +10,7 @@ use crossbeam::utils::Backoff;
 
 use super::TableMetadata;
 use crate::{
-  disk::{DiskController, FreeList, PagePool, PAGE_SIZE},
-  metrics::MetricsRegistry,
+  disk::{DiskController, FreeList, PAGE_SIZE},
   Error, Result,
 };
 
@@ -24,23 +23,16 @@ pub struct TableHandle {
   pin: AtomicUsize,
 }
 impl TableHandle {
-  pub fn open(
-    metadata: TableMetadata,
-    page_pool: Arc<PagePool<PAGE_SIZE>>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Result<Self> {
-    let disk = DiskController::open(metadata.get_path(), page_pool, metrics)?;
-    Ok(Self {
+  pub fn new(metadata: TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
+    Self {
       metadata,
       disk,
       free_list: FreeList::new(),
       pin: AtomicUsize::new(0),
-    })
+    }
   }
 
-  fn pin(&self) {
-    self.pin.fetch_add(1, Ordering::Release);
-  }
+  #[inline]
   fn unpin(&self) {
     self.pin.fetch_sub(1, Ordering::Release);
   }
@@ -65,6 +57,7 @@ impl TableHandle {
     }
   }
 
+  #[inline]
   pub fn replay(&self) -> Result {
     self.free_list.replay(self.disk.len()?);
     Ok(())
@@ -83,6 +76,7 @@ impl TableHandle {
     &self.free_list
   }
 
+  #[inline]
   pub fn closed(&self) -> bool {
     self.pin.load(Ordering::Acquire) & CLOSED != 0
   }
@@ -95,19 +89,12 @@ impl TableHandle {
   }
 
   pub fn truncate(&self) -> Result {
-    self.disk.close();
     std::fs::remove_file(self.metadata.get_path()).map_err(Error::IO)
   }
 }
 
 pub struct PinnedHandle(Arc<TableHandle>);
 impl PinnedHandle {
-  #[inline]
-  pub fn new(handle: Arc<TableHandle>) -> Self {
-    handle.pin();
-    Self(handle)
-  }
-
   #[inline]
   pub fn handle(&self) -> Arc<TableHandle> {
     self.0.clone()
