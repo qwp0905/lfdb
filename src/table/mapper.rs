@@ -1,6 +1,6 @@
 use std::{
-  collections::HashMap,
-  fs::exists,
+  collections::{HashMap, HashSet},
+  fs::{exists, read_dir, remove_file},
   path::{Path, PathBuf},
   sync::{atomic::Ordering, Arc},
 };
@@ -69,13 +69,31 @@ impl TableMapper {
   }
 
   pub fn replay<Iter: Iterator<Item = Arc<TableHandle>>>(&self, iter: Iter) -> Result {
+    let dir = read_dir(&self.base_path).map_err(Error::IO)?;
+    let mut exists = HashSet::new();
+    for entry in dir {
+      let entry = entry.map_err(Error::IO)?;
+      if !entry.file_name().to_string_lossy().ends_with(FILE_SUFFIX) {
+        continue;
+      }
+      if entry.path() == self.metadata.metadata().get_path() {
+        continue;
+      }
+      exists.insert(entry.path());
+    }
+
     self.metadata.replay()?;
 
     for table in iter {
+      exists.remove(table.metadata().get_path());
       table.replay()?;
       let id = table.metadata().get_id();
       self.last_table_id.fetch_max(id + 1, Ordering::Relaxed);
       self.open_handles.write().insert(id, table);
+    }
+
+    for path in exists {
+      remove_file(path).map_err(Error::IO)?;
     }
     Ok(())
   }
