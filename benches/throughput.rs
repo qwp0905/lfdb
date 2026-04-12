@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use crossbeam::channel::{unbounded, Sender};
 use lfdb::EngineBuilder;
 use tempfile::TempDir;
@@ -39,6 +39,11 @@ fn build<T: AsRef<std::path::Path> + ?Sized>(dir: &T) -> EngineBuilder<&T> {
 fn create_table(engine: &lfdb::Engine) {
   let mut tx = engine.new_tx().unwrap();
   tx.open_table(TABLE).unwrap();
+  tx.commit().unwrap();
+}
+fn drop_table(engine: &lfdb::Engine) {
+  let mut tx = engine.new_tx().unwrap();
+  tx.drop_table(TABLE).unwrap();
   tx.commit().unwrap();
 }
 
@@ -80,6 +85,9 @@ fn bench_sequential_get(c: &mut Criterion) {
 }
 
 fn bench_sequential_insert(c: &mut Criterion) {
+  let dir = TempDir::new_in(".").expect("dir failed.");
+  let engine = build(dir.path()).build().expect("bootstrap error");
+
   let keys: Vec<_> = (0..SEQ_SIZE).map(make_key).collect();
   let values: Vec<_> = (0..SEQ_SIZE).map(make_value).collect();
 
@@ -89,24 +97,17 @@ fn bench_sequential_insert(c: &mut Criterion) {
     .measurement_time(Duration::from_secs(15))
     .throughput(Throughput::Elements(SEQ_SIZE as u64))
     .bench_function("bench", |b| {
-      b.iter_batched_ref(
-        || {
-          let dir = TempDir::new_in(".").expect("dir failed.");
-          let engine = build(dir.path()).build().expect("bootstrap error");
-          create_table(&engine);
-          (dir, engine)
-        },
-        |(_, engine)| {
-          for i in 0..SEQ_SIZE {
-            let mut tx = engine.new_tx().expect("start error");
-            let t = tx.table(TABLE).expect("table error");
-            t.insert(keys[i].clone(), values[i].clone())
-              .expect("insert error");
-            tx.commit().expect("commit error");
-          }
-        },
-        BatchSize::PerIteration,
-      );
+      b.iter(|| {
+        create_table(&engine);
+        for i in 0..SEQ_SIZE {
+          let mut tx = engine.new_tx().expect("start error");
+          let t = tx.table(TABLE).expect("table error");
+          t.insert(keys[i].clone(), values[i].clone())
+            .expect("insert error");
+          tx.commit().expect("commit error");
+        }
+        drop_table(&engine);
+      });
     });
   group.finish();
 }
@@ -185,8 +186,28 @@ fn bench_concurrent_get(c: &mut Criterion) {
 }
 
 fn bench_concurrent_insert(c: &mut Criterion) {
+  let dir = TempDir::new_in(".").expect("dir failed.");
+  let engine = Arc::new(build(dir.path()).build().expect("bootstrap error"));
+
   let keys: Vec<_> = (0..CONC_SIZE).map(make_key).collect();
   let values: Vec<_> = (0..CONC_SIZE).map(make_value).collect();
+
+  let (tx, rx) = unbounded::<(Vec<u8>, Vec<u8>, Sender<()>)>();
+  let threads: Vec<_> = (0..CONC_THREADS)
+    .map(|_| {
+      let rx = rx.clone();
+      let e = engine.clone();
+      std::thread::spawn(move || {
+        while let Ok((k, v, done)) = rx.recv() {
+          let mut tx = e.new_tx().expect("start error");
+          let t = tx.table(TABLE).expect("table error");
+          t.insert(k, v).expect("insert error");
+          tx.commit().expect("commit error");
+          done.send(()).unwrap();
+        }
+      })
+    })
+    .collect();
 
   let mut group = c.benchmark_group("concurrent-insert");
   group
@@ -194,42 +215,22 @@ fn bench_concurrent_insert(c: &mut Criterion) {
     .measurement_time(Duration::from_secs(20))
     .throughput(Throughput::Elements(CONC_SIZE as u64))
     .bench_function("bench", |b| {
-      b.iter_batched_ref(
-        || {
-          let dir = TempDir::new_in(".").expect("dir failed.");
-          let engine = Arc::new(build(dir.path()).build().expect("bootstrap error"));
-          create_table(&engine);
-          let (tx, rx) = unbounded::<(Vec<u8>, Vec<u8>, Sender<()>)>();
-          let threads: Vec<_> = (0..CONC_THREADS)
-            .map(|_| {
-              let rx = rx.clone();
-              let e = engine.clone();
-              std::thread::spawn(move || {
-                while let Ok((k, v, done)) = rx.recv() {
-                  let mut tx = e.new_tx().expect("start error");
-                  let t = tx.table(TABLE).expect("table error");
-                  t.insert(k, v).expect("insert error");
-                  tx.commit().expect("commit error");
-                  done.send(()).unwrap();
-                }
-              })
-            })
-            .collect();
-          (dir, engine, tx, threads)
-        },
-        |(_, _, tx, _)| {
-          let mut waiting = Vec::with_capacity(CONC_SIZE);
-          for i in 0..CONC_SIZE {
-            let (t, r) = unbounded();
-            tx.send((keys[i].clone(), values[i].clone(), t)).unwrap();
-            waiting.push(r);
-          }
-          waiting.into_iter().for_each(|r| r.recv().unwrap());
-        },
-        BatchSize::PerIteration,
-      );
+      b.iter(|| {
+        create_table(&engine);
+        let mut waiting = Vec::with_capacity(CONC_SIZE);
+        for i in 0..CONC_SIZE {
+          let (t, r) = unbounded();
+          tx.send((keys[i].clone(), values[i].clone(), t)).unwrap();
+          waiting.push(r);
+        }
+        waiting.into_iter().for_each(|r| r.recv().unwrap());
+        drop_table(&engine);
+      });
     });
   group.finish();
+
+  drop(tx);
+  threads.into_iter().for_each(|t| t.join().unwrap());
 }
 
 fn bench_concurrent_update(c: &mut Criterion) {
