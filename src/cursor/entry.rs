@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::{
   disk::{Pointer, POINTER_BYTES},
   serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
-  wal::TxId,
+  wal::{TxId, TX_ID_BYTES},
   Error, Result,
 };
 
@@ -12,7 +12,8 @@ pub const MAX_VALUE: usize = 1 << 16;
 
 // Maximum inline value size for a single-version DataEntry.
 // Overhead: next(8) + version_count(2) + version(8) + owner(8) + data_len(2) + type_byte(1) = 29
-pub const LARGE_VALUE: usize = SERIALIZABLE_BYTES - 29;
+pub const LARGE_VALUE: usize =
+  SERIALIZABLE_BYTES - ((TX_ID_BYTES << 1) + POINTER_BYTES + 2 + 2 + 1);
 pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 
 /**

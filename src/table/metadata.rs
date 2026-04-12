@@ -11,6 +11,8 @@ pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
 pub type AtomicTableId = AtomicU32;
 
+pub const MAX_TABLE_NAME_LEN: usize = 256 as usize;
+
 pub struct TableMetadata {
   id: TableId,
   name: String,

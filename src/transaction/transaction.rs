@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Instant};
 use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
-  table::{TableHandle, TableMetadata},
+  table::{TableHandle, TableMetadata, MAX_TABLE_NAME_LEN},
   transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
 };
@@ -53,6 +53,10 @@ impl<'a> Transaction<'a> {
   }
 
   pub fn table(&self, name: &str) -> Result<Cursor<'_>> {
+    if name.len() > MAX_TABLE_NAME_LEN {
+      return Err(Error::TableNameExceeded(MAX_TABLE_NAME_LEN, name.len()));
+    }
+
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -69,6 +73,10 @@ impl<'a> Transaction<'a> {
   }
 
   pub fn open_table(&mut self, name: &str) -> Result<Cursor<'_>> {
+    if name.len() > MAX_TABLE_NAME_LEN {
+      return Err(Error::TableNameExceeded(MAX_TABLE_NAME_LEN, name.len()));
+    }
+
     if !self.state.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -99,6 +107,10 @@ impl<'a> Transaction<'a> {
   }
 
   pub fn drop_table(&mut self, name: &str) -> Result {
+    if name.len() > MAX_TABLE_NAME_LEN {
+      return Err(Error::TableNameExceeded(MAX_TABLE_NAME_LEN, name.len()));
+    }
+
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table());
     if let Some(bytes) = cursor.get(&name.as_bytes())? {
       let metadata = TableMetadata::from_bytes(&bytes)?;
