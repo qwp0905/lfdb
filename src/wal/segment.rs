@@ -17,16 +17,7 @@ use crate::{
 
 pub const FILE_SUFFIX: &str = ".wal";
 
-pub struct FsyncResult(TaskHandle<bool>);
-impl FsyncResult {
-  pub fn wait(self) -> Result {
-    self
-      .0
-      .wait()?
-      .then(|| Ok(()))
-      .unwrap_or_else(|| Err(Error::FlushFailed))
-  }
-}
+pub type FsyncResult = TaskHandle<Result>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
@@ -34,7 +25,7 @@ pub struct WALSegment {
   file: Arc<File>,
   path: Mutex<PathBuf>,
   io: Box<dyn BackgroundThread<(Pointer, &'static [u8]), Result>>,
-  flush: Box<dyn BackgroundThread<(), bool>>,
+  flush: Box<dyn BackgroundThread<(), Result>>,
 }
 impl WALSegment {
   pub fn parse_generation<A>(filename: &A) -> Result<SegmentGeneration>
@@ -110,7 +101,7 @@ impl WALSegment {
     // the page buffer outlives the background thread's use of the pointer.
     self
       .io
-      .send((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
+      .execute((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
       .wait()
       .flatten()
   }
@@ -164,7 +155,7 @@ impl WALSegment {
 
   #[inline]
   pub fn fsync(&self) -> FsyncResult {
-    FsyncResult(self.flush.send(()))
+    self.flush.execute(())
   }
 
   #[inline]
@@ -181,8 +172,8 @@ impl WALSegment {
 }
 
 #[inline]
-fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> bool {
-  move |_| file.sync_data().is_ok()
+fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> Result {
+  move |_| file.sync_data().map_err(Error::IO)
 }
 
 /**
@@ -202,8 +193,8 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result 
 
     // Duplicate indexes all point to the same underlying page memory (same PageRef),
     // so writing once is equivalent — no data is lost by deduplicating.
-    buffered.dedup_by_key(|(i, _)| *i);
     buffered.sort_by_key(|(i, _)| *i);
+    buffered.dedup_by_key(|(i, _)| *i);
 
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)

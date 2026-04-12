@@ -66,7 +66,7 @@ impl GarbageCollector {
           if !dedup.insert((table.metadata().get_id(), ptr)) {
             continue;
           }
-          waiting.push(self.entry.send((table, ptr)));
+          waiting.push(self.entry.execute((table, ptr)));
         }
         GcPointer::Release(table, ptr) => {
           release.insert((table.metadata().get_id(), ptr), table);
@@ -97,21 +97,21 @@ impl GarbageCollector {
     self.queue.push(GcPointer::Release(table, pointer))
   }
   pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId) {
-    self.table.send((table, tx_id));
+    self.table.execute((table, tx_id));
   }
 
   pub fn batch_check_empty(
     &self,
     pointers: Vec<(Arc<TableHandle>, Pointer)>,
   ) -> BatchTaskHandle<Result<bool>> {
-    self.check.send_batch(pointers)
+    self.check.execute_batch(pointers)
   }
   pub fn check_empty(
     &self,
     table: Arc<TableHandle>,
     pointer: Pointer,
   ) -> TaskHandle<Result<bool>> {
-    self.check.send((table, pointer))
+    self.check.execute((table, pointer))
   }
 
   pub fn start(

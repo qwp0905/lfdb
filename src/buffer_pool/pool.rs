@@ -136,8 +136,8 @@ impl BufferPool {
     let (old_p, old_h) = frame.wl().replace(pointer, new, handle);
 
     if self.dirty.contains(id) {
-      if !old_h.closed() {
-        old_h.disk().write(evicted, &old_p)?;
+      if let Some(handle) = old_h.try_pin() {
+        handle.disk().write(evicted, &old_p)?;
       }
       self.dirty.remove(id);
     }
@@ -162,9 +162,10 @@ impl BufferPool {
       for id in self.dirty.iter() {
         let frame = unsafe { self.frame[id].assume_init_ref() }.rl();
         self.dirty.remove(id);
-        if frame.handle().closed() {
-          continue;
-        }
+        let handle = match frame.handle().try_pin() {
+          None => continue,
+          Some(handle) => handle,
+        };
 
         // Submit all writes asynchronously first so the DiskController can
         // buffer and sort them, then batch into a single pwritev call.
@@ -172,10 +173,9 @@ impl BufferPool {
         // and issue a separate syscall per page.
         waits.push(frame.flush_async());
 
-        let handle = frame.handle();
         handles
           .entry(handle.metadata().get_id())
-          .or_insert_with(|| handle);
+          .or_insert_with(|| handle.handle());
       }
 
       waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
@@ -183,6 +183,7 @@ impl BufferPool {
 
       handles
         .into_values()
+        .flat_map(|handle| handle.try_pin())
         .map(|handle| once(move || handle.disk().fsync()))
         .collect::<Vec<_>>()
         .into_iter()

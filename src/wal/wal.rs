@@ -244,12 +244,12 @@ impl WAL {
 
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           if let Some(f) = self.fsync_queue.pop() {
-            f.wait()?;
+            f.wait().flatten()?;
             self.synced_count.fetch_add(1, Ordering::Release);
           }
           backoff.snooze()
         }
-        return f.wait();
+        return f.wait().flatten();
       }
 
       if offset >= WAL_BLOCK_SIZE {
@@ -309,7 +309,7 @@ impl WAL {
 
       let segment = buffer.take_segment();
       self.fsync_queue.push(segment.fsync());
-      self.wait_checkpoint.wait().send(segment);
+      self.wait_checkpoint.wait().execute(segment);
     }
   }
 
@@ -419,7 +419,7 @@ fn waiting_checkpoint(
       None => return segments.into_iter().for_each(|seg| seg.close()),
     };
 
-    match checkpoint.send(()).wait().flatten() {
+    match checkpoint.execute(()).wait().flatten() {
       Ok(_) => {
         while let Some(buffered) = failed.pop() {
           preloader.reuse(buffered);

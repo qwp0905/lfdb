@@ -15,10 +15,10 @@ fn test_basic_send_and_receive() {
     SingleFn::new(|values: Vec<usize>| values.iter().sum::<usize>()),
   );
 
-  let result = thread.send(10).wait().unwrap();
+  let result = thread.execute(10).wait().unwrap();
   assert_eq!(result, 10);
 
-  let result = thread.send(20).wait().unwrap();
+  let result = thread.execute(20).wait().unwrap();
   assert_eq!(result, 20);
 
   thread.close();
@@ -42,11 +42,11 @@ fn test_try_recv_drains_pending() {
   );
 
   // trigger first recv (blocking) and wait
-  thread.send(1).wait().unwrap();
+  thread.execute(1).wait().unwrap();
 
   // now worker is back to blocking recv
   // send many rapidly — they should be batched by try_recv
-  let pending: Vec<_> = (0..20).map(|i| thread.send(i)).collect();
+  let pending: Vec<_> = (0..20).map(|i| thread.execute(i)).collect();
   for r in pending {
     let _ = r.wait().unwrap();
   }
@@ -82,7 +82,7 @@ fn test_max_count_respected() {
   );
 
   // send more than max_count
-  let pending: Vec<_> = (0..20).map(|i| thread.send(i)).collect();
+  let pending: Vec<_> = (0..20).map(|i| thread.execute(i)).collect();
   for r in pending {
     let _ = r.wait().unwrap();
   }
@@ -111,7 +111,7 @@ fn test_result_per_item() {
   );
 
   // each sender should get the shared result
-  let r1 = thread.send(5);
+  let r1 = thread.execute(5);
   let result = r1.wait().unwrap();
   assert_eq!(result, vec![15]);
 
@@ -135,7 +135,7 @@ fn test_close_flushes_remaining() {
 
   // send items
   for i in 0..5 {
-    let _ = thread.send(i);
+    let _ = thread.execute(i);
   }
 
   // close should flush remaining
@@ -167,7 +167,7 @@ fn test_panic_recovery() {
     SingleFn::new(|_: Vec<usize>| -> usize { panic!("intentional panic") }),
   );
 
-  let result = thread.send(1).wait();
+  let result = thread.execute(1).wait();
   assert!(result.is_err());
 
   thread.close();
@@ -194,7 +194,7 @@ fn test_concurrent_senders() {
     let t = thread.clone();
     handles.push(thread::spawn(move || {
       for j in 0..25 {
-        let _ = t.send(i * 25 + j).wait().unwrap();
+        let _ = t.execute(i * 25 + j).wait().unwrap();
       }
     }));
   }
