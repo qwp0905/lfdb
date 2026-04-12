@@ -12,6 +12,7 @@ use crate::{
 
 pub enum Context<T, R> {
   Work(T, OneshotFulfill<Result<R>>),
+  Dispatch(T),
   Term,
 }
 

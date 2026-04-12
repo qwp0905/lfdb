@@ -41,6 +41,9 @@ where
       .spawn(move || loop {
         match receiver.recv_timeout(timeout) {
           Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
+          Ok(Context::Dispatch(v)) => {
+            let _ = work.call(Some(v));
+          }
           Err(RecvTimeoutError::Timeout) => {
             let _ = work.call(None);
           }

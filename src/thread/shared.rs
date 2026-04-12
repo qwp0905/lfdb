@@ -28,14 +28,24 @@ where
   move || {
     let backoff = Backoff::new();
 
-    while let Ok(Context::Work(v, done)) = receiver.recv() {
-      done.fulfill(work.call(v));
+    while let Ok(ctx) = receiver.recv() {
+      match ctx {
+        Context::Work(v, done) => done.fulfill(work.call(v)),
+        Context::Dispatch(v) => {
+          let _ = work.call(v);
+        }
+        Context::Term => return,
+      }
 
       backoff.reset();
       while !backoff.is_completed() {
         match receiver.try_recv() {
           Ok(Context::Work(v, done)) => {
             done.fulfill(work.call(v));
+            backoff.reset();
+          }
+          Ok(Context::Dispatch(v)) => {
+            let _ = work.call(v);
             backoff.reset();
           }
           Ok(Context::Term) | Err(TryRecvError::Disconnected) => return,

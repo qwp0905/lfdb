@@ -47,7 +47,7 @@ where
         let mut buffered = Vec::with_capacity(max_buffering_count);
         let mut timer = timeout.as_timer();
 
-        let mut flush = |buffer: &mut Vec<(T, OneshotFulfill<Result<R>>)>| {
+        let mut flush = |buffer: &mut Vec<(T, Option<OneshotFulfill<Result<R>>>)>| {
           if buffer.is_empty() {
             return;
           }
@@ -56,13 +56,21 @@ where
           let result = when_buffered.call(values).map(Ok).unwrap_or_else(Err);
           waiting
             .into_iter()
+            .flatten()
             .for_each(|done| done.fulfill(result.clone()));
         };
 
         loop {
           match rx.recv_timeout(timer.get_remain()) {
             Ok(Context::Work(v, done)) => {
-              buffered.push((v, done));
+              buffered.push((v, Some(done)));
+              if buffered.len() < max_buffering_count {
+                timer.check();
+                continue;
+              }
+            }
+            Ok(Context::Dispatch(v)) => {
+              buffered.push((v, None));
               if buffered.len() < max_buffering_count {
                 timer.check();
                 continue;

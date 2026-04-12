@@ -97,7 +97,7 @@ impl GarbageCollector {
     self.queue.push(GcPointer::Release(table, pointer))
   }
   pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId) {
-    self.table.execute((table, tx_id));
+    self.table.dispatch((table, tx_id));
   }
 
   pub fn batch_check_empty(

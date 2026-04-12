@@ -65,7 +65,7 @@ impl<const N: usize> WriteHandle<N> {
 
     self
       .thread
-      .execute((file.clone(), self.queue.clone(), self.occupied.clone()));
+      .dispatch((file.clone(), self.queue.clone(), self.occupied.clone()));
     handle
   }
 }

@@ -309,7 +309,7 @@ impl WAL {
 
       let segment = buffer.take_segment();
       self.fsync_queue.push(segment.fsync());
-      self.wait_checkpoint.wait().execute(segment);
+      self.wait_checkpoint.wait().dispatch(segment);
     }
   }
 
