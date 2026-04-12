@@ -16,6 +16,7 @@ where
   pub fn new(base_path: T) -> Self {
     Self(EngineConfig {
       base_path,
+      io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_segment_flush_count: DEFAULT_WAL_SEGMENT_FLUSH_COUNT,
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
@@ -32,7 +33,18 @@ where
   }
 
   /**
+   * Number of background IO worker threads shared across tables for write batching.
+   * Each table holds at most one worker at a time.
+   */
+  pub fn io_thread_count(mut self, count: usize) -> Self {
+    self.0.io_thread_count = count;
+    self
+  }
+
+  /**
    * Size limit of a single WAL segment file. When exceeded, a new segment is created.
+   * Larger segments improve write throughput by reducing rotation/checkpoint frequency,
+   * but extend recovery time on crash since more records must be replayed before the engine becomes available.
    */
   pub fn wal_file_size(mut self, size: usize) -> Self {
     self.0.wal_file_size = size;
@@ -144,3 +156,4 @@ const DEFAULT_BUFFER_POOL_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_LOGGER: NoneLogger = NoneLogger;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
+const DEFAULT_IO_THREAD_COUNT: usize = 32;

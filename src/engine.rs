@@ -29,6 +29,7 @@ where
   T: AsRef<Path>,
 {
   pub base_path: T,
+  pub io_thread_count: usize,
   pub wal_file_size: usize,
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
@@ -82,6 +83,7 @@ impl Engine {
     };
     let table_config = TableConfig {
       base_path: config.base_path.as_ref().into(),
+      io_thread_count: config.io_thread_count,
     };
 
     let buffer_pool =
