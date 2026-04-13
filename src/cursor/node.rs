@@ -174,32 +174,34 @@ impl InternalNode {
     Ok(())
   }
 
-  fn byte_len(&self) -> usize {
-    1 + 1
+  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
+    let mut bytes_len = 1
+      + 1
       + self
         .right
         .as_ref()
         .map(|(_, k)| k.len() + POINTER_BYTES + 2)
         .unwrap_or(0)
       + 2
-      + self.keys.iter().map(|k| 2 + k.len()).sum::<usize>()
-      + self.children.len() * POINTER_BYTES
-  }
+      + self.children.len() * POINTER_BYTES;
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
-    if self.byte_len() <= SERIALIZABLE_BYTES {
-      return None;
+    for key in self.keys.iter() {
+      bytes_len += 2 + key.len();
+
+      if bytes_len > SERIALIZABLE_BYTES {
+        let mid = self.keys.len() >> 1;
+        let keys = self.keys.split_off(mid + 1);
+        let mid_key = self.keys.pop().unwrap();
+        let children = self.children.split_off(mid + 1);
+
+        return Some((
+          InternalNode::new(keys, children, self.right.take()),
+          mid_key,
+        ));
+      }
     }
 
-    let mid = self.keys.len() >> 1;
-    let keys = self.keys.split_off(mid + 1);
-    let mid_key = self.keys.pop().unwrap();
-    let children = self.children.split_off(mid + 1);
-
-    Some((
-      InternalNode::new(keys, children, self.right.take()),
-      mid_key,
-    ))
+    None
   }
 
   pub fn set_right(&mut self, key: &Key, ptr: Pointer) -> Option<(Pointer, Key)> {
@@ -282,16 +284,6 @@ impl LeafNode {
     self.next.replace(pointer)
   }
 
-  fn byte_len(&self) -> usize {
-    1 + POINTER_BYTES
-      + 2
-      + self
-        .entries
-        .iter()
-        .map(|(k, _)| 2 + k.len() + POINTER_BYTES)
-        .sum::<usize>()
-  }
-
   pub fn insert_and_split(
     &mut self,
     index: usize,
@@ -300,14 +292,18 @@ impl LeafNode {
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
 
-    if self.byte_len() <= SERIALIZABLE_BYTES {
-      return None;
-    }
+    let mut bytes_len = 1 + POINTER_BYTES + 2;
+    for (key, _) in self.entries.iter() {
+      bytes_len += 2 + key.len() + POINTER_BYTES;
 
-    Some(LeafNode::new(
-      self.entries.split_off(self.entries.len() >> 1),
-      self.next.take(),
-    ))
+      if bytes_len > SERIALIZABLE_BYTES {
+        return Some(LeafNode::new(
+          self.entries.split_off(self.entries.len() >> 1),
+          self.next.take(),
+        ));
+      }
+    }
+    None
   }
 
   pub fn top(&self) -> &Key {
