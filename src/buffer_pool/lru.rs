@@ -12,7 +12,7 @@ use hashbrown::{raw::RawTable, Equivalent};
 fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
 ) -> impl Fn(&NonNull<Bucket<K, V>>) -> bool + 'a {
-  move |&ptr| key.equivalent(ptr.borrow_unsafe().get_key())
+  move |ptr| key.equivalent(ptr.borrow_unsafe().get_key())
 }
 
 fn make_hasher<'a, K, V, S>(
@@ -22,7 +22,7 @@ where
   K: Hash,
   S: BuildHasher,
 {
-  move |&ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
+  move |ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
 }
 
 /**
