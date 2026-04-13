@@ -29,12 +29,7 @@ struct WriteHandle<const N: usize> {
   thread: Arc<WriteThread<N>>,
 }
 impl<const N: usize> WriteHandle<N> {
-  fn new(
-    page_pool: Arc<PagePool<N>>,
-    thread: Arc<
-      dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>,
-    >,
-  ) -> Self {
+  fn new(page_pool: Arc<PagePool<N>>, thread: Arc<WriteThread<N>>) -> Self {
     Self {
       queue: SegQueue::new().to_arc(),
       occupied: AtomicBool::new(false).to_arc(),
