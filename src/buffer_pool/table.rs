@@ -92,8 +92,7 @@ impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
       if let Some((i, _)) = self.evicted {
-        let mut shard = self.guard.l();
-        shard.eviction.remove(&i);
+        self.guard.l().eviction.remove(&i);
       }
       // This guard now owns the frame (pin count = 1).
       self.state.completion_evict(1);
@@ -101,14 +100,16 @@ impl<'a> Drop for EvictionGuard<'a> {
     }
 
     // rollback
-    let mut shard = self.guard.l();
-    if let Some((i, h)) = self.evicted {
-      shard.eviction.remove(&i);
-      shard.lru.insert(i, self.state.clone(), h, self.hasher);
+    {
+      let mut shard = self.guard.l();
+      if let Some((i, h)) = self.evicted {
+        shard.eviction.remove(&i);
+        shard.lru.insert(i, self.state.clone(), h, self.hasher);
+      }
+      shard
+        .lru
+        .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     }
-    shard
-      .lru
-      .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     // No ownership claimed — frame is immediately available for eviction.
     self.state.completion_evict(0);
   }
@@ -220,13 +221,8 @@ impl LRUTable {
         continue;
       }
 
-      let state = shard
-        .temporary
-        .entry(key)
-        .insert_entry(TempFrameState::new(self.page_pool.acquire()).to_arc())
-        .get()
-        .clone();
-
+      let state = TempFrameState::new(self.page_pool.acquire()).to_arc();
+      shard.temporary.insert(key, state.clone());
       return Peeked::DiskRead(TempGuard::new(state, s));
     }
   }
