@@ -60,7 +60,7 @@ impl Frame {
   }
 
   #[inline]
-  pub fn handle(&self) -> Arc<TableHandle> {
-    self.handle.clone()
+  pub fn handle(&self) -> &Arc<TableHandle> {
+    &self.handle
   }
 }
