@@ -189,10 +189,19 @@ impl InternalNode {
   }
 
   pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
-    if self.bytes_len() <= SERIALIZABLE_BYTES {
+    let bytes_len = self.bytes_len();
+    if bytes_len <= SERIALIZABLE_BYTES {
       return None;
     }
-    let mid = self.keys.len() >> 1;
+
+    // node type + right pointer flag + key length + first child pointer
+    let mut sum = 1 + 1 + 2 + POINTER_BYTES;
+    let mut mid = 0;
+    while sum <= bytes_len >> 1 {
+      sum += self.keys[mid].len() + 2 + POINTER_BYTES;
+      mid += 1;
+    }
+
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);
@@ -295,14 +304,20 @@ impl LeafNode {
     pointer: Pointer,
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
-    if self.bytes_len() <= SERIALIZABLE_BYTES {
+
+    let bytes_len = self.bytes_len();
+    if bytes_len <= SERIALIZABLE_BYTES {
       return None;
     }
 
-    Some(LeafNode::new(
-      self.entries.split_off(self.entries.len() >> 1),
-      self.next.take(),
-    ))
+    let mut sum = 1 + POINTER_BYTES + 2;
+    let mut mid = 0;
+    while sum <= bytes_len >> 1 {
+      sum += self.entries[mid].0.len() + 2 + POINTER_BYTES;
+      mid += 1;
+    }
+
+    Some(LeafNode::new(self.entries.split_off(mid), self.next.take()))
   }
 
   pub fn top(&self) -> &Key {
