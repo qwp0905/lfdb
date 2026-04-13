@@ -123,7 +123,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
 
-  #[inline]
   pub fn read_n(&mut self, n: usize) -> Result<&[u8]> {
     let end = self.offset + n;
     if end > T {
@@ -134,8 +133,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
-  #[inline]
-  pub fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
+  fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
     if self.offset + N > T {
       return Err(Error::EOF);
     }
@@ -174,7 +172,6 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     }
   }
 
-  #[inline]
   pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
     let len = bytes.len();
     let end = self.offset + len;
