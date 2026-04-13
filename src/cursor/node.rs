@@ -185,8 +185,8 @@ impl InternalNode {
       + 2
       + self.children.len() * POINTER_BYTES;
 
-    for key in self.keys.iter() {
-      bytes_len += 2 + key.len();
+    for i in 0..self.keys.len() {
+      bytes_len += 2 + self.keys[i].len();
 
       if bytes_len > SERIALIZABLE_BYTES {
         let mid = self.keys.len() >> 1;
@@ -293,7 +293,8 @@ impl LeafNode {
     self.entries.insert(index, (key, pointer));
 
     let mut bytes_len = 1 + POINTER_BYTES + 2;
-    for (key, _) in self.entries.iter() {
+    for i in 0..self.entries.len() {
+      let (key, _) = &self.entries[i];
       bytes_len += 2 + key.len() + POINTER_BYTES;
 
       if bytes_len > SERIALIZABLE_BYTES {
