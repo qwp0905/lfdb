@@ -26,9 +26,7 @@ fn test_read_write() {
 
   // Write test
   let mut writer = page.writer();
-  assert!(!writer.is_eof());
   writer.write(&test_data).unwrap();
-  assert!(writer.is_eof());
   assert_eq!(writer.finalize(), 4);
 
   // Read test
@@ -61,22 +59,6 @@ fn test_write_overflow() {
 
   let mut writer = page.writer();
   assert!(writer.write(&test_data).is_err()); // Expect EOF error
-}
-
-#[test]
-fn test_read_eof() {
-  const SMALL_SIZE: usize = 4;
-  let page = Page::<SMALL_SIZE>::new();
-  let mut scanner = page.scanner();
-
-  // Read entire data
-  for _ in 0..SMALL_SIZE {
-    assert!(scanner.read().is_ok());
-  }
-
-  assert!(scanner.is_eof());
-  // Attempt to read at EOF
-  assert!(scanner.read().is_err());
 }
 
 #[test]

@@ -113,6 +113,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
+  #[inline]
   pub fn read(&mut self) -> Result<u8> {
     if self.offset >= T {
       return Err(Error::EOF);
@@ -122,6 +123,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
 
+  #[inline]
   pub fn read_n(&mut self, n: usize) -> Result<&[u8]> {
     let end = self.offset + n;
     if end > T {
@@ -132,6 +134,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
+  #[inline]
   pub fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
     if self.offset + N > T {
       return Err(Error::EOF);
@@ -143,10 +146,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   #[inline(always)]
   pub fn read_u16(&mut self) -> Result<u16> {
     self.read_const_n::<2>().map(u16::from_le_bytes)
-  }
-  #[inline(always)]
-  pub fn is_eof(&self) -> bool {
-    T <= self.offset
   }
 }
 
@@ -171,6 +170,7 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     }
   }
 
+  #[inline]
   pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
     let len = bytes.len();
     let end = self.offset + len;
@@ -195,18 +195,8 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   pub fn finalize(self) -> usize {
     self.offset
   }
-
-  #[inline(always)]
-  pub fn is_eof(&self) -> bool {
-    T <= self.offset
-  }
 }
 
 #[cfg(test)]
 #[path = "tests/page.rs"]
 mod tests;
-
-#[test]
-fn sdf() {
-  println!("{}", size_of::<Page<4096>>())
-}
