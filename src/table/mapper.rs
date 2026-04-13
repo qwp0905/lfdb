@@ -2,14 +2,14 @@ use std::{
   collections::{HashMap, HashSet},
   fs::{exists, read_dir, remove_file},
   path::{Path, PathBuf},
-  sync::{atomic::Ordering, Arc},
+  sync::{atomic::Ordering, Arc, RwLock},
 };
 
 use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{IOPool, PagePool, PAGE_SIZE},
   metrics::MetricsRegistry,
-  utils::{SpinRwLock, ToArc},
+  utils::{SpinningRwWait, ToArc},
   Error, Result,
 };
 
@@ -28,7 +28,7 @@ pub struct TableConfig {
 }
 
 pub struct TableMapper {
-  open_handles: SpinRwLock<HashMap<TableId, Arc<TableHandle>>>,
+  open_handles: RwLock<HashMap<TableId, Arc<TableHandle>>>,
   base_path: PathBuf,
   metadata: Arc<TableHandle>,
   io_pool: IOPool<PAGE_SIZE>,
@@ -89,7 +89,7 @@ impl TableMapper {
       table.replay()?;
       let id = table.metadata().get_id();
       self.last_table_id.fetch_max(id + 1, Ordering::Relaxed);
-      self.open_handles.write().insert(id, table);
+      self.open_handles.spin_wl().insert(id, table);
     }
 
     for path in exists {
@@ -105,7 +105,7 @@ impl TableMapper {
   pub fn get(&self, id: TableId) -> Option<Arc<TableHandle>> {
     self
       .open_handles
-      .read()
+      .spin_rl()
       .get(&id)
       .map(|handle| handle.clone())
   }
@@ -113,11 +113,11 @@ impl TableMapper {
   pub fn insert(&self, handle: Arc<TableHandle>) {
     self
       .open_handles
-      .write()
+      .spin_wl()
       .insert(handle.metadata().get_id(), handle);
   }
   pub fn remove(&self, id: TableId) {
-    self.open_handles.write().remove(&id);
+    self.open_handles.spin_wl().remove(&id);
   }
 
   pub fn create_metadata(&self, str: &str) -> TableMetadata {
@@ -132,7 +132,7 @@ impl TableMapper {
   pub fn get_all(&self) -> Vec<Arc<TableHandle>> {
     self
       .open_handles
-      .read()
+      .spin_rl()
       .values()
       .map(|v| v.clone())
       .chain([self.metadata.clone()])

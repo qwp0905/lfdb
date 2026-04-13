@@ -343,7 +343,7 @@ fn test_peek_or_temp_creates_temp_when_not_in_lru() {
       let (state, shard) = guard.take();
       state.completion_evict(1);
       state.unpin();
-      shard.l().remove_temp(T, 42);
+      shard.lock().unwrap().remove_temp(T, 42);
     }
   }
 }
@@ -381,7 +381,7 @@ fn test_acquire_hits_temp_page() {
       let (state, shard) = temp.take();
       state.unpin();
       state.unpin();
-      shard.l().remove_temp(T, 42);
+      shard.lock().unwrap().remove_temp(T, 42);
     }
     _ => panic!("expected Acquired::Temp for index 42"),
   };
@@ -398,7 +398,7 @@ fn test_remove_temp_then_peek_creates_new_temp() {
   };
   state.completion_evict(1);
   state.unpin();
-  shard.l().remove_temp(T, 42);
+  shard.lock().unwrap().remove_temp(T, 42);
 
   // peek again — should create new temp (DiskRead)
   match table.peek_or_temp(T, 42) {
@@ -406,7 +406,7 @@ fn test_remove_temp_then_peek_creates_new_temp() {
       let (state, shard) = guard.take();
       state.completion_evict(1);
       state.unpin();
-      shard.l().remove_temp(T, 42);
+      shard.lock().unwrap().remove_temp(T, 42);
     }
     _ => panic!("should create new DiskRead"),
   }
@@ -430,7 +430,7 @@ fn test_peek_or_temp_returns_existing_temp() {
       let (state, shard) = guard.take();
       state.unpin();
       state.unpin();
-      shard.l().remove_temp(T, 42);
+      shard.lock().unwrap().remove_temp(T, 42);
     }
     Peeked::DiskRead(_) => panic!("should return existing Temp, not DiskRead"),
     Peeked::Hit(_) => panic!("should return existing Temp, not Hit"),

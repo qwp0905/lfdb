@@ -9,7 +9,7 @@ use super::{Frame, FrameState, Shard, TempFrameState};
 use crate::{
   disk::{Page, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
-  utils::{AtomicBitmap, ShortenedMutex, ShortenedRwLock},
+  utils::{AtomicBitmap, SpinningRwWait, SpinningWait},
 };
 
 /**
@@ -121,7 +121,7 @@ impl<'a> PageSlot<'a> {
     'a: 'b,
   {
     PageSlotRead {
-      guard: self.frame.rl(),
+      guard: self.frame.spin_rl(),
       state: self.state,
     }
   }
@@ -131,7 +131,7 @@ impl<'a> PageSlot<'a> {
     'a: 'b,
   {
     PageSlotWrite {
-      guard: self.frame.wl(),
+      guard: self.frame.spin_wl(),
       dirty: self.dirty,
       state: self.state,
     }
@@ -225,7 +225,7 @@ impl<'a> TempSlotWrite<'a> {
     let _ = handle.disk().write(self.pointer, &self.state.for_read());
     self
       .shard
-      .l()
+      .spin_lock()
       .remove_temp(handle.metadata().get_id(), self.pointer);
   }
 }
@@ -270,7 +270,7 @@ impl<'a> TempSlotRead<'a> {
     }
     self
       .shard
-      .l()
+      .spin_lock()
       .remove_temp(handle.metadata().get_id(), self.pointer);
   }
 }

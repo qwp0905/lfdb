@@ -10,7 +10,7 @@ use super::{FrameState, LRUShard, TempFrameState};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   table::TableId,
-  utils::{ShortenedMutex, ToArc},
+  utils::{SpinningWait, ToArc},
 };
 
 type Key = (TableId, Pointer);
@@ -92,8 +92,7 @@ impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
       if let Some((i, _)) = self.evicted {
-        let mut shard = self.guard.l();
-        shard.eviction.remove(&i);
+        self.guard.spin_lock().eviction.remove(&i);
       }
       // This guard now owns the frame (pin count = 1).
       self.state.completion_evict(1);
@@ -101,14 +100,16 @@ impl<'a> Drop for EvictionGuard<'a> {
     }
 
     // rollback
-    let mut shard = self.guard.l();
-    if let Some((i, h)) = self.evicted {
-      shard.eviction.remove(&i);
-      shard.lru.insert(i, self.state.clone(), h, self.hasher);
+    {
+      let mut shard = self.guard.spin_lock();
+      if let Some((i, h)) = self.evicted {
+        shard.eviction.remove(&i);
+        shard.lru.insert(i, self.state.clone(), h, self.hasher);
+      }
+      shard
+        .lru
+        .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     }
-    shard
-      .lru
-      .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     // No ownership claimed — frame is immediately available for eviction.
     self.state.completion_evict(0);
   }
@@ -193,7 +194,7 @@ impl LRUTable {
     let backoff = Backoff::new();
 
     loop {
-      let mut shard = s.l();
+      let mut shard = s.spin_lock();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -220,13 +221,8 @@ impl LRUTable {
         continue;
       }
 
-      let state = shard
-        .temporary
-        .entry(key)
-        .insert_entry(TempFrameState::new(self.page_pool.acquire()).to_arc())
-        .get()
-        .clone();
-
+      let state = TempFrameState::new(self.page_pool.acquire()).to_arc();
+      shard.temporary.insert(key, state.clone());
       return Peeked::DiskRead(TempGuard::new(state, s));
     }
   }
@@ -253,7 +249,7 @@ impl LRUTable {
     let backoff = Backoff::new();
 
     loop {
-      let mut shard = s.l();
+      let mut shard = s.spin_lock();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -316,7 +312,7 @@ impl LRUTable {
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.l().lru.len(), self.offset[i]))
+      .map(|(i, s)| (s.spin_lock().lru.len(), self.offset[i]))
   }
 }
 

@@ -52,20 +52,13 @@ impl<K, V> LRUShard<K, V> {
       capacity,
     }
   }
-
-  // pub fn clear(&mut self) {
-  //   self.old_entries.clear();
-  //   self.old_sub_list.clear();
-  //   self.new_entries.clear();
-  //   self.new_sub_list.clear();
-  // }
 }
 impl<K, V> LRUShard<K, V>
 where
   K: Eq + Hash,
 {
   #[inline]
-  fn get_bucket<Q: ?Sized, S>(
+  fn promote_bucket<Q: ?Sized, S>(
     &mut self,
     key: &Q,
     hash: u64,
@@ -76,39 +69,31 @@ where
     Q: Hash + Eq,
     S: BuildHasher,
   {
-    if let Some(bucket) = self.new_entries.get_mut(hash, equivalent(key)) {
-      self.new_sub_list.move_to_head(bucket);
-      return Some(bucket.borrow_mut_unsafe());
+    if let Some(ptr) = self.new_entries.get_mut(hash, equivalent(key)) {
+      let bucket = ptr.borrow_mut_unsafe();
+      self.new_sub_list.move_to_head(ptr);
+      return Some(bucket);
     }
 
-    let mut bucket = self.old_entries.remove_entry(hash, equivalent(key))?;
-    self.old_sub_list.remove(&mut bucket);
-    self.new_sub_list.push_head(&mut bucket);
-    self.new_entries.insert(hash, bucket, make_hasher(hasher));
+    let ptr = self.old_entries.get_mut(hash, equivalent(key))?;
+    let bucket = ptr.borrow_mut_unsafe();
+
+    self.old_sub_list.remove(ptr);
+    self.new_sub_list.push_head(ptr);
+    self.new_entries.insert(hash, *ptr, make_hasher(hasher));
+    self.old_entries.remove_entry(hash, equivalent(key));
     self.rebalance(hasher);
-    Some(bucket.borrow_mut_unsafe())
+    Some(bucket)
   }
+
   pub fn get<Q: ?Sized, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<&V>
   where
     K: Borrow<Q>,
     Q: Hash + Eq,
     S: BuildHasher,
   {
-    Some(self.get_bucket(key, hash, hasher)?.get_value())
+    Some(self.promote_bucket(key, hash, hasher)?.get_value())
   }
-  // pub fn get_mut<Q: ?Sized, S>(
-  //   &mut self,
-  //   key: &Q,
-  //   hash: u64,
-  //   hasher: &S,
-  // ) -> Option<&mut V>
-  // where
-  //   K: Borrow<Q>,
-  //   Q: Hash + Eq,
-  //   S: BuildHasher,
-  // {
-  //   Some(self.get_bucket(key, hash, hasher)?.get_value_mut())
-  // }
 
   pub fn peek<Q: ?Sized>(&self, key: &Q, hash: u64) -> Option<&V>
   where
@@ -161,7 +146,7 @@ where
   where
     S: BuildHasher,
   {
-    if let Some(bucket) = self.get_bucket(&key, hash, hasher) {
+    if let Some(bucket) = self.promote_bucket(&key, hash, hasher) {
       return Some(bucket.set_value(value));
     }
 
