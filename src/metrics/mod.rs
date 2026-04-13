@@ -6,3 +6,6 @@ use counter::*;
 
 mod registry;
 pub use registry::*;
+
+mod gauge;
+use gauge::*;

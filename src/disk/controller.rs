@@ -158,6 +158,8 @@ impl<const N: usize> IOPool<N> {
   ) -> impl Fn((Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>)) {
     let count = max_iov();
     move |(file, queue, occupied)| {
+      metrics.active_io_threads.inc();
+
       let mut buffered = Vec::with_capacity(count);
 
       loop {
@@ -171,12 +173,14 @@ impl<const N: usize> IOPool<N> {
         Self::flush(&metrics, &file, &mut buffered);
         occupied.fetch_and(false, Ordering::Release);
         if queue.is_empty() {
-          return;
+          break;
         }
         if occupied.fetch_or(true, Ordering::AcqRel) {
-          return;
+          break;
         }
       }
+
+      metrics.active_io_threads.dec();
     }
   }
 

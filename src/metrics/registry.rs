@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use super::{Counter, Histogram};
+use super::{Counter, Gauge, Histogram};
 
 /**
  * A point-in-time snapshot of engine metrics. Obtain via Engine::metrics().
@@ -69,6 +69,11 @@ pub struct EngineMetrics {
    * p50 disk write io latency in microseconds.
    */
   pub disk_write_latency_micros_p50: f64,
+
+  /**
+   * Number of active IO threads processing disk requests.
+   */
+  pub active_io_threads: u64,
 
   /**
    * Number of transactions started.
@@ -187,6 +192,7 @@ pub struct MetricsRegistry {
 
   pub disk_read: Histogram,
   pub disk_write: Histogram,
+  pub active_io_threads: Gauge,
 
   pub transaction_start: Histogram,
   pub transaction_commit: Histogram,
@@ -209,6 +215,7 @@ impl MetricsRegistry {
       transaction_abort_count: Counter::new(),
       disk_read: Histogram::new(1000, Duration::from_nanos(100)),
       disk_write: Histogram::new(1000, Duration::from_nanos(100)),
+      active_io_threads: Gauge::new(),
       started_at: Instant::now(),
       operation_get: Histogram::new(1000, Duration::from_nanos(100)),
       operation_insert: Histogram::new(1000, Duration::from_nanos(100)),
@@ -247,6 +254,8 @@ impl MetricsRegistry {
       disk_write_count: disk_write.total_count(),
       disk_write_latency_micros_avg: disk_write.average() / 10.0,
       disk_write_latency_micros_p50: disk_write.percentile(0.5) / 10.0,
+
+      active_io_threads: self.active_io_threads.load(),
 
       transaction_start_count: transaction_start.total_count(),
       transaction_abort_count: self.transaction_abort_count.load(),
