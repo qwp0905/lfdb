@@ -37,7 +37,7 @@ impl TableHandle {
     self.pin.fetch_sub(1, Ordering::Release);
   }
 
-  pub fn try_pin(self: Arc<Self>) -> Option<PinnedHandle> {
+  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle> {
     let backoff = Backoff::new();
     loop {
       let c = self.pin.load(Ordering::Acquire);
