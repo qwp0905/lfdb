@@ -7,7 +7,7 @@ use crossbeam::utils::Backoff;
 
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::SpinningRwWait,
+  utils::ShortenedRwLock,
 };
 
 /**
@@ -119,10 +119,10 @@ impl TempFrameState {
   }
 
   pub fn for_write(&self) -> RwLockWriteGuard<'_, PageRef<PAGE_SIZE>> {
-    self.page.spin_wl()
+    self.page.wl()
   }
   pub fn for_read(&self) -> RwLockReadGuard<'_, PageRef<PAGE_SIZE>> {
-    self.page.spin_rl()
+    self.page.rl()
   }
   pub fn mark_dirty(&self) {
     self.dirty.fetch_or(true, Ordering::Release);

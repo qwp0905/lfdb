@@ -10,7 +10,7 @@ use super::{FrameState, LRUShard, TempFrameState};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   table::TableId,
-  utils::{SpinningWait, ToArc},
+  utils::{ShortenedMutex, ToArc},
 };
 
 type Key = (TableId, Pointer);
@@ -92,7 +92,7 @@ impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
       if let Some((i, _)) = self.evicted {
-        self.guard.spin_lock().eviction.remove(&i);
+        self.guard.l().eviction.remove(&i);
       }
       // This guard now owns the frame (pin count = 1).
       self.state.completion_evict(1);
@@ -101,7 +101,7 @@ impl<'a> Drop for EvictionGuard<'a> {
 
     // rollback
     {
-      let mut shard = self.guard.spin_lock();
+      let mut shard = self.guard.l();
       if let Some((i, h)) = self.evicted {
         shard.eviction.remove(&i);
         shard.lru.insert(i, self.state.clone(), h, self.hasher);
@@ -194,7 +194,7 @@ impl LRUTable {
     let backoff = Backoff::new();
 
     loop {
-      let mut shard = s.spin_lock();
+      let mut shard = s.l();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -249,7 +249,7 @@ impl LRUTable {
     let backoff = Backoff::new();
 
     loop {
-      let mut shard = s.spin_lock();
+      let mut shard = s.l();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -312,7 +312,7 @@ impl LRUTable {
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.spin_lock().lru.len(), self.offset[i]))
+      .map(|(i, s)| (s.l().lru.len(), self.offset[i]))
   }
 }
 

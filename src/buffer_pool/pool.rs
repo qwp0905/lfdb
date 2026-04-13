@@ -11,7 +11,9 @@ use crate::{
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::once,
-  utils::{AtomicBitmap, LogFilter, SpinningRwWait, SpinningWait, ToArc, UnsafeBorrow},
+  utils::{
+    AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, UnsafeBorrow,
+  },
 };
 
 pub struct BufferPoolConfig {
@@ -84,7 +86,7 @@ impl BufferPool {
       Err(err) => {
         // Remove the temp entry so other threads waiting on this page
         // don't block forever on a completion signal that will never arrive.
-        shard.spin_lock().remove_temp(table_id, pointer);
+        shard.l().remove_temp(table_id, pointer);
         return Err(err);
       }
     };
@@ -131,7 +133,7 @@ impl BufferPool {
     };
 
     let frame = unsafe { self.frame[id].assume_init_ref() };
-    let (old_p, old_h) = frame.spin_wl().replace(pointer, new, handle);
+    let (old_p, old_h) = frame.wl().replace(pointer, new, handle);
 
     if self.dirty.contains(id) {
       if let Some(handle) = old_h.try_pin() {
@@ -158,7 +160,7 @@ impl BufferPool {
       let mut waits = Vec::new();
       let mut handles = BTreeMap::new();
       for id in self.dirty.iter() {
-        let frame = unsafe { self.frame[id].assume_init_ref() }.spin_rl();
+        let frame = unsafe { self.frame[id].assume_init_ref() }.rl();
         self.dirty.remove(id);
         let handle = match frame.handle().try_pin() {
           None => continue,
