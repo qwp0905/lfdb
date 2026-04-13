@@ -154,8 +154,9 @@ impl DataEntry {
   }
 
   pub fn is_available(&self, record: &VersionRecord) -> bool {
-    let byte_len = 8 + 2 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
-    record.byte_len() + byte_len < SERIALIZABLE_BYTES
+    let byte_len =
+      POINTER_BYTES + 2 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
+    record.byte_len() + byte_len <= SERIALIZABLE_BYTES
   }
 
   pub fn is_empty(&self) -> bool {

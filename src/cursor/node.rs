@@ -1,7 +1,7 @@
 use super::{Key, KeyRef};
 use crate::{
-  disk::{PageScanner, PageWriter, Pointer, PAGE_SIZE},
-  serialize::{Serializable, SerializeType},
+  disk::{PageScanner, PageWriter, Pointer, POINTER_BYTES},
+  serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
   Error, Result,
 };
 
@@ -174,23 +174,32 @@ impl InternalNode {
     Ok(())
   }
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
-    let mut byte_len = 1 + 1 + 8 + self.children.len() * 8;
-    for i in 0..self.keys.len() {
-      byte_len += 8 * 2 + self.keys[i].len();
-      if byte_len >= PAGE_SIZE {
-        let mid = self.keys.len() >> 1;
-        let keys = self.keys.split_off(mid + 1);
-        let mid_key = self.keys.pop().unwrap();
-        let children = self.children.split_off(mid + 1);
+  fn byte_len(&self) -> usize {
+    1 + 1
+      + self
+        .right
+        .as_ref()
+        .map(|(_, k)| k.len() + POINTER_BYTES + 2)
+        .unwrap_or(0)
+      + 2
+      + self.keys.iter().map(|k| 2 + k.len()).sum::<usize>()
+      + self.children.len() * POINTER_BYTES
+  }
 
-        return Some((
-          InternalNode::new(keys, children, self.right.take()),
-          mid_key,
-        ));
-      }
+  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
+    if self.byte_len() <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    let mid = self.keys.len() >> 1;
+    let keys = self.keys.split_off(mid + 1);
+    let mid_key = self.keys.pop().unwrap();
+    let children = self.children.split_off(mid + 1);
+
+    Some((
+      InternalNode::new(keys, children, self.right.take()),
+      mid_key,
+    ))
   }
 
   pub fn set_right(&mut self, key: &Key, ptr: Pointer) -> Option<(Pointer, Key)> {
@@ -273,6 +282,16 @@ impl LeafNode {
     self.next.replace(pointer)
   }
 
+  fn byte_len(&self) -> usize {
+    1 + POINTER_BYTES
+      + 2
+      + self
+        .entries
+        .iter()
+        .map(|(k, _)| 2 + k.len() + POINTER_BYTES)
+        .sum::<usize>()
+  }
+
   pub fn insert_and_split(
     &mut self,
     index: usize,
@@ -281,17 +300,14 @@ impl LeafNode {
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
 
-    let mut byte_len = 1 + 8 + 8 + 8;
-    for i in 0..self.entries.len() {
-      byte_len += 8 * 2 + self.entries[i].0.len();
-      if byte_len >= PAGE_SIZE {
-        return Some(LeafNode::new(
-          self.entries.split_off(self.entries.len() >> 1),
-          self.next.take(),
-        ));
-      }
+    if self.byte_len() <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    Some(LeafNode::new(
+      self.entries.split_off(self.entries.len() >> 1),
+      self.next.take(),
+    ))
   }
 
   pub fn top(&self) -> &Key {
