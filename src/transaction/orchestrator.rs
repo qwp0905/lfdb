@@ -225,6 +225,8 @@ impl TxOrchestrator {
     self.checkpoint.close();
     self.logger.info(|| "last checkpoint completed.");
 
+    self.buffer_pool.close();
+    self.logger.info(|| "buffer pool closed.");
     self.gc.close();
     self.tables.close();
     self.logger.info(|| "tables closed.");

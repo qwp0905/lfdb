@@ -1,7 +1,9 @@
 use std::{
   collections::BTreeMap,
   mem::MaybeUninit,
+  ptr::drop_in_place,
   sync::{Arc, RwLock},
+  time::Duration,
 };
 
 use super::{Acquired, Frame, LRUTable, Peeked, Slot};
@@ -10,11 +12,14 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
-  thread::once,
+  thread::{once, BackgroundThread, WorkBuilder},
   utils::{
-    AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, UnsafeBorrow,
+    AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, ToBox, UnsafeBorrow,
   },
 };
+
+const PRE_FLUSH_THRESHOLD: usize = 100;
+const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct BufferPoolConfig {
   pub shard_count: usize,
@@ -23,10 +28,11 @@ pub struct BufferPoolConfig {
 
 pub struct BufferPool {
   table: LRUTable,
-  frame: Vec<MaybeUninit<RwLock<Frame>>>,
-  dirty: AtomicBitmap,
+  frame: Arc<Vec<MaybeUninit<RwLock<Frame>>>>,
+  dirty: Arc<AtomicBitmap>,
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
+  pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BufferPool {
@@ -43,13 +49,25 @@ impl BufferPool {
     let frame_cap = (config.capacity * 9) / 10;
     let mut frame = Vec::with_capacity(frame_cap);
     frame.resize_with(frame_cap, MaybeUninit::uninit);
+    let frame = frame.to_arc();
+    let dirty = AtomicBitmap::new(frame_cap).to_arc();
+
+    let pre_flush = WorkBuilder::new()
+      .name("buffer pool pre-flush")
+      .single()
+      .interval(
+        PRE_FLUSH_INTERVAL,
+        handle_flush(frame.clone(), dirty.clone()),
+      )
+      .to_box();
 
     Ok(Self {
       frame,
       table: LRUTable::new(page_pool.clone(), config.shard_count, frame_cap),
-      dirty: AtomicBitmap::new(frame_cap),
+      dirty,
       logger,
       page_pool,
+      pre_flush,
       metrics,
     })
   }
@@ -156,43 +174,10 @@ impl BufferPool {
 
   pub fn flush(&self) -> Result {
     self.logger.debug(|| "buffer pool flush triggered.");
-    self.metrics.buffer_pool_flush.measure(|| {
-      let mut waits = Vec::new();
-      let mut handles = BTreeMap::new();
-      for id in self.dirty.iter() {
-        let frame = unsafe { self.frame[id].assume_init_ref() }.rl();
-        self.dirty.remove(id);
-        let handle = match frame.handle().try_pin() {
-          None => continue,
-          Some(handle) => handle,
-        };
-
-        // Submit all writes asynchronously first so the DiskController can
-        // buffer and sort them, then batch into a single pwritev call.
-        // Writing synchronously one by one would bypass this optimization
-        // and issue a separate syscall per page.
-        waits.push(frame.flush_async());
-
-        handles
-          .entry(handle.metadata().get_id())
-          .or_insert_with(|| handle.handle());
-      }
-
-      waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
-      self.logger.debug(|| "buffer pool flushed all pages.");
-
-      handles
-        .into_values()
-        .flat_map(|handle| handle.try_pin())
-        .map(|handle| once(move || handle.disk().fsync()))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|th| th.wait().flatten())
-        .collect::<Result>()?;
-
-      Ok(())
-    })?;
-
+    self
+      .metrics
+      .buffer_pool_flush
+      .measure(|| self.pre_flush.execute(()).wait().flatten())?;
     self.logger.debug(|| "buffer pool synced.");
     Ok(())
   }
@@ -200,14 +185,67 @@ impl BufferPool {
   pub fn page_pool(&self) -> Arc<PagePool<PAGE_SIZE>> {
     self.page_pool.clone()
   }
+
+  pub fn close(&self) {
+    self.pre_flush.close();
+  }
 }
 
 impl Drop for BufferPool {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
       for i in offset..offset + len {
-        unsafe { self.frame[i].assume_init_drop() };
+        unsafe { drop_in_place(self.frame[i].as_ptr() as *mut RwLock<Frame>) };
       }
     }
+  }
+}
+
+fn handle_flush(
+  frame: Arc<Vec<MaybeUninit<RwLock<Frame>>>>,
+  dirty: Arc<AtomicBitmap>,
+) -> impl Fn(Option<()>) -> Result {
+  move |trigger| {
+    let mut waits = Vec::new();
+    let mut handles = BTreeMap::new();
+
+    if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
+      return Ok(());
+    }
+
+    for id in dirty
+      .iter()
+      .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
+    {
+      let frame = unsafe { frame[id].assume_init_ref() }.rl();
+      dirty.remove(id);
+      let handle = match frame.handle().try_pin() {
+        None => continue,
+        Some(handle) => handle,
+      };
+
+      // Submit all writes asynchronously first so the DiskController can
+      // buffer and sort them, then batch into a single pwritev call.
+      // Writing synchronously one by one would bypass this optimization
+      // and issue a separate syscall per page.
+      waits.push(frame.flush_async());
+
+      handles
+        .entry(handle.metadata().get_id())
+        .or_insert_with(|| handle.handle());
+    }
+
+    waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
+
+    handles
+      .into_values()
+      .flat_map(|handle| handle.try_pin())
+      .map(|handle| once(move || handle.disk().fsync()))
+      .collect::<Vec<_>>()
+      .into_iter()
+      .map(|th| th.wait().flatten())
+      .collect::<Result>()?;
+
+    Ok(())
   }
 }

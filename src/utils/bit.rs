@@ -1,6 +1,6 @@
 use std::{
   iter::Enumerate,
-  sync::atomic::{AtomicU64, Ordering},
+  sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 // use crate::utils::Vector;
@@ -14,13 +14,17 @@ const MASK: usize = MAX_BIT - 1;
  */
 pub struct AtomicBitmap {
   bits: Vec<AtomicU64>,
+  len: AtomicUsize,
 }
 impl AtomicBitmap {
   pub fn new(capacity: usize) -> Self {
     let cap = (capacity + MASK) >> SHIFT;
     let mut bits = Vec::with_capacity(cap);
     bits.resize_with(cap, || AtomicU64::new(0));
-    AtomicBitmap { bits }
+    AtomicBitmap {
+      bits,
+      len: AtomicUsize::new(0),
+    }
   }
 
   pub fn insert(&self, n: usize) -> bool {
@@ -31,7 +35,12 @@ impl AtomicBitmap {
     let j = n & MASK;
     let b = 1 << j;
     let prev = self.bits[i].fetch_or(b, Ordering::Release);
-    prev & b == 0
+    if prev & b != 0 {
+      return false;
+    }
+
+    self.len.fetch_add(1, Ordering::Relaxed);
+    true
   }
 
   pub fn contains(&self, n: usize) -> bool {
@@ -51,7 +60,16 @@ impl AtomicBitmap {
     let j = n & MASK;
     let b = 1 << j;
     let prev = self.bits[i].fetch_and(!b, Ordering::Release);
-    prev & b != 0
+    if prev & b == 0 {
+      return false;
+    }
+
+    self.len.fetch_sub(1, Ordering::Relaxed);
+    true
+  }
+
+  pub fn len(&self) -> usize {
+    self.len.load(Ordering::Relaxed)
   }
 
   pub fn iter(&self) -> BitMapIter<impl Iterator<Item = u64> + '_> {
@@ -92,13 +110,7 @@ where
 
   fn next(&mut self) -> Option<Self::Item> {
     while self.remaining == 0 {
-      match self.bits.next() {
-        Some((i, bit)) => {
-          self.remaining = bit;
-          self.index = i;
-        }
-        None => return None,
-      }
+      (self.index, self.remaining) = self.bits.next()?;
     }
 
     let bit = self.remaining.trailing_zeros() as usize;
