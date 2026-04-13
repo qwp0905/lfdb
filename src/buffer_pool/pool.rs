@@ -209,6 +209,10 @@ fn handle_flush(
     let mut waits = Vec::new();
     let mut handles = BTreeMap::new();
 
+    if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
+      return Ok(());
+    }
+
     for id in dirty
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
