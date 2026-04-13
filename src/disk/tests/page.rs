@@ -213,15 +213,15 @@ fn test_from_slice() {
 #[test]
 fn test_read_u64() {
   let mut page = Page::<16>::new();
-  let test_value = 42u64.to_le_bytes();
+  let test_value = 42u64;
 
   // Write value
   let mut writer = page.writer();
-  writer.write(&test_value).unwrap();
+  writer.write_u64(test_value).unwrap();
 
   // Read and verify usize value
   let mut scanner = page.scanner();
-  let read_value = scanner.read_const_n::<8>().unwrap();
+  let read_value = scanner.read_u64().unwrap();
   assert_eq!(read_value, test_value);
 }
 

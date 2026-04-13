@@ -182,12 +182,12 @@ impl Serializable for DataEntry {
     SerializeType::DataEntry
   }
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
-    writer.write(&self.next.unwrap_or(0).to_le_bytes())?;
+    writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.versions.len() as u16)?;
 
     for record in &self.versions {
-      writer.write(&record.version.to_le_bytes())?;
-      writer.write(&record.owner.to_le_bytes())?;
+      writer.write_u64(record.version)?;
+      writer.write_u64(record.owner)?;
       match &record.data {
         RecordData::Data(data) => {
           writer.write(&[0])?;
@@ -199,7 +199,7 @@ impl Serializable for DataEntry {
           writer.write(&[2])?;
           writer.write_u8(pointers.len() as u8)?;
           for ptr in pointers {
-            writer.write(&ptr.to_le_bytes())?;
+            writer.write_u64(*ptr)?;
           }
         }
       }
@@ -212,8 +212,8 @@ impl Serializable for DataEntry {
     let len = reader.read_u16()? as usize;
     let mut versions = VecDeque::with_capacity(len);
     for _ in 0..len {
-      let version = TxId::from_le_bytes(reader.read_const_n::<TX_ID_BYTES>()?);
-      let owner = TxId::from_le_bytes(reader.read_const_n::<TX_ID_BYTES>()?);
+      let version = reader.read_u64()?;
+      let owner = reader.read_u64()?;
       let data = match reader.read()? {
         0 => {
           let l = reader.read_u16()? as usize;
@@ -224,8 +224,7 @@ impl Serializable for DataEntry {
           let l = reader.read()? as usize;
           let mut pointers = Vec::with_capacity(l);
           for _ in 0..l {
-            let bytes = reader.read_const_n::<POINTER_BYTES>()?;
-            pointers.push(Pointer::from_le_bytes(bytes));
+            pointers.push(reader.read_u64()?);
           }
           RecordData::Chunked(pointers)
         }

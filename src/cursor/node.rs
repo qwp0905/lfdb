@@ -38,7 +38,7 @@ impl Serializable for CursorNode {
         match &node.right {
           Some((pointer, key)) => {
             writer.write(&[1])?;
-            writer.write(&pointer.to_le_bytes())?;
+            writer.write_u64(*pointer)?;
             writer.write_u16(key.len() as u16)?;
             writer.write(key)
           }
@@ -50,17 +50,17 @@ impl Serializable for CursorNode {
           writer.write(key)?;
         }
         for ptr in &node.children {
-          writer.write(&ptr.to_le_bytes())?;
+          writer.write_u64(*ptr)?;
         }
       }
       CursorNode::Leaf(node) => {
         writer.write(&[1])?;
-        writer.write(&node.next.unwrap_or(0).to_le_bytes())?;
+        writer.write_u64(node.next.unwrap_or(0))?;
         writer.write_u16(node.entries.len() as u16)?;
         for (key, pointer) in &node.entries {
           writer.write_u16(key.len() as u16)?;
           writer.write(&key)?;
-          writer.write(&pointer.to_le_bytes())?;
+          writer.write_u64(*pointer)?;
         }
       }
     }
@@ -73,7 +73,7 @@ impl Serializable for CursorNode {
         //internal
         let mut right = None;
         if scanner.read()? == 1 {
-          let ptr = Pointer::from_le_bytes(scanner.read_const_n::<POINTER_BYTES>()?);
+          let ptr = scanner.read_u64()?;
           let len = scanner.read_u16()? as usize;
           let key = scanner.read_n(len)?.to_vec();
           right = Some((ptr, key));
@@ -88,8 +88,7 @@ impl Serializable for CursorNode {
 
         let mut children = Vec::with_capacity(len + 1);
         for _ in 0..=len {
-          let bytes = scanner.read_const_n::<POINTER_BYTES>()?;
-          children.push(Pointer::from_le_bytes(bytes));
+          children.push(scanner.read_u64()?);
         }
         Ok(Self::Internal(InternalNode::new(keys, children, right)))
       }
@@ -101,7 +100,7 @@ impl Serializable for CursorNode {
         for _ in 0..len {
           let l = scanner.read_u16()? as usize;
           let key = scanner.read_n(l)?.to_vec();
-          let ptr = Pointer::from_le_bytes(scanner.read_const_n::<POINTER_BYTES>()?);
+          let ptr = scanner.read_u64()?;
           entries.push((key, ptr));
         }
         Ok(Self::Leaf(LeafNode::new(
