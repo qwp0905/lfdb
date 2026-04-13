@@ -148,10 +148,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub fn read_u16(&mut self) -> Result<u16> {
     self.read_const_n::<2>().map(u16::from_le_bytes)
   }
-  #[inline(always)]
-  pub fn is_eof(&self) -> bool {
-    T <= self.offset
-  }
 }
 
 /**
@@ -203,18 +199,8 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   pub fn finalize(self) -> usize {
     self.offset
   }
-
-  #[inline(always)]
-  pub fn is_eof(&self) -> bool {
-    T <= self.offset
-  }
 }
 
 #[cfg(test)]
 #[path = "tests/page.rs"]
 mod tests;
-
-#[test]
-fn sdf() {
-  println!("{}", size_of::<Page<4096>>())
-}
