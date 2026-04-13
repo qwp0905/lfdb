@@ -1,5 +1,5 @@
 use crate::{
-  disk::{PageScanner, PageWriter, Pointer},
+  disk::{PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::{Serializable, SerializeType},
   Result,
 };
@@ -41,13 +41,13 @@ impl Serializable for TreeHeader {
   }
 
   fn write_at(&self, writer: &mut PageWriter) -> Result {
-    writer.write_u64(self.root)?;
+    writer.write(&self.root.to_le_bytes())?;
     writer.write_u16(self.height)?;
     Ok(())
   }
 
   fn read_from(reader: &mut PageScanner) -> Result<Self> {
-    let root = reader.read_u64()?;
+    let root = Pointer::from_le_bytes(reader.read_const_n::<POINTER_BYTES>()?);
     let height = reader.read_u16()?;
     Ok(Self { root, height })
   }

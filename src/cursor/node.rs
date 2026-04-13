@@ -1,7 +1,7 @@
 use super::{Key, KeyRef};
 use crate::{
-  disk::{PageScanner, PageWriter, Pointer, PAGE_SIZE},
-  serialize::{Serializable, SerializeType},
+  disk::{PageScanner, PageWriter, Pointer, POINTER_BYTES},
+  serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
   Error, Result,
 };
 
@@ -38,7 +38,7 @@ impl Serializable for CursorNode {
         match &node.right {
           Some((pointer, key)) => {
             writer.write(&[1])?;
-            writer.write_u64(*pointer)?;
+            writer.write(&pointer.to_le_bytes())?;
             writer.write_u16(key.len() as u16)?;
             writer.write(key)
           }
@@ -50,17 +50,17 @@ impl Serializable for CursorNode {
           writer.write(key)?;
         }
         for ptr in &node.children {
-          writer.write_u64(*ptr)?;
+          writer.write(&ptr.to_le_bytes())?;
         }
       }
       CursorNode::Leaf(node) => {
         writer.write(&[1])?;
-        writer.write_u64(node.next.unwrap_or(0))?;
+        writer.write(&node.next.unwrap_or(0).to_le_bytes())?;
         writer.write_u16(node.entries.len() as u16)?;
         for (key, pointer) in &node.entries {
           writer.write_u16(key.len() as u16)?;
           writer.write(&key)?;
-          writer.write_u64(*pointer)?;
+          writer.write(&pointer.to_le_bytes())?;
         }
       }
     }
@@ -73,7 +73,7 @@ impl Serializable for CursorNode {
         //internal
         let mut right = None;
         if scanner.read()? == 1 {
-          let ptr = scanner.read_u64()?;
+          let ptr = Pointer::from_le_bytes(scanner.read_const_n::<POINTER_BYTES>()?);
           let len = scanner.read_u16()? as usize;
           let key = scanner.read_n(len)?.to_vec();
           right = Some((ptr, key));
@@ -88,19 +88,20 @@ impl Serializable for CursorNode {
 
         let mut children = Vec::with_capacity(len + 1);
         for _ in 0..=len {
-          children.push(scanner.read_u64()?);
+          let bytes = scanner.read_const_n::<POINTER_BYTES>()?;
+          children.push(Pointer::from_le_bytes(bytes));
         }
         Ok(Self::Internal(InternalNode::new(keys, children, right)))
       }
       1 => {
         // leaf
-        let next = scanner.read_u64()?;
+        let next = Pointer::from_le_bytes(scanner.read_const_n()?);
         let len = scanner.read_u16()? as usize;
         let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
           let l = scanner.read_u16()? as usize;
           let key = scanner.read_n(l)?.to_vec();
-          let ptr = scanner.read_u64()?;
+          let ptr = Pointer::from_le_bytes(scanner.read_const_n::<POINTER_BYTES>()?);
           entries.push((key, ptr));
         }
         Ok(Self::Leaf(LeafNode::new(
@@ -174,29 +175,39 @@ impl InternalNode {
     Ok(())
   }
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
-    let mut byte_len = 1 + 1 + 8 + self.children.len() * 8;
-    for i in 0..self.keys.len() {
-      byte_len += 8 * 2 + self.keys[i].len();
-      if byte_len >= PAGE_SIZE {
-        let mid = self.keys.len() >> 1;
-        let keys = self.keys.split_off(mid + 1);
-        let mid_key = self.keys.pop().unwrap();
-        let children = self.children.split_off(mid + 1);
+  fn byte_len(&self) -> usize {
+    1 + 1
+      + self
+        .right
+        .as_ref()
+        .map(|(_, k)| k.len() + POINTER_BYTES + 2)
+        .unwrap_or(0)
+      + 2
+      + self.keys.iter().map(|k| 2 + k.len()).sum::<usize>()
+      + self.children.len() * POINTER_BYTES
+  }
 
-        return Some((
-          InternalNode::new(keys, children, self.right.take()),
-          mid_key,
-        ));
-      }
+  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
+    let byte_len = self.byte_len();
+    if byte_len <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    let mid = self.keys.len() >> 1;
+    let keys = self.keys.split_off(mid + 1);
+    let mid_key = self.keys.pop().unwrap();
+    let children = self.children.split_off(mid + 1);
+
+    Some((
+      InternalNode::new(keys, children, self.right.take()),
+      mid_key,
+    ))
   }
 
   pub fn set_right(&mut self, key: &Key, ptr: Pointer) -> Option<(Pointer, Key)> {
     self.right.replace((ptr, key.clone()))
   }
-  pub fn get_all_child<'a>(&'a self) -> impl Iterator<Item = Pointer> + 'a {
+  pub fn get_all_child(&self) -> impl Iterator<Item = Pointer> + '_ {
     self.children.iter().map(|i| *i)
   }
 }
@@ -273,6 +284,16 @@ impl LeafNode {
     self.next.replace(pointer)
   }
 
+  fn byte_len(&self) -> usize {
+    1 + POINTER_BYTES
+      + 2
+      + self
+        .entries
+        .iter()
+        .map(|(k, _)| 2 + k.len() + POINTER_BYTES)
+        .sum::<usize>()
+  }
+
   pub fn insert_and_split(
     &mut self,
     index: usize,
@@ -281,17 +302,14 @@ impl LeafNode {
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
 
-    let mut byte_len = 1 + 8 + 8 + 8;
-    for i in 0..self.entries.len() {
-      byte_len += 8 * 2 + self.entries[i].0.len();
-      if byte_len >= PAGE_SIZE {
-        return Some(LeafNode::new(
-          self.entries.split_off(self.entries.len() >> 1),
-          self.next.take(),
-        ));
-      }
+    if self.byte_len() <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    Some(LeafNode::new(
+      self.entries.split_off(self.entries.len() >> 1),
+      self.next.take(),
+    ))
   }
 
   pub fn top(&self) -> &Key {
