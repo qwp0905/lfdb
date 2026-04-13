@@ -69,21 +69,17 @@ where
     Q: Hash + Eq,
     S: BuildHasher,
   {
-    if let Some(ptr) = self.new_entries.get_mut(hash, equivalent(key)) {
-      let bucket = ptr.borrow_mut_unsafe();
-      self.new_sub_list.move_to_head(ptr);
-      return Some(bucket);
+    if let Some(bucket) = self.new_entries.get_mut(hash, equivalent(key)) {
+      self.new_sub_list.move_to_head(bucket);
+      return Some(bucket.borrow_mut_unsafe());
     }
 
-    let ptr = self.old_entries.get_mut(hash, equivalent(key))?;
-    let bucket = ptr.borrow_mut_unsafe();
-
-    self.old_sub_list.remove(ptr);
-    self.new_sub_list.push_head(ptr);
-    self.new_entries.insert(hash, *ptr, make_hasher(hasher));
-    self.old_entries.remove_entry(hash, equivalent(key));
+    let mut bucket = self.old_entries.remove_entry(hash, equivalent(key))?;
+    self.old_sub_list.remove(&mut bucket);
+    self.new_sub_list.push_head(&mut bucket);
+    self.new_entries.insert(hash, bucket, make_hasher(hasher));
     self.rebalance(hasher);
-    Some(bucket)
+    Some(bucket.borrow_mut_unsafe())
   }
 
   pub fn get<Q: ?Sized, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<&V>
@@ -183,15 +179,6 @@ where
     let (_, value) = bucket.take_unsafe().take();
     Some(value)
   }
-
-  // pub fn has<Q: ?Sized>(&self, key: &Q, hash: u64) -> bool
-  // where
-  //   K: Borrow<Q>,
-  //   Q: Hash + Eq,
-  // {
-  //   self.new_entries.find(hash, equivalent(key)).is_some()
-  //     || self.old_entries.find(hash, equivalent(key)).is_some()
-  // }
 
   pub fn len(&self) -> usize {
     self.new_entries.len() + self.old_entries.len()
