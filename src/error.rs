@@ -7,11 +7,6 @@ pub enum Error {
   #[error("table {0} not found")]
   TableNotFound(String),
 
-  #[error(
-    "table {0} already dropped. please commit and open new transaction to open table."
-  )]
-  TableAlreadyDropped(String),
-
   #[error("invalid format: {0}")]
   InvalidFormat(&'static str),
 
@@ -75,7 +70,6 @@ impl Clone for Error {
   fn clone(&self) -> Self {
     match self {
       Self::TableNotFound(str) => Self::TableNotFound(str.clone()),
-      Self::TableAlreadyDropped(str) => Self::TableAlreadyDropped(str.clone()),
       Self::InvalidFormat(err) => Self::InvalidFormat(err),
       Self::DeserializeError(e, r) => Self::DeserializeError(*e, *r),
       Self::Unknown(err) => Self::Unknown(err.clone()),
