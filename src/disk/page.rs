@@ -132,17 +132,13 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
-  fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
+  pub fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
     if self.offset + N > T {
       return Err(Error::EOF);
     }
     let v = unsafe { (self.inner.add(self.offset) as *const [u8; N]).read() };
     self.offset += N;
     Ok(v)
-  }
-  #[inline(always)]
-  pub fn read_u64(&mut self) -> Result<u64> {
-    self.read_const_n::<8>().map(u64::from_le_bytes)
   }
   #[inline(always)]
   pub fn read_u16(&mut self) -> Result<u16> {
@@ -186,10 +182,6 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     Ok(())
   }
 
-  #[inline(always)]
-  pub fn write_u64(&mut self, value: u64) -> Result<()> {
-    self.write(&value.to_le_bytes())
-  }
   #[inline(always)]
   pub fn write_u16(&mut self, value: u16) -> Result {
     self.write(&value.to_le_bytes())
