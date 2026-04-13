@@ -153,8 +153,15 @@ impl DataEntry {
   }
 
   pub fn is_available(&self, record: &VersionRecord) -> bool {
-    let byte_len = 8 + 2 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
-    record.byte_len() + byte_len < SERIALIZABLE_BYTES
+    // next pointer + version record count + version record data
+    let mut bytes_len = POINTER_BYTES + 2 + record.byte_len();
+    for record in self.versions.iter() {
+      bytes_len += record.byte_len();
+      if bytes_len > SERIALIZABLE_BYTES {
+        return false;
+      }
+    }
+    true
   }
 
   pub fn is_empty(&self) -> bool {
