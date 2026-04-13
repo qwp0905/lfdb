@@ -12,7 +12,7 @@ use hashbrown::{raw::RawTable, Equivalent};
 fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
 ) -> impl Fn(&NonNull<Bucket<K, V>>) -> bool + 'a {
-  move |&ptr| key.equivalent(ptr.borrow_unsafe().get_key())
+  move |ptr| key.equivalent(ptr.borrow_unsafe().get_key())
 }
 
 fn make_hasher<'a, K, V, S>(
@@ -22,7 +22,7 @@ where
   K: Hash,
   S: BuildHasher,
 {
-  move |&ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
+  move |ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
 }
 
 /**
@@ -52,20 +52,13 @@ impl<K, V> LRUShard<K, V> {
       capacity,
     }
   }
-
-  // pub fn clear(&mut self) {
-  //   self.old_entries.clear();
-  //   self.old_sub_list.clear();
-  //   self.new_entries.clear();
-  //   self.new_sub_list.clear();
-  // }
 }
 impl<K, V> LRUShard<K, V>
 where
   K: Eq + Hash,
 {
   #[inline]
-  fn get_bucket<Q: ?Sized, S>(
+  fn promote_bucket<Q: ?Sized, S>(
     &mut self,
     key: &Q,
     hash: u64,
@@ -88,27 +81,15 @@ where
     self.rebalance(hasher);
     Some(bucket.borrow_mut_unsafe())
   }
+
   pub fn get<Q: ?Sized, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<&V>
   where
     K: Borrow<Q>,
     Q: Hash + Eq,
     S: BuildHasher,
   {
-    Some(self.get_bucket(key, hash, hasher)?.get_value())
+    Some(self.promote_bucket(key, hash, hasher)?.get_value())
   }
-  // pub fn get_mut<Q: ?Sized, S>(
-  //   &mut self,
-  //   key: &Q,
-  //   hash: u64,
-  //   hasher: &S,
-  // ) -> Option<&mut V>
-  // where
-  //   K: Borrow<Q>,
-  //   Q: Hash + Eq,
-  //   S: BuildHasher,
-  // {
-  //   Some(self.get_bucket(key, hash, hasher)?.get_value_mut())
-  // }
 
   pub fn peek<Q: ?Sized>(&self, key: &Q, hash: u64) -> Option<&V>
   where
@@ -161,7 +142,7 @@ where
   where
     S: BuildHasher,
   {
-    if let Some(bucket) = self.get_bucket(&key, hash, hasher) {
+    if let Some(bucket) = self.promote_bucket(&key, hash, hasher) {
       return Some(bucket.set_value(value));
     }
 
@@ -198,15 +179,6 @@ where
     let (_, value) = bucket.take_unsafe().take();
     Some(value)
   }
-
-  // pub fn has<Q: ?Sized>(&self, key: &Q, hash: u64) -> bool
-  // where
-  //   K: Borrow<Q>,
-  //   Q: Hash + Eq,
-  // {
-  //   self.new_entries.find(hash, equivalent(key)).is_some()
-  //     || self.old_entries.find(hash, equivalent(key)).is_some()
-  // }
 
   pub fn len(&self) -> usize {
     self.new_entries.len() + self.old_entries.len()

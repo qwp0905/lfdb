@@ -1,4 +1,3 @@
-
 use std::hash::RandomState;
 
 use super::*;
@@ -58,7 +57,7 @@ fn test_evict_order() {
 
   // evict all: oldest first (FIFO within old)
   let evicted: Vec<usize> = (0..cap)
-    .map(|_| shard.evict(&hasher).unwrap().0.0)
+    .map(|_| shard.evict(&hasher).unwrap().0 .0)
     .collect();
   assert_eq!(evicted, vec![0, 1, 2, 3, 4]);
   assert_eq!(shard.len(), 0);
