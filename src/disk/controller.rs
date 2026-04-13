@@ -17,7 +17,8 @@ use crate::{
   thread::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle, WorkBuilder},
   utils::ToArc,
 };
-
+type WriteThread<const N: usize> =
+  dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>;
 type WriteTask<const N: usize> = (Pointer, PageRef<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
@@ -25,15 +26,10 @@ struct WriteHandle<const N: usize> {
   queue: Arc<WriteQueue<N>>,
   occupied: Arc<AtomicBool>,
   page_pool: Arc<PagePool<N>>,
-  thread: Arc<dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>>,
+  thread: Arc<WriteThread<N>>,
 }
 impl<const N: usize> WriteHandle<N> {
-  fn new(
-    page_pool: Arc<PagePool<N>>,
-    thread: Arc<
-      dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>,
-    >,
-  ) -> Self {
+  fn new(page_pool: Arc<PagePool<N>>, thread: Arc<WriteThread<N>>) -> Self {
     Self {
       queue: SegQueue::new().to_arc(),
       occupied: AtomicBool::new(false).to_arc(),
@@ -71,7 +67,7 @@ impl<const N: usize> WriteHandle<N> {
 }
 
 pub struct IOPool<const N: usize> {
-  thread: Arc<dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>>,
+  thread: Arc<WriteThread<N>>,
   page_pool: Arc<PagePool<N>>,
   metrics: Arc<MetricsRegistry>,
 }

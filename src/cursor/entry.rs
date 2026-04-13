@@ -78,7 +78,7 @@ impl VersionRecord {
     }
   }
   fn byte_len(&self) -> usize {
-    16 + self.data.len() // owner 8byte + version 8byte + data
+    (POINTER_BYTES << 1) + self.data.len() // owner 8byte + version 8byte + data
   }
 }
 
@@ -154,8 +154,9 @@ impl DataEntry {
   }
 
   pub fn is_available(&self, record: &VersionRecord) -> bool {
-    let byte_len = 8 + 2 + self.versions.iter().fold(0, |a, c| a + c.byte_len());
-    record.byte_len() + byte_len < SERIALIZABLE_BYTES
+    let byte_len =
+      POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();
+    record.byte_len() + byte_len <= SERIALIZABLE_BYTES
   }
 
   pub fn is_empty(&self) -> bool {

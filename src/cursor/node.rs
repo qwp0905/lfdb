@@ -1,7 +1,7 @@
 use super::{Key, KeyRef};
 use crate::{
-  disk::{PageScanner, PageWriter, Pointer, PAGE_SIZE},
-  serialize::{Serializable, SerializeType},
+  disk::{PageScanner, PageWriter, Pointer, POINTER_BYTES},
+  serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
   Error, Result,
 };
 
@@ -174,23 +174,42 @@ impl InternalNode {
     Ok(())
   }
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
-    let mut byte_len = 1 + 1 + 8 + self.children.len() * 8;
-    for i in 0..self.keys.len() {
-      byte_len += 8 * 2 + self.keys[i].len();
-      if byte_len >= PAGE_SIZE {
-        let mid = self.keys.len() >> 1;
-        let keys = self.keys.split_off(mid + 1);
-        let mid_key = self.keys.pop().unwrap();
-        let children = self.children.split_off(mid + 1);
+  #[inline]
+  fn bytes_len(&self) -> usize {
+    1 + 1
+      + self
+        .right
+        .as_ref()
+        .map(|(_, k)| k.len() + POINTER_BYTES + 2)
+        .unwrap_or(0)
+      + 2
+      + self.children.len() * POINTER_BYTES
+      + self.keys.iter().map(|k| k.len()).sum::<usize>()
+      + self.keys.len() * 2
+  }
 
-        return Some((
-          InternalNode::new(keys, children, self.right.take()),
-          mid_key,
-        ));
-      }
+  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
+    let bytes_len = self.bytes_len();
+    if bytes_len <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    // node type + right pointer flag + key length + first child pointer
+    let mut sum = 1 + 1 + 2 + POINTER_BYTES;
+    let mut mid = 0;
+    while sum <= bytes_len >> 1 {
+      sum += self.keys[mid].len() + 2 + POINTER_BYTES;
+      mid += 1;
+    }
+
+    let keys = self.keys.split_off(mid + 1);
+    let mid_key = self.keys.pop().unwrap();
+    let children = self.children.split_off(mid + 1);
+
+    Some((
+      InternalNode::new(keys, children, self.right.take()),
+      mid_key,
+    ))
   }
 
   pub fn set_right(&mut self, key: &Key, ptr: Pointer) -> Option<(Pointer, Key)> {
@@ -259,9 +278,6 @@ impl LeafNode {
   pub fn get_entry_pointers(&self) -> impl Iterator<Item = Pointer> + '_ {
     self.entries.iter().map(|(_, p)| *p)
   }
-  pub fn get_entries(&self) -> impl Iterator<Item = &(Key, Pointer)> + '_ {
-    self.entries.iter()
-  }
   pub fn set_entries(&mut self, entries: Vec<(Key, Pointer)>) {
     self.entries = entries;
   }
@@ -273,6 +289,14 @@ impl LeafNode {
     self.next.replace(pointer)
   }
 
+  #[inline]
+  fn bytes_len(&self) -> usize {
+    1 + POINTER_BYTES
+      + 2
+      + self.entries.iter().map(|(k, _)| k.len()).sum::<usize>()
+      + self.entries.len() * (POINTER_BYTES + 2)
+  }
+
   pub fn insert_and_split(
     &mut self,
     index: usize,
@@ -281,17 +305,19 @@ impl LeafNode {
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
 
-    let mut byte_len = 1 + 8 + 8 + 8;
-    for i in 0..self.entries.len() {
-      byte_len += 8 * 2 + self.entries[i].0.len();
-      if byte_len >= PAGE_SIZE {
-        return Some(LeafNode::new(
-          self.entries.split_off(self.entries.len() >> 1),
-          self.next.take(),
-        ));
-      }
+    let bytes_len = self.bytes_len();
+    if bytes_len <= SERIALIZABLE_BYTES {
+      return None;
     }
-    None
+
+    let mut sum = 1 + POINTER_BYTES + 2;
+    let mut mid = 0;
+    while sum <= bytes_len >> 1 {
+      sum += self.entries[mid].0.len() + 2 + POINTER_BYTES;
+      mid += 1;
+    }
+
+    Some(LeafNode::new(self.entries.split_off(mid), self.next.take()))
   }
 
   pub fn top(&self) -> &Key {
