@@ -94,7 +94,7 @@ impl Serializable for CursorNode {
       }
       1 => {
         // leaf
-        let next = Pointer::from_le_bytes(scanner.read_const_n()?);
+        let next = scanner.read_u64()?;
         let len = scanner.read_u16()? as usize;
         let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
