@@ -74,7 +74,7 @@ jobs:
         if [ -n "$FILTER" ]; then
           ARGS="$ARGS --bench $FILTER"
         fi
-        cargo flamegraph --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
+        cargo flamegraph --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
     - name: Upload flamegraph
       uses: actions/upload-artifact@v4
