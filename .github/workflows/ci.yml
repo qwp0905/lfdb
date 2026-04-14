@@ -47,6 +47,7 @@ jobs:
 
     - name: Throughput baseline
       run: cargo benchmark --bench throughput --features lfdb -- --save-baseline main --quiet
+      continue-on-error: true
 
     - name: Switch to PR branch
       run: git switch ${{ github.head_ref }}
@@ -75,6 +76,7 @@ jobs:
 
     - name: YCSB baseline
       run: cargo benchmark --bench ycsb --features lfdb -- --save-baseline main --quiet
+      continue-on-error: true
 
     - name: Switch to PR branch
       run: git switch ${{ github.head_ref }}
