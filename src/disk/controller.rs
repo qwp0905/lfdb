@@ -17,8 +17,9 @@ use crate::{
   thread::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle, WorkBuilder},
   utils::ToArc,
 };
-type WriteThread<const N: usize> =
-  dyn BackgroundThread<(Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>), ()>;
+
+type ThreadArg<const N: usize> = (Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>);
+type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
 type WriteTask<const N: usize> = (Pointer, PageRef<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
@@ -149,11 +150,11 @@ impl<const N: usize> IOPool<N> {
       .for_each(|done| done.fulfill(result.clone()));
   }
 
-  fn handle_thread(
-    metrics: Arc<MetricsRegistry>,
-  ) -> impl Fn((Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>)) {
+  fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg<N>) {
     let count = max_iov();
     move |(file, queue, occupied)| {
+      metrics.active_io_threads.inc();
+
       let mut buffered = Vec::with_capacity(count);
 
       loop {
@@ -167,12 +168,14 @@ impl<const N: usize> IOPool<N> {
         Self::flush(&metrics, &file, &mut buffered);
         occupied.fetch_and(false, Ordering::Release);
         if queue.is_empty() {
-          return;
+          break;
         }
         if occupied.fetch_or(true, Ordering::AcqRel) {
-          return;
+          break;
         }
       }
+
+      metrics.active_io_threads.dec();
     }
   }
 
