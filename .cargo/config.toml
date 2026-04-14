@@ -1,4 +1,4 @@
 [alias]
-"test:cov:html" = "llvm-cov --workspace --html --open"
-"test:cov" = "llvm-cov --release --workspace --fail-under-functions 80 --fail-under-lines 80 --fail-under-regions 80 -- --test-threads 1"
+"test:cov:html" = "llvm-cov --package lfdb --html --open"
+"test:cov" = "llvm-cov --release --package lfdb --fail-under-functions 80 --fail-under-lines 80 --fail-under-regions 80 -- --test-threads 1"
 "benchmark" = "bench --package bench"
