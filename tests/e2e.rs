@@ -19,6 +19,8 @@ impl Logger for TestLogger {
 
 fn build_engine(dir: &TempDir) -> Engine {
   EngineBuilder::new(dir.path())
+    .wal_file_size(8 << 20)
+    .gc_thread_count(3)
     .buffer_pool_memory_capacity(32 << 20)
     .buffer_pool_shard_count(1 << 2)
     .group_commit_count(10)

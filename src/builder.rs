@@ -144,13 +144,13 @@ where
   }
 }
 
-const DEFAULT_WAL_FILE_SIZE: usize = 8 << 20; // 8 mb
+const DEFAULT_WAL_FILE_SIZE: usize = 512 << 20; // 512 mb
 const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(10);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 32;
 const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_GROUP_COMMIT_COUNT: usize = 512;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(300);
-const DEFAULT_GC_THREAD_COUNT: usize = 3;
+const DEFAULT_GC_THREAD_COUNT: usize = 5;
 const DEFAULT_BUFFER_POOL_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BUFFER_POOL_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
