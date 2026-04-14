@@ -12,6 +12,9 @@ rand_distr = "0.4"
 
 lfdb = { path = "..", optional = true }
 redb = { version = "4.0.0", optional = true }
+rocksdb = { version = "0.24.0", features = [
+  "multi-threaded-cf",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3.10.1"
@@ -29,3 +32,4 @@ harness = false
 default = ["lfdb"]
 lfdb = ["dep:lfdb"]
 redb = ["dep:redb"]
+rocksdb = ["dep:rocksdb"]
