@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+  time::Instant,
+};
 
 use crate::{
   cursor::Cursor,
@@ -21,6 +27,7 @@ pub struct Transaction<'a> {
   tx_start: Option<Instant>,
   created_tables: Vec<Arc<TableHandle>>,
   dropped_tables: Vec<Arc<TableHandle>>,
+  modified: AtomicBool,
 }
 impl<'a> Transaction<'a> {
   pub fn new(
@@ -38,6 +45,7 @@ impl<'a> Transaction<'a> {
       tx_start,
       created_tables: Default::default(),
       dropped_tables: Default::default(),
+      modified: AtomicBool::new(false),
     }
   }
 
@@ -48,6 +56,7 @@ impl<'a> Transaction<'a> {
       &self.orchestrator,
       &self.state,
       &self.snapshot,
+      &self.modified,
       &self.metrics,
     )
   }
@@ -99,6 +108,7 @@ impl<'a> Transaction<'a> {
       &self.orchestrator,
       &self.state,
       &self.snapshot,
+      &self.modified,
       &self.metrics,
     )?;
     self.created_tables.push(table);
@@ -128,6 +138,11 @@ impl<'a> Transaction<'a> {
     if !self.state.try_commit() {
       return Err(Error::TransactionClosed);
     }
+    if !self.modified.load(Ordering::Acquire) {
+      self.state.deactive();
+      return Ok(());
+    }
+
     if let Err(err) = self.orchestrator.commit_tx(self.state.get_id()) {
       self.state.make_available();
       return Err(err);
@@ -145,6 +160,11 @@ impl<'a> Transaction<'a> {
     if !self.state.try_abort() {
       return Err(Error::TransactionClosed);
     }
+    if !self.modified.load(Ordering::Acquire) {
+      self.state.deactive();
+      return Ok(());
+    }
+
     self.orchestrator.abort_tx(self.state.get_id())?;
     while let Some(table) = self.created_tables.pop() {
       self.orchestrator.drop_table(table, self.state.get_id());
