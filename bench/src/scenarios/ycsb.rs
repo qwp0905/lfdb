@@ -102,8 +102,8 @@ pub fn workload_a<F, E>(
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let zipf = Zipf::new(record_count as u64, ZIPF_EXPONENT).unwrap();
-  let rng = &mut rand::thread_rng();
+  let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
+  let rng = &mut rand::rng();
 
   group
     .throughput(Throughput::Elements(op_count as u64))
@@ -113,7 +113,7 @@ pub fn workload_a<F, E>(
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
           let key = make_key(idx);
-          let op = if rng.gen_bool(0.50) {
+          let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
             Op::Insert(key, make_value(idx))
@@ -148,8 +148,8 @@ pub fn workload_b<E, F>(
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let zipf = Zipf::new(record_count as u64, ZIPF_EXPONENT).unwrap();
-  let rng = &mut rand::thread_rng();
+  let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
+  let rng = &mut rand::rng();
 
   group
     .throughput(Throughput::Elements(op_count as u64))
@@ -159,7 +159,7 @@ pub fn workload_b<E, F>(
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
           let key = make_key(idx);
-          let op = if rng.gen_bool(0.95) {
+          let op = if rng.random_bool(0.95) {
             Op::Get(key)
           } else {
             Op::Insert(key, make_value(idx))
@@ -194,7 +194,7 @@ pub fn workload_d<E, F>(
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let rng = &mut rand::thread_rng();
+  let rng = &mut rand::rng();
   let insert_counter = AtomicUsize::new(record_count);
 
   group
@@ -204,8 +204,8 @@ pub fn workload_d<E, F>(
         counter.store(op_count, Ordering::Release);
         let latest = insert_counter.load(Ordering::Relaxed);
         for _ in 0..op_count {
-          let op = if rng.gen_bool(0.95) {
-            let idx = latest.saturating_sub(rng.gen_range(0..latest.min(1000)));
+          let op = if rng.random_bool(0.95) {
+            let idx = latest.saturating_sub(rng.random_range(0..latest.min(1000)));
             Op::Get(make_key(idx))
           } else {
             let idx = insert_counter.fetch_add(1, Ordering::Relaxed);
@@ -241,7 +241,7 @@ pub fn workload_e<E, F>(
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let rng = &mut rand::thread_rng();
+  let rng = &mut rand::rng();
   let insert_counter = AtomicUsize::new(record_count);
 
   group
@@ -249,10 +249,10 @@ pub fn workload_e<E, F>(
     .bench_function("95scan-5insert", |b| {
       b.iter(|| {
         let current = insert_counter.load(Ordering::Relaxed);
-        let zipf = Zipf::new(current as u64, ZIPF_EXPONENT).unwrap();
+        let zipf = Zipf::new(current as f64, ZIPF_EXPONENT).unwrap();
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let op = if rng.gen_bool(0.95) {
+          let op = if rng.random_bool(0.95) {
             let idx = zipfian_index(rng, &zipf, current);
             let start = make_key(idx);
             let end = make_key((idx + SCAN_LENGTH).min(current - 1));
@@ -291,8 +291,8 @@ pub fn workload_f<E, F>(
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let zipf = Zipf::new(record_count as u64, ZIPF_EXPONENT).unwrap();
-  let rng = &mut rand::thread_rng();
+  let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
+  let rng = &mut rand::rng();
 
   group
     .throughput(Throughput::Elements(op_count as u64))
@@ -302,7 +302,7 @@ pub fn workload_f<E, F>(
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
           let key = make_key(idx);
-          let op = if rng.gen_bool(0.50) {
+          let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
             Op::ReadModifyWrite(key, make_value(idx))

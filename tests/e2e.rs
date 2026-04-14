@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Sender};
 use lfdb::{Engine, EngineBuilder, Error, LogLevel, Logger};
-use rand::{seq::IteratorRandom, thread_rng};
+use rand::{rng, seq::IteratorRandom};
 use tempfile::{tempdir_in, TempDir};
 
 struct TestLogger;
@@ -482,7 +482,7 @@ fn test_btree_node_split_and_recovery() {
       }));
     }
 
-    let rng = &mut thread_rng();
+    let rng = &mut rng();
     let mut completions = Vec::with_capacity(key_count);
     for i in (0..key_count).choose_multiple(rng, key_count) {
       let (done_tx, done_rx) = crossbeam::channel::unbounded();
@@ -585,7 +585,7 @@ fn crash_writer() {
     .group_commit_count(10)
     .build()
     .expect("engine bootstrap failed");
-  let rng = &mut thread_rng();
+  let rng = &mut rng();
 
   let table_count: usize = 10;
   let table_names: Vec<String> = (0..table_count)
@@ -733,7 +733,7 @@ fn test_process_crash_recovery() {
 fn test_hard_workload() {
   let dir = tempdir_in(".").unwrap();
   let engine = Arc::new(build_engine(&dir));
-  let rng = &mut thread_rng();
+  let rng = &mut rng();
 
   let table_count: usize = 10;
   let key_count: usize = 100_000;
