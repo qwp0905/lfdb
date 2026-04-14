@@ -54,6 +54,18 @@ fn bench_ycsb_a(c: &mut Criterion) {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
   }
+
+  #[cfg(feature = "rocksdb")]
+  {
+    let dir = TempDir::new_in(".").expect("dir failed.");
+    let mut group = c.benchmark_group(group_name);
+    group
+      .sample_size(DEFAULT_SAMPLE_SIZE)
+      .measurement_time(Duration::from_secs(20));
+    scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
+      engines::rocksdb::new(CACHE_SIZE, dir.path())
+    });
+  }
 }
 
 /// Workload B: 95% read, 5% update (read-heavy, typical web app)
@@ -83,6 +95,18 @@ fn bench_ycsb_b(c: &mut Criterion) {
       .measurement_time(Duration::from_secs(20));
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
+    });
+  }
+
+  #[cfg(feature = "rocksdb")]
+  {
+    let dir = TempDir::new_in(".").expect("dir failed.");
+    let mut group = c.benchmark_group(group_name);
+    group
+      .sample_size(DEFAULT_SAMPLE_SIZE)
+      .measurement_time(Duration::from_secs(20));
+    scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
+      engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
   }
 }
@@ -116,6 +140,18 @@ fn bench_ycsb_d(c: &mut Criterion) {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
   }
+
+  #[cfg(feature = "rocksdb")]
+  {
+    let dir = TempDir::new_in(".").expect("dir failed.");
+    let mut group = c.benchmark_group(group_name);
+    group
+      .sample_size(DEFAULT_SAMPLE_SIZE)
+      .measurement_time(Duration::from_secs(20));
+    scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
+      engines::rocksdb::new(CACHE_SIZE, dir.path())
+    });
+  }
 }
 
 /// Workload E: 95% scan, 5% insert (range query heavy, analytics)
@@ -147,6 +183,18 @@ fn bench_ycsb_e(c: &mut Criterion) {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
   }
+
+  #[cfg(feature = "rocksdb")]
+  {
+    let dir = TempDir::new_in(".").expect("dir failed.");
+    let mut group = c.benchmark_group(group_name);
+    group
+      .sample_size(DEFAULT_SAMPLE_SIZE)
+      .measurement_time(Duration::from_secs(20));
+    scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
+      engines::rocksdb::new(CACHE_SIZE, dir.path())
+    });
+  }
 }
 
 /// Workload F: 50% read, 50% read-modify-write (transactional, account balance)
@@ -176,6 +224,18 @@ fn bench_ycsb_f(c: &mut Criterion) {
       .measurement_time(Duration::from_secs(20));
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
+    });
+  }
+
+  #[cfg(feature = "rocksdb")]
+  {
+    let dir = TempDir::new_in(".").expect("dir failed.");
+    let mut group = c.benchmark_group(group_name);
+    group
+      .sample_size(DEFAULT_SAMPLE_SIZE)
+      .measurement_time(Duration::from_secs(20));
+    scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
+      engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
   }
 }
