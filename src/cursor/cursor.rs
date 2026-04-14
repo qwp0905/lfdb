@@ -1,4 +1,11 @@
-use std::{marker::PhantomData, mem::replace, sync::Arc};
+use std::{
+  marker::PhantomData,
+  mem::replace,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+};
 
 use super::{
   CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, Key, KeyRef, LeafNode,
@@ -25,6 +32,7 @@ pub struct Cursor<'a> {
   state: &'a TxState<'a>,
   snapshot: &'a TxSnapshot<'a>,
   metrics: &'a MetricsRegistry,
+  modified: &'a AtomicBool,
   _marker: PhantomData<*const ()>,
 }
 impl<'a> Cursor<'a> {
@@ -53,6 +61,7 @@ impl<'a> Cursor<'a> {
     orchestrator: &'a TxOrchestrator,
     state: &'a TxState<'a>,
     snapshot: &'a TxSnapshot<'a>,
+    modified: &'a AtomicBool,
     metrics: &'a MetricsRegistry,
   ) -> Result<Self> {
     let handle = table.clone();
@@ -62,6 +71,7 @@ impl<'a> Cursor<'a> {
       state,
       snapshot,
       metrics,
+      modified,
       _marker: PhantomData,
     };
     let root = cursor.alloc_and_log(&CursorNode::initial_state())?;
@@ -75,6 +85,7 @@ impl<'a> Cursor<'a> {
     orchestrator: &'a TxOrchestrator,
     state: &'a TxState<'a>,
     snapshot: &'a TxSnapshot<'a>,
+    modified: &'a AtomicBool,
     metrics: &'a MetricsRegistry,
   ) -> Self {
     Self {
@@ -83,6 +94,7 @@ impl<'a> Cursor<'a> {
       state,
       snapshot,
       metrics,
+      modified,
       _marker: PhantomData,
     }
   }
@@ -325,10 +337,12 @@ impl<'a> Cursor<'a> {
       return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
     }
 
+    self.modified.fetch_or(true, Ordering::Release);
     self
       .metrics
       .operation_insert
-      .measure(|| self.__insert(key, value))
+      .measure(|| self.__insert(key, value))?;
+    Ok(())
   }
 
   fn apply_split(
@@ -442,10 +456,12 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
     }
 
+    self.modified.fetch_or(true, Ordering::Release);
     self
       .metrics
       .operation_remove
-      .measure(|| self.__remove(key.as_ref()))
+      .measure(|| self.__remove(key.as_ref()))?;
+    Ok(())
   }
 
   pub fn scan<'b, K: AsRef<[u8]>>(
