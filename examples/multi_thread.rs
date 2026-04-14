@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use crossbeam::channel::{unbounded, Sender};
 use lfdb::{EngineBuilder, LogLevel, Logger};
-use rand::{seq::IteratorRandom, thread_rng};
+use rand::{rng, seq::IteratorRandom};
 
 struct DebugLogger;
 impl Logger for DebugLogger {
@@ -33,7 +33,7 @@ fn main() {
   }
 
   let count = 100_000_usize;
-  let rng = &mut thread_rng();
+  let rng = &mut rng();
   let keys = (0..count)
     .map(|i| format!("123{:0>6}", i).as_bytes().to_vec())
     .choose_multiple(rng, count);
