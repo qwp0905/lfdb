@@ -53,7 +53,9 @@ impl<'a> Cursor<'a> {
       self.table.metadata().get_id(),
       slot,
       data,
-    )
+    )?;
+    self.modified.fetch_or(true, Ordering::Release);
+    Ok(())
   }
 
   pub fn initialize(
@@ -337,12 +339,10 @@ impl<'a> Cursor<'a> {
       return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
     }
 
-    self.modified.fetch_or(true, Ordering::Release);
     self
       .metrics
       .operation_insert
-      .measure(|| self.__insert(key, value))?;
-    Ok(())
+      .measure(|| self.__insert(key, value))
   }
 
   fn apply_split(
@@ -456,12 +456,10 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
     }
 
-    self.modified.fetch_or(true, Ordering::Release);
     self
       .metrics
       .operation_remove
-      .measure(|| self.__remove(key.as_ref()))?;
-    Ok(())
+      .measure(|| self.__remove(key.as_ref()))
   }
 
   pub fn scan<'b, K: AsRef<[u8]>>(
