@@ -227,7 +227,7 @@ impl Engine {
   }
 
   /**
-   * create tranaction cursor with default timeout.
+   * create transaction cursor with default timeout.
    */
   pub fn new_tx(&self) -> Result<Transaction<'_>> {
     if !self.available.load(Ordering::Acquire) {
@@ -243,7 +243,7 @@ impl Engine {
   }
 
   /**
-   * create tranaction cursor with specified timeout.
+   * create transaction cursor with specified timeout.
    */
   pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Transaction<'_>> {
     if !self.available.load(Ordering::Acquire) {

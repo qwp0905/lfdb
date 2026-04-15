@@ -32,7 +32,6 @@ pub struct ReplayResult {
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
   pub segments: Vec<WALSegment>,
   pub generation: SegmentGeneration,
-  pub is_new: bool,
 }
 impl ReplayResult {
   fn empty() -> Self {
@@ -43,7 +42,6 @@ impl ReplayResult {
       aborted: Default::default(),
       redo: Default::default(),
       segments: Default::default(),
-      is_new: true,
     }
   }
 }
@@ -75,6 +73,7 @@ pub fn replay(
   let mut redo = BTreeMap::<LogId, Vec<(TableId, Pointer, Vec<u8>)>>::new();
   let mut aborted = BTreeMap::<LogId, TxId>::new();
   let mut started = BTreeSet::<TxId>::new();
+  let mut modified = HashSet::<TxId>::new();
   let mut closed = HashSet::<TxId>::new();
 
   let mut segments = Vec::new();
@@ -102,6 +101,7 @@ pub fn replay(
       tx_id = tx_id.max(record.tx_id);
       match record.operation {
         Operation::Insert(table_id, ptr, page) => {
+          modified.insert(record.tx_id);
           if last_checkpoint.map_or(false, |c| c >= record.log_id) {
             continue;
           }
@@ -111,6 +111,7 @@ pub fn replay(
             .push((table_id, ptr, page));
         }
         Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
+          modified.insert(record.tx_id);
           if last_checkpoint.map_or(false, |c| c >= record.log_id) {
             continue;
           }
@@ -161,11 +162,15 @@ pub fn replay(
     // Explicit aborts + transactions open at crash time (started but never committed or aborted).
     aborted: aborted
       .into_values()
-      .chain(started.into_iter().filter(|c| !closed.contains(&c)))
+      .chain(
+        started
+          .into_iter()
+          .filter(|c| modified.contains(c))
+          .filter(|c| !closed.contains(&c)),
+      )
       .collect(),
     redo: redo.into_values().flatten().collect::<Vec<_>>(),
     segments,
     generation,
-    is_new: false,
   })
 }
