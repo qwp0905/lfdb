@@ -1,6 +1,11 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+  atomic::{AtomicU64, Ordering},
+  Arc,
+};
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{epoch, queue::SegQueue};
+
+use crate::utils::ToArc;
 
 use super::Pointer;
 
@@ -9,13 +14,13 @@ use super::Pointer;
  */
 pub struct FreeList {
   file_end: AtomicU64,
-  released: SegQueue<Pointer>,
+  released: Arc<SegQueue<Pointer>>,
 }
 impl FreeList {
   pub fn new() -> Self {
     Self {
       file_end: AtomicU64::new(1),
-      released: SegQueue::new(),
+      released: SegQueue::new().to_arc(),
     }
   }
 
@@ -27,7 +32,8 @@ impl FreeList {
   }
 
   pub fn dealloc(&self, pointer: Pointer) {
-    self.released.push(pointer);
+    let released = self.released.clone();
+    epoch::pin().defer(move || released.push(pointer));
   }
   pub fn replay(&self, file_end: Pointer) {
     self.file_end.store(file_end, Ordering::Release);
