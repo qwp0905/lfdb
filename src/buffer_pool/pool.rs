@@ -1,9 +1,5 @@
 use std::{
-  collections::BTreeMap,
-  mem::MaybeUninit,
-  ptr::drop_in_place,
-  sync::{Arc, RwLock},
-  time::Duration,
+  collections::BTreeMap, mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration,
 };
 
 use super::{Acquired, Frame, LRUTable, Peeked, Slot};
@@ -13,9 +9,7 @@ use crate::{
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::{once, BackgroundThread, WorkBuilder},
-  utils::{
-    AtomicBitmap, LogFilter, ShortenedMutex, ShortenedRwLock, ToArc, ToBox, UnsafeBorrow,
-  },
+  utils::{AtomicBitmap, LogFilter, ShortenedMutex, ToArc, ToBox, UnsafeBorrow},
 };
 
 const PRE_FLUSH_THRESHOLD: usize = 100;
@@ -28,7 +22,7 @@ pub struct BufferPoolConfig {
 
 pub struct BufferPool {
   table: LRUTable,
-  frame: Arc<Vec<MaybeUninit<RwLock<Frame>>>>,
+  frame: Arc<Vec<MaybeUninit<Frame>>>,
   dirty: Arc<AtomicBitmap>,
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
@@ -63,7 +57,7 @@ impl BufferPool {
 
     Ok(Self {
       frame,
-      table: LRUTable::new(page_pool.clone(), config.shard_count, frame_cap),
+      table: LRUTable::new(config.shard_count, frame_cap),
       dirty,
       logger,
       page_pool,
@@ -91,25 +85,30 @@ impl BufferPool {
           unsafe { self.frame[id].assume_init_ref() },
           &self.dirty,
           state,
+          &self.page_pool,
         ));
       }
       Peeked::Temp(temp) => {
         let (state, shard) = temp.take();
-        return Ok(Slot::temp(state, pointer, None, shard));
+        return Ok(Slot::temp(state, pointer, None, shard, &self.page_pool));
       }
       Peeked::DiskRead(temp) => temp.take(),
     };
-    match handle.disk().read(pointer, &mut state.for_write()) {
-      Ok(p) => p,
-      Err(err) => {
-        // Remove the temp entry so other threads waiting on this page
-        // don't block forever on a completion signal that will never arrive.
-        shard.l().remove_temp(table_id, pointer);
-        return Err(err);
-      }
-    };
+
+    let mut page = self.page_pool.acquire();
+    if let Err(err) = handle.disk().read(pointer, &mut page) {
+      shard.l().remove_temp(table_id, pointer);
+      return Err(err);
+    }
+    state.store(page);
     state.completion_evict(1);
-    Ok(Slot::temp(state, pointer, Some(handle), shard))
+    Ok(Slot::temp(
+      state,
+      pointer,
+      Some(handle),
+      shard,
+      &self.page_pool,
+    ))
   }
 
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
@@ -118,7 +117,7 @@ impl BufferPool {
       Acquired::Temp(temp) => {
         let (state, shard) = temp.take();
         self.metrics.buffer_pool_cache_hit.inc();
-        return Ok(Slot::temp(state, pointer, None, shard));
+        return Ok(Slot::temp(state, pointer, None, shard, &self.page_pool));
       }
       Acquired::Hit(state) => {
         let id = state.get_frame_id();
@@ -127,6 +126,7 @@ impl BufferPool {
           unsafe { self.frame[id].assume_init_ref() },
           &self.dirty,
           state,
+          &self.page_pool,
         ));
       }
       Acquired::Evicted(guard) => guard,
@@ -136,32 +136,32 @@ impl BufferPool {
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
 
-    let evicted = match guard.get_evicted_pointer() {
-      Some(evicted) => evicted,
-      None => {
-        let ptr = self.frame[id].as_ptr() as *mut RwLock<_>;
-        unsafe { ptr.write(RwLock::new(Frame::new(pointer, new, handle))) };
-        guard.commit();
-        return Ok(Slot::page(
-          ptr.borrow_unsafe(),
-          &self.dirty,
-          guard.get_state(),
-        ));
-      }
-    };
+    let new_frame = Frame::new(pointer, new, handle);
+    let ptr = self.frame[id].as_ptr() as *mut Frame;
+    if !guard.is_evicted() {
+      unsafe { ptr.write(new_frame) };
+      guard.commit();
+      return Ok(Slot::page(
+        ptr.borrow_unsafe(),
+        &self.dirty,
+        guard.get_state(),
+        &self.page_pool,
+      ));
+    }
 
-    let frame = unsafe { self.frame[id].assume_init_ref() };
-    let (old_p, old_h) = frame.wl().replace(pointer, new, handle);
-
+    let old = unsafe { ptr.replace(new_frame) };
     if self.dirty.contains(id) {
-      if let Some(handle) = old_h.try_pin() {
-        handle.disk().write(evicted, &old_p)?;
-      }
+      old.flush_async().map(|h| h.wait()).unwrap_or(Ok(()))?;
       self.dirty.remove(id);
     }
 
     guard.commit();
-    Ok(Slot::page(frame, &self.dirty, guard.get_state()))
+    Ok(Slot::page(
+      ptr.borrow_unsafe(),
+      &self.dirty,
+      guard.get_state(),
+      &self.page_pool,
+    ))
   }
 
   #[inline]
@@ -195,14 +195,14 @@ impl Drop for BufferPool {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
       for i in offset..offset + len {
-        unsafe { drop_in_place(self.frame[i].as_ptr() as *mut RwLock<Frame>) };
+        unsafe { drop_in_place(self.frame[i].as_ptr() as *mut Frame) };
       }
     }
   }
 }
 
 fn handle_flush(
-  frame: Arc<Vec<MaybeUninit<RwLock<Frame>>>>,
+  frame: Arc<Vec<MaybeUninit<Frame>>>,
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
   move |trigger| {
@@ -217,22 +217,20 @@ fn handle_flush(
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
-      let frame = unsafe { frame[id].assume_init_ref() }.rl();
+      let frame = unsafe { frame[id].assume_init_ref() };
+      let _lock = frame.latch();
       dirty.remove(id);
-      let handle = match frame.handle().try_pin() {
-        None => continue,
-        Some(handle) => handle,
-      };
 
       // Submit all writes asynchronously first so the DiskController can
       // buffer and sort them, then batch into a single pwritev call.
       // Writing synchronously one by one would bypass this optimization
       // and issue a separate syscall per page.
-      waits.push(frame.flush_async());
-
-      handles
-        .entry(handle.metadata().get_id())
-        .or_insert_with(|| handle.handle());
+      if let Some(r) = frame.flush_async() {
+        waits.push(r);
+        handles
+          .entry(frame.handle().metadata().get_id())
+          .or_insert_with(|| frame.handle().clone());
+      }
     }
 
     waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
