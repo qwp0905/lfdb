@@ -1,19 +1,23 @@
-use std::{mem::replace, sync::Arc};
+use std::sync::{atomic::Ordering, Arc, Mutex, MutexGuard};
+
+use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
   thread::TaskHandle,
+  utils::{ShortenedMutex, UnsafeBorrow},
 };
 
 pub struct Frame {
-  page: PageRef<PAGE_SIZE>,
+  page: Atomic<PageRef<PAGE_SIZE>>,
   /**
    * pointer can be wrong if nothing allocated.
    * only lru table is the single truth source.
    */
   pointer: Pointer,
   handle: Arc<TableHandle>,
+  latch: Mutex<()>,
 }
 impl Frame {
   #[inline]
@@ -23,44 +27,61 @@ impl Frame {
     handle: Arc<TableHandle>,
   ) -> Self {
     Self {
-      page,
+      page: Atomic::new(page),
       pointer,
       handle,
+      latch: Default::default(),
     }
   }
 
   #[inline]
-  pub fn replace(
-    &mut self,
-    pointer: Pointer,
-    page: PageRef<PAGE_SIZE>,
-    handle: Arc<TableHandle>,
-  ) -> (PageRef<PAGE_SIZE>, Arc<TableHandle>) {
-    self.pointer = pointer;
-    let old_page = replace(&mut self.page, page);
-    let old_handle = replace(&mut self.handle, handle);
-    (old_page, old_handle)
-  }
-  #[inline]
   pub fn get_pointer(&self) -> Pointer {
     self.pointer
   }
+
   #[inline]
-  pub fn page_ref(&self) -> &PageRef<PAGE_SIZE> {
-    &self.page
+  pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
+    self.page.load(Ordering::Acquire, guard).as_raw()
   }
-  #[inline]
-  pub fn page_ref_mut(&mut self) -> &mut PageRef<PAGE_SIZE> {
-    &mut self.page
+  pub fn store(&self, page: PageRef<PAGE_SIZE>) {
+    let g = pin();
+    let old = self.page.swap(Owned::new(page), Ordering::Release, &g);
+    if old.is_null() {
+      return;
+    }
+    unsafe { g.defer_destroy(old) };
   }
 
   #[inline]
-  pub fn flush_async(&self) -> TaskHandle<()> {
-    self.handle.disk().write_async(self.pointer, &self.page)
+  pub fn latch(&self) -> MutexGuard<'_, ()> {
+    self.latch.l()
   }
 
   #[inline]
-  pub fn handle(&self) -> Arc<TableHandle> {
-    self.handle.clone()
+  pub fn flush_async(&self) -> Option<TaskHandle<()>> {
+    let handle = self.handle.try_pin()?;
+
+    let g = pin();
+    Some(
+      handle
+        .disk()
+        .write_async(self.pointer, self.load_page(&g).borrow_unsafe()),
+    )
+  }
+
+  #[inline]
+  pub fn handle(&self) -> &Arc<TableHandle> {
+    &self.handle
+  }
+}
+
+impl Drop for Frame {
+  fn drop(&mut self) {
+    let g = pin();
+    let old = self.page.swap(Shared::null(), Ordering::Release, &g);
+    if old.is_null() {
+      return;
+    }
+    unsafe { g.defer_destroy(old) };
   }
 }

@@ -7,8 +7,7 @@ use super::*;
 const T: TableId = 0;
 
 fn make_table(shard_count: usize, capacity: usize) -> LRUTable {
-  let page_pool = Arc::new(PagePool::new(100));
-  LRUTable::new(page_pool, shard_count, capacity)
+  LRUTable::new(shard_count, capacity)
 }
 
 fn miss(table: &LRUTable, index: Pointer) -> EvictionGuard<'_> {
@@ -31,7 +30,7 @@ fn test_cache_miss_then_hit() {
 
   let mut guard = miss(&table, 42);
   let frame_id = guard.get_frame_id();
-  assert!(guard.get_evicted_pointer().is_none());
+  assert!(!guard.is_evicted());
   guard.commit();
   drop(guard);
 
@@ -48,7 +47,7 @@ fn test_multiple_misses_no_eviction() {
   let mut frame_ids = Vec::new();
   for i in 0..cap {
     let mut guard = miss(&table, i as Pointer);
-    assert!(guard.get_evicted_pointer().is_none());
+    assert!(!guard.is_evicted());
     frame_ids.push(guard.get_frame_id());
     guard.commit();
   }
@@ -65,7 +64,7 @@ fn test_eviction_when_full() {
 
   for i in 0..cap {
     let mut guard = miss(&table, i as Pointer);
-    assert!(guard.get_evicted_pointer().is_none());
+    assert!(!guard.is_evicted());
     guard.commit();
   }
 
@@ -77,9 +76,7 @@ fn test_eviction_when_full() {
   }
 
   let mut guard = miss(&table, 100);
-  let evicted = guard.get_evicted_pointer();
-  assert!(evicted.is_some());
-  assert!(evicted.unwrap() < cap as Pointer);
+  assert!(guard.is_evicted());
   guard.commit();
 }
 
@@ -135,9 +132,7 @@ fn test_sharded_eviction() {
         continue;
       }
       Acquired::Evicted(mut guard) => {
-        if guard.get_evicted_pointer().is_some() {
-          eviction_happened = true;
-        }
+        eviction_happened |= guard.is_evicted();
         inserted.push((i, guard.get_frame_id()));
         guard.commit();
       }
@@ -197,12 +192,19 @@ fn test_eviction_guard_drop_rollback() {
 
   // evict but don't commit — Drop should rollback
   let guard = miss(&table, 30);
-  let evicted = guard.get_evicted_pointer().unwrap();
+  assert!(guard.is_evicted());
   drop(guard);
 
-  // evicted index should still be accessible (restored by rollback)
-  let state = hit(&table, evicted);
-  state.unpin();
+  // After rollback, both original indices remain accessible
+  hit(&table, 10).unpin();
+  hit(&table, 20).unpin();
+
+  // 30 was removed by rollback — acquiring it should be a miss, not a hit
+  match table.acquire(T, 30) {
+    Acquired::Evicted(mut g) => g.commit(),
+    Acquired::Hit(_) => panic!("30 should have been removed on rollback"),
+    Acquired::Temp(_) => panic!("unexpected temp"),
+  };
 }
 
 #[test]
@@ -221,7 +223,7 @@ fn test_eviction_guard_commit_persists() {
   }
 
   let mut guard = miss(&table, 30);
-  assert!(guard.get_evicted_pointer().is_some());
+  assert!(guard.is_evicted());
   guard.commit();
   drop(guard);
 
@@ -238,15 +240,28 @@ fn test_pinned_entry_not_evicted() {
     miss(&table, i).commit();
   }
 
-  // keep index 10 pinned (pin=2 from commit+acquire), unpin 20
-  let _pinned = hit(&table, 10); // pin=2
-  let state20 = hit(&table, 20);
-  state20.unpin(); // pin=1
-  state20.unpin(); // pin=0
+  // Keep 10 pinned via acquire (promotes to new segment, pin=2).
+  let _pinned = hit(&table, 10);
 
-  // eviction should evict 20 (pin=0), not 10 (pin=2)
-  let guard = miss(&table, 30);
-  assert_eq!(guard.get_evicted_pointer().unwrap(), 20);
+  // Unpin 20 without promotion so it stays in the old segment.
+  // peek_or_temp does not promote, preserving segment placement.
+  let state20 = match table.peek_or_temp(T, 20) {
+    Peeked::Hit(s) => s,
+    _ => panic!("expected Hit for 20"),
+  };
+  state20.unpin();
+  state20.unpin(); // pin 20 = 0
+
+  // Eviction must succeed (targets old-segment tail=20, skipping pinned 10).
+  let mut guard = miss(&table, 30);
+  assert!(guard.is_evicted());
+  guard.commit();
+  drop(guard);
+
+  // 10 survives — would panic inside hit() if it had been evicted.
+  // (Since only one of the initial entries could have been evicted to make room,
+  // 10 surviving implies 20 was the one evicted.)
+  hit(&table, 10).unpin();
 }
 
 #[test]
@@ -304,16 +319,16 @@ fn test_concurrent_acquire_waits_for_evicted_index() {
     state.unpin();
   }
 
-  // evict without commit — index 10 is in eviction set
+  // Setup access order puts 10 at the LRU tail — miss(30) evicts 10.
   let guard = miss(&table, 30);
-  let evicted = guard.get_evicted_pointer().unwrap();
+  assert!(guard.is_evicted());
 
   let done = AtomicBool::new(false);
 
   thread::scope(|s| {
     s.spawn(|| {
       // acquire the evicted index — should block on eviction set check
-      let state = hit(&table, evicted);
+      let state = hit(&table, 10);
       done.store(true, Ordering::Release);
       state.unpin();
     });
@@ -328,7 +343,7 @@ fn test_concurrent_acquire_waits_for_evicted_index() {
 
   assert!(done.load(Ordering::Acquire), "thread should have completed");
   // evicted index should be accessible after rollback
-  let state = hit(&table, evicted);
+  let state = hit(&table, 10);
   state.unpin();
 }
 

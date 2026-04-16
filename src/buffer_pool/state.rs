@@ -1,13 +1,16 @@
 use std::sync::{
   atomic::{AtomicBool, AtomicU32, Ordering},
-  RwLock, RwLockReadGuard, RwLockWriteGuard,
+  Mutex, MutexGuard,
 };
 
-use crossbeam::utils::Backoff;
+use crossbeam::{
+  epoch::{pin, Atomic, Guard, Owned, Shared},
+  utils::Backoff,
+};
 
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::ShortenedRwLock,
+  utils::ShortenedMutex,
 };
 
 /**
@@ -92,16 +95,18 @@ impl FrameState {
  */
 pub struct TempFrameState {
   pin: AtomicU32,
-  page: RwLock<PageRef<PAGE_SIZE>>,
+  page: Atomic<PageRef<PAGE_SIZE>>,
   dirty: AtomicBool,
+  latch: Mutex<()>,
 }
 
 impl TempFrameState {
-  pub fn new(page: PageRef<PAGE_SIZE>) -> Self {
+  pub fn new() -> Self {
     Self {
       pin: AtomicU32::new(EVICTION_BIT),
-      page: RwLock::new(page),
+      page: Atomic::null(),
       dirty: AtomicBool::new(false),
+      latch: Default::default(),
     }
   }
 
@@ -118,12 +123,19 @@ impl TempFrameState {
       .is_ok()
   }
 
-  pub fn for_write(&self) -> RwLockWriteGuard<'_, PageRef<PAGE_SIZE>> {
-    self.page.wl()
+  pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
+    self.page.load(Ordering::Acquire, guard).as_raw()
   }
-  pub fn for_read(&self) -> RwLockReadGuard<'_, PageRef<PAGE_SIZE>> {
-    self.page.rl()
+
+  pub fn store(&self, page: PageRef<PAGE_SIZE>) {
+    let g = pin();
+    let old = self.page.swap(Owned::new(page), Ordering::Release, &g);
+    if old.is_null() {
+      return;
+    }
+    unsafe { g.defer_destroy(old) };
   }
+
   pub fn mark_dirty(&self) {
     self.dirty.fetch_or(true, Ordering::Release);
   }
@@ -150,6 +162,10 @@ impl TempFrameState {
     }
   }
 
+  pub fn latch(&self) -> MutexGuard<'_, ()> {
+    self.latch.l()
+  }
+
   /**
    * Releases the eviction lock and sets the pin count to the given value.
    * Safe to use a plain store here because the eviction flag guarantees
@@ -161,5 +177,15 @@ impl TempFrameState {
 
   pub fn unpin(&self) {
     self.pin.fetch_sub(1, Ordering::Release);
+  }
+}
+impl Drop for TempFrameState {
+  fn drop(&mut self) {
+    let g = pin();
+    let old = self.page.swap(Shared::null(), Ordering::Release, &g);
+    if old.is_null() {
+      return;
+    }
+    unsafe { g.defer_destroy(old) };
   }
 }
