@@ -6,11 +6,11 @@ use std::{
   time::Instant,
 };
 
+use super::{TxOrchestrator, TxSnapshot, TxState};
 use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
   table::{TableHandle, TableMetadata, MAX_TABLE_NAME_LEN},
-  transaction::{TxOrchestrator, TxSnapshot, TxState},
   Error, Result,
 };
 
