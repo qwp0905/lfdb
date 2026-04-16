@@ -8,7 +8,7 @@ use crossbeam::utils::Backoff;
 
 use super::{FrameState, LRUShard, TempFrameState};
 use crate::{
-  disk::{PagePool, Pointer, PAGE_SIZE},
+  disk::Pointer,
   table::TableId,
   utils::{ShortenedMutex, ToArc},
 };
@@ -81,8 +81,8 @@ impl<'a> EvictionGuard<'a> {
   pub fn get_state(&self) -> Arc<FrameState> {
     self.state.clone()
   }
-  pub fn get_evicted_pointer(&self) -> Option<Pointer> {
-    self.evicted.as_ref().map(|(i, _)| i.1)
+  pub fn is_evicted(&self) -> bool {
+    self.evicted.is_some()
   }
   pub fn commit(&mut self) {
     self.committed = true;
@@ -143,14 +143,9 @@ pub struct LRUTable {
   shards: Vec<Mutex<Shard>>,
   offset: Vec<usize>,
   hasher: RandomState,
-  page_pool: Arc<PagePool<PAGE_SIZE>>,
 }
 impl LRUTable {
-  pub fn new(
-    page_pool: Arc<PagePool<PAGE_SIZE>>,
-    shard_count: usize,
-    capacity: usize,
-  ) -> Self {
+  pub fn new(shard_count: usize, capacity: usize) -> Self {
     let cap_per_shard = capacity / shard_count;
     let mut shards = Vec::with_capacity(shard_count);
     let mut offset = Vec::with_capacity(shard_count);
@@ -168,7 +163,6 @@ impl LRUTable {
       shards,
       offset,
       hasher: Default::default(),
-      page_pool,
     }
   }
   fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {
@@ -221,7 +215,7 @@ impl LRUTable {
         continue;
       }
 
-      let state = TempFrameState::new(self.page_pool.acquire()).to_arc();
+      let state = TempFrameState::new().to_arc();
       shard.temporary.insert(key, state.clone());
       return Peeked::DiskRead(TempGuard::new(state, s));
     }
