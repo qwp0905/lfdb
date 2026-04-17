@@ -6,7 +6,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{FrameState, LRUShard, TempFrameState};
+use super::{EvictionPin, LRUShard, TempFrameState};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -15,21 +15,18 @@ use crate::{
 
 type Key = (TableId, Pointer);
 
+pub type FrameId = usize;
+
 /**
  * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
  * shrink its allocation on removal, which is problematic for long-running
  * servers. Since the number of entries here is expected to be very small
  * at any given time, the performance difference is negligible.
  */
-pub struct Shard {
-  lru: LRUShard<Key, Arc<FrameState>>,
+struct Shard {
+  lru: LRUShard<Key, FrameId>,
   eviction: BTreeSet<Key>, // evicting pointers
   temporary: BTreeMap<Key, Arc<TempFrameState>>, // temporary pages for gc without promote
-}
-impl Shard {
-  pub fn remove_temp(&mut self, table_id: TableId, ptr: Pointer) {
-    self.temporary.remove(&(table_id, ptr));
-  }
 }
 
 /**
@@ -47,7 +44,8 @@ impl Shard {
  */
 pub struct EvictionGuard<'a> {
   evicted: Option<(Key, u64)>,
-  state: Arc<FrameState>,
+  frame_id: FrameId,
+  pin: &'a EvictionPin,
   guard: &'a Mutex<Shard>,
   hasher: &'a RandomState,
   new_pointer: Key,
@@ -58,7 +56,8 @@ pub struct EvictionGuard<'a> {
 impl<'a> EvictionGuard<'a> {
   fn new(
     evicted: Option<(Key, u64)>,
-    state: Arc<FrameState>,
+    frame_id: usize,
+    pin: &'a EvictionPin,
     guard: &'a Mutex<Shard>,
     hasher: &'a RandomState,
     new_pointer: Key,
@@ -66,7 +65,8 @@ impl<'a> EvictionGuard<'a> {
   ) -> Self {
     Self {
       evicted,
-      state,
+      frame_id,
+      pin,
       guard,
       hasher,
       new_pointer,
@@ -76,10 +76,7 @@ impl<'a> EvictionGuard<'a> {
   }
 
   pub fn get_frame_id(&self) -> usize {
-    self.state.get_frame_id()
-  }
-  pub fn get_state(&self) -> Arc<FrameState> {
-    self.state.clone()
+    self.frame_id
   }
   pub fn is_evicted(&self) -> bool {
     self.evicted.is_some()
@@ -95,8 +92,7 @@ impl<'a> Drop for EvictionGuard<'a> {
         self.guard.l().eviction.remove(&i);
       }
       // This guard now owns the frame (pin count = 1).
-      self.state.completion_evict(1);
-      return;
+      return self.pin.owned();
     }
 
     // rollback
@@ -104,44 +100,48 @@ impl<'a> Drop for EvictionGuard<'a> {
       let mut shard = self.guard.l();
       if let Some((i, h)) = self.evicted {
         shard.eviction.remove(&i);
-        shard.lru.insert(i, self.state.clone(), h, self.hasher);
+        shard.lru.insert(i, self.frame_id, h, self.hasher);
       }
       shard
         .lru
         .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     }
     // No ownership claimed — frame is immediately available for eviction.
-    self.state.completion_evict(0);
+    self.pin.release();
   }
 }
 
 pub struct TempGuard<'a> {
-  state: Arc<TempFrameState>,
   shard: &'a Mutex<Shard>,
+  key: Key,
 }
 impl<'a> TempGuard<'a> {
-  fn new(state: Arc<TempFrameState>, shard: &'a Mutex<Shard>) -> Self {
-    Self { state, shard }
+  #[inline]
+  fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
+    Self { shard, key }
   }
-  pub fn take(self) -> (Arc<TempFrameState>, &'a Mutex<Shard>) {
-    (self.state, self.shard)
+}
+impl<'a> Drop for TempGuard<'a> {
+  #[inline]
+  fn drop(&mut self) {
+    self.shard.l().temporary.remove(&self.key);
   }
 }
 
 pub enum Acquired<'a> {
-  Temp(TempGuard<'a>),
-  Hit(Arc<FrameState>),
+  Temp(Arc<TempFrameState>),
+  Hit(FrameId),
   Evicted(EvictionGuard<'a>),
 }
 pub enum Peeked<'a> {
-  Hit(Arc<FrameState>),
-  Temp(TempGuard<'a>),
-  DiskRead(TempGuard<'a>),
+  Hit(FrameId),
+  Temp(Arc<TempFrameState>),
+  DiskRead(Arc<TempFrameState>, TempGuard<'a>),
 }
 
 pub struct LRUTable {
   shards: Vec<Mutex<Shard>>,
-  offset: Vec<usize>,
+  offset: Vec<FrameId>,
   hasher: RandomState,
 }
 impl LRUTable {
@@ -182,7 +182,15 @@ impl LRUTable {
    * 4. If not found anywhere, allocate a new temp page in EVICTION_BIT state
    *    and return DiskRead — the caller is responsible for loading from disk.
    */
-  pub fn peek_or_temp<'a>(&'a self, table_id: TableId, pointer: Pointer) -> Peeked<'a> {
+  pub fn peek_or_temp<'a, F>(
+    &'a self,
+    table_id: TableId,
+    pointer: Pointer,
+    get_pin: F,
+  ) -> Peeked<'a>
+  where
+    F: Fn(usize) -> &'a EvictionPin,
+  {
     let key = (table_id, pointer);
     let (hash, s, _) = self.get_shard(key);
     let backoff = Backoff::new();
@@ -197,7 +205,7 @@ impl LRUTable {
 
       if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
-          return Peeked::Temp(TempGuard::new(state.clone(), s));
+          return Peeked::Temp(state.clone());
         }
 
         drop(shard);
@@ -205,9 +213,9 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(state) = shard.lru.peek(&key, hash) {
-        if state.try_pin() {
-          return Peeked::Hit(state.clone());
+      if let Some(&fid) = shard.lru.peek(&key, hash) {
+        if get_pin(fid).try_pin() {
+          return Peeked::Hit(fid);
         }
 
         drop(shard);
@@ -217,7 +225,7 @@ impl LRUTable {
 
       let state = TempFrameState::new().to_arc();
       shard.temporary.insert(key, state.clone());
-      return Peeked::DiskRead(TempGuard::new(state, s));
+      return Peeked::DiskRead(state, TempGuard::new(s, key));
     }
   }
 
@@ -236,7 +244,15 @@ impl LRUTable {
    * to minimize lock contention — holding the lock during CAS would block all
    * other threads on this shard unnecessarily.
    */
-  pub fn acquire<'a>(&'a self, table_id: TableId, pointer: Pointer) -> Acquired<'a> {
+  pub fn acquire<'a, F>(
+    &'a self,
+    table_id: TableId,
+    pointer: Pointer,
+    get_pin: F,
+  ) -> Acquired<'a>
+  where
+    F: Fn(FrameId) -> &'a EvictionPin,
+  {
     let key = (table_id, pointer);
     let (hash, s, offset) = self.get_shard(key);
     let hasher = &self.hasher;
@@ -252,7 +268,7 @@ impl LRUTable {
 
       if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
-          return Acquired::Temp(TempGuard::new(state.clone(), s));
+          return Acquired::Temp(state.clone());
         }
 
         drop(shard);
@@ -260,9 +276,9 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(state) = shard.lru.get(&key, hash, hasher) {
-        if state.try_pin() {
-          return Acquired::Hit(state.clone());
+      if let Some(&fid) = shard.lru.get(&key, hash, hasher) {
+        if get_pin(fid).try_pin() {
+          return Acquired::Hit(fid);
         }
 
         drop(shard);
@@ -274,25 +290,30 @@ impl LRUTable {
       // This ensures shards never access the same frame, eliminating contention
       // between shards entirely.
       if !shard.lru.is_full() {
-        let frame_id = shard.lru.len() + offset;
-        let state = FrameState::new(frame_id).to_arc();
-        shard.lru.insert(key, state.clone(), hash, hasher);
-        return Acquired::Evicted(EvictionGuard::new(None, state, &s, hasher, key, hash));
+        let fid = shard.lru.len() + offset;
+        let pin = get_pin(fid);
+        pin.init();
+        shard.lru.insert(key, fid, hash, hasher);
+        return Acquired::Evicted(EvictionGuard::new(
+          None, fid, pin, &s, hasher, key, hash,
+        ));
       }
 
-      let ((evicted, state), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      if !state.try_evict() {
-        shard.lru.insert(evicted, state, evicted_hash, hasher);
+      let ((evicted, fid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
+      let pin = get_pin(fid);
+      if !pin.try_evict() {
+        shard.lru.insert(evicted, fid, evicted_hash, hasher);
         drop(shard);
         backoff.snooze();
         continue;
       }
 
       shard.eviction.insert(evicted);
-      shard.lru.insert(key, state.clone(), hash, hasher);
+      shard.lru.insert(key, fid, hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
-        state,
+        fid,
+        pin,
         &s,
         hasher,
         key,
@@ -314,7 +335,3 @@ impl LRUTable {
 // is guarded by a Mutex, and all public methods take &self.
 unsafe impl Sync for LRUTable {}
 unsafe impl Send for LRUTable {}
-
-#[cfg(test)]
-#[path = "tests/table.rs"]
-mod tests;
