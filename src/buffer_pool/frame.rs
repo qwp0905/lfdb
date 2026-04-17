@@ -57,15 +57,17 @@ impl Frame {
     self.latch.l()
   }
 
+  /**
+   * Guard must be live until async write is done.
+   */
   #[inline]
-  pub fn flush_async(&self) -> Option<TaskHandle<()>> {
+  pub fn flush_async<'a>(&self, guard: &'a Guard) -> Option<TaskHandle<()>> {
     let handle = self.handle.try_pin()?;
 
-    let g = pin();
     Some(
       handle
         .disk()
-        .write_async(self.pointer, self.load_page(&g).borrow_unsafe()),
+        .write_async(self.pointer, self.load_page(guard).borrow_unsafe()),
     )
   }
 
