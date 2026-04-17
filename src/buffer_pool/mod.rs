@@ -21,6 +21,3 @@ use temp::*;
 
 mod frame;
 use frame::*;
-
-mod pin;
-use pin::*;
