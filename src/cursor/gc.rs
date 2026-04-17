@@ -1,6 +1,6 @@
 use std::{
   collections::{BTreeMap, HashSet, VecDeque},
-  mem::{forget, replace},
+  mem::replace,
   sync::Arc,
   time::Duration,
 };
@@ -296,8 +296,7 @@ fn run_release_table(
       unpinned.push(table)
     }
 
-    for table in unpinned.extract_if(.., |table| table.try_close().map(forget).is_some())
-    {
+    for table in unpinned.extract_if(.., |table| table.try_close()) {
       unreachable.push(table);
     }
 

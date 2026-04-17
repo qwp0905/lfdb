@@ -1,9 +1,9 @@
-use std::{ops::Deref, sync::Arc};
+use std::{mem::forget, ops::Deref, sync::Arc};
 
 use super::TableMetadata;
 use crate::{
   disk::{DiskController, FreeList, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{ExclusivePin, SharedToken},
   Error, Result,
 };
 
@@ -55,9 +55,13 @@ impl TableHandle {
     self.pin.is_exclusive()
   }
 
+  /**
+   * Permanently and exclusively fix the table pin.
+   * After calling this method, you cannot pin it forever.
+   */
   #[inline]
-  pub fn try_close(&self) -> Option<ExclusiveToken<'_>> {
-    self.pin.try_exclusive()
+  pub fn try_close(&self) -> bool {
+    self.pin.try_exclusive().map(forget).is_some()
   }
 
   pub fn truncate(&self) -> Result {
