@@ -1,6 +1,6 @@
 use std::{
   collections::{BTreeMap, HashSet, VecDeque},
-  mem::replace,
+  mem::{forget, replace},
   sync::Arc,
   time::Duration,
 };
@@ -283,6 +283,7 @@ fn run_release_table(
 ) -> impl FnMut(Option<(Arc<TableHandle>, TxId)>) {
   let mut tables = Vec::new();
   let mut unpinned = Vec::new();
+  let mut unreachable = Vec::new();
   move |recv| {
     if let Some((table, tx_id)) = recv {
       tables.push((table, tx_id));
@@ -295,12 +296,12 @@ fn run_release_table(
       unpinned.push(table)
     }
 
-    for table in unpinned.extract_if(.., |table| {
-      table
-        .try_close()
-        .map(|_token| table.truncate().is_ok())
-        .unwrap_or(false)
-    }) {
+    for table in unpinned.extract_if(.., |table| table.try_close().map(forget).is_some())
+    {
+      unreachable.push(table);
+    }
+
+    for table in unreachable.extract_if(.., |table| table.truncate().is_ok()) {
       mapper.remove(table.metadata().get_id());
     }
   }
