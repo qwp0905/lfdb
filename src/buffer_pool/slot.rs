@@ -1,6 +1,6 @@
 use std::{
   mem::{transmute, ManuallyDrop},
-  sync::{Arc, Mutex, MutexGuard},
+  sync::{Arc, MutexGuard},
 };
 
 use crossbeam::{
@@ -8,11 +8,11 @@ use crossbeam::{
   utils::Backoff,
 };
 
-use super::{EvictionPin, Frame, FrameId, Shard, TempFrameState};
+use super::{EvictionPin, Frame, FrameId, TempFrameState, TempGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
-  utils::{AtomicBitmap, ShortenedMutex, UnsafeBorrow},
+  utils::{AtomicBitmap, UnsafeBorrow},
 };
 
 /**
@@ -27,21 +27,21 @@ pub enum Slot<'a> {
   Page(PageSlot<'a>),
 }
 impl<'a> Slot<'a> {
+  #[inline]
   pub fn temp(
     state: Arc<TempFrameState>,
     pointer: Pointer,
-    handle: Option<Arc<TableHandle>>,
-    shard: &'a Mutex<Shard>,
+    guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
     page_pool: &'a PagePool<PAGE_SIZE>,
   ) -> Self {
     Self::Temp(TempSlot {
       state,
       pointer,
-      handle,
-      shard,
+      guard,
       page_pool,
     })
   }
+  #[inline]
   pub fn page(
     frame: &'a Frame,
     dirty: &'a AtomicBitmap,
@@ -57,6 +57,7 @@ impl<'a> Slot<'a> {
       page_pool,
     })
   }
+  #[inline]
   pub fn for_read<'b>(self) -> ReadonlySlot<'b>
   where
     'a: 'b,
@@ -67,6 +68,7 @@ impl<'a> Slot<'a> {
     }
   }
 
+  #[inline]
   pub fn for_write<'b>(self) -> WritableSlot<'b>
   where
     'a: 'b,
@@ -82,6 +84,7 @@ pub enum WritableSlot<'a> {
   Page(PageSlotWrite<'a>),
 }
 impl<'a> AsMut<Page<PAGE_SIZE>> for WritableSlot<'a> {
+  #[inline]
   fn as_mut(&mut self) -> &mut Page<PAGE_SIZE> {
     match self {
       WritableSlot::Temp(temp) => temp.shadow.as_mut(),
@@ -90,6 +93,7 @@ impl<'a> AsMut<Page<PAGE_SIZE>> for WritableSlot<'a> {
   }
 }
 impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
+  #[inline]
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     match self {
       WritableSlot::Temp(temp) => temp.shadow.as_ref(),
@@ -98,6 +102,7 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
   }
 }
 impl<'a> WritableSlot<'a> {
+  #[inline]
   pub fn get_pointer(&self) -> Pointer {
     match self {
       WritableSlot::Temp(temp) => temp.pointer,
@@ -111,6 +116,7 @@ pub enum ReadonlySlot<'a> {
   Page(PageSlotRead<'a>),
 }
 impl<'a> AsRef<Page<PAGE_SIZE>> for ReadonlySlot<'a> {
+  #[inline]
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     match self {
       ReadonlySlot::Temp(temp) => temp.page.borrow_unsafe().as_ref(),
@@ -127,6 +133,7 @@ pub struct PageSlot<'a> {
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
 impl<'a> PageSlot<'a> {
+  #[inline]
   fn for_read<'b>(self) -> PageSlotRead<'b>
   where
     'a: 'b,
@@ -189,6 +196,7 @@ pub struct PageSlotRead<'a> {
   _guard: Guard,
 }
 impl<'a> Drop for PageSlotRead<'a> {
+  #[inline]
   fn drop(&mut self) {
     self.pin.unpin();
   }
@@ -197,24 +205,23 @@ impl<'a> Drop for PageSlotRead<'a> {
 pub struct TempSlot<'a> {
   state: Arc<TempFrameState>,
   pointer: Pointer,
-  handle: Option<Arc<TableHandle>>,
-  shard: &'a Mutex<Shard>,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
 impl<'a> TempSlot<'a> {
+  #[inline]
   fn for_read<'b>(self) -> TempSlotRead<'b>
   where
     'a: 'b,
   {
-    let guard = pin();
-    let page = self.state.load_page(&guard);
+    let write_guard = pin();
+    let page = self.state.load_page(&write_guard);
     TempSlotRead {
       state: self.state,
       page,
       pointer: self.pointer,
-      handle: self.handle,
-      shard: self.shard,
-      guard,
+      frame_guard: self.guard,
+      write_guard,
     }
   }
 
@@ -233,8 +240,7 @@ impl<'a> TempSlot<'a> {
       shadow: ManuallyDrop::new(shadow),
       state: self.state.clone(),
       pointer: self.pointer,
-      handle: self.handle,
-      shard: self.shard,
+      guard: self.guard,
       latch: ManuallyDrop::new(unsafe { transmute(latch) }),
     }
   }
@@ -253,13 +259,12 @@ pub struct TempSlotWrite<'a> {
   shadow: ManuallyDrop<PageRef<PAGE_SIZE>>,
   state: Arc<TempFrameState>,
   pointer: Pointer,
-  handle: Option<Arc<TableHandle>>,
-  shard: &'a Mutex<Shard>,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
   latch: ManuallyDrop<MutexGuard<'a, ()>>,
 }
 
 impl<'a> TempSlotWrite<'a> {
-  fn release(&mut self, handle: Arc<TableHandle>) {
+  fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
     unsafe { ManuallyDrop::drop(&mut self.latch) };
     let backoff = Backoff::new();
     while !self.state.try_evict() {
@@ -268,10 +273,6 @@ impl<'a> TempSlotWrite<'a> {
     let guard = pin();
     let page = self.state.load_page(&guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
-    self
-      .shard
-      .l()
-      .remove_temp(handle.metadata().get_id(), self.pointer);
   }
 }
 impl<'a> Drop for TempSlotWrite<'a> {
@@ -279,10 +280,10 @@ impl<'a> Drop for TempSlotWrite<'a> {
     self
       .state
       .store(unsafe { ManuallyDrop::take(&mut self.shadow) });
-    // handle identifies the creator of this temp page, who is responsible
+    // guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some(handle) = self.handle.take() {
-      return self.release(handle);
+    if let Some((guard, handle)) = self.guard.take() {
+      return self.release(handle, guard);
     }
     self.state.mark_dirty();
     self.state.unpin();
@@ -303,32 +304,29 @@ pub struct TempSlotRead<'a> {
   state: Arc<TempFrameState>,
   page: *const PageRef<PAGE_SIZE>,
   pointer: Pointer,
-  handle: Option<Arc<TableHandle>>,
-  shard: &'a Mutex<Shard>,
-  guard: Guard,
+  frame_guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
+  write_guard: Guard,
 }
 impl<'a> TempSlotRead<'a> {
-  fn release(&mut self, handle: Arc<TableHandle>) {
+  fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
     let backoff = Backoff::new();
     while !self.state.try_evict() {
       backoff.snooze();
     }
-    if self.state.is_dirty() {
-      let page = self.state.load_page(&self.guard);
-      let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
+    if !self.state.is_dirty() {
+      return;
     }
-    self
-      .shard
-      .l()
-      .remove_temp(handle.metadata().get_id(), self.pointer);
+
+    let page = self.state.load_page(&self.write_guard);
+    let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
   }
 }
 impl<'a> Drop for TempSlotRead<'a> {
   fn drop(&mut self) {
-    // handle identifies the creator of this temp page, who is responsible
+    // frame_guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some(handle) = self.handle.take() {
-      return self.release(handle);
+    if let Some((guard, handle)) = self.frame_guard.take() {
+      return self.release(handle, guard);
     }
 
     self.state.unpin();

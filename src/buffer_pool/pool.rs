@@ -9,7 +9,7 @@ use crate::{
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::{once, BackgroundThread, WorkBuilder},
-  utils::{AtomicBitmap, LogFilter, ShortenedMutex, ToArc, ToBox},
+  utils::{AtomicBitmap, LogFilter, ToArc, ToBox},
 };
 
 const PRE_FLUSH_THRESHOLD: usize = 100;
@@ -95,30 +95,25 @@ impl BufferPool {
    */
   pub fn peek(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
     let table_id = handle.metadata().get_id();
-    let (state, shard) = match self
+    let (state, guard) = match self
       .table
       .peek_or_temp(table_id, pointer, |id| &self.pins[id])
     {
       Peeked::Hit(id) => return Ok(self.page_slot(id)),
-      Peeked::Temp(temp) => {
-        let (state, shard) = temp.take();
-        return Ok(Slot::temp(state, pointer, None, shard, &self.page_pool));
+      Peeked::Temp(state) => {
+        return Ok(Slot::temp(state, pointer, None, &self.page_pool))
       }
-      Peeked::DiskRead(temp) => temp.take(),
+      Peeked::DiskRead(state, guard) => (state, guard),
     };
 
     let mut page = self.page_pool.acquire();
-    if let Err(err) = handle.disk().read(pointer, &mut page) {
-      shard.l().remove_temp(table_id, pointer);
-      return Err(err);
-    }
+    handle.disk().read(pointer, &mut page)?;
     state.store(page);
     state.completion_evict();
     Ok(Slot::temp(
       state,
       pointer,
-      Some(handle),
-      shard,
+      Some((guard, handle)),
       &self.page_pool,
     ))
   }
@@ -126,10 +121,9 @@ impl BufferPool {
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
     let table_id = handle.metadata().get_id();
     let mut guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
-      Acquired::Temp(temp) => {
-        let (state, shard) = temp.take();
+      Acquired::Temp(state) => {
         self.metrics.buffer_pool_cache_hit.inc();
-        return Ok(Slot::temp(state, pointer, None, shard, &self.page_pool));
+        return Ok(Slot::temp(state, pointer, None, &self.page_pool));
       }
       Acquired::Hit(frame_id) => {
         self.metrics.buffer_pool_cache_hit.inc();

@@ -23,15 +23,10 @@ pub type FrameId = usize;
  * servers. Since the number of entries here is expected to be very small
  * at any given time, the performance difference is negligible.
  */
-pub struct Shard {
+struct Shard {
   lru: LRUShard<Key, FrameId>,
   eviction: BTreeSet<Key>, // evicting pointers
   temporary: BTreeMap<Key, Arc<TempFrameState>>, // temporary pages for gc without promote
-}
-impl Shard {
-  pub fn remove_temp(&mut self, table_id: TableId, ptr: Pointer) {
-    self.temporary.remove(&(table_id, ptr));
-  }
 }
 
 /**
@@ -117,32 +112,36 @@ impl<'a> Drop for EvictionGuard<'a> {
 }
 
 pub struct TempGuard<'a> {
-  state: Arc<TempFrameState>,
   shard: &'a Mutex<Shard>,
+  key: Key,
 }
 impl<'a> TempGuard<'a> {
-  fn new(state: Arc<TempFrameState>, shard: &'a Mutex<Shard>) -> Self {
-    Self { state, shard }
+  #[inline]
+  fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
+    Self { shard, key }
   }
-  pub fn take(self) -> (Arc<TempFrameState>, &'a Mutex<Shard>) {
-    (self.state, self.shard)
+}
+impl<'a> Drop for TempGuard<'a> {
+  #[inline]
+  fn drop(&mut self) {
+    self.shard.l().temporary.remove(&self.key);
   }
 }
 
 pub enum Acquired<'a> {
-  Temp(TempGuard<'a>),
-  Hit(usize),
+  Temp(Arc<TempFrameState>),
+  Hit(FrameId),
   Evicted(EvictionGuard<'a>),
 }
 pub enum Peeked<'a> {
-  Hit(usize),
-  Temp(TempGuard<'a>),
-  DiskRead(TempGuard<'a>),
+  Hit(FrameId),
+  Temp(Arc<TempFrameState>),
+  DiskRead(Arc<TempFrameState>, TempGuard<'a>),
 }
 
 pub struct LRUTable {
   shards: Vec<Mutex<Shard>>,
-  offset: Vec<usize>,
+  offset: Vec<FrameId>,
   hasher: RandomState,
 }
 impl LRUTable {
@@ -206,7 +205,7 @@ impl LRUTable {
 
       if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
-          return Peeked::Temp(TempGuard::new(state.clone(), s));
+          return Peeked::Temp(state.clone());
         }
 
         drop(shard);
@@ -226,7 +225,7 @@ impl LRUTable {
 
       let state = TempFrameState::new().to_arc();
       shard.temporary.insert(key, state.clone());
-      return Peeked::DiskRead(TempGuard::new(state, s));
+      return Peeked::DiskRead(state, TempGuard::new(s, key));
     }
   }
 
@@ -269,7 +268,7 @@ impl LRUTable {
 
       if let Some(state) = shard.temporary.get(&key) {
         if state.try_pin() {
-          return Acquired::Temp(TempGuard::new(state.clone(), s));
+          return Acquired::Temp(state.clone());
         }
 
         drop(shard);
