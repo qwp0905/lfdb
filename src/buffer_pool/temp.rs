@@ -1,15 +1,17 @@
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Mutex, MutexGuard,
+use std::{
+  marker::PhantomData,
+  mem::transmute,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, MutexGuard,
+  },
 };
 
 use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
 
-use super::EvictionPin;
-
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::ShortenedMutex,
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 /**
@@ -24,7 +26,7 @@ use crate::{
  *    the LRU eviction path.
  */
 pub struct TempFrameState {
-  pin: EvictionPin,
+  pin: ExclusivePin,
   page: Atomic<PageRef<PAGE_SIZE>>,
   dirty: AtomicBool,
   latch: Mutex<()>,
@@ -33,7 +35,7 @@ pub struct TempFrameState {
 impl TempFrameState {
   pub fn new() -> Self {
     Self {
-      pin: EvictionPin::evicting(),
+      pin: ExclusivePin::new(),
       page: Atomic::null(),
       dirty: AtomicBool::new(false),
       latch: Default::default(),
@@ -46,8 +48,8 @@ impl TempFrameState {
    * The owner is always responsible for cleanup, so eviction
    * is safe as soon as no other reader holds a pin.
    */
-  pub fn try_evict(&self) -> bool {
-    self.pin.try_evict_owned()
+  pub fn try_evict(&self) -> Option<ExclusiveToken<'_>> {
+    self.pin.try_exclusive()
   }
 
   pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
@@ -73,26 +75,13 @@ impl TempFrameState {
   }
 
   #[inline]
-  pub fn try_pin(&self) -> bool {
-    self.pin.try_pin()
+  pub fn try_pin(&self) -> Option<SharedToken<'_>> {
+    self.pin.try_shared()
   }
 
+  #[inline]
   pub fn latch(&self) -> MutexGuard<'_, ()> {
     self.latch.l()
-  }
-
-  /**
-   * Releases the eviction lock and sets the pin count to the given value.
-   * Safe to use a plain store here because the eviction flag guarantees
-   * exclusive access — no other thread can pin or evict while it is set.
-   */
-  #[inline]
-  pub fn completion_evict(&self) {
-    self.pin.owned();
-  }
-
-  pub fn unpin(&self) {
-    self.pin.unpin()
   }
 }
 impl Drop for TempFrameState {
@@ -103,5 +92,62 @@ impl Drop for TempFrameState {
       return;
     }
     unsafe { g.defer_destroy(old) };
+  }
+}
+
+pub struct TempStateRef<'a, T> {
+  state: Arc<TempFrameState>,
+  token: T,
+  _marker: PhantomData<&'a ()>,
+}
+impl<'a, T> TempStateRef<'a, T> {
+  #[inline]
+  pub fn state(&self) -> &TempFrameState {
+    &self.state
+  }
+}
+
+/**
+ * transmute is allowed since Arc<TempFrameState> is valid until this struct.
+ */
+impl<'a> TempStateRef<'a, SharedToken<'a>> {
+  #[inline]
+  pub fn shared(state: &Arc<TempFrameState>) -> Option<Self> {
+    let token = state.try_pin()?;
+    Some(Self {
+      state: state.clone(),
+      token: unsafe { transmute(token) },
+      _marker: PhantomData,
+    })
+  }
+
+  #[inline]
+  pub fn upgrade(self) -> TempStateRef<'a, ExclusiveToken<'a>> {
+    TempStateRef {
+      state: self.state,
+      token: self.token.upgrade(),
+      _marker: self._marker,
+    }
+  }
+}
+
+impl<'a> TempStateRef<'a, ExclusiveToken<'a>> {
+  #[inline]
+  pub fn exclusive(state: &Arc<TempFrameState>) -> Self {
+    let token = state.try_evict().unwrap();
+    Self {
+      state: state.clone(),
+      token: unsafe { transmute(token) },
+      _marker: PhantomData,
+    }
+  }
+
+  #[inline]
+  pub fn downgrade(self) -> TempStateRef<'a, SharedToken<'a>> {
+    TempStateRef {
+      state: self.state,
+      token: self.token.downgrade(),
+      _marker: self._marker,
+    }
   }
 }

@@ -1,16 +1,17 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
   hash::{BuildHasher, RandomState},
+  mem::ManuallyDrop,
   sync::{Arc, Mutex},
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{EvictionPin, LRUShard, TempFrameState};
+use super::{LRUShard, TempFrameState, TempStateRef};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
 };
 
 type Key = (TableId, Pointer);
@@ -45,7 +46,7 @@ struct Shard {
 pub struct EvictionGuard<'a> {
   evicted: Option<(Key, u64)>,
   frame_id: FrameId,
-  pin: &'a EvictionPin,
+  token: ManuallyDrop<ExclusiveToken<'a>>,
   guard: &'a Mutex<Shard>,
   hasher: &'a RandomState,
   new_pointer: Key,
@@ -57,7 +58,7 @@ impl<'a> EvictionGuard<'a> {
   fn new(
     evicted: Option<(Key, u64)>,
     frame_id: usize,
-    pin: &'a EvictionPin,
+    token: ExclusiveToken<'a>,
     guard: &'a Mutex<Shard>,
     hasher: &'a RandomState,
     new_pointer: Key,
@@ -66,7 +67,7 @@ impl<'a> EvictionGuard<'a> {
     Self {
       evicted,
       frame_id,
-      pin,
+      token: ManuallyDrop::new(token),
       guard,
       hasher,
       new_pointer,
@@ -81,8 +82,9 @@ impl<'a> EvictionGuard<'a> {
   pub fn is_evicted(&self) -> bool {
     self.evicted.is_some()
   }
-  pub fn commit(&mut self) {
+  pub fn commit(mut self) -> SharedToken<'a> {
     self.committed = true;
+    unsafe { ManuallyDrop::take(&mut self.token) }.downgrade()
   }
 }
 impl<'a> Drop for EvictionGuard<'a> {
@@ -91,8 +93,7 @@ impl<'a> Drop for EvictionGuard<'a> {
       if let Some((i, _)) = self.evicted {
         self.guard.l().eviction.remove(&i);
       }
-      // This guard now owns the frame (pin count = 1).
-      return self.pin.owned();
+      return;
     }
 
     // rollback
@@ -107,7 +108,7 @@ impl<'a> Drop for EvictionGuard<'a> {
         .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     }
     // No ownership claimed — frame is immediately available for eviction.
-    self.pin.release();
+    unsafe { ManuallyDrop::drop(&mut self.token) };
   }
 }
 
@@ -129,14 +130,14 @@ impl<'a> Drop for TempGuard<'a> {
 }
 
 pub enum Acquired<'a> {
-  Temp(Arc<TempFrameState>),
-  Hit(FrameId),
+  Hit(FrameId, SharedToken<'a>),
+  Temp(TempStateRef<'a, SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 pub enum Peeked<'a> {
-  Hit(FrameId),
-  Temp(Arc<TempFrameState>),
-  DiskRead(Arc<TempFrameState>, TempGuard<'a>),
+  Hit(FrameId, SharedToken<'a>),
+  Temp(TempStateRef<'a, SharedToken<'a>>),
+  DiskRead(TempStateRef<'a, ExclusiveToken<'a>>, TempGuard<'a>),
 }
 
 pub struct LRUTable {
@@ -179,7 +180,7 @@ impl LRUTable {
    * 1. If the pointer is being evicted, wait.
    * 2. If a temp page is already allocated for this pointer, return it.
    * 3. If the pointer is in the LRU, return it without promotion.
-   * 4. If not found anywhere, allocate a new temp page in EVICTION_BIT state
+   * 4. If not found anywhere, allocate a new temp page exclusive state
    *    and return DiskRead — the caller is responsible for loading from disk.
    */
   pub fn peek_or_temp<'a, F>(
@@ -189,7 +190,7 @@ impl LRUTable {
     get_pin: F,
   ) -> Peeked<'a>
   where
-    F: Fn(usize) -> &'a EvictionPin,
+    F: Fn(usize) -> &'a ExclusivePin,
   {
     let key = (table_id, pointer);
     let (hash, s, _) = self.get_shard(key);
@@ -204,8 +205,8 @@ impl LRUTable {
       }
 
       if let Some(state) = shard.temporary.get(&key) {
-        if state.try_pin() {
-          return Peeked::Temp(state.clone());
+        if let Some(state_ref) = TempStateRef::shared(state) {
+          return Peeked::Temp(state_ref);
         }
 
         drop(shard);
@@ -214,8 +215,8 @@ impl LRUTable {
       }
 
       if let Some(&fid) = shard.lru.peek(&key, hash) {
-        if get_pin(fid).try_pin() {
-          return Peeked::Hit(fid);
+        if let Some(token) = get_pin(fid).try_shared() {
+          return Peeked::Hit(fid, token);
         }
 
         drop(shard);
@@ -224,8 +225,9 @@ impl LRUTable {
       }
 
       let state = TempFrameState::new().to_arc();
-      shard.temporary.insert(key, state.clone());
-      return Peeked::DiskRead(state, TempGuard::new(s, key));
+      let state_ref = TempStateRef::exclusive(&state);
+      shard.temporary.insert(key, state);
+      return Peeked::DiskRead(state_ref, TempGuard::new(s, key));
     }
   }
 
@@ -251,7 +253,7 @@ impl LRUTable {
     get_pin: F,
   ) -> Acquired<'a>
   where
-    F: Fn(FrameId) -> &'a EvictionPin,
+    F: Fn(FrameId) -> &'a ExclusivePin,
   {
     let key = (table_id, pointer);
     let (hash, s, offset) = self.get_shard(key);
@@ -267,8 +269,8 @@ impl LRUTable {
       }
 
       if let Some(state) = shard.temporary.get(&key) {
-        if state.try_pin() {
-          return Acquired::Temp(state.clone());
+        if let Some(state_ref) = TempStateRef::shared(state) {
+          return Acquired::Temp(state_ref);
         }
 
         drop(shard);
@@ -277,8 +279,8 @@ impl LRUTable {
       }
 
       if let Some(&fid) = shard.lru.get(&key, hash, hasher) {
-        if get_pin(fid).try_pin() {
-          return Acquired::Hit(fid);
+        if let Some(token) = get_pin(fid).try_shared() {
+          return Acquired::Hit(fid, token);
         }
 
         drop(shard);
@@ -291,29 +293,30 @@ impl LRUTable {
       // between shards entirely.
       if !shard.lru.is_full() {
         let fid = shard.lru.len() + offset;
-        let pin = get_pin(fid);
-        pin.init();
+        let token = get_pin(fid).try_exclusive().unwrap();
         shard.lru.insert(key, fid, hash, hasher);
         return Acquired::Evicted(EvictionGuard::new(
-          None, fid, pin, &s, hasher, key, hash,
+          None, fid, token, &s, hasher, key, hash,
         ));
       }
 
       let ((evicted, fid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      let pin = get_pin(fid);
-      if !pin.try_evict() {
-        shard.lru.insert(evicted, fid, evicted_hash, hasher);
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
+      let token = match get_pin(fid).try_exclusive() {
+        Some(t) => t,
+        None => {
+          shard.lru.insert(evicted, fid, evicted_hash, hasher);
+          drop(shard);
+          backoff.snooze();
+          continue;
+        }
+      };
 
       shard.eviction.insert(evicted);
       shard.lru.insert(key, fid, hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         fid,
-        pin,
+        token,
         &s,
         hasher,
         key,
