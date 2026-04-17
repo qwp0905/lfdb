@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
-use super::{max_iov, DirectIO, PagePool, PageRef, Pointer, Pread, Pwrite, Pwritev};
+use super::{max_iov, DirectIO, PageRef, Pointer, Pread, Pwrite, Pwritev};
 use crate::{
   error::{Error, Result},
   metrics::MetricsRegistry,
@@ -20,42 +20,37 @@ use crate::{
 
 type ThreadArg<const N: usize> = (Arc<File>, Arc<WriteQueue<N>>, Arc<AtomicBool>);
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
-type WriteTask<const N: usize> = (Pointer, PageRef<N>);
+type WriteTask<const N: usize> = (Pointer, &'static PageRef<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
   queue: Arc<WriteQueue<N>>,
   occupied: Arc<AtomicBool>,
-  page_pool: Arc<PagePool<N>>,
   thread: Arc<WriteThread<N>>,
 }
 impl<const N: usize> WriteHandle<N> {
-  fn new(page_pool: Arc<PagePool<N>>, thread: Arc<WriteThread<N>>) -> Self {
+  fn new(thread: Arc<WriteThread<N>>) -> Self {
     Self {
       queue: SegQueue::new().to_arc(),
       occupied: AtomicBool::new(false).to_arc(),
-      page_pool,
       thread,
     }
   }
 
-  fn execute<'a>(
+  fn execute(
     &self,
     file: &Arc<File>,
     pointer: Pointer,
-    page: &'a PageRef<N>,
+    page: &'static PageRef<N>,
   ) -> TaskHandle<()> {
     // Copy the page into a pooled buffer before sending to the writer thread.
     // The original PageRef is held under a lock, which cannot be transferred
     // across thread boundaries. Copying also releases the lock immediately,
     // allowing concurrent access while IO happens in the background.
 
-    let mut pooled = self.page_pool.acquire();
-    pooled.as_mut().copy_from(page.as_ref());
-
     let (o, f) = oneshot();
     let handle = TaskHandle::from(o);
-    self.queue.push(((pointer, pooled), f));
+    self.queue.push(((pointer, page), f));
     if self.occupied.fetch_or(true, Ordering::Release) {
       return handle;
     }
@@ -69,34 +64,25 @@ impl<const N: usize> WriteHandle<N> {
 
 pub struct IOPool<const N: usize> {
   thread: Arc<WriteThread<N>>,
-  page_pool: Arc<PagePool<N>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl<const N: usize> IOPool<N> {
   const SIZE: Pointer = N as Pointer;
 
-  pub fn new(
-    thread_count: usize,
-    page_pool: Arc<PagePool<N>>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Self {
+  pub fn new(thread_count: usize, metrics: Arc<MetricsRegistry>) -> Self {
     let thread = WorkBuilder::new()
       .name("io pool")
       .multi(thread_count)
       .shared(Self::handle_thread(metrics.clone()))
       .to_arc();
-    Self {
-      thread,
-      page_pool,
-      metrics,
-    }
+    Self { thread, metrics }
   }
 
   #[inline]
   pub fn open_controller<P: AsRef<Path>>(&self, path: P) -> Result<DiskController<N>> {
     DiskController::open(
       path,
-      WriteHandle::new(self.page_pool.clone(), self.thread.clone()),
+      WriteHandle::new(self.thread.clone()),
       self.metrics.clone(),
     )
   }
@@ -235,15 +221,15 @@ impl<const N: usize> DiskController<N> {
   }
 
   #[inline]
-  pub fn write_async<'a>(
+  pub fn write_async(
     &self,
     pointer: Pointer,
-    page: &'a PageRef<N>,
+    page: &'static PageRef<N>,
   ) -> TaskHandle<()> {
     self.write_handle.execute(&self.file, pointer, page)
   }
   #[inline]
-  pub fn write<'a>(&self, pointer: Pointer, page: &'a PageRef<N>) -> Result {
+  pub fn write(&self, pointer: Pointer, page: &'static PageRef<N>) -> Result {
     self.write_async(pointer, page).wait()
   }
 

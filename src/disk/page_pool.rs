@@ -1,6 +1,6 @@
 use std::{mem::ManuallyDrop, sync::Arc};
 
-use crossbeam::queue::ArrayQueue;
+use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
 use super::Page;
 use crate::utils::ToArc;
@@ -62,10 +62,14 @@ impl<const N: usize> PagePool<N> {
   }
 
   pub fn acquire(&self) -> PageRef<N> {
-    match self.store.data.pop() {
-      Some(page) => PageRef::from_exists(self.store.clone(), page),
-      None => PageRef::new(self.store.clone()),
+    let backoff = Backoff::new();
+    while !backoff.is_completed() {
+      if let Some(page) = self.store.data.pop() {
+        return PageRef::from_exists(self.store.clone(), page);
+      }
+      backoff.snooze();
     }
+    PageRef::new(self.store.clone())
   }
 
   #[allow(unused)]
@@ -81,13 +85,6 @@ impl<const N: usize> PageStore<N> {
   fn new(cap: usize) -> Self {
     Self {
       data: ArrayQueue::new(cap),
-    }
-  }
-}
-impl<const N: usize> Drop for PageStore<N> {
-  fn drop(&mut self) {
-    while let Some(page) = self.data.pop() {
-      drop(page);
     }
   }
 }

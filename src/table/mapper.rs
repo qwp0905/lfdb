@@ -7,7 +7,7 @@ use std::{
 
 use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
 use crate::{
-  disk::{IOPool, PagePool, PAGE_SIZE},
+  disk::{IOPool, PAGE_SIZE},
   metrics::MetricsRegistry,
   utils::{ShortenedRwLock, ToArc},
   Error, Result,
@@ -36,12 +36,8 @@ pub struct TableMapper {
   is_new: bool,
 }
 impl TableMapper {
-  pub fn new(
-    config: TableConfig,
-    page_pool: Arc<PagePool<PAGE_SIZE>>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Result<Self> {
-    let io_pool = IOPool::new(config.io_thread_count, page_pool, metrics.clone());
+  pub fn new(config: TableConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
+    let io_pool = IOPool::new(config.io_thread_count, metrics.clone());
 
     let path = to_path(&config.base_path, META_TABLE_ID);
     let is_new = !exists(&path).map_err(Error::IO)?;

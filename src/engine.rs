@@ -7,7 +7,7 @@ use std::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use crate::{
@@ -55,6 +55,7 @@ impl Engine {
   where
     T: AsRef<Path>,
   {
+    let st = Instant::now();
     let metrics_registry = MetricsRegistry::new().to_arc();
     let logger = LogFilter::new(config.log_level, config.logger);
     logger.info(|| "start engine");
@@ -89,12 +90,7 @@ impl Engine {
     let buffer_pool =
       BufferPool::open(buffer_pool_config, logger.clone(), metrics_registry.clone())?
         .to_arc();
-    let tables = TableMapper::new(
-      table_config,
-      buffer_pool.page_pool(),
-      metrics_registry.clone(),
-    )?
-    .to_arc();
+    let tables = TableMapper::new(table_config, metrics_registry.clone())?.to_arc();
 
     let (wal, replay) = WAL::replay(&wal_config, logger.clone())?;
     let wal = wal.to_arc();
@@ -138,7 +134,7 @@ impl Engine {
       )
       .to_arc();
 
-      logger.info(|| "engine bootstrapped.");
+      logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
       return Ok(Self {
         orchestrator,
         available: AtomicBool::new(true),
@@ -217,7 +213,7 @@ impl Engine {
     )?
     .to_arc();
 
-    logger.info(|| "engine bootstrapped.");
+    logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
     Ok(Self {
       orchestrator,
       available: AtomicBool::new(true),

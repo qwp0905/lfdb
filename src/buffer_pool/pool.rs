@@ -2,13 +2,15 @@ use std::{
   collections::BTreeMap, mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration,
 };
 
+use crossbeam::epoch::{self, Guard};
+
 use super::{Acquired, EvictionPin, Frame, LRUTable, Peeked, Slot};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
-  thread::{once, BackgroundThread, WorkBuilder},
+  thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
   utils::{AtomicBitmap, LogFilter, ToArc, ToBox},
 };
 
@@ -146,7 +148,11 @@ impl BufferPool {
 
     let old = unsafe { ptr.replace(new_frame) };
     if self.dirty.contains(frame_id) {
-      old.flush_async().map(|h| h.wait()).unwrap_or(Ok(()))?;
+      let guard = epoch::pin();
+      old
+        .flush_async(&guard)
+        .map(|h| h.wait())
+        .unwrap_or(Ok(()))?;
       self.dirty.remove(frame_id);
     }
 
@@ -172,10 +178,6 @@ impl BufferPool {
     Ok(())
   }
 
-  pub fn page_pool(&self) -> Arc<PagePool<PAGE_SIZE>> {
-    self.page_pool.clone()
-  }
-
   pub fn close(&self) {
     self.pre_flush.close();
   }
@@ -196,8 +198,13 @@ fn handle_flush(
   pins: Arc<Vec<EvictionPin>>,
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
+  const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
+  fn flush(waiting: &mut Vec<(Guard, TaskHandle<()>)>) -> Result {
+    waiting.drain(..).map(|(_guard, w)| w.wait()).collect()
+  }
+
   move |trigger| {
-    let mut waits = Vec::new();
+    let mut waits = Vec::with_capacity(PRE_FLUSH_THRESHOLD);
     let mut handles = BTreeMap::new();
 
     if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
@@ -225,17 +232,23 @@ fn handle_flush(
         // buffer and sort them, then batch into a single pwritev call.
         // Writing synchronously one by one would bypass this optimization
         // and issue a separate syscall per page.
-        if let Some(r) = frame.flush_async() {
-          waits.push(r);
+        let guard = epoch::pin();
+        if let Some(r) = frame.flush_async(&guard) {
+          waits.push((guard, r));
           handles
             .entry(frame.handle().metadata().get_id())
             .or_insert_with(|| frame.handle().clone());
         }
       }
       pin.release();
+
+      if waits.len() < MAX_BATCHING {
+        continue;
+      }
+      flush(&mut waits)?;
     }
 
-    waits.into_iter().map(|w| w.wait()).collect::<Result>()?;
+    flush(&mut waits)?;
 
     handles
       .into_values()
