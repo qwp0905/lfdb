@@ -8,7 +8,7 @@ use crossbeam::{
   utils::Backoff,
 };
 
-use super::{Frame, FrameState, Shard, TempFrameState};
+use super::{EvictionPin, Frame, FrameId, Shard, TempFrameState};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
@@ -45,13 +45,15 @@ impl<'a> Slot<'a> {
   pub fn page(
     frame: &'a Frame,
     dirty: &'a AtomicBitmap,
-    state: Arc<FrameState>,
+    frame_id: FrameId,
+    pin: &'a EvictionPin,
     page_pool: &'a PagePool<PAGE_SIZE>,
   ) -> Self {
     Self::Page(PageSlot {
       frame,
       dirty,
-      state,
+      frame_id,
+      pin,
       page_pool,
     })
   }
@@ -106,7 +108,7 @@ impl<'a> WritableSlot<'a> {
 
 pub enum ReadonlySlot<'a> {
   Temp(TempSlotRead<'a>),
-  Page(PageSlotRead),
+  Page(PageSlotRead<'a>),
 }
 impl<'a> AsRef<Page<PAGE_SIZE>> for ReadonlySlot<'a> {
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
@@ -120,17 +122,21 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for ReadonlySlot<'a> {
 pub struct PageSlot<'a> {
   frame: &'a Frame,
   dirty: &'a AtomicBitmap,
-  state: Arc<FrameState>,
+  frame_id: FrameId,
+  pin: &'a EvictionPin,
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
 impl<'a> PageSlot<'a> {
-  fn for_read(self) -> PageSlotRead {
+  fn for_read<'b>(self) -> PageSlotRead<'b>
+  where
+    'a: 'b,
+  {
     let guard = pin();
     let page = self.frame.load_page(&guard);
     PageSlotRead {
       _guard: guard,
       page,
-      state: self.state,
+      pin: self.pin,
     }
   }
 
@@ -148,7 +154,8 @@ impl<'a> PageSlot<'a> {
       shadow: ManuallyDrop::new(shadow),
       frame: self.frame,
       dirty: self.dirty,
-      state: self.state,
+      frame_id: self.frame_id,
+      pin: self.pin,
       _latch,
     }
   }
@@ -157,7 +164,8 @@ pub struct PageSlotWrite<'a> {
   shadow: ManuallyDrop<PageRef<PAGE_SIZE>>,
   frame: &'a Frame,
   dirty: &'a AtomicBitmap,
-  state: Arc<FrameState>,
+  frame_id: FrameId,
+  pin: &'a EvictionPin,
   _latch: MutexGuard<'a, ()>,
 }
 
@@ -167,22 +175,22 @@ impl<'a> Drop for PageSlotWrite<'a> {
     // We cannot know whether the caller actually modified it without expensive
     // byte-level comparison. The cost of an occasional unnecessary flush is
     // far lower than tracking write intent.
-    self.dirty.insert(self.state.get_frame_id());
+    self.dirty.insert(self.frame_id);
     self
       .frame
       .store(unsafe { ManuallyDrop::take(&mut self.shadow) });
-    self.state.unpin();
+    self.pin.unpin();
   }
 }
 
-pub struct PageSlotRead {
+pub struct PageSlotRead<'a> {
   page: *const PageRef<PAGE_SIZE>,
-  state: Arc<FrameState>,
+  pin: &'a EvictionPin,
   _guard: Guard,
 }
-impl Drop for PageSlotRead {
+impl<'a> Drop for PageSlotRead<'a> {
   fn drop(&mut self) {
-    self.state.unpin();
+    self.pin.unpin();
   }
 }
 
