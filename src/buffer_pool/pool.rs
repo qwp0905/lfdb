@@ -212,13 +212,13 @@ fn handle_flush(
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
-      let _token = match pins[id].try_exclusive() {
-        Some(t) => t,
-        None => continue,
-      };
-
-      let frame = unsafe { frame[id].assume_init_ref() };
       {
+        let _token = match pins[id].try_exclusive() {
+          Some(t) => t,
+          None => continue,
+        };
+
+        let frame = unsafe { frame[id].assume_init_ref() };
         let _lock = frame.latch();
         if !dirty.remove(id) {
           continue;
