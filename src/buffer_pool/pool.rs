@@ -4,14 +4,14 @@ use std::{
 
 use crossbeam::epoch::{self, Guard};
 
-use super::{Acquired, EvictionPin, Frame, LRUTable, Peeked, Slot};
+use super::{Acquired, Frame, LRUTable, Peeked, Slot};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
-  utils::{AtomicBitmap, LogFilter, ToArc, ToBox},
+  utils::{AtomicBitmap, ExclusivePin, LogFilter, SharedToken, ToArc, ToBox},
 };
 
 const PRE_FLUSH_THRESHOLD: usize = 100;
@@ -25,7 +25,7 @@ pub struct BufferPoolConfig {
 pub struct BufferPool {
   table: LRUTable,
   frame: Arc<Vec<MaybeUninit<Frame>>>,
-  pins: Arc<Vec<EvictionPin>>,
+  pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
   logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
@@ -47,7 +47,7 @@ impl BufferPool {
     let mut frame = Vec::with_capacity(frame_cap);
     frame.resize_with(frame_cap, MaybeUninit::uninit);
     let mut pins = Vec::with_capacity(frame_cap);
-    pins.resize_with(frame_cap, EvictionPin::new);
+    pins.resize_with(frame_cap, ExclusivePin::new);
 
     let frame = frame.to_arc();
     let pins = pins.to_arc();
@@ -75,12 +75,12 @@ impl BufferPool {
   }
 
   #[inline]
-  fn page_slot(&self, id: usize) -> Slot<'_> {
+  fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> Slot<'a> {
     Slot::page(
       unsafe { self.frame[id].assume_init_ref() },
       &self.dirty,
       id,
-      &self.pins[id],
+      token,
       &self.page_pool,
     )
   }
@@ -97,11 +97,11 @@ impl BufferPool {
    */
   pub fn peek(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
     let table_id = handle.metadata().get_id();
-    let (state, guard) = match self
+    let (state_ref, guard) = match self
       .table
       .peek_or_temp(table_id, pointer, |id| &self.pins[id])
     {
-      Peeked::Hit(id) => return Ok(self.page_slot(id)),
+      Peeked::Hit(id, token) => return Ok(self.page_slot(id, token)),
       Peeked::Temp(state) => {
         return Ok(Slot::temp(state, pointer, None, &self.page_pool))
       }
@@ -110,10 +110,9 @@ impl BufferPool {
 
     let mut page = self.page_pool.acquire();
     handle.disk().read(pointer, &mut page)?;
-    state.store(page);
-    state.completion_evict();
+    state_ref.state().store(page);
     Ok(Slot::temp(
-      state,
+      state_ref.downgrade(),
       pointer,
       Some((guard, handle)),
       &self.page_pool,
@@ -122,14 +121,14 @@ impl BufferPool {
 
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
     let table_id = handle.metadata().get_id();
-    let mut guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
+    let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Temp(state) => {
         self.metrics.buffer_pool_cache_hit.inc();
         return Ok(Slot::temp(state, pointer, None, &self.page_pool));
       }
-      Acquired::Hit(frame_id) => {
+      Acquired::Hit(frame_id, token) => {
         self.metrics.buffer_pool_cache_hit.inc();
-        return Ok(self.page_slot(frame_id));
+        return Ok(self.page_slot(frame_id, token));
       }
       Acquired::Evicted(guard) => guard,
     };
@@ -142,8 +141,7 @@ impl BufferPool {
     let ptr = self.frame[frame_id].as_ptr() as *mut Frame;
     if !guard.is_evicted() {
       unsafe { ptr.write(new_frame) };
-      guard.commit();
-      return Ok(self.page_slot(frame_id));
+      return Ok(self.page_slot(frame_id, guard.commit()));
     }
 
     let old = unsafe { ptr.replace(new_frame) };
@@ -156,8 +154,7 @@ impl BufferPool {
       self.dirty.remove(frame_id);
     }
 
-    guard.commit();
-    Ok(self.page_slot(frame_id))
+    Ok(self.page_slot(frame_id, guard.commit()))
   }
 
   #[inline]
@@ -195,7 +192,7 @@ impl Drop for BufferPool {
 
 fn handle_flush(
   frame: Arc<Vec<MaybeUninit<Frame>>>,
-  pins: Arc<Vec<EvictionPin>>,
+  pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
   const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
@@ -215,16 +212,15 @@ fn handle_flush(
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
-      let pin = &pins[id];
-      if !pin.try_evict() {
-        continue;
-      }
+      let _token = match pins[id].try_exclusive() {
+        Some(t) => t,
+        None => continue,
+      };
 
       let frame = unsafe { frame[id].assume_init_ref() };
       {
         let _lock = frame.latch();
         if !dirty.remove(id) {
-          pin.release();
           continue;
         };
 
@@ -240,7 +236,6 @@ fn handle_flush(
             .or_insert_with(|| frame.handle().clone());
         }
       }
-      pin.release();
 
       if waits.len() < MAX_BATCHING {
         continue;
@@ -252,8 +247,15 @@ fn handle_flush(
 
     handles
       .into_values()
-      .flat_map(|handle| handle.try_pin())
-      .map(|handle| once(move || handle.disk().fsync()))
+      // .flat_map(|handle| handle.try_pin())
+      .map(|table| {
+        once(move || {
+          table
+            .try_pin()
+            .map(|handle| handle.disk().fsync())
+            .unwrap_or(Ok(()))
+        })
+      })
       .collect::<Vec<_>>()
       .into_iter()
       .map(|th| th.wait().flatten())

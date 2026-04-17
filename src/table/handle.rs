@@ -1,26 +1,17 @@
-use std::{
-  ops::Deref,
-  sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-  },
-};
-
-use crossbeam::utils::Backoff;
+use std::{ops::Deref, sync::Arc};
 
 use super::TableMetadata;
 use crate::{
   disk::{DiskController, FreeList, PAGE_SIZE},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken},
   Error, Result,
 };
-
-const CLOSED: usize = 1 << (usize::BITS - 1);
 
 pub struct TableHandle {
   metadata: TableMetadata,
   disk: DiskController<PAGE_SIZE>,
   free_list: FreeList,
-  pin: AtomicUsize,
+  pin: ExclusivePin,
 }
 impl TableHandle {
   pub fn new(metadata: TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
@@ -28,33 +19,16 @@ impl TableHandle {
       metadata,
       disk,
       free_list: FreeList::new(),
-      pin: AtomicUsize::new(0),
+      pin: ExclusivePin::new(),
     }
   }
 
-  #[inline]
-  fn unpin(&self) {
-    self.pin.fetch_sub(1, Ordering::Release);
-  }
-
-  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle> {
-    let backoff = Backoff::new();
-    loop {
-      let c = self.pin.load(Ordering::Acquire);
-      if c & CLOSED != 0 {
-        return None;
-      }
-
-      if self
-        .pin
-        .compare_exchange(c, c + 1, Ordering::Release, Ordering::Acquire)
-        .is_ok()
-      {
-        return Some(PinnedHandle(Arc::clone(&self)));
-      }
-
-      backoff.spin();
-    }
+  pub fn try_pin<'a>(self: &'a Arc<Self>) -> Option<PinnedHandle<'a>> {
+    let token = self.pin.try_shared()?;
+    Some(PinnedHandle {
+      handle: self,
+      _token: token,
+    })
   }
 
   #[inline]
@@ -78,14 +52,12 @@ impl TableHandle {
 
   #[inline]
   pub fn closed(&self) -> bool {
-    self.pin.load(Ordering::Acquire) & CLOSED != 0
+    self.pin.is_exclusive()
   }
 
-  pub fn try_close(&self) -> bool {
-    self
-      .pin
-      .compare_exchange(0, CLOSED, Ordering::Release, Ordering::Acquire)
-      .is_ok()
+  #[inline]
+  pub fn try_close(&self) -> Option<ExclusiveToken<'_>> {
+    self.pin.try_exclusive()
   }
 
   pub fn truncate(&self) -> Result {
@@ -93,25 +65,22 @@ impl TableHandle {
   }
 }
 
-pub struct PinnedHandle(Arc<TableHandle>);
-impl PinnedHandle {
+pub struct PinnedHandle<'a> {
+  handle: &'a Arc<TableHandle>,
+  _token: SharedToken<'a>,
+}
+impl<'a> PinnedHandle<'a> {
   #[inline]
   pub fn handle(&self) -> Arc<TableHandle> {
-    self.0.clone()
-  }
-}
-impl Drop for PinnedHandle {
-  #[inline]
-  fn drop(&mut self) {
-    self.0.unpin();
+    self.handle.clone()
   }
 }
 
-impl Deref for PinnedHandle {
+impl<'a> Deref for PinnedHandle<'a> {
   type Target = TableHandle;
 
   #[inline]
   fn deref(&self) -> &Self::Target {
-    &self.0
+    &self.handle
   }
 }
