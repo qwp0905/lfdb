@@ -16,7 +16,6 @@ use crate::{
 
 /**
  * A handle for a single transaction, providing table operations.
- * Must be used on a single thread; cross-thread behavior is untested.
  * Automatically aborts on drop if not committed.
  */
 pub struct Transaction<'a> {
