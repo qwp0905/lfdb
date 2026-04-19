@@ -1,6 +1,7 @@
 use std::{
   alloc::{alloc_zeroed, dealloc, Layout},
   marker::PhantomData,
+  ops::Range,
   panic::RefUnwindSafe,
   ptr::copy_nonoverlapping,
   slice::{from_raw_parts, from_raw_parts_mut},
@@ -53,6 +54,10 @@ impl<const T: usize> Page<T> {
   #[inline]
   pub fn writer(&mut self) -> PageWriter<'_, T> {
     PageWriter::new(self.0)
+  }
+  #[inline]
+  pub fn range(&self, range: Range<usize>) -> &[u8] {
+    unsafe { from_raw_parts(self.0.add(range.start), range.end - range.start) }
   }
 }
 
@@ -113,6 +118,11 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
+  #[inline]
+  pub fn offset(&self) -> usize {
+    self.offset
+  }
+
   pub fn read(&mut self) -> Result<u8> {
     if self.offset >= T {
       return Err(Error::EOF);
@@ -122,7 +132,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
 
-  pub fn read_n(&mut self, n: usize) -> Result<&[u8]> {
+  pub fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
     let end = self.offset + n;
     if end > T {
       return Err(Error::EOF);

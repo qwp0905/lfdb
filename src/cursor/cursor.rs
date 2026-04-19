@@ -1,4 +1,5 @@
 use std::{
+  collections::VecDeque,
   marker::PhantomData,
   mem::replace,
   sync::{
@@ -8,12 +9,12 @@ use std::{
 };
 
 use super::{
-  CursorIterator, CursorNode, DataChunk, DataEntry, InternalNode, Key, KeyRef, LeafNode,
-  NodeFindResult, RecordData, TreeHeader, VersionRecord, CHUNK_SIZE, HEADER_POINTER,
-  LARGE_VALUE, MAX_KEY, MAX_VALUE,
+  CursorIterator, CursorNode, CursorNodeView, DataChunk, DataEntry, InternalNode, Key,
+  KeyRef, LeafNodeView, NodeFindResult, RecordData, TreeHeader, VersionRecord,
+  CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE, MAX_KEY, MAX_VALUE,
 };
 use crate::{
-  buffer_pool::WritableSlot,
+  buffer_pool::{ReadonlySlot, WritableSlot},
   disk::Pointer,
   metrics::MetricsRegistry,
   serialize::Serializable,
@@ -101,10 +102,7 @@ impl<'a> Cursor<'a> {
     }
   }
 
-  fn find_leaf<'b>(&'a self, key: KeyRef) -> Result<LeafNode>
-  where
-    'a: 'b,
-  {
+  fn get_entry(&self, key: KeyRef) -> Result<Option<(ReadonlySlot<'a>, Pointer)>> {
     let mut ptr = self
       .orchestrator
       .fetch(HEADER_POINTER, self.table.clone())?
@@ -114,38 +112,36 @@ impl<'a> Cursor<'a> {
       .get_root();
 
     loop {
-      match self
-        .orchestrator
-        .fetch(ptr, self.table.clone())?
-        .for_read()
-        .as_ref()
-        .deserialize::<CursorNode>()?
-      {
-        CursorNode::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
-        CursorNode::Leaf(node) => return Ok(node),
+      let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+
+      match slot.as_ref().view::<CursorNodeView>()? {
+        CursorNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        CursorNodeView::Leaf(mut node) => loop {
+          match node.find(key) {
+            NodeFindResult::Found(_, i) => return Ok(Some((slot, i))),
+            NodeFindResult::Move(i) => {
+              drop(slot);
+              slot = self.orchestrator.fetch(i, self.table.clone())?.for_read();
+              node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+            }
+            NodeFindResult::NotFound(_) => return Ok(None),
+          }
+        },
       }
     }
   }
 
   fn __get(&self, key: KeyRef) -> Result<Option<Vec<u8>>> {
-    let mut node = self.find_leaf(key)?;
-    let ptr = loop {
-      match node.find(key) {
-        NodeFindResult::Found(_, i) => break i,
-        NodeFindResult::NotFound(_) => return Ok(None),
-        NodeFindResult::Move(i) => {
-          node = self
-            .orchestrator
-            .fetch(i, self.table.clone())?
-            .for_read()
-            .as_ref()
-            .deserialize::<CursorNode>()?
-            .as_leaf()?
-        }
-      }
+    let (mut slot, ptr) = match self.get_entry(key)? {
+      Some((s, p)) => (s, p),
+      None => return Ok(None),
     };
 
-    let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+    let _ = replace(
+      &mut slot,
+      self.orchestrator.fetch(ptr, self.table.clone())?.for_read(),
+    );
+
     loop {
       let entry: DataEntry = slot.as_ref().deserialize()?;
       if let Some(record) =
@@ -216,12 +212,12 @@ impl<'a> Cursor<'a> {
     };
     let mut stack = vec![];
 
-    while let CursorNode::Internal(node) = self
+    while let CursorNodeView::Internal(node) = self
       .orchestrator
       .fetch(ptr, self.table.clone())?
       .for_read()
       .as_ref()
-      .deserialize()?
+      .view::<CursorNodeView>()?
     {
       match node.find(&key) {
         Ok(i) => stack.push(replace(&mut ptr, i)),
@@ -234,15 +230,13 @@ impl<'a> Cursor<'a> {
         .orchestrator
         .fetch(ptr, self.table.clone())?
         .for_write();
-      let mut leaf = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
 
-      match leaf.find(&key) {
-        NodeFindResult::Move(i) => {
-          ptr = i;
-          continue;
-        }
+      let node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+      match node.find(&key) {
         NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot),
+        NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(i) => {
+          let mut node = node.writable();
           let entry = DataEntry::init(VersionRecord::new(
             self.state.get_id(),
             self.orchestrator.current_version(),
@@ -250,16 +244,16 @@ impl<'a> Cursor<'a> {
           ));
           let entry_ptr = self.alloc_and_log(&entry)?;
 
-          let split = match leaf.insert_and_split(i, key.clone(), entry_ptr) {
+          let split = match node.insert_and_split(i, key.clone(), entry_ptr) {
             Some(split) => split,
-            None => return self.serialize_and_log(&mut slot, &leaf.to_node()),
+            None => return self.serialize_and_log(&mut slot, &node.to_node()),
           };
 
           let mid_key = split.top().clone();
           let split_ptr = self.alloc_and_log(&split.to_node())?;
 
-          leaf.set_next(split_ptr);
-          self.serialize_and_log(&mut slot, &leaf.to_node())?;
+          node.set_next(split_ptr);
+          self.serialize_and_log(&mut slot, &node.to_node())?;
 
           break (mid_key, split_ptr);
         }
@@ -302,13 +296,8 @@ impl<'a> Cursor<'a> {
       let mut stack = vec![];
 
       while stack.len() < diff {
-        let node = self
-          .orchestrator
-          .fetch(ptr, self.table.clone())?
-          .for_read()
-          .as_ref()
-          .deserialize::<CursorNode>()?
-          .as_internal()?;
+        let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+        let node = slot.as_ref().view::<CursorNodeView>()?.as_internal()?;
         match node.find(&split_key) {
           Ok(i) => stack.push(replace(&mut ptr, i)),
           Err(i) => ptr = i,
@@ -425,25 +414,23 @@ impl<'a> Cursor<'a> {
       .deserialize::<TreeHeader>()?
       .get_root();
 
-    let (mut slot, mut node) = loop {
-      let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
-      match slot.as_ref().deserialize::<CursorNode>()? {
-        CursorNode::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
-        CursorNode::Leaf(node) => break (slot, node),
-      }
-    };
-
     loop {
-      match node.find(key.as_ref()) {
-        NodeFindResult::Found(_, i) => {
-          return self.insert_at(i, RecordData::Tombstone, slot)
-        }
-        NodeFindResult::Move(i) => {
-          drop(slot);
-          slot = self.orchestrator.fetch(i, self.table.clone())?.for_read();
-          node = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
-        }
-        NodeFindResult::NotFound(_) => return Ok(()),
+      let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+      match slot.as_ref().view::<CursorNodeView>()? {
+        CursorNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        CursorNodeView::Leaf(mut node) => loop {
+          match node.find(key.as_ref()) {
+            NodeFindResult::Found(_, i) => {
+              return self.insert_at(i, RecordData::Tombstone, slot)
+            }
+            NodeFindResult::Move(i) => {
+              drop(slot);
+              slot = self.orchestrator.fetch(i, self.table.clone())?.for_read();
+              node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+            }
+            NodeFindResult::NotFound(_) => return Ok(()),
+          }
+        },
       }
     }
   }
@@ -480,32 +467,74 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, end.as_ref().len()));
     }
 
-    let mut node = self.find_leaf(start.as_ref())?;
-    let (leaf, pos) = loop {
-      match node.find(start.as_ref()) {
-        NodeFindResult::Found(pos, _) => break (node, pos),
-        NodeFindResult::NotFound(pos) => break (node, pos),
-        NodeFindResult::Move(i) => {
-          node = self
-            .orchestrator
-            .fetch(i, self.table.clone())?
-            .for_read()
-            .as_ref()
-            .deserialize::<CursorNode>()?
-            .as_leaf()?
-        }
-      }
-    };
+    let mut ptr = self
+      .orchestrator
+      .fetch(HEADER_POINTER, self.table.clone())?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
 
-    Ok(CursorIterator::new(
+    loop {
+      let mut slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+      match slot.as_ref().view::<CursorNodeView>()? {
+        CursorNodeView::Internal(node) => {
+          ptr = node.find(start.as_ref()).unwrap_or_else(|i| i)
+        }
+        CursorNodeView::Leaf(mut node) => loop {
+          match node.find(start.as_ref()) {
+            NodeFindResult::NotFound(i) => {
+              return Ok(self.create_iter(&node, i, end.as_ref()))
+            }
+            NodeFindResult::Found(i, _) => {
+              return Ok(self.create_iter(&node, i, end.as_ref()))
+            }
+            NodeFindResult::Move(i) => {
+              drop(slot);
+              slot = self.orchestrator.fetch(i, self.table.clone())?.for_read();
+              node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+            }
+          }
+        },
+      }
+    }
+  }
+
+  fn create_iter<'b>(
+    &'a self,
+    node: &LeafNodeView,
+    pos: usize,
+    end: KeyRef,
+  ) -> CursorIterator<'b>
+  where
+    'a: 'b,
+  {
+    let mut keys = VecDeque::new();
+    for (k, p) in node.get_entries().skip(pos) {
+      if end <= k {
+        return CursorIterator::new(
+          self.table.clone(),
+          &self.state,
+          &self.snapshot,
+          &self.orchestrator,
+          keys,
+          None,
+          Some(end.to_vec()),
+        );
+      }
+
+      keys.push_back((k.to_vec(), p));
+    }
+
+    CursorIterator::new(
       self.table.clone(),
       &self.state,
       &self.snapshot,
       &self.orchestrator,
-      leaf,
-      pos,
-      Some(end.as_ref().into()),
-    ))
+      keys,
+      node.get_next(),
+      Some(end.to_vec()),
+    )
   }
 
   pub fn scan_all<'b>(&'a self) -> Result<CursorIterator<'b>>
@@ -523,27 +552,26 @@ impl<'a> Cursor<'a> {
       .as_ref()
       .deserialize::<TreeHeader>()?
       .get_root();
-    let leaf = loop {
-      let node: CursorNode = self
-        .orchestrator
-        .fetch(ptr, self.table.clone())?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-      match node {
-        CursorNode::Internal(internal) => ptr = internal.first_child(),
-        CursorNode::Leaf(leaf) => break leaf,
-      };
-    };
 
-    Ok(CursorIterator::new(
-      self.table.clone(),
-      &self.state,
-      &self.snapshot,
-      &self.orchestrator,
-      leaf,
-      0,
-      None,
-    ))
+    loop {
+      let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+      match slot.as_ref().view::<CursorNodeView>()? {
+        CursorNodeView::Internal(node) => ptr = node.first_child(),
+        CursorNodeView::Leaf(node) => {
+          let keys = node.get_entries().map(|(k, p)| (k.to_vec(), p)).collect();
+          let next = node.get_next();
+
+          return Ok(CursorIterator::new(
+            self.table.clone(),
+            &self.state,
+            &self.snapshot,
+            &self.orchestrator,
+            keys,
+            next,
+            None,
+          ));
+        }
+      }
+    }
   }
 }

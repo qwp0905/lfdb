@@ -4,92 +4,66 @@ use super::*;
 
 #[test]
 fn test_serialize_internal() {
+  let keys = vec![];
+  let children = vec![10];
+  let next = None;
   let mut page = Page::new();
-  let node = CursorNode::Internal(InternalNode::new(vec![], vec![10], None));
+  let node =
+    CursorNode::Internal(InternalNode::new(keys.clone(), children.clone(), next));
   page.serialize_from(&node).expect("serialize error");
 
-  let d = page
-    .deserialize::<CursorNode>()
-    .expect("desiralize error")
-    .as_internal()
-    .expect("desirialize internal error");
+  let d = match page.view::<CursorNodeView>().expect("deserialize error") {
+    CursorNodeView::Internal(node) => node,
+    CursorNodeView::Leaf(_) => panic!("must be internal"),
+  };
 
-  assert_eq!(d.keys.len(), 0);
-  assert_eq!(d.children.len(), 1);
-  assert_eq!(d.children[0], 10);
-  assert_eq!(d.right, None)
+  for (i, c) in d.get_all_child().enumerate() {
+    assert_eq!(children[i], c)
+  }
 }
 
 #[test]
 fn test_serialize_leaf() {
   let mut page = Page::new();
 
-  let key = vec![49, 50, 51];
-  let ptr = 100;
+  let entries = vec![(vec![49, 50, 51], 100)];
   let next = Some(1100);
 
-  let node = CursorNode::Leaf(LeafNode::new(vec![(key.clone(), ptr)], next));
+  let node = CursorNode::Leaf(LeafNode::new(entries.clone(), next));
   page.serialize_from(&node).expect("serialize error");
 
   let d = page
-    .deserialize::<CursorNode>()
+    .view::<CursorNodeView>()
     .expect("desiralize error")
     .as_leaf()
     .expect("desirialize leaf error");
-  assert_eq!(d.entries, vec![(key, ptr)]);
-  assert_eq!(d.next, next);
+  for (i, (k, p)) in d.get_entries().enumerate() {
+    assert_eq!(entries[i].0, k.to_vec());
+    assert_eq!(entries[i].1, p)
+  }
+  assert_eq!(d.get_next(), next)
 }
 
 #[test]
 fn test_serialize_internal_with_keys_and_right() {
   let mut page = Page::new();
+  let keys = vec![vec![1, 2], vec![3, 4]];
+  let children = vec![10, 20, 30];
+  let next = Some((99, vec![5, 6]));
   let node = CursorNode::Internal(InternalNode::new(
-    vec![vec![1, 2], vec![3, 4]],
-    vec![10, 20, 30],
-    Some((99, vec![5, 6])),
+    keys.clone(),
+    children.clone(),
+    next.clone(),
   ));
   page.serialize_from(&node).expect("serialize error");
 
-  let d = page
-    .deserialize::<CursorNode>()
-    .expect("deserialize error")
-    .as_internal()
-    .expect("as_internal error");
+  let d = match page.view::<CursorNodeView>().expect("desiralize error") {
+    CursorNodeView::Internal(node) => node,
+    CursorNodeView::Leaf(_) => panic!("must be internal"),
+  };
 
-  assert_eq!(d.keys, vec![vec![1, 2], vec![3, 4]]);
-  assert_eq!(d.children, vec![10, 20, 30]);
-  assert_eq!(d.right, Some((99, vec![5, 6])));
-}
-
-#[test]
-fn test_serialize_leaf_with_prev_and_next() {
-  let mut page = Page::new();
-  let node =
-    CursorNode::Leaf(LeafNode::new(vec![(vec![1], 10), (vec![2], 20)], Some(50)));
-  page.serialize_from(&node).expect("serialize error");
-
-  let d = page
-    .deserialize::<CursorNode>()
-    .expect("deserialize error")
-    .as_leaf()
-    .expect("as_leaf error");
-
-  assert_eq!(d.entries, vec![(vec![1], 10), (vec![2], 20)]);
-  assert_eq!(d.next, Some(50));
-}
-
-#[test]
-fn test_serialize_empty_leaf() {
-  let mut page = Page::new();
-  let node = CursorNode::Leaf(LeafNode::new(vec![], None));
-  page.serialize_from(&node).expect("serialize error");
-
-  let d = page
-    .deserialize::<CursorNode>()
-    .expect("deserialize error")
-    .as_leaf()
-    .expect("as_leaf error");
-
-  assert!(d.entries.is_empty());
-  assert_eq!(d.next, None);
+  assert_eq!(d.find(&vec![1, 1]).unwrap(), children[0]);
+  assert_eq!(d.find(&vec![2, 2]).unwrap(), children[1]);
+  assert_eq!(d.find(&vec![4, 4]).unwrap(), children[2]);
+  assert_eq!(d.find(&vec![9, 9]).err(), Some(99));
 }

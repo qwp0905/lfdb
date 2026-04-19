@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 
 use crate::{
   disk::{Pointer, POINTER_BYTES},
-  serialize::{Serializable, SerializeType, SERIALIZABLE_BYTES},
+  serialize::{
+    Deserializable, Serializable, SerializeType, TypedObject, SERIALIZABLE_BYTES,
+  },
   wal::{TxId, TX_ID_BYTES},
   Error, Result,
 };
@@ -172,10 +174,12 @@ impl DataEntry {
     false
   }
 }
-impl Serializable for DataEntry {
+impl TypedObject for DataEntry {
   fn get_type() -> SerializeType {
     SerializeType::DataEntry
   }
+}
+impl Serializable for DataEntry {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
     writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.versions.len() as u16)?;
@@ -201,7 +205,8 @@ impl Serializable for DataEntry {
     }
     Ok(())
   }
-
+}
+impl Deserializable for DataEntry {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let next = reader.read_u64()?;
     let len = reader.read_u16()? as usize;
@@ -246,18 +251,19 @@ impl DataChunk {
     &self.chunk
   }
 }
-
-impl Serializable for DataChunk {
+impl TypedObject for DataChunk {
   fn get_type() -> SerializeType {
     SerializeType::DataChunk
   }
-
+}
+impl Serializable for DataChunk {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
     writer.write_u16(self.chunk.len() as u16)?;
     writer.write(&self.chunk)?;
     Ok(())
   }
-
+}
+impl Deserializable for DataChunk {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let len = reader.read_u16()? as usize;
     let chunk = reader.read_n(len)?.to_vec();

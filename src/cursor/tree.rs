@@ -3,7 +3,8 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  CursorNode, DataEntry, GarbageCollector, RecordData, TreeHeader, HEADER_POINTER,
+  CursorNode, CursorNodeView, DataEntry, GarbageCollector, RecordData, TreeHeader,
+  HEADER_POINTER,
 };
 use crate::{
   buffer_pool::BufferPool,
@@ -102,29 +103,20 @@ impl TreeManager {
       .deserialize::<TreeHeader>()?
       .get_root();
 
-    let leaf = loop {
-      let node: CursorNode = buffer_pool
-        .read(ptr, meta_table.clone())?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-      match node {
-        CursorNode::Internal(internal) => ptr = internal.first_child(),
-        CursorNode::Leaf(leaf) => break leaf,
-      };
-    };
+    while let CursorNodeView::Internal(node) = buffer_pool
+      .read(ptr, meta_table.clone())?
+      .for_read()
+      .as_ref()
+      .view()?
+    {
+      ptr = node.first_child();
+    }
 
-    let mut next = Some(leaf);
-    while let Some(leaf) = next.take() {
-      if let Some(ptr) = leaf.get_next() {
-        next = buffer_pool
-          .read(ptr, meta_table.clone())?
-          .for_read()
-          .as_ref()
-          .deserialize::<CursorNode>()?
-          .as_leaf()
-          .map(Some)?;
-      }
+    let mut next = Some(ptr);
+    while let Some(ptr) = next.take() {
+      let slot = buffer_pool.read(ptr, meta_table.clone())?.for_read();
+      let leaf = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+      next = leaf.get_next();
 
       'outer: for ptr in leaf.get_entry_pointers() {
         let mut ptr = Some(ptr);
@@ -191,11 +183,11 @@ impl TreeManager {
           while let Some(table) = open_handles.pop() {
             logger.debug(|| {
               format!(
-                "table {} start to collect orphand blocks.",
+                "table {} start to collect orphan blocks.",
                 table.metadata().get_id()
               )
             });
-            release_orphand(&buffer_pool, &gc, &logger, table)?;
+            release_orphaned(&buffer_pool, &gc, &logger, table)?;
           }
           Ok(())
         })
@@ -207,7 +199,7 @@ impl TreeManager {
       .map(|th| th.wait().flatten())
       .collect::<Result>()?;
 
-    logger.info(|| "orphand block has released successfully.");
+    logger.info(|| "orphaned block has released successfully.");
     Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
   }
 
@@ -245,11 +237,11 @@ fn run_merge_leaf(
         .deserialize::<TreeHeader>()?
         .get_root();
 
-      while let CursorNode::Internal(node) = buffer_pool
+      while let CursorNodeView::Internal(node) = buffer_pool
         .peek(ptr, table.handle())?
         .for_read()
         .as_ref()
-        .deserialize::<CursorNode>()?
+        .view::<CursorNodeView>()?
       {
         ptr = node.first_child()
       }
@@ -257,12 +249,8 @@ fn run_merge_leaf(
       let mut index = Some(ptr);
       while let Some(i) = index.take() {
         {
-          let leaf = buffer_pool
-            .peek(i, table.handle())?
-            .for_read()
-            .as_ref()
-            .deserialize::<CursorNode>()?
-            .as_leaf()?;
+          let slot = buffer_pool.peek(i, table.handle())?.for_read();
+          let leaf = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
               leaf
@@ -285,7 +273,7 @@ fn run_merge_leaf(
 
         let prev_len = leaf.len();
         let mut new_entries = vec![];
-        let mut orphand = vec![];
+        let mut orphaned = vec![];
 
         let found = leaf
           .drain()
@@ -293,7 +281,7 @@ fn run_merge_leaf(
           .collect::<Vec<_>>();
         for (key, ptr, r) in found.into_iter() {
           match r.wait().flatten()? {
-            true => orphand.push(ptr),
+            true => orphaned.push(ptr),
             false => new_entries.push((key, ptr)),
           }
         }
@@ -311,7 +299,7 @@ fn run_merge_leaf(
             )?;
             drop(slot);
 
-            orphand
+            orphaned
               .into_iter()
               .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
             continue;
@@ -340,7 +328,7 @@ fn run_merge_leaf(
         drop(slot);
         drop(next_slot);
 
-        orphand
+        orphaned
           .into_iter()
           .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
       }
@@ -356,7 +344,7 @@ fn run_merge_leaf(
   }
 }
 
-fn release_orphand(
+fn release_orphaned(
   buffer_pool: &BufferPool,
   gc: &GarbageCollector,
   logger: &LogFilter,
@@ -378,10 +366,10 @@ fn release_orphand(
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()
-      .deserialize::<CursorNode>()?
+      .view::<CursorNodeView>()?
     {
-      CursorNode::Internal(internal) => node_stack.extend(internal.get_all_child()),
-      CursorNode::Leaf(leaf) => entry_stack.extend(leaf.get_entry_pointers()),
+      CursorNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
+      CursorNodeView::Leaf(node) => entry_stack.extend(node.get_entry_pointers()),
     };
   }
 

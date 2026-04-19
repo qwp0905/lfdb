@@ -1,6 +1,6 @@
-use std::{mem::replace, sync::Arc};
+use std::{collections::VecDeque, mem::replace, sync::Arc};
 
-use super::{CursorNode, DataEntry, Key, LeafNode};
+use super::{CursorNodeView, DataEntry, Key};
 use crate::{
   disk::Pointer,
   error::{Error, Result},
@@ -22,8 +22,8 @@ pub struct CursorIterator<'a> {
   state: &'a TxState<'a>,
   snapshot: &'a TxSnapshot<'a>,
   orchestrator: &'a TxOrchestrator,
-  leaf: LeafNode,
-  pos: usize,
+  keys: VecDeque<(Key, Pointer)>,
+  next: Option<Pointer>,
   end: Option<Key>,
   closed: bool,
 }
@@ -33,8 +33,8 @@ impl<'a> CursorIterator<'a> {
     state: &'a TxState,
     snapshot: &'a TxSnapshot<'a>,
     orchestrator: &'a TxOrchestrator,
-    leaf: LeafNode,
-    pos: usize,
+    keys: VecDeque<(Key, Pointer)>,
+    next: Option<Pointer>,
     end: Option<Key>,
   ) -> Self {
     Self {
@@ -42,8 +42,8 @@ impl<'a> CursorIterator<'a> {
       state,
       snapshot,
       orchestrator,
-      leaf,
-      pos,
+      keys,
+      next,
       end,
       closed: false,
     }
@@ -81,40 +81,46 @@ impl<'a> CursorIterator<'a> {
       return Ok(None);
     }
 
-    if !self.state.is_available() {
-      return Err(Error::TransactionClosed);
-    }
-
     loop {
-      for i in self.pos..self.leaf.len() {
-        let (key, ptr) = self.leaf.at(i);
-        if self.end.as_ref().map(|e| key >= e).unwrap_or(false) {
-          self.closed = true;
-          return Ok(None);
-        }
+      if !self.state.is_available() {
+        return Err(Error::TransactionClosed);
+      }
 
-        self.pos += 1;
-        if let Some(value) = self.find_value(*ptr)? {
-          return Ok(Some((key.clone(), value)));
+      while let Some((key, ptr)) = self.keys.pop_front() {
+        if let Some(value) = self.find_value(ptr)? {
+          return Ok(Some((key, value)));
         }
       }
 
-      let ptr = match self.leaf.get_next() {
-        Some(i) => i,
+      let ptr = match self.next.take() {
+        Some(p) => p,
         None => {
           self.closed = true;
           return Ok(None);
         }
       };
 
-      self.leaf = self
-        .orchestrator
-        .fetch(ptr, self.table.clone())?
-        .for_read()
-        .as_ref()
-        .deserialize::<CursorNode>()?
-        .as_leaf()?;
-      self.pos = 0;
+      let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+      let node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+
+      let end = match self.end.as_ref() {
+        Some(k) => k,
+        None => {
+          node
+            .get_entries()
+            .for_each(|(k, p)| self.keys.push_back((k.to_vec(), p)));
+          self.next = node.get_next();
+          continue;
+        }
+      };
+
+      for (k, p) in node.get_entries().take_while(|(k, _)| *k < end) {
+        self.keys.push_back((k.to_vec(), p))
+      }
+
+      if node.len() == self.keys.len() {
+        self.next = node.get_next();
+      }
     }
   }
 }

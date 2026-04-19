@@ -28,15 +28,11 @@ impl From<SerializeType> for u8 {
 
 pub const SERIALIZABLE_BYTES: usize = PAGE_SIZE - 1; // 1 byte reserved for SerializeType tag
 
-pub trait Serializable: Sized {
+pub trait TypedObject {
   fn get_type() -> SerializeType;
-  fn serialize_at(&self, page: &mut Page<PAGE_SIZE>) -> Result<usize> {
-    let mut writer = page.writer();
-    writer.write(&[u8::from(Self::get_type())])?;
-    self.write_at(&mut writer)?;
-    Ok(writer.finalize())
-  }
-  fn write_at(&self, writer: &mut PageWriter) -> Result;
+}
+
+pub trait Deserializable: Sized + TypedObject {
   fn read_from(reader: &mut PageScanner) -> Result<Self>;
   fn deserialize(value: &Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = value.scanner();
@@ -50,12 +46,29 @@ pub trait Serializable: Sized {
     Self::read_from(&mut reader)
   }
 }
+
+pub trait Serializable: Sized + TypedObject {
+  fn serialize_at(&self, page: &mut Page<PAGE_SIZE>) -> Result<usize> {
+    let mut writer = page.writer();
+    writer.write(&[u8::from(Self::get_type())])?;
+    self.write_at(&mut writer)?;
+    Ok(writer.finalize())
+  }
+  fn write_at(&self, writer: &mut PageWriter) -> Result;
+}
 impl Page<PAGE_SIZE> {
   pub fn deserialize<T>(&self) -> Result<T>
   where
-    T: Serializable,
+    T: Deserializable,
   {
     T::deserialize(self)
+  }
+
+  pub fn view<'a, T>(&'a self) -> Result<T>
+  where
+    T: Viewable<'a>,
+  {
+    T::view(self)
   }
 }
 
@@ -66,4 +79,20 @@ impl<T: Serializable> SerializeFrom<T> for Page<PAGE_SIZE> {
   fn serialize_from(&mut self, target: &T) -> Result<usize> {
     target.serialize_at(self)
   }
+}
+
+pub trait Viewable<'a>: Sized + TypedObject {
+  fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
+    let mut scanner = page.scanner();
+
+    let expected = u8::from(Self::get_type());
+    let received = scanner.read()?;
+    if expected != received {
+      return Err(Error::DeserializeError(expected, received));
+    }
+
+    Self::read_from(page, &mut scanner)
+  }
+
+  fn read_from(page: &'a Page<PAGE_SIZE>, scanner: &mut PageScanner<'a>) -> Result<Self>;
 }
