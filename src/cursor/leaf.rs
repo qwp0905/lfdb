@@ -180,4 +180,8 @@ impl<'a> LeafNodeView<'a> {
   pub fn get_next(&self) -> Option<Pointer> {
     self.next
   }
+
+  pub fn len(&self) -> usize {
+    self.entries.len()
+  }
 }

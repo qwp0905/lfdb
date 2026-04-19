@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, mem::replace, sync::Arc};
 
-use super::{CursorNodeView, DataEntry, Key, KeyRef};
+use super::{CursorNodeView, DataEntry, Key};
 use crate::{
   disk::Pointer,
   error::{Error, Result},
@@ -81,7 +81,7 @@ impl<'a> CursorIterator<'a> {
       return Ok(None);
     }
 
-    'outer: loop {
+    loop {
       if !self.state.is_available() {
         return Err(Error::TransactionClosed);
       }
@@ -94,22 +94,33 @@ impl<'a> CursorIterator<'a> {
 
       let ptr = match self.next.take() {
         Some(p) => p,
-        None => return Ok(None),
+        None => {
+          self.closed = true;
+          return Ok(None);
+        }
       };
 
       let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
       let node = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
 
-      for (k, p) in node.get_entries() {
-        if let Some(end) = self.end.as_ref() {
-          if end as KeyRef <= k {
-            continue 'outer;
-          }
+      let end = match self.end.as_ref() {
+        Some(k) => k,
+        None => {
+          node
+            .get_entries()
+            .for_each(|(k, p)| self.keys.push_back((k.to_vec(), p)));
+          self.next = node.get_next();
+          continue;
         }
+      };
 
-        self.keys.push_back((k.to_vec(), p));
+      for (k, p) in node.get_entries().take_while(|(k, _)| *k < end) {
+        self.keys.push_back((k.to_vec(), p))
       }
-      self.next = node.get_next()
+
+      if node.len() == self.keys.len() {
+        self.next = node.get_next();
+      }
     }
   }
 }
