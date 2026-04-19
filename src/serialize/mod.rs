@@ -57,6 +57,13 @@ impl Page<PAGE_SIZE> {
   {
     T::deserialize(self)
   }
+
+  pub fn view<'a, T>(&'a self) -> Result<T>
+  where
+    T: Viewable<'a>,
+  {
+    T::view(self)
+  }
 }
 
 pub trait SerializeFrom<T: Serializable> {
@@ -66,4 +73,22 @@ impl<T: Serializable> SerializeFrom<T> for Page<PAGE_SIZE> {
   fn serialize_from(&mut self, target: &T) -> Result<usize> {
     target.serialize_at(self)
   }
+}
+
+pub trait Viewable<'a>: Sized {
+  fn get_type() -> SerializeType;
+
+  fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
+    let mut scanner = page.scanner();
+
+    let expected = u8::from(Self::get_type());
+    let received = scanner.read()?;
+    if expected != received {
+      return Err(Error::DeserializeError(expected, received));
+    }
+
+    Self::read_from(page, &mut scanner)
+  }
+
+  fn read_from(page: &'a Page<PAGE_SIZE>, scanner: &mut PageScanner<'a>) -> Result<Self>;
 }
