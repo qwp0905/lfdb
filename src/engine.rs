@@ -45,7 +45,7 @@ where
 }
 
 pub struct Engine {
-  orchestrator: Arc<TxOrchestrator>,
+  orchestrator: TxOrchestrator,
   available: AtomicBool,
   metrics_registry: Arc<MetricsRegistry>,
   logger: LogFilter,
@@ -131,8 +131,7 @@ impl Engine {
         logger.clone(),
         tree_manager,
         metrics_registry.clone(),
-      )
-      .to_arc();
+      );
 
       logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
       return Ok(Self {
@@ -210,8 +209,7 @@ impl Engine {
       tree_manager,
       metrics_registry.clone(),
       replay.segments,
-    )?
-    .to_arc();
+    )?;
 
     logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
     Ok(Self {
@@ -231,10 +229,10 @@ impl Engine {
     }
     let (state, snapshot) = self.orchestrator.start_tx(None)?;
     Ok(Transaction::new(
-      self.orchestrator.clone(),
+      &self.orchestrator,
       state,
       snapshot,
-      self.metrics_registry.clone(),
+      &self.metrics_registry,
     ))
   }
 
@@ -247,10 +245,10 @@ impl Engine {
     }
     let (state, snapshot) = self.orchestrator.start_tx(Some(timeout))?;
     Ok(Transaction::new(
-      self.orchestrator.clone(),
+      &self.orchestrator,
       state,
       snapshot,
-      self.metrics_registry.clone(),
+      &self.metrics_registry,
     ))
   }
 
