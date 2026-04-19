@@ -16,14 +16,13 @@ use crate::{
 
 /**
  * A handle for a single transaction, providing table operations.
- * Must be used on a single thread; cross-thread behavior is untested.
  * Automatically aborts on drop if not committed.
  */
 pub struct Transaction<'a> {
-  orchestrator: Arc<TxOrchestrator>,
+  orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
-  metrics: Arc<MetricsRegistry>,
+  metrics: &'a MetricsRegistry,
   tx_start: Option<Instant>,
   created_tables: Vec<Arc<TableHandle>>,
   dropped_tables: Vec<Arc<TableHandle>>,
@@ -31,10 +30,10 @@ pub struct Transaction<'a> {
 }
 impl<'a> Transaction<'a> {
   pub fn new(
-    orchestrator: Arc<TxOrchestrator>,
+    orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,
-    metrics: Arc<MetricsRegistry>,
+    metrics: &'a MetricsRegistry,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
     Self {

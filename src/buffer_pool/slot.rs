@@ -205,7 +205,7 @@ impl<'a> TempSlot<'a> {
     'a: 'b,
   {
     let write_guard = pin();
-    let page = self.state.state().load_page(&write_guard);
+    let page = self.state.load_page(&write_guard);
     TempSlotRead {
       state: ManuallyDrop::new(self.state),
       page,
@@ -221,15 +221,10 @@ impl<'a> TempSlot<'a> {
   {
     let guard = pin();
     let mut shadow = self.page_pool.acquire();
-    let latch = unsafe { transmute(self.state.state().latch()) };
-    shadow.as_mut().copy_from(
-      self
-        .state
-        .state()
-        .load_page(&guard)
-        .borrow_unsafe()
-        .as_ref(),
-    );
+    let latch = unsafe { transmute(self.state.latch()) };
+    shadow
+      .as_mut()
+      .copy_from(self.state.load_page(&guard).borrow_unsafe().as_ref());
 
     TempSlotWrite {
       shadow: ManuallyDrop::new(shadow),
@@ -264,7 +259,7 @@ impl<'a> TempSlotWrite<'a> {
     let state = unsafe { ManuallyDrop::take(&mut self.state) }.upgrade();
 
     let guard = pin();
-    let page = state.state().load_page(&guard);
+    let page = state.load_page(&guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
   }
 }
@@ -272,14 +267,14 @@ impl<'a> Drop for TempSlotWrite<'a> {
   fn drop(&mut self) {
     self
       .state
-      .state()
       .store(unsafe { ManuallyDrop::take(&mut self.shadow) });
+
     // guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
     if let Some((guard, handle)) = self.guard.take() {
       return self.release(handle, guard);
     }
-    self.state.state().mark_dirty();
+    self.state.mark_dirty();
     unsafe { ManuallyDrop::drop(&mut self.latch) };
     unsafe { ManuallyDrop::drop(&mut self.state) };
   }
@@ -304,11 +299,11 @@ pub struct TempSlotRead<'a> {
 impl<'a> TempSlotRead<'a> {
   fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
     let state = unsafe { ManuallyDrop::take(&mut self.state) }.upgrade();
-    if !state.state().is_dirty() {
+    if !state.is_dirty() {
       return;
     }
 
-    let page = state.state().load_page(&self.write_guard);
+    let page = state.load_page(&self.write_guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
   }
 }

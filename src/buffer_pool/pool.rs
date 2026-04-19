@@ -110,7 +110,7 @@ impl BufferPool {
 
     let mut page = self.page_pool.acquire();
     handle.disk().read(pointer, &mut page)?;
-    state_ref.state().store(page);
+    state_ref.store(page);
     Ok(Slot::temp(
       state_ref.downgrade(),
       pointer,
@@ -202,7 +202,7 @@ fn handle_flush(
 
   move |trigger| {
     let mut waits = Vec::with_capacity(MAX_BATCHING);
-    let mut handles = BTreeMap::new();
+    let mut tables = BTreeMap::new();
 
     if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
       return Ok(());
@@ -231,7 +231,7 @@ fn handle_flush(
         let guard = epoch::pin();
         if let Some(r) = frame.flush_async(&guard) {
           waits.push((guard, r));
-          handles
+          tables
             .entry(frame.handle().metadata().get_id())
             .or_insert_with(|| frame.handle().clone());
         }
@@ -245,18 +245,17 @@ fn handle_flush(
 
     flush(&mut waits)?;
 
-    handles
-      .into_values()
-      // .flat_map(|handle| handle.try_pin())
-      .map(|table| {
-        once(move || {
-          table
-            .try_pin()
-            .map(|handle| handle.disk().fsync())
-            .unwrap_or(Ok(()))
-        })
-      })
-      .collect::<Vec<_>>()
+    let mut threads = Vec::with_capacity(tables.len());
+
+    for table in tables.into_values() {
+      let th = once(move || match table.try_pin() {
+        Some(handle) => handle.disk().fsync(),
+        None => Ok(()),
+      });
+      threads.push(th)
+    }
+
+    threads
       .into_iter()
       .map(|th| th.wait().flatten())
       .collect::<Result>()?;
