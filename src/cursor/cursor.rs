@@ -296,13 +296,8 @@ impl<'a> Cursor<'a> {
       let mut stack = vec![];
 
       while stack.len() < diff {
-        let node = self
-          .orchestrator
-          .fetch(ptr, self.table.clone())?
-          .for_read()
-          .as_ref()
-          .deserialize::<CursorNode>()?
-          .as_internal()?;
+        let slot = self.orchestrator.fetch(ptr, self.table.clone())?.for_read();
+        let node = slot.as_ref().view::<CursorNodeView>()?.as_internal()?;
         match node.find(&split_key) {
           Ok(i) => stack.push(replace(&mut ptr, i)),
           Err(i) => ptr = i,
@@ -524,7 +519,7 @@ impl<'a> Cursor<'a> {
           &self.orchestrator,
           keys,
           None,
-          None,
+          Some(end.to_vec()),
         );
       }
 
@@ -538,7 +533,7 @@ impl<'a> Cursor<'a> {
       &self.orchestrator,
       keys,
       node.get_next(),
-      None,
+      Some(end.to_vec()),
     )
   }
 
