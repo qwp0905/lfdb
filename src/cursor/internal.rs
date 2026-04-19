@@ -74,17 +74,6 @@ impl InternalNode {
       right,
     }
   }
-  pub fn find(&self, key: KeyRef) -> std::result::Result<Pointer, Pointer> {
-    if let Some((right, high)) = &self.right {
-      if high as KeyRef <= key {
-        return Err(*right);
-      }
-    };
-    match self.keys.binary_search_by(|k| (k as KeyRef).cmp(key)) {
-      Ok(i) => Ok(self.children[i + 1]),
-      Err(i) => Ok(self.children[i]),
-    }
-  }
 
   pub fn insert_or_next(
     &mut self,

@@ -1,6 +1,6 @@
 use crate::{
   disk::{PageScanner, PageWriter, Pointer},
-  serialize::{Serializable, SerializeType},
+  serialize::{Deserializable, Serializable, SerializeType, TypedObject},
   Result,
 };
 
@@ -35,17 +35,20 @@ impl TreeHeader {
   }
 }
 
-impl Serializable for TreeHeader {
+impl TypedObject for TreeHeader {
   fn get_type() -> SerializeType {
     SerializeType::Header
   }
+}
 
+impl Serializable for TreeHeader {
   fn write_at(&self, writer: &mut PageWriter) -> Result {
     writer.write_u64(self.root)?;
     writer.write_u16(self.height)?;
     Ok(())
   }
-
+}
+impl Deserializable for TreeHeader {
   fn read_from(reader: &mut PageScanner) -> Result<Self> {
     let root = reader.read_u64()?;
     let height = reader.read_u16()?;

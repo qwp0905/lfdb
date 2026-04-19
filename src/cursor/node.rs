@@ -1,7 +1,7 @@
 use super::{InternalNode, InternalNodeView, LeafNode, LeafNodeView};
 use crate::{
   disk::{PageScanner, PageWriter},
-  serialize::{Serializable, SerializeType, Viewable},
+  serialize::{Deserializable, Serializable, SerializeType, TypedObject, Viewable},
   Error, Result,
 };
 
@@ -9,11 +9,13 @@ pub enum CursorNodeView<'a> {
   Internal(InternalNodeView<'a>),
   Leaf(LeafNodeView<'a>),
 }
-impl<'a> Viewable<'a> for CursorNodeView<'a> {
+impl<'a> TypedObject for CursorNodeView<'a> {
   fn get_type() -> SerializeType {
     SerializeType::CursorNode
   }
+}
 
+impl<'a> Viewable<'a> for CursorNodeView<'a> {
   fn read_from(
     page: &'a crate::disk::Page,
     scanner: &mut PageScanner<'a>,
@@ -29,18 +31,20 @@ impl<'a> Viewable<'a> for CursorNodeView<'a> {
 }
 
 impl<'a> CursorNodeView<'a> {
+  #[inline]
   pub fn as_leaf(self) -> Result<LeafNodeView<'a>> {
     match self {
       Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
       Self::Leaf(node) => Ok(node),
     }
   }
-  // pub fn as_internal(self) -> Result<InternalNodeView<'a>> {
-  //   match self {
-  //     Self::Internal(node) => Ok(node),
-  //     Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
-  //   }
-  // }
+  #[inline]
+  pub fn as_internal(self) -> Result<InternalNodeView<'a>> {
+    match self {
+      Self::Internal(node) => Ok(node),
+      Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
+    }
+  }
 }
 #[derive(Debug)]
 pub enum CursorNode {
@@ -64,10 +68,12 @@ impl CursorNode {
     }
   }
 }
-impl Serializable for CursorNode {
+impl TypedObject for CursorNode {
   fn get_type() -> SerializeType {
     SerializeType::CursorNode
   }
+}
+impl Serializable for CursorNode {
   fn write_at(&self, writer: &mut PageWriter) -> Result {
     match self {
       Self::Internal(node) => {
@@ -81,7 +87,8 @@ impl Serializable for CursorNode {
     }
     Ok(())
   }
-
+}
+impl Deserializable for CursorNode {
   fn read_from(scanner: &mut PageScanner) -> Result<Self> {
     match scanner.read()? {
       0 => Ok(Self::Internal(InternalNode::from_scanner(scanner)?)),
@@ -103,3 +110,7 @@ impl InternalNode {
     CursorNode::Internal(self)
   }
 }
+
+#[cfg(test)]
+#[path = "tests/node.rs"]
+mod tests;
