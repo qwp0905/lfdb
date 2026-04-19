@@ -201,7 +201,7 @@ fn handle_flush(
   }
 
   move |trigger| {
-    let mut waits = Vec::with_capacity(PRE_FLUSH_THRESHOLD);
+    let mut waits = Vec::with_capacity(MAX_BATCHING);
     let mut handles = BTreeMap::new();
 
     if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
