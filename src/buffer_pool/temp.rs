@@ -1,6 +1,7 @@
 use std::{
   marker::PhantomData,
   mem::transmute,
+  ops::Deref,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
@@ -100,9 +101,11 @@ pub struct TempStateRef<'a, T> {
   token: T,
   _marker: PhantomData<&'a ()>,
 }
-impl<'a, T> TempStateRef<'a, T> {
+impl<'a, T> Deref for TempStateRef<'a, T> {
+  type Target = TempFrameState;
+
   #[inline]
-  pub fn state(&self) -> &TempFrameState {
+  fn deref(&self) -> &Self::Target {
     &self.state
   }
 }
