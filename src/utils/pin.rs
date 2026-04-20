@@ -109,3 +109,7 @@ impl<'a> Drop for ExclusiveToken<'a> {
     self.pin.store(0, Ordering::Release);
   }
 }
+
+#[cfg(test)]
+#[path = "tests/pin.rs"]
+mod tests;
