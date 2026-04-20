@@ -133,8 +133,7 @@ impl<'a> LeafNodeView<'a> {
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
-      let offset = scanner.offset();
-      scanner.read_n(l)?;
+      let offset = scanner.advance(l)?;
       let ptr = scanner.read_u64()?;
       entries.push((offset, offset + l, ptr));
     }

@@ -150,8 +150,7 @@ impl<'a> InternalNodeView<'a> {
     if scanner.read()? == 1 {
       let ptr = scanner.read_u64()?;
       let len = scanner.read_u16()? as usize;
-      let offset = scanner.offset();
-      scanner.read_n(len)?;
+      let offset = scanner.advance(len)?;
       right = Some((ptr, offset, offset + len));
     };
 
@@ -159,8 +158,7 @@ impl<'a> InternalNodeView<'a> {
     let mut keys = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
-      let offset = scanner.offset();
-      scanner.read_n(l)?;
+      let offset = scanner.advance(l)?;
       keys.push((offset, offset + l))
     }
 
