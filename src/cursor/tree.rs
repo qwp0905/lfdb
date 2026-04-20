@@ -117,6 +117,10 @@ impl TreeManager {
       let slot = buffer_pool.read(ptr, meta_table.clone())?.for_read();
       let leaf = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
       next = leaf.get_next();
+      if leaf.len() == 0 {
+        meta_table.mark_redirection();
+        continue;
+      }
 
       'outer: for ptr in leaf.get_entry_pointers() {
         let mut ptr = Some(ptr);
@@ -183,8 +187,8 @@ impl TreeManager {
           while let Some(table) = open_handles.pop() {
             logger.debug(|| {
               format!(
-                "table {} start to collect orphan blocks.",
-                table.metadata().get_id()
+                "table {} start to collect orphaned blocks.",
+                table.metadata().get_name()
               )
             });
             release_orphaned(&buffer_pool, &gc, &logger, table)?;
@@ -328,17 +332,20 @@ fn run_merge_leaf(
         drop(slot);
         drop(next_slot);
 
+        table.mark_redirection();
         orphaned
           .into_iter()
           .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
       }
 
-      logger.debug(|| {
-        format!(
-          "clean leaf table {} collect end.",
-          table.metadata().get_name()
-        )
-      });
+      let dead = table.dead_ratio();
+      let name = table.metadata().get_name();
+      if dead > 0.5 {
+        logger.warn(|| format!("table {name} dead space exceeded 50%({dead})."));
+        continue;
+      }
+
+      logger.debug(|| format!("clean leaf table {name} collect end. dead ratio {dead}",));
     }
     Ok(())
   }
@@ -369,7 +376,13 @@ fn release_orphaned(
       .view::<CursorNodeView>()?
     {
       CursorNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
-      CursorNodeView::Leaf(node) => entry_stack.extend(node.get_entry_pointers()),
+      CursorNodeView::Leaf(node) => {
+        if node.len() == 0 {
+          table.mark_redirection();
+          continue;
+        }
+        entry_stack.extend(node.get_entry_pointers());
+      }
     };
   }
 
