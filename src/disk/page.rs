@@ -1,6 +1,7 @@
 use std::{
   alloc::{alloc_zeroed, dealloc, Layout},
   marker::PhantomData,
+  mem::replace,
   ops::Range,
   panic::RefUnwindSafe,
   ptr::copy_nonoverlapping,
@@ -118,9 +119,12 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline]
-  pub fn offset(&self) -> usize {
-    self.offset
+  pub fn advance(&mut self, n: usize) -> Result<usize> {
+    let end = self.offset + n;
+    if end > T {
+      return Err(Error::EOF);
+    }
+    Ok(replace(&mut self.offset, end))
   }
 
   pub fn read(&mut self) -> Result<u8> {
