@@ -1,4 +1,11 @@
-use std::{mem::forget, ops::Deref, sync::Arc};
+use std::{
+  mem::forget,
+  ops::Deref,
+  sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+  },
+};
 
 use super::TableMetadata;
 use crate::{
@@ -12,6 +19,7 @@ pub struct TableHandle {
   disk: DiskController<PAGE_SIZE>,
   free_list: FreeList,
   pin: ExclusivePin,
+  redirection_count: AtomicU32,
 }
 impl TableHandle {
   pub fn new(metadata: TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
@@ -20,6 +28,7 @@ impl TableHandle {
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
+      redirection_count: AtomicU32::new(0),
     }
   }
 
@@ -66,6 +75,16 @@ impl TableHandle {
 
   pub fn truncate(&self) -> Result {
     std::fs::remove_file(self.metadata.get_path()).map_err(Error::IO)
+  }
+
+  pub fn mark_redirection(&self) {
+    self.redirection_count.fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn dead_ratio(&self) -> f64 {
+    (self.free_list.dead_count()
+      + self.redirection_count.load(Ordering::Relaxed) as usize) as f64
+      / self.free_list.file_len() as f64
   }
 }
 

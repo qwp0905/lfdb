@@ -38,4 +38,14 @@ impl FreeList {
   pub fn replay(&self, file_end: Pointer) {
     self.file_end.store(file_end, Ordering::Release);
   }
+
+  #[inline]
+  pub fn file_len(&self) -> Pointer {
+    self.file_end.load(Ordering::Acquire)
+  }
+
+  #[inline]
+  pub fn dead_count(&self) -> usize {
+    self.released.len()
+  }
 }

@@ -1,4 +1,6 @@
-use lfdb::{EngineBuilder, LogLevel, Logger};
+use std::{thread::sleep, time::Duration};
+
+use lfdb::{Engine, EngineBuilder, LogLevel, Logger};
 
 struct DebugLogger;
 impl Logger for DebugLogger {
@@ -6,12 +8,18 @@ impl Logger for DebugLogger {
     println!("[{}] {}", level.to_str(), String::from_utf8_lossy(msg))
   }
 }
-fn main() {
-  let engine = EngineBuilder::new("./.local")
+
+fn build() -> Engine {
+  EngineBuilder::new("./.local")
     .logger(DebugLogger)
     .log_level(LogLevel::Trace)
+    .gc_trigger_interval(Duration::from_secs(10))
+    .checkpoint_interval(Duration::from_secs(5))
     .build()
-    .expect("bootstrap error");
+    .expect("bootstrap error")
+}
+fn main() {
+  let engine = build();
 
   let table = "test";
   {
@@ -20,7 +28,7 @@ fn main() {
     t.commit().unwrap();
   }
 
-  let count = 1_000_usize;
+  let count = 10_000_usize;
   {
     for i in 0..count {
       let mut t = engine.new_tx().expect("tx start error");
@@ -52,11 +60,12 @@ fn main() {
       .expect("insert error");
     tt.commit().expect("commit error");
   }
+
+  sleep(Duration::from_secs(30));
+
   drop(engine);
 
-  let engine = EngineBuilder::new("./.local")
-    .build()
-    .expect("bootstrap error");
+  let engine = build();
 
   let mut t = engine.new_tx().expect("tx start error");
   let tt = t.table(table).unwrap();
