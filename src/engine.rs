@@ -37,6 +37,7 @@ where
   pub group_commit_count: usize,
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
+  pub compaction_threshold: f64,
   pub buffer_pool_shard_count: usize,
   pub buffer_pool_memory_capacity: usize,
   pub transaction_timeout: Duration,
@@ -77,6 +78,7 @@ impl Engine {
     };
     let tree_config = TreeManagerConfig {
       merge_interval: config.gc_trigger_interval,
+      compaction_threshold: config.compaction_threshold,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
@@ -116,6 +118,8 @@ impl Engine {
         tables.clone(),
         recorder.clone(),
         gc.clone(),
+        wal.clone(),
+        version_visibility.clone(),
         logger.clone(),
         tree_config,
       )?;
@@ -160,8 +164,14 @@ impl Engine {
     }
 
     let mut handles = HashMap::new();
-    for table in TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)? {
+    let (open_handles, compactions) =
+      TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)?;
+    for table in open_handles {
       handles.insert(table.metadata().get_id(), table);
+    }
+    for (table, c_table) in compactions.iter() {
+      handles.insert(table.metadata().get_id(), table.clone());
+      handles.insert(c_table.metadata().get_id(), c_table.handle().clone());
     }
 
     for (table_id, ptr, data) in replay
@@ -192,9 +202,15 @@ impl Engine {
       tables.clone(),
       recorder.clone(),
       gc.clone(),
+      wal.clone(),
+      version_visibility.clone(),
       logger.clone(),
       tree_config,
     )?;
+
+    for (table, c_table) in compactions {
+      tree_manager.compact(table, c_table);
+    }
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
