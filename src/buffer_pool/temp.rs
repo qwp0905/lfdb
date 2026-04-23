@@ -12,7 +12,7 @@ use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
 
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
 };
 
 /**
@@ -34,23 +34,13 @@ pub struct TempFrameState {
 }
 
 impl TempFrameState {
-  pub fn new() -> Self {
+  fn new(pin: ExclusivePin) -> Self {
     Self {
-      pin: ExclusivePin::new(),
+      pin,
       page: Atomic::null(),
       dirty: AtomicBool::new(false),
       latch: Default::default(),
     }
-  }
-
-  /**
-   * Unlike FrameState which waits for pin == 0 (no readers),
-   * TempFrameState waits for pin == 1 — the owner's own pin.
-   * The owner is always responsible for cleanup, so eviction
-   * is safe as soon as no other reader holds a pin.
-   */
-  pub fn try_evict(&self) -> Option<ExclusiveToken<'_>> {
-    self.pin.try_exclusive()
   }
 
   pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
@@ -136,13 +126,19 @@ impl<'a> TempStateRef<'a, SharedToken<'a>> {
 
 impl<'a> TempStateRef<'a, ExclusiveToken<'a>> {
   #[inline]
-  pub fn exclusive(state: &Arc<TempFrameState>) -> Self {
-    let token = state.try_evict().unwrap();
+  pub fn exclusive() -> Self {
+    let pin = ExclusivePin::new();
+    let token = unsafe { transmute(pin.try_exclusive().unwrap()) };
+    let state = TempFrameState::new(pin).to_arc();
     Self {
-      state: state.clone(),
-      token: unsafe { transmute(token) },
+      state,
+      token,
       _marker: PhantomData,
     }
+  }
+
+  pub fn get_state(&self) -> Arc<TempFrameState> {
+    self.state.clone()
   }
 
   #[inline]
