@@ -524,6 +524,51 @@ impl CompactTask {
   }
 }
 
+struct MiniTx<'a> {
+  state: TxState<'a>,
+  snapshot: TxSnapshot<'a>,
+  version_visibility: &'a VersionVisibility,
+  wal: &'a WAL,
+  committed: bool,
+}
+impl<'a> MiniTx<'a> {
+  fn new(version_visibility: &'a VersionVisibility, wal: &'a WAL) -> Self {
+    let (state, snapshot) = version_visibility.new_transaction();
+    Self {
+      state,
+      snapshot,
+      version_visibility,
+      wal,
+      committed: false,
+    }
+  }
+
+  fn abort(&mut self) -> Result {
+    if self.committed {
+      return Ok(());
+    }
+    self.version_visibility.set_abort(self.state.get_id());
+    self.wal.append_abort(self.state.get_id())?;
+    self.state.deactive();
+    Ok(())
+  }
+
+  fn commit(&mut self) -> Result {
+    if self.committed {
+      return Ok(());
+    }
+    self.wal.commit_and_flush(self.state.get_id())?;
+    self.committed = true;
+    self.state.deactive();
+    Ok(())
+  }
+}
+impl<'a> Drop for MiniTx<'a> {
+  fn drop(&mut self) {
+    let _ = self.abort();
+  }
+}
+
 pub fn handle_compaction(
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
@@ -539,56 +584,57 @@ pub fn handle_compaction(
     let (old_table, new) = match task {
       CompactTask::Resume(old, new) => (old, new),
       CompactTask::New(old) => {
-        let (state, snapshot) = versions.new_transaction();
-        wal.append_start(state.get_id())?;
+        let (new_table, wait_until) = {
+          let mut tx = MiniTx::new(&versions, &wal);
+          wal.append_start(tx.state.get_id())?;
 
-        let meta_table = tables.meta_table();
+          let meta_table = tables.meta_table();
 
-        let mut metadata = match get_data(
-          &buffer_pool,
-          &meta_table,
-          &state,
-          &snapshot,
-          table_name.as_bytes(),
-        )? {
-          Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-          None => return Err(Error::TableNotFound(table_name)),
+          let mut metadata = match get_data(
+            &buffer_pool,
+            &meta_table,
+            &tx.state,
+            &tx.snapshot,
+            table_name.as_bytes(),
+          )? {
+            Some(bytes) => TableMetadata::from_bytes(&bytes)?,
+            None => return Err(Error::TableNotFound(table_name)),
+          };
+
+          if old.metadata().get_id() != metadata.get_id() {
+            return Err(Error::TableNotFound(table_name));
+          }
+          if metadata.get_compaction_id().is_some() {
+            return Ok(());
+          }
+
+          let table_meta = tables.create_metadata(&table_name);
+          metadata.set_compaction(&table_meta);
+
+          update_data(
+            &buffer_pool,
+            &meta_table,
+            &tx.state,
+            &tx.snapshot,
+            &recorder,
+            &versions,
+            table_name.as_bytes(),
+            metadata.to_vec(),
+          )?;
+
+          let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
+
+          tables.insert(new_table.handle().clone());
+
+          initialize(new_table.handle(), &buffer_pool, &recorder)?;
+
+          tx.commit()?;
+          (new_table, tx.state.get_id())
         };
-
-        if old.metadata().get_id() != metadata.get_id() {
-          return Err(Error::TableNotFound(table_name));
-        }
-        if metadata.get_compaction_id().is_some() {
-          return Ok(());
-        }
-
-        let table_meta = tables.create_metadata(&table_name);
-        metadata.set_compaction(&table_meta);
-
-        update_data(
-          &buffer_pool,
-          &meta_table,
-          &state,
-          &snapshot,
-          &recorder,
-          &versions,
-          table_name.as_bytes(),
-          metadata.to_vec(),
-        )?;
-
-        let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
-
-        tables.insert(new_table.handle().clone());
-
-        initialize(new_table.handle(), &buffer_pool, &recorder)?;
-
-        wal.commit_and_flush(state.get_id())?;
-        state.deactive();
 
         logger
           .info(|| format!("table {table_name} compacting wait until another tx close."));
 
-        let wait_until = versions.current_version();
         while versions.min_version() < wait_until {
           std::thread::sleep(Duration::from_secs(1));
         }
@@ -625,16 +671,16 @@ pub fn handle_compaction(
     });
 
     let tx_id = {
-      let (state, snapshot) = versions.new_transaction();
-      wal.append_start(state.get_id())?;
+      let mut tx = MiniTx::new(&versions, &wal);
+      wal.append_start(tx.state.get_id())?;
 
       let meta_table = tables.meta_table();
 
       if get_data(
         &buffer_pool,
         &meta_table,
-        &state,
-        &snapshot,
+        &tx.state,
+        &tx.snapshot,
         table_name.as_bytes(),
       )?
       .is_none()
@@ -646,17 +692,15 @@ pub fn handle_compaction(
       update_data(
         &buffer_pool,
         &meta_table,
-        &state,
-        &snapshot,
+        &tx.state,
+        &tx.snapshot,
         &recorder,
         &versions,
         table_name.as_bytes(),
         compactor.new.metadata().to_vec(),
       )?;
-
-      wal.commit_and_flush(state.get_id())?;
-      state.deactive();
-      state.get_id()
+      tx.commit()?;
+      tx.state.get_id()
     };
 
     gc.release_table(compactor.old, tx_id);

@@ -12,7 +12,7 @@ use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
 
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 /**
@@ -34,9 +34,9 @@ pub struct TempFrameState {
 }
 
 impl TempFrameState {
-  fn new(pin: ExclusivePin) -> Self {
+  pub fn new() -> Self {
     Self {
-      pin,
+      pin: ExclusivePin::new(),
       page: Atomic::null(),
       dirty: AtomicBool::new(false),
       latch: Default::default(),
@@ -126,13 +126,11 @@ impl<'a> TempStateRef<'a, SharedToken<'a>> {
 
 impl<'a> TempStateRef<'a, ExclusiveToken<'a>> {
   #[inline]
-  pub fn exclusive() -> Self {
-    let pin = ExclusivePin::new();
-    let token = unsafe { transmute(pin.try_exclusive().unwrap()) };
-    let state = TempFrameState::new(pin).to_arc();
+  pub fn exclusive(state: &Arc<TempFrameState>) -> Self {
+    let token = state.pin.try_exclusive().unwrap();
     Self {
-      state,
-      token,
+      state: state.clone(),
+      token: unsafe { transmute(token) },
       _marker: PhantomData,
     }
   }

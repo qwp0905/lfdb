@@ -911,44 +911,46 @@ fn test_heavy_gc_single_key() {
 #[test]
 fn insert_and_remove_and_gc() {
   let dir = tempdir_in(".").unwrap();
-  let engine = Arc::new(build_engine(&dir));
-  create_table(&engine, TEST_TABLE);
-
   let count: usize = 1000;
-  for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.insert(bytes.clone(), bytes).expect("insert error");
-    t.commit().expect("commit error")
-  }
+  {
+    let engine = Arc::new(build_engine(&dir));
+    create_table(&engine, TEST_TABLE);
 
-  for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.remove(&bytes).expect("remove error");
-    t.commit().expect("commit error")
-  }
-  let e = engine.clone();
-  let th = std::thread::spawn(move || {
-    for _ in 0..count {
-      let tx = e.new_tx().expect("tx start error");
-      let table = tx.table(TEST_TABLE).expect("table error");
-      let mut iter = table.scan::<[_]>(..).expect("scan error");
-      while let Ok(Some(_)) = iter.try_next() {}
+    for i in 0..count {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.insert(bytes.clone(), bytes).expect("insert error");
+      t.commit().expect("commit error")
     }
-  });
-  std::thread::sleep(Duration::from_secs(60));
 
-  for i in count..count << 1 {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.insert(bytes.clone(), bytes).expect("insert error");
-    t.commit().expect("commit error")
+    for i in 0..count {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.remove(&bytes).expect("remove error");
+      t.commit().expect("commit error")
+    }
+    let e = engine.clone();
+    let th = std::thread::spawn(move || {
+      for _ in 0..count {
+        let tx = e.new_tx().expect("tx start error");
+        let table = tx.table(TEST_TABLE).expect("table error");
+        let mut iter = table.scan::<[_]>(..).expect("scan error");
+        while let Ok(Some(_)) = iter.try_next() {}
+      }
+    });
+    std::thread::sleep(Duration::from_secs(60));
+
+    for i in count..count << 1 {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.insert(bytes.clone(), bytes).expect("insert error");
+      t.commit().expect("commit error")
+    }
+    th.join().unwrap();
   }
-  th.join().unwrap();
 
   let engine = build_engine(&dir);
 
