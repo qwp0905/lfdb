@@ -39,6 +39,7 @@ impl ExclusivePin {
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub fn is_exclusive(&self) -> bool {
     self.0.load(Ordering::Acquire) == EXCLUSIVE
   }
