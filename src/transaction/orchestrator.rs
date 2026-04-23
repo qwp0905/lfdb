@@ -9,7 +9,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{TableHandle, TableId, TableMapper, TableMetadata},
+  table::{MutationHandle, TableHandle, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
   utils::{LogFilter, ToArc},
   wal::{TxId, WALConfig, WALSegment, WAL},
@@ -158,7 +158,7 @@ impl TxOrchestrator {
   ) -> Result<(TxState<'_>, TxSnapshot<'_>)> {
     let (state, snapshot) = self.version_visibility.new_transaction();
     let tx_id = state.get_id();
-    self.wal.append_start(state.get_id())?;
+    self.wal.append_start(tx_id)?;
     self
       .timeout_thread
       .register(tx_id, timeout.unwrap_or(self.tx_timeout));
@@ -196,7 +196,7 @@ impl TxOrchestrator {
     self.tables.insert(table);
   }
   #[inline]
-  pub fn open_table(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn open_table(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
     self.tables.create_handle(table_meta)
   }
   #[inline]
@@ -211,6 +211,10 @@ impl TxOrchestrator {
   #[inline]
   pub fn get_metadata_table(&self) -> Arc<TableHandle> {
     self.tables.meta_table()
+  }
+  #[inline]
+  pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle) {
+    self.tree_manager.compact(old, new);
   }
 
   /**
