@@ -44,7 +44,7 @@ impl TableMapper {
 
     let disk = io_pool.open_controller(&path)?;
     let metadata = TableHandle::new(
-      TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
+      &TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
       disk,
     )
     .to_arc();
@@ -59,7 +59,7 @@ impl TableMapper {
     })
   }
 
-  pub fn create_handle(&self, table_meta: TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
     let disk = self.io_pool.open_controller(table_meta.get_path())?;
     Ok(TableHandle::new(table_meta, disk).to_arc())
   }
