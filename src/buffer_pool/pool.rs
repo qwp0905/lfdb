@@ -147,10 +147,7 @@ impl BufferPool {
     let old = unsafe { ptr.replace(new_frame) };
     if self.dirty.contains(frame_id) {
       let guard = epoch::pin();
-      old
-        .flush_async(&guard)
-        .map(|h| h.wait())
-        .unwrap_or(Ok(()))?;
+      old.flush_async(&guard).wait()?;
       self.dirty.remove(frame_id);
     }
 
@@ -196,8 +193,8 @@ fn handle_flush(
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
   const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
-  fn flush(waiting: &mut Vec<(Guard, TaskHandle<()>)>) -> Result {
-    waiting.drain(..).map(|(_guard, w)| w.wait()).collect()
+  fn flush(waiting: &mut Vec<(TaskHandle<()>, Guard)>) -> Result {
+    waiting.drain(..).map(|(w, _guard)| w.wait()).collect()
   }
 
   move |trigger| {
@@ -213,7 +210,7 @@ fn handle_flush(
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
       {
-        let _token = match pins[id].try_exclusive() {
+        let _token = match pins[id].try_shared() {
           Some(t) => t,
           None => continue,
         };
@@ -229,12 +226,10 @@ fn handle_flush(
         // Writing synchronously one by one would bypass this optimization
         // and issue a separate syscall per page.
         let guard = epoch::pin();
-        if let Some(r) = frame.flush_async(&guard) {
-          waits.push((guard, r));
-          tables
-            .entry(frame.handle().metadata().get_id())
-            .or_insert_with(|| frame.handle().clone());
-        }
+        waits.push((frame.flush_async(&guard), guard));
+        tables
+          .entry(frame.handle().metadata().get_id())
+          .or_insert_with(|| frame.handle().clone());
       }
 
       if waits.len() < MAX_BATCHING {
@@ -248,11 +243,7 @@ fn handle_flush(
     let mut threads = Vec::with_capacity(tables.len());
 
     for table in tables.into_values() {
-      let th = once(move || match table.try_pin() {
-        Some(handle) => handle.disk().fsync(),
-        None => Ok(()),
-      });
-      threads.push(th)
+      threads.push(once(move || table.disk().fsync()))
     }
 
     threads
