@@ -48,18 +48,28 @@ let tx = engine.new_tx()?;
 let users = tx.table("users")?;
 
 // Range scan [start, end)
-let mut iter = users.scan(b"key1", b"key3")?;
+let mut iter = users.scan(b"key1"..b"key3")?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
 // Full scan
-let mut iter = users.scan_all()?;
+let mut iter = users.scan::<[_]>(..)?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
 tx.commit()?;
+```
+
+### Compact Table
+
+```rust
+let mut tx = engine.new_tx()?;
+tx.compact_table("users")?;
+tx.commit()?; 
+// commit dispatches the compaction and returns immediately
+// the compaction itself runs in the background
 ```
 
 ### Drop Table
@@ -106,6 +116,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `buffer_pool_shard_count` | Number of buffer pool shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
 | `gc_trigger_interval` | Interval at which leaf merge runs. Run more frequently when removes are heavy, less frequently when removes are rare. |
 | `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
+| `compaction_threshold` | Fragmentation ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every `gc_trigger_interval`, and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
 | `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
 
 ## Architecture
@@ -204,7 +215,7 @@ On startup, the engine replays the WAL and redoes all committed transactions sin
 
 - **Key size**: maximum 256 bytes
 - **Value size**: maximum 65,536 bytes (64 KB)
-- **Heavy removes**: compaction is not implemented. Disk space freed by removes is returned to the per-table free list and reused for new writes, but each table's data file never shrinks. Heavy delete workloads will cause disk fragmentation over time. Tune `gc_trigger_interval` to reduce empty leaf nodes and maintain scan performance, but this does not recover fragmented disk space. Dropping a table deletes the entire file immediately.
+- **Heavy removes**: heavy delete workloads warrant care. Disk space freed by removes is returned to the per-table free list and reused for new writes. When auto compaction is triggered, the table is rebuilt into a new file, and reads that happen during the compaction pay an extra cost because they are routed across both the old and the new file until the swap completes.
 
 ## License
 
