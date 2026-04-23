@@ -85,7 +85,7 @@ impl GarbageCollector {
     // it could occur dangling pointer reference.
     release
       .into_iter()
-      .filter(|(_, table)| !table.closed())
+      .filter(|(_, table)| !table.is_closed())
       .for_each(|((_, ptr), table)| table.free().dealloc(ptr));
     Ok(())
   }
@@ -131,6 +131,7 @@ impl GarbageCollector {
         buffer_pool.clone(),
         version_visibility.clone(),
         recorder.clone(),
+        queue.clone(),
       ))
       .to_arc();
     let check = WorkBuilder::new()
@@ -144,7 +145,7 @@ impl GarbageCollector {
       .single()
       .interval(
         RELEASE_CHECK_INTERVAL,
-        run_release_table(mapper, version_visibility),
+        run_release_table(mapper, version_visibility, logger.clone()),
       )
       .to_box();
 
@@ -168,11 +169,18 @@ fn run_entry(
   buffer_pool: Arc<BufferPool>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
+  queue: Arc<DoubleBuffer<GcPointer>>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
   move |(table, pointer)| {
+    if table.is_closed() {
+      return Ok(());
+    }
     let table = match table.try_pin() {
       Some(table) => table,
-      None => return Ok(()),
+      None => {
+        queue.push(GcPointer::Trim(table.clone(), pointer));
+        return Ok(());
+      }
     };
 
     let table_id = table.metadata().get_id();
@@ -219,12 +227,7 @@ fn run_entry(
 
       if !max_found {
         if let Some(record) = expired_max.take() {
-          match &record.data {
-            RecordData::Data(_) => new_versions.push_back(record),
-            RecordData::Chunked(_) => new_versions.push_back(record),
-            RecordData::Tombstone => {}
-          }
-
+          new_versions.push_back(record);
           max_found = true;
         }
       }
@@ -280,6 +283,7 @@ fn run_check(
 fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
+  logger: LogFilter,
 ) -> impl FnMut(Option<(Arc<TableHandle>, TxId)>) {
   let mut tables = Vec::new();
   let mut unpinned = Vec::new();
@@ -302,6 +306,7 @@ fn run_release_table(
 
     for table in unreachable.extract_if(.., |table| table.truncate().is_ok()) {
       mapper.remove(table.metadata().get_id());
+      logger.debug(|| format!("{} table dropped.", table.metadata().get_name()))
     }
   }
 }

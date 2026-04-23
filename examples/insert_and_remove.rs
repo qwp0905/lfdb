@@ -69,7 +69,7 @@ fn main() {
 
   let mut t = engine.new_tx().expect("tx start error");
   let tt = t.table(table).unwrap();
-  let mut iter = tt.scan_all().expect("scan start error");
+  let mut iter = tt.scan::<[_]>(..).expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {

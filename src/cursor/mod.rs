@@ -27,3 +27,6 @@ use leaf::*;
 
 mod internal;
 use internal::*;
+
+mod compactor;
+use compactor::*;

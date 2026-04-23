@@ -25,6 +25,7 @@ fn build_engine(dir: &TempDir) -> Engine {
     .buffer_pool_shard_count(1 << 2)
     .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
+    .checkpoint_interval(Duration::from_secs(2))
     .logger(TestLogger)
     .log_level(LogLevel::Trace)
     .build()
@@ -241,7 +242,7 @@ fn test_scan_range() {
   let t2 = tx2.table(TEST_TABLE).unwrap();
 
   // scan [3, 7)
-  let mut iter = t2.scan(&vec![3], &vec![7]).unwrap();
+  let mut iter = t2.scan(&vec![3]..&vec![7]).unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -266,7 +267,7 @@ fn test_scan_all() {
 
   let tx2 = engine.new_tx().unwrap();
   let t2 = tx2.table(TEST_TABLE).unwrap();
-  let mut iter = t2.scan_all().unwrap();
+  let mut iter = t2.scan::<[_]>(..).unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -498,7 +499,7 @@ fn test_btree_node_split_and_recovery() {
     // scan all and verify order + completeness
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    let mut iter = table.scan_all().unwrap();
+    let mut iter = table.scan::<[_]>(..).unwrap();
     let mut count = 0;
     let mut prev_key: Option<Vec<u8>> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -545,7 +546,7 @@ fn test_btree_node_split_and_recovery() {
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
 
-    let mut iter = table.scan_all().unwrap();
+    let mut iter = table.scan::<[_]>(..).unwrap();
     let mut count = 0;
     let mut prev_key: Option<Vec<u8>> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -796,7 +797,7 @@ fn test_hard_workload() {
   for name in &table_names {
     let t = engine.new_tx().expect("tx start error");
     let table = t.table(name).expect("table error");
-    let mut iter = table.scan_all().expect("scan start error");
+    let mut iter = table.scan::<[_]>(..).expect("scan start error");
     let mut count = 0;
     while let Ok(Some(_)) = iter.try_next() {
       count += 1;
@@ -910,50 +911,52 @@ fn test_heavy_gc_single_key() {
 #[test]
 fn insert_and_remove_and_gc() {
   let dir = tempdir_in(".").unwrap();
-  let engine = Arc::new(build_engine(&dir));
-  create_table(&engine, TEST_TABLE);
-
   let count: usize = 1000;
-  for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.insert(bytes.clone(), bytes).expect("insert error");
-    t.commit().expect("commit error")
-  }
+  {
+    let engine = Arc::new(build_engine(&dir));
+    create_table(&engine, TEST_TABLE);
 
-  for i in 0..count {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.remove(&bytes).expect("remove error");
-    t.commit().expect("commit error")
-  }
-  let e = engine.clone();
-  let th = std::thread::spawn(move || {
-    for _ in 0..count {
-      let tx = e.new_tx().expect("tx start error");
-      let table = tx.table(TEST_TABLE).expect("table error");
-      let mut iter = table.scan_all().expect("scan error");
-      while let Ok(Some(_)) = iter.try_next() {}
+    for i in 0..count {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.insert(bytes.clone(), bytes).expect("insert error");
+      t.commit().expect("commit error")
     }
-  });
-  std::thread::sleep(Duration::from_secs(60));
 
-  for i in count..count << 1 {
-    let mut t = engine.new_tx().expect("tx start error");
-    let table = t.table(TEST_TABLE).expect("table error");
-    let bytes: Vec<u8> = i.to_le_bytes().into();
-    table.insert(bytes.clone(), bytes).expect("insert error");
-    t.commit().expect("commit error")
+    for i in 0..count {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.remove(&bytes).expect("remove error");
+      t.commit().expect("commit error")
+    }
+    let e = engine.clone();
+    let th = std::thread::spawn(move || {
+      for _ in 0..count {
+        let tx = e.new_tx().expect("tx start error");
+        let table = tx.table(TEST_TABLE).expect("table error");
+        let mut iter = table.scan::<[_]>(..).expect("scan error");
+        while let Ok(Some(_)) = iter.try_next() {}
+      }
+    });
+    std::thread::sleep(Duration::from_secs(60));
+
+    for i in count..count << 1 {
+      let mut t = engine.new_tx().expect("tx start error");
+      let table = t.table(TEST_TABLE).expect("table error");
+      let bytes: Vec<u8> = i.to_le_bytes().into();
+      table.insert(bytes.clone(), bytes).expect("insert error");
+      t.commit().expect("commit error")
+    }
+    th.join().unwrap();
   }
-  th.join().unwrap();
 
   let engine = build_engine(&dir);
 
   let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
-  let mut iter = table.scan_all().expect("scan start error");
+  let mut iter = table.scan::<[_]>(..).expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -970,7 +973,7 @@ fn insert_and_remove_and_gc() {
 
   let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
-  let mut iter = table.scan_all().expect("scan start error");
+  let mut iter = table.scan::<[_]>(..).expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -1142,7 +1145,7 @@ fn test_large_key_value_gc() {
 
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    let mut iter = table.scan_all().unwrap();
+    let mut iter = table.scan::<[_]>(..).unwrap();
 
     let mut found = 0;
     while let Ok(Some(_)) = iter.try_next() {
@@ -1420,6 +1423,128 @@ fn test_drop_and_recreate_many_tables() {
         "table {} key {k:?} should hold the second-generation value",
         name,
       );
+    }
+  }
+}
+
+// ============================================================
+// 29. Compact table
+// ============================================================
+#[test]
+fn test_compaction() {
+  let dir = tempdir_in(".").unwrap();
+
+  let count = 10_000;
+  let remove_count = 7_000;
+  let keys = (0..count)
+    .map(|i| format!("{i:0>width$}", width = 16))
+    .map(|b| b.as_bytes().to_vec())
+    .collect::<Vec<_>>();
+  let values = (0..count)
+    .map(|i| format!("{i:0>width$}", width = 100))
+    .map(|b| b.as_bytes().to_vec())
+    .map(|mut b| {
+      b.resize(100, b'x');
+      b
+    })
+    .collect::<Vec<_>>();
+  let new_values = (0..remove_count)
+    .map(|i| format!("{i:0>width$}", width = 100))
+    .map(|b| b.as_bytes().to_vec())
+    .map(|mut b| {
+      b.resize(100, b'1');
+      b
+    })
+    .collect::<Vec<_>>();
+
+  {
+    let engine = build_engine(&dir);
+
+    create_table(&engine, TEST_TABLE);
+
+    let mut tx = engine.new_tx().unwrap();
+
+    let table = tx.table(TEST_TABLE).unwrap();
+    for i in 0..count {
+      table.insert(keys[i].clone(), values[i].clone()).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = engine.new_tx().unwrap();
+
+    let table = tx.table(TEST_TABLE).unwrap();
+    for i in 0..remove_count {
+      table.remove(&keys[i]).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let mut tx = engine.new_tx().unwrap();
+
+    tx.compact_table(TEST_TABLE).unwrap();
+    tx.commit().unwrap();
+
+    let mut tx = engine.new_tx().unwrap();
+    std::thread::scope(|scope| {
+      let th1 = scope.spawn(|| {
+        let table = tx.table(TEST_TABLE).unwrap();
+        let mut iter = table.scan(..=keys.last().unwrap()).unwrap();
+
+        let mut i = remove_count;
+        while let Some((k, v)) = iter.try_next().unwrap() {
+          assert_eq!(k, keys[i]);
+          assert_eq!(v, values[i]);
+          i += 1;
+        }
+        assert_eq!(i, count)
+      });
+
+      let th2 = scope.spawn(|| {
+        let table = tx.table(TEST_TABLE).unwrap();
+        for i in 0..remove_count {
+          table
+            .insert(keys[i].clone(), new_values[i].clone())
+            .unwrap();
+        }
+      });
+
+      th1.join().unwrap();
+      th2.join().unwrap();
+    });
+
+    tx.commit().unwrap();
+  }
+
+  {
+    let engine = build_engine(&dir);
+    {
+      let tx = engine.new_tx().unwrap();
+
+      let table = tx.table(TEST_TABLE).unwrap();
+      let mut iter = table.scan::<[_]>(..).unwrap();
+
+      let mut i = 0;
+      while let Some((k, v)) = iter.try_next().unwrap() {
+        assert_eq!(k, keys[i]);
+        if i >= remove_count {
+          assert_eq!(v, values[i]);
+        } else {
+          assert_eq!(v, new_values[i]);
+        }
+        i += 1;
+      }
+      assert_eq!(i, count);
+    }
+
+    {
+      let tx = engine.new_tx().unwrap();
+
+      let table = tx.table(TEST_TABLE).unwrap();
+      for i in 0..remove_count {
+        assert_eq!(table.get(&keys[i]).unwrap(), Some(new_values[i].clone()));
+      }
+      for i in remove_count..count {
+        assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
+      }
     }
   }
 }

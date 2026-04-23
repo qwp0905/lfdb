@@ -3,22 +3,23 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  CursorNode, CursorNodeView, DataEntry, GarbageCollector, RecordData, TreeHeader,
-  HEADER_POINTER,
+  handle_compaction, CompactTask, CursorNode, CursorNodeView, DataEntry,
+  GarbageCollector, RecordData, TreeHeader, HEADER_POINTER,
 };
 use crate::{
   buffer_pool::BufferPool,
   disk::Pointer,
-  table::{TableHandle, TableMapper, TableMetadata},
+  table::{MutationHandle, TableHandle, TableMapper, TableMetadata, META_TABLE_ID},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{LogFilter, ToArc, ToBox},
-  wal::RESERVED_TX,
+  wal::{RESERVED_TX, WAL},
   Result,
 };
 
 pub struct TreeManagerConfig {
   pub merge_interval: Duration,
+  pub compaction_threshold: f64,
 }
 
 /**
@@ -27,6 +28,7 @@ pub struct TreeManagerConfig {
  */
 pub struct TreeManager {
   merge_leaf: Box<dyn BackgroundThread<(), Result>>,
+  compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
 }
 impl TreeManager {
   fn new(
@@ -34,9 +36,26 @@ impl TreeManager {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
+    version_visibility: Arc<VersionVisibility>,
+    wal: Arc<WAL>,
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Self {
+    let compaction = WorkBuilder::new()
+      .name("tree compaction")
+      .stack_size(2 << 20)
+      .multi(1)
+      .shared(handle_compaction(
+        tables.clone(),
+        buffer_pool.clone(),
+        version_visibility.clone(),
+        wal.clone(),
+        recorder.clone(),
+        gc.clone(),
+        logger.clone(),
+      ))
+      .to_arc();
+
     let merge_leaf = WorkBuilder::new()
       .name("merge leaf nodes")
       .single()
@@ -44,15 +63,20 @@ impl TreeManager {
         config.merge_interval,
         run_merge_leaf(
           buffer_pool.clone(),
-          tables,
+          tables.clone(),
           recorder.clone(),
           gc.clone(),
+          compaction.clone(),
+          config.compaction_threshold,
           logger.clone(),
         ),
       )
       .to_box();
 
-    Self { merge_leaf }
+    Self {
+      merge_leaf,
+      compaction,
+    }
   }
 
   pub fn initialize(
@@ -60,6 +84,8 @@ impl TreeManager {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
+    wal: Arc<WAL>,
+    version_visibility: Arc<VersionVisibility>,
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
@@ -84,16 +110,28 @@ impl TreeManager {
       )?;
     }
 
-    Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
+    Ok(Self::new(
+      buffer_pool,
+      tables,
+      recorder,
+      gc,
+      version_visibility,
+      wal,
+      logger,
+      config,
+    ))
   }
 
   pub fn open_handles(
     buffer_pool: &BufferPool,
     version_visibility: &VersionVisibility,
     tables: &TableMapper,
-  ) -> Result<Vec<Arc<TableHandle>>> {
+  ) -> Result<(
+    Vec<Arc<TableHandle>>,
+    Vec<(Arc<TableHandle>, MutationHandle)>,
+  )> {
     let mut handles = vec![];
-    let current_version = version_visibility.current_version();
+    let mut compactions = vec![];
     let meta_table = tables.meta_table();
 
     let mut ptr = buffer_pool
@@ -131,29 +169,39 @@ impl TreeManager {
             .as_ref()
             .deserialize::<DataEntry>()?;
 
-          if let Some(record) =
-            entry.find_record(current_version, |i| !version_visibility.is_aborted(i))
-          {
-            if let Some(bytes) = record.read_data(|i| {
+          for record in entry.get_versions() {
+            if version_visibility.is_aborted(&record.owner) {
+              continue;
+            }
+
+            let metadata = match record.data.read_data(|i| {
               buffer_pool
                 .read(i, meta_table.clone())?
                 .for_read()
                 .as_ref()
                 .deserialize()
             })? {
-              let metadata = TableMetadata::from_bytes(&bytes)?;
-              let handle = tables.create_handle(metadata)?;
-              handles.push(handle);
-              continue 'outer;
+              Some(bytes) => TableMetadata::from_bytes(&bytes)?,
+              None => continue 'outer,
+            };
+
+            match metadata.get_compaction_metadata() {
+              Some(c_meta) => compactions.push((
+                tables.create_handle(&metadata)?,
+                tables.create_handle(&c_meta)?.try_mutation().unwrap(),
+              )),
+              None => handles.push(tables.create_handle(&metadata)?),
             }
-          };
+
+            continue 'outer;
+          }
 
           ptr = entry.get_next();
         }
       }
     }
 
-    Ok(handles)
+    Ok((handles, compactions))
   }
 
   /**
@@ -168,6 +216,8 @@ impl TreeManager {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
+    wal: Arc<WAL>,
+    version_visibility: Arc<VersionVisibility>,
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
@@ -204,11 +254,25 @@ impl TreeManager {
       .collect::<Result>()?;
 
     logger.info(|| "orphaned block has released successfully.");
-    Ok(Self::new(buffer_pool, tables, recorder, gc, logger, config))
+    Ok(Self::new(
+      buffer_pool,
+      tables,
+      recorder,
+      gc,
+      version_visibility,
+      wal,
+      logger,
+      config,
+    ))
   }
 
   pub fn close(&self) {
     self.merge_leaf.close();
+    self.compaction.close();
+  }
+
+  pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle) {
+    self.compaction.dispatch(CompactTask::Resume(old, new));
   }
 }
 
@@ -217,6 +281,8 @@ fn run_merge_leaf(
   tables: Arc<TableMapper>,
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
+  compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
+  compaction_threshold: f64,
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
@@ -340,8 +406,9 @@ fn run_merge_leaf(
 
       let dead = table.dead_ratio();
       let name = table.metadata().get_name();
-      if dead > 0.5 {
-        logger.warn(|| format!("table {name} dead space exceeded 50%({dead})."));
+      if dead > compaction_threshold && table_id != META_TABLE_ID {
+        logger.debug(|| format!("table {name} dead ratio exceeded as {dead}.",));
+        compaction.dispatch(CompactTask::New(table.handle()));
         continue;
       }
 

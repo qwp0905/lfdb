@@ -90,9 +90,13 @@ pub struct TxSnapshot<'a> {
   aborted: &'a SkipSet<TxId>,
 }
 impl<'a> TxSnapshot<'a> {
-  fn new(active: &SkipMap<TxId, AtomicU8>, aborted: &'a SkipSet<TxId>) -> Self {
-    let (front, max) = match (active.front(), active.back()) {
-      (Some(front), Some(back)) => (front, *back.key()),
+  fn new(
+    active: &SkipMap<TxId, AtomicU8>,
+    aborted: &'a SkipSet<TxId>,
+    max: TxId,
+  ) -> Self {
+    let front = match active.front() {
+      Some(front) => front,
       _ => {
         return TxSnapshot {
           active: OffsetBitmap::new(0, 0),
@@ -105,7 +109,7 @@ impl<'a> TxSnapshot<'a> {
     let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
 
     let mut entry = Some(front);
-    while let Some(e) = entry.take_if(|e| *e.key() <= max) {
+    while let Some(e) = entry.take_if(|e| *e.key() < max) {
       if !e.is_removed() {
         snapshot.insert(*e.key());
       }
@@ -188,11 +192,10 @@ impl VersionVisibility {
     self.aborted.insert(tx_id);
   }
   pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
-    let snapshot = TxSnapshot::new(&self.active, &self.aborted);
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
     (
       TxState(self.active.insert(tx_id, AtomicU8::new(STATUS_AVAILABLE))),
-      snapshot,
+      TxSnapshot::new(&self.active, &self.aborted, tx_id),
     )
   }
   #[inline]

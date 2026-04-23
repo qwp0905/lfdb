@@ -24,6 +24,7 @@ where
       group_commit_count: DEFAULT_GROUP_COMMIT_COUNT,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
+      compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       buffer_pool_shard_count: DEFAULT_BUFFER_POOL_SHARD_COUNT,
       buffer_pool_memory_capacity: DEFAULT_BUFFER_POOL_MEMORY_CAPACITY,
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
@@ -139,6 +140,15 @@ where
     self
   }
 
+  /**
+   * Threshold which trigger auto compaction. To disable auto compaction, then set 1.0.
+   */
+  pub fn compaction_threshold(mut self, threshold: f64) -> Self {
+    assert!(threshold <= 1.0);
+    self.0.compaction_threshold = threshold;
+    self
+  }
+
   pub fn build(self) -> Result<Engine> {
     Engine::bootstrap(self.0)
   }
@@ -157,3 +167,4 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_LOGGER: NoneLogger = NoneLogger;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
 const DEFAULT_IO_THREAD_COUNT: usize = 32;
+const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;

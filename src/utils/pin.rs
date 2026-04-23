@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam::utils::Backoff;
 
 const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
+
+#[derive(Debug)]
 pub struct ExclusivePin(AtomicUsize);
 impl ExclusivePin {
   #[inline]
@@ -39,6 +41,7 @@ impl ExclusivePin {
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub fn is_exclusive(&self) -> bool {
     self.0.load(Ordering::Acquire) == EXCLUSIVE
   }
@@ -96,6 +99,8 @@ impl<'a> ExclusiveToken<'a> {
   #[inline]
   pub fn downgrade(mut self) -> SharedToken<'a> {
     self.downgrade = true;
+
+    debug_assert_eq!(self.pin.load(Ordering::Acquire), EXCLUSIVE);
     self.pin.store(1, Ordering::Release);
     SharedToken::new(self.pin)
   }
@@ -106,6 +111,8 @@ impl<'a> Drop for ExclusiveToken<'a> {
     if self.downgrade {
       return;
     }
+
+    debug_assert_eq!(self.pin.load(Ordering::Acquire), EXCLUSIVE);
     self.pin.store(0, Ordering::Release);
   }
 }

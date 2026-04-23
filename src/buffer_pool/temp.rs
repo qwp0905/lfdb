@@ -43,16 +43,6 @@ impl TempFrameState {
     }
   }
 
-  /**
-   * Unlike FrameState which waits for pin == 0 (no readers),
-   * TempFrameState waits for pin == 1 — the owner's own pin.
-   * The owner is always responsible for cleanup, so eviction
-   * is safe as soon as no other reader holds a pin.
-   */
-  pub fn try_evict(&self) -> Option<ExclusiveToken<'_>> {
-    self.pin.try_exclusive()
-  }
-
   pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
     self.page.load(Ordering::Acquire, guard).as_raw()
   }
@@ -137,12 +127,16 @@ impl<'a> TempStateRef<'a, SharedToken<'a>> {
 impl<'a> TempStateRef<'a, ExclusiveToken<'a>> {
   #[inline]
   pub fn exclusive(state: &Arc<TempFrameState>) -> Self {
-    let token = state.try_evict().unwrap();
+    let token = state.pin.try_exclusive().unwrap();
     Self {
       state: state.clone(),
       token: unsafe { transmute(token) },
       _marker: PhantomData,
     }
+  }
+
+  pub fn get_state(&self) -> Arc<TempFrameState> {
+    self.state.clone()
   }
 
   #[inline]

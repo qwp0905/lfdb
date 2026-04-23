@@ -85,7 +85,7 @@ fn main() {
     let mut t = engine.new_tx().expect("scan start error");
     let tt = t.table(table).expect("table error");
 
-    let mut iter = tt.scan_all().expect("scan create error");
+    let mut iter = tt.scan::<[_]>(..).expect("scan create error");
     while let Ok(Some(_)) = iter.try_next() {
       total += 1;
     }
