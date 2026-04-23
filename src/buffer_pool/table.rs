@@ -11,7 +11,7 @@ use super::{LRUShard, TempFrameState, TempStateRef};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -224,9 +224,8 @@ impl LRUTable {
         continue;
       }
 
-      let state = TempFrameState::new().to_arc();
-      let state_ref = TempStateRef::exclusive(&state);
-      shard.temporary.insert(key, state);
+      let state_ref = TempStateRef::exclusive();
+      shard.temporary.insert(key, state_ref.get_state());
       return Peeked::DiskRead(state_ref, TempGuard::new(s, key));
     }
   }
