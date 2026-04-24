@@ -17,8 +17,8 @@ use crate::{
 };
 
 pub enum CompactTask {
-  Resume(Arc<TableHandle>, MutationHandle),
   New(Arc<TableHandle>),
+  Wait(Arc<TableHandle>, MutationHandle, TxId),
 }
 
 struct MiniTx<'a> {
@@ -211,7 +211,7 @@ pub fn wait_compaction(
   move |task| {
     if let Some(task) = task {
       match task {
-        CompactTask::Resume(old, new) => waited.push_back((old, new)),
+        CompactTask::Wait(old, new, until) => triggered.push((old, new, until)),
         CompactTask::New(old) => {
           let table_name = old.metadata().get_name();
           let (new_table, wait_until) = {
@@ -251,21 +251,20 @@ pub fn wait_compaction(
             index.initialize(new_table.handle())?;
 
             tx.commit()?;
-            (new_table, tx.state.get_id())
+            (new_table, versions.current_version())
           };
 
           logger.info(|| {
             format!("table {table_name} compacting wait until another tx close.")
           });
 
-          triggered.push((wait_until, old, new_table));
+          triggered.push((old, new_table, wait_until));
         }
       };
     }
 
-    for (_, old, new) in
-      triggered.extract_if(.., |(v, _, _)| versions.min_version() >= *v)
-    {
+    let min_version = versions.min_version();
+    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version >= *v) {
       waited.push_back((old, new));
     }
 
@@ -291,6 +290,9 @@ pub fn handle_compaction(
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
   logger: LogFilter,
+  after_compaction: Arc<
+    dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
+  >,
 ) -> impl Fn((MutationHandle, MutationHandle)) -> Result {
   let meta_table = tables.meta_table();
   move |(old, new)| {
@@ -304,6 +306,7 @@ pub fn handle_compaction(
       &meta_table,
       old,
       new,
+      &after_compaction,
     )
   }
 }
@@ -318,6 +321,9 @@ fn do_compaction(
   meta_table: &Arc<TableHandle>,
   old_table: MutationHandle,
   new: MutationHandle,
+  after_compaction: &Arc<
+    dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
+  >,
 ) -> Result {
   let table_name = old_table.metadata().get_name();
   logger.info(|| format!("table {table_name} compacting begin."));
@@ -365,7 +371,7 @@ fn do_compaction(
     )
   });
 
-  let tx_id = {
+  let (tx_id, version) = {
     let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
     let index = BTreeIndex::new(&tx);
 
@@ -381,11 +387,30 @@ fn do_compaction(
     )?;
 
     tx.commit()?;
-    tx.state.get_id()
+    (tx.state.get_id(), version_visibility.current_version())
   };
 
-  gc.release_table(old_table.handle().clone(), tx_id);
   logger.info(|| format!("table {table_name} compacting totally complete."));
+  after_compaction.dispatch((old_table, new, tx_id, version));
 
   Ok(())
+}
+
+pub fn after_compaction(
+  gc: Arc<GarbageCollector>,
+  version_visibility: Arc<VersionVisibility>,
+) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {
+  let mut buffered = Vec::new();
+  move |data| {
+    if let Some(v) = data {
+      buffered.push(v);
+    }
+
+    let min_version = version_visibility.min_version();
+    for (old, _, tx_id, version) in
+      buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
+    {
+      gc.release_table(old.into_inner(), tx_id, version);
+    }
+  }
 }
