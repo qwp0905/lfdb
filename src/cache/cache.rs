@@ -4,7 +4,7 @@ use std::{
 
 use crossbeam::epoch::{self, Guard};
 
-use super::{Acquired, Frame, LRUTable, Peeked, Slot};
+use super::{Acquired, CacheSlot, Frame, LRUTable, Peeked};
 use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
@@ -17,12 +17,12 @@ use crate::{
 const PRE_FLUSH_THRESHOLD: usize = 100;
 const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
-pub struct BufferPoolConfig {
+pub struct BlockCacheConfig {
   pub shard_count: usize,
   pub capacity: usize,
 }
 
-pub struct BufferPool {
+pub struct BlockCache {
   table: LRUTable,
   frame: Arc<Vec<MaybeUninit<Frame>>>,
   pins: Arc<Vec<ExclusivePin>>,
@@ -32,9 +32,9 @@ pub struct BufferPool {
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
 }
-impl BufferPool {
+impl BlockCache {
   pub fn open(
-    config: BufferPoolConfig,
+    config: BlockCacheConfig,
     logger: LogFilter,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
@@ -54,7 +54,7 @@ impl BufferPool {
     let dirty = AtomicBitmap::new(frame_cap).to_arc();
 
     let pre_flush = WorkBuilder::new()
-      .name("buffer pool pre-flush")
+      .name("block cache pre-flush")
       .single()
       .interval(
         PRE_FLUSH_INTERVAL,
@@ -75,8 +75,8 @@ impl BufferPool {
   }
 
   #[inline]
-  fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> Slot<'a> {
-    Slot::page(
+  fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
+    CacheSlot::page(
       unsafe { self.frame[id].assume_init_ref() },
       &self.dirty,
       id,
@@ -86,7 +86,7 @@ impl BufferPool {
   }
 
   /**
-   * Reading buffer pool without promotion.
+   * Reading block cache without promotion.
    * Used for reads that should not affect LRU, like gc.
    *
    * DiskRead: another thread has already registered a temp slot for this
@@ -95,7 +95,11 @@ impl BufferPool {
    * concurrent read() from promoting this page into the LRU while we
    * are reading — which would create two live copies of the same page.
    */
-  pub fn peek(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
+  pub fn peek(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CacheSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let (state_ref, guard) = match self
       .table
@@ -103,7 +107,7 @@ impl BufferPool {
     {
       Peeked::Hit(id, token) => return Ok(self.page_slot(id, token)),
       Peeked::Temp(state) => {
-        return Ok(Slot::temp(state, pointer, None, &self.page_pool))
+        return Ok(CacheSlot::temp(state, pointer, None, &self.page_pool))
       }
       Peeked::DiskRead(state, guard) => (state, guard),
     };
@@ -111,7 +115,7 @@ impl BufferPool {
     let mut page = self.page_pool.acquire();
     handle.disk().read(pointer, &mut page)?;
     state_ref.store(page);
-    Ok(Slot::temp(
+    Ok(CacheSlot::temp(
       state_ref.downgrade(),
       pointer,
       Some((guard, handle)),
@@ -119,15 +123,15 @@ impl BufferPool {
     ))
   }
 
-  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
+  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CacheSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Temp(state) => {
-        self.metrics.buffer_pool_cache_hit.inc();
-        return Ok(Slot::temp(state, pointer, None, &self.page_pool));
+        self.metrics.block_cache_hit.inc();
+        return Ok(CacheSlot::temp(state, pointer, None, &self.page_pool));
       }
       Acquired::Hit(frame_id, token) => {
-        self.metrics.buffer_pool_cache_hit.inc();
+        self.metrics.block_cache_hit.inc();
         return Ok(self.page_slot(frame_id, token));
       }
       Acquired::Evicted(guard) => guard,
@@ -155,20 +159,24 @@ impl BufferPool {
   }
 
   #[inline]
-  pub fn read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
+  pub fn read(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CacheSlot<'_>> {
     self
       .metrics
-      .buffer_pool_read
+      .block_cache_read
       .measure(|| self.__read(pointer, handle))
   }
 
   pub fn flush(&self) -> Result {
-    self.logger.debug(|| "buffer pool flush triggered.");
+    self.logger.debug(|| "block cache flush triggered.");
     self
       .metrics
-      .buffer_pool_flush
+      .block_cache_flush
       .measure(|| self.pre_flush.execute(()).wait().flatten())?;
-    self.logger.debug(|| "buffer pool synced.");
+    self.logger.debug(|| "block cache synced.");
     Ok(())
   }
 
@@ -177,7 +185,7 @@ impl BufferPool {
   }
 }
 
-impl Drop for BufferPool {
+impl Drop for BlockCache {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
       for i in offset..offset + len {

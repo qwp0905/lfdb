@@ -5,7 +5,7 @@ use super::{
   VersionRecord, WritablePolicy,
 };
 use crate::{
-  buffer_pool::{BufferPool, WritableSlot},
+  cache::{BlockCache, WritableSlot},
   disk::Pointer,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
@@ -24,7 +24,7 @@ pub enum CompactTask {
 struct MiniTx<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
-  buffer_pool: &'a BufferPool,
+  block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
@@ -36,7 +36,7 @@ impl<'a> MiniTx<'a> {
   fn start(
     version_visibility: &'a VersionVisibility,
     wal: &'a WAL,
-    buffer_pool: &'a BufferPool,
+    block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
     gc: &'a GarbageCollector,
   ) -> Result<Self> {
@@ -45,7 +45,7 @@ impl<'a> MiniTx<'a> {
     Ok(Self {
       state,
       snapshot,
-      buffer_pool,
+      block_cache,
       recorder,
       version_visibility,
       wal,
@@ -99,8 +99,8 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::buffer_pool::Slot<'_>> {
-    self.buffer_pool.peek(pointer, table.clone())
+  ) -> Result<crate::cache::CacheSlot<'_>> {
+    self.block_cache.peek(pointer, table.clone())
   }
 }
 impl<'a> WritablePolicy for &MiniTx<'a> {
@@ -139,7 +139,7 @@ impl<'a> CreatablePolicy for &MiniTx<'a> {
 }
 
 struct CompactionReadPolicy<'a> {
-  buffer_pool: &'a BufferPool,
+  block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
 }
 impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
@@ -151,13 +151,13 @@ impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::buffer_pool::Slot<'_>> {
-    self.buffer_pool.peek(pointer, table.clone())
+  ) -> Result<crate::cache::CacheSlot<'_>> {
+    self.block_cache.peek(pointer, table.clone())
   }
 }
 
 struct CompactionWritePolicy<'a> {
-  buffer_pool: &'a BufferPool,
+  block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   gc: &'a GarbageCollector,
@@ -171,8 +171,8 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::buffer_pool::Slot<'_>> {
-    self.buffer_pool.peek(pointer, table.clone())
+  ) -> Result<crate::cache::CacheSlot<'_>> {
+    self.block_cache.peek(pointer, table.clone())
   }
 }
 impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
@@ -196,7 +196,7 @@ pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
 pub fn wait_compaction(
   tables: Arc<TableMapper>,
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
@@ -215,7 +215,7 @@ pub fn wait_compaction(
         CompactTask::New(old) => {
           let table_name = old.metadata().get_name();
           let (new_table, wait_until) = {
-            let mut tx = MiniTx::start(&versions, &wal, &buffer_pool, &recorder, &gc)?;
+            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc)?;
 
             let index = BTreeIndex::new(&tx);
 
@@ -285,7 +285,7 @@ pub fn wait_compaction(
 
 pub fn handle_compaction(
   tables: Arc<TableMapper>,
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
@@ -295,7 +295,7 @@ pub fn handle_compaction(
   let meta_table = tables.meta_table();
   move |(old, new)| {
     do_compaction(
-      &buffer_pool,
+      &block_cache,
       &versions,
       &wal,
       &recorder,
@@ -309,7 +309,7 @@ pub fn handle_compaction(
 }
 
 fn do_compaction(
-  buffer_pool: &BufferPool,
+  block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
   wal: &WAL,
   recorder: &PageRecorder,
@@ -325,7 +325,7 @@ fn do_compaction(
 
   {
     let old_index = BTreeIndex::new(CompactionReadPolicy {
-      buffer_pool,
+      block_cache,
       version_visibility,
     });
 
@@ -333,7 +333,7 @@ fn do_compaction(
       old_index.scan(old_table.handle(), &Bound::Unbounded, &Bound::Unbounded)?;
 
     let new_index = BTreeIndex::new(CompactionWritePolicy {
-      buffer_pool,
+      block_cache,
       version_visibility,
       recorder,
       gc,
@@ -350,7 +350,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, buffer_pool, recorder, gc)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         logger.warn(|| format!("table {table_name} already dropped."));
         return Ok(());
@@ -366,7 +366,7 @@ fn do_compaction(
   });
 
   let tx_id = {
-    let mut tx = MiniTx::start(version_visibility, wal, buffer_pool, recorder, gc)?;
+    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {

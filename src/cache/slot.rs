@@ -1,29 +1,29 @@
 use std::{
-  mem::{ManuallyDrop, transmute},
+  mem::{transmute, ManuallyDrop},
   sync::{Arc, MutexGuard},
 };
 
-use crossbeam::epoch::{Guard, pin};
+use crossbeam::epoch::{pin, Guard};
 
 use super::{Frame, FrameId, TempGuard, TempStateRef};
 use crate::{
-  disk::{PAGE_SIZE, Page, PagePool, PageRef, Pointer},
+  disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
   utils::{AtomicBitmap, SharedToken, UnsafeBorrow},
 };
 
 /**
- * A handle to a buffer pool page, abstracting over LRU frames and temp pages.
+ * A handle to a block cache page, abstracting over LRU frames and temp pages.
  *
  * Callers only need to call for_read() or for_write() — the distinction between
  * Page and Temp is an internal detail. Dirty tracking and disk writes are handled
- * by the buffer pool itself when the slot is dropped.
+ * by the block cache itself when the slot is dropped.
  */
-pub enum Slot<'a> {
+pub enum CacheSlot<'a> {
   Temp(TempSlot<'a>),
   Page(PageSlot<'a>),
 }
-impl<'a> Slot<'a> {
+impl<'a> CacheSlot<'a> {
   #[inline]
   pub fn temp(
     state: TempStateRef<'a, SharedToken<'a>>,
@@ -60,8 +60,8 @@ impl<'a> Slot<'a> {
     'a: 'b,
   {
     match self {
-      Slot::Temp(temp) => ReadonlySlot::Temp(temp.for_read()),
-      Slot::Page(page) => ReadonlySlot::Page(page.for_read()),
+      CacheSlot::Temp(temp) => ReadonlySlot::Temp(temp.for_read()),
+      CacheSlot::Page(page) => ReadonlySlot::Page(page.for_read()),
     }
   }
 
@@ -71,8 +71,8 @@ impl<'a> Slot<'a> {
     'a: 'b,
   {
     match self {
-      Slot::Temp(temp) => WritableSlot::Temp(temp.for_write()),
-      Slot::Page(page) => WritableSlot::Page(page.for_write()),
+      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write()),
+      CacheSlot::Page(page) => WritableSlot::Page(page.for_write()),
     }
   }
 }

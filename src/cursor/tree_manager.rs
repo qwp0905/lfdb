@@ -8,7 +8,7 @@ use super::{
   COMPACTION_INTERVAL, HEADER_POINTER,
 };
 use crate::{
-  buffer_pool::BufferPool,
+  cache::BlockCache,
   disk::Pointer,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata, META_TABLE_ID},
   thread::{once, BackgroundThread, WorkBuilder},
@@ -24,7 +24,7 @@ pub struct TreeManagerConfig {
 }
 
 struct TableOpenPolicy<'a> {
-  buffer_pool: &'a BufferPool,
+  block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
 }
 impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
@@ -36,8 +36,8 @@ impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::buffer_pool::Slot<'_>> {
-    self.buffer_pool.read(pointer, table.clone())
+  ) -> Result<crate::cache::CacheSlot<'_>> {
+    self.block_cache.read(pointer, table.clone())
   }
 }
 
@@ -52,7 +52,7 @@ pub struct TreeManager {
 }
 impl TreeManager {
   fn new(
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
@@ -66,7 +66,7 @@ impl TreeManager {
       .multi(1)
       .shared(handle_compaction(
         tables.clone(),
-        buffer_pool.clone(),
+        block_cache.clone(),
         version_visibility.clone(),
         wal.clone(),
         recorder.clone(),
@@ -81,7 +81,7 @@ impl TreeManager {
         COMPACTION_INTERVAL,
         wait_compaction(
           tables.clone(),
-          buffer_pool.clone(),
+          block_cache.clone(),
           version_visibility.clone(),
           wal.clone(),
           recorder.clone(),
@@ -98,7 +98,7 @@ impl TreeManager {
       .interval(
         config.merge_interval,
         run_merge_leaf(
-          buffer_pool.clone(),
+          block_cache.clone(),
           tables.clone(),
           recorder.clone(),
           gc.clone(),
@@ -117,7 +117,7 @@ impl TreeManager {
   }
 
   pub fn initialize(
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
@@ -130,7 +130,7 @@ impl TreeManager {
     let table_id = table.metadata().get_id();
     {
       let root_ptr = table.free().alloc();
-      let mut root = buffer_pool.read(root_ptr, table.clone())?.for_write();
+      let mut root = block_cache.read(root_ptr, table.clone())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -138,7 +138,7 @@ impl TreeManager {
         &BTreeNode::initial_state(),
       )?;
 
-      let mut header = buffer_pool.read(HEADER_POINTER, table.clone())?.for_write();
+      let mut header = block_cache.read(HEADER_POINTER, table.clone())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -148,7 +148,7 @@ impl TreeManager {
     }
 
     Ok(Self::new(
-      buffer_pool,
+      block_cache,
       tables,
       recorder,
       gc,
@@ -160,7 +160,7 @@ impl TreeManager {
   }
 
   pub fn open_handles(
-    buffer_pool: &BufferPool,
+    block_cache: &BlockCache,
     version_visibility: &VersionVisibility,
     tables: &TableMapper,
   ) -> Result<(
@@ -172,7 +172,7 @@ impl TreeManager {
     let meta_table = tables.meta_table();
 
     let index = BTreeIndex::new(TableOpenPolicy {
-      buffer_pool,
+      block_cache,
       version_visibility,
     });
 
@@ -200,7 +200,7 @@ impl TreeManager {
    * WAL record was written. Orphans are reclaimed via lazy_release.
    */
   pub fn clean_and_start(
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     gc: Arc<GarbageCollector>,
@@ -217,7 +217,7 @@ impl TreeManager {
 
     let threads = (0..5)
       .map(|_| {
-        let buffer_pool = buffer_pool.clone();
+        let block_cache = block_cache.clone();
         let gc = gc.clone();
         let logger = logger.clone();
         let open_handles = open_handles.clone();
@@ -229,7 +229,7 @@ impl TreeManager {
                 table.metadata().get_name()
               )
             });
-            release_orphaned(&buffer_pool, &gc, &logger, table)?;
+            release_orphaned(&block_cache, &gc, &logger, table)?;
           }
           Ok(())
         })
@@ -243,7 +243,7 @@ impl TreeManager {
 
     logger.info(|| "orphaned block has released successfully.");
     Ok(Self::new(
-      buffer_pool,
+      block_cache,
       tables,
       recorder,
       gc,
@@ -266,7 +266,7 @@ impl TreeManager {
 }
 
 fn run_merge_leaf(
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   tables: Arc<TableMapper>,
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
@@ -289,14 +289,14 @@ fn run_merge_leaf(
       });
       let table_id = table.metadata().get_id();
 
-      let mut ptr = buffer_pool
+      let mut ptr = block_cache
         .peek(HEADER_POINTER, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?
         .get_root();
 
-      while let BTreeNodeView::Internal(node) = buffer_pool
+      while let BTreeNodeView::Internal(node) = block_cache
         .peek(ptr, table.handle())?
         .for_read()
         .as_ref()
@@ -305,10 +305,10 @@ fn run_merge_leaf(
         ptr = node.first_child()
       }
 
-      let mut index = Some(ptr);
-      while let Some(i) = index.take() {
+      let mut next_ptr = Some(ptr);
+      while let Some(i) = next_ptr.take() {
         {
-          let slot = buffer_pool.peek(i, table.handle())?.for_read();
+          let slot = block_cache.peek(i, table.handle())?.for_read();
           let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
@@ -321,14 +321,14 @@ fn run_merge_leaf(
             .into_iter()
             .fold(Ok(false), |a, c| a.and_then(|a| c.map(|c| a || c)))?
           {
-            index = leaf.get_next();
+            next_ptr = leaf.get_next();
             continue;
           }
         }
 
-        let mut slot = buffer_pool.peek(i, table.handle())?.for_write();
+        let mut slot = block_cache.peek(i, table.handle())?.for_write();
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
-        index = leaf.get_next();
+        next_ptr = leaf.get_next();
 
         let prev_len = leaf.len();
         let mut new_entries = vec![];
@@ -345,7 +345,7 @@ fn run_merge_leaf(
           }
         }
 
-        let next = match (new_entries.len(), index) {
+        let next = match (new_entries.len(), next_ptr) {
           (0, Some(next)) => next,
           (len, _) if len == prev_len => continue,
           _ => {
@@ -370,7 +370,7 @@ fn run_merge_leaf(
           format!("trying to start merge {} with {}", slot.get_pointer(), next)
         });
 
-        let mut next_slot = buffer_pool.peek(next, table.handle())?.for_write();
+        let mut next_slot = block_cache.peek(next, table.handle())?.for_write();
         let next_leaf = next_slot.as_ref().deserialize::<BTreeNode>()?;
         leaf.set_next(slot.get_pointer());
 
@@ -382,7 +382,7 @@ fn run_merge_leaf(
           &mut next_slot,
           &leaf.to_node(),
         )?;
-        index = Some(slot.get_pointer());
+        next_ptr = Some(slot.get_pointer());
 
         drop(slot);
         drop(next_slot);
@@ -407,13 +407,13 @@ fn run_merge_leaf(
 }
 
 fn release_orphaned(
-  buffer_pool: &BufferPool,
+  block_cache: &BlockCache,
   gc: &GarbageCollector,
   logger: &LogFilter,
   table: Arc<TableHandle>,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
-  let root = buffer_pool
+  let root = block_cache
     .read(HEADER_POINTER, table.clone())?
     .for_read()
     .as_ref()
@@ -424,7 +424,7 @@ fn release_orphaned(
 
   while let Some(ptr) = node_stack.pop() {
     visited.insert(ptr);
-    match buffer_pool
+    match block_cache
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()
@@ -449,7 +449,7 @@ fn release_orphaned(
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let entry: DataEntry = buffer_pool
+    let entry: DataEntry = block_cache
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()

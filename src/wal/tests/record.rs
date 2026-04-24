@@ -38,9 +38,9 @@ fn test_insert_roundtrip() {
   let r = LogRecord::new_insert(4, 42, 1, 99, page);
   let parsed = assert_roundtrip(&r);
   match parsed.operation {
-    Operation::Insert(table_id, index, data) => {
+    Operation::Insert(table_id, ptr, data) => {
       assert_eq!(table_id, 1);
-      assert_eq!(index, 99);
+      assert_eq!(ptr, 99);
       assert_eq!(data[0], 0xAB);
       assert_eq!(data[99], 0xCD);
     }

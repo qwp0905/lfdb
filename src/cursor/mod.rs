@@ -25,8 +25,8 @@ use leaf::*;
 mod internal;
 use internal::*;
 
-mod compactor;
-use compactor::*;
+mod compact;
+use compact::*;
 
 mod btree;
 use btree::*;

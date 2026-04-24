@@ -133,8 +133,8 @@ impl DataEntry {
   pub fn get_next(&self) -> Option<Pointer> {
     self.next
   }
-  pub fn set_next(&mut self, index: Pointer) {
-    self.next = Some(index);
+  pub fn set_next(&mut self, ptr: Pointer) {
+    self.next = Some(ptr);
   }
 
   pub fn append(&mut self, record: VersionRecord) {

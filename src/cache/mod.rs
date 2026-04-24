@@ -10,8 +10,8 @@ use lru::*;
 mod table;
 use table::*;
 
-mod pool;
-pub use pool::*;
+mod cache;
+pub use cache::*;
 
 mod slot;
 pub use slot::*;

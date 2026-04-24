@@ -7,7 +7,7 @@ use std::{
 
 use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
-  buffer_pool::BufferPool,
+  cache::BlockCache,
   disk::Pointer,
   error::Result,
   table::{TableHandle, TableMapper},
@@ -115,7 +115,7 @@ impl GarbageCollector {
   }
 
   pub fn start(
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
@@ -128,7 +128,7 @@ impl GarbageCollector {
       .name("gc found entry")
       .multi(config.thread_count)
       .shared(run_entry(
-        buffer_pool.clone(),
+        block_cache.clone(),
         version_visibility.clone(),
         recorder.clone(),
         queue.clone(),
@@ -137,7 +137,7 @@ impl GarbageCollector {
     let check = WorkBuilder::new()
       .name("gc check top entry")
       .multi(config.thread_count)
-      .shared(run_check(buffer_pool.clone()))
+      .shared(run_check(block_cache.clone()))
       .to_arc();
 
     let table = WorkBuilder::new()
@@ -166,7 +166,7 @@ impl GarbageCollector {
 }
 
 fn run_entry(
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
   queue: Arc<DoubleBuffer<GcPointer>>,
@@ -194,7 +194,7 @@ fn run_entry(
     };
 
     while let Some(i) = ptr.take() {
-      let mut slot = buffer_pool.peek(i, table.handle())?.for_write();
+      let mut slot = block_cache.peek(i, table.handle())?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -251,7 +251,7 @@ fn run_entry(
         }
       };
 
-      let next_entry: DataEntry = buffer_pool
+      let next_entry: DataEntry = block_cache
         .peek(next, table.handle())?
         .for_read()
         .as_ref()
@@ -266,11 +266,11 @@ fn run_entry(
 }
 
 fn run_check(
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
   move |(table, pointer)| {
     Ok(
-      buffer_pool
+      block_cache
         .peek(pointer, table)?
         .for_read()
         .as_ref()

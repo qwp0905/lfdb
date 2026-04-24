@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::{RecordData, VersionRecord};
 
 use crate::{
-  buffer_pool::{Slot, WritableSlot},
+  cache::{CacheSlot, WritableSlot},
   disk::Pointer,
   serialize::{Deserializable, Serializable},
   table::TableHandle,
@@ -13,7 +13,11 @@ use crate::{
 
 pub trait ReadonlyPolicy {
   fn is_visible(&self, owner: TxId, version: TxId) -> bool;
-  fn fetch_slot(&self, pointer: Pointer, table: &Arc<TableHandle>) -> Result<Slot<'_>>;
+  fn fetch_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<CacheSlot<'_>>;
 
   fn fetch_and_deserialize<T>(
     &self,

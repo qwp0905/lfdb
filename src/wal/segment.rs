@@ -191,7 +191,7 @@ fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result 
       return file.pwrite(slice, i * SIZE).map_err(Error::IO).map(drop);
     }
 
-    // Duplicate indexes all point to the same underlying page memory (same PageRef),
+    // Duplicate offsets all point to the same underlying page memory (same PageRef),
     // so writing once is equivalent — no data is lost by deduplicating.
     buffered.sort_by_key(|(i, _)| *i);
     buffered.dedup_by_key(|(i, _)| *i);
