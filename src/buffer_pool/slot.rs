@@ -1,13 +1,13 @@
 use std::{
-  mem::{transmute, ManuallyDrop},
+  mem::{ManuallyDrop, transmute},
   sync::{Arc, MutexGuard},
 };
 
-use crossbeam::epoch::{pin, Guard};
+use crossbeam::epoch::{Guard, pin};
 
 use super::{Frame, FrameId, TempGuard, TempStateRef};
 use crate::{
-  disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
+  disk::{PAGE_SIZE, Page, PagePool, PageRef, Pointer},
   table::TableHandle,
   utils::{AtomicBitmap, SharedToken, UnsafeBorrow},
 };
@@ -238,9 +238,9 @@ impl<'a> TempSlot<'a> {
 
 /**
  * The guard is wrapped in ManuallyDrop to control drop order inside Drop::drop.
- * The lock must be released before try_evict() so that other threads waiting
+ * The lock must be released before upgrade() so that other threads waiting
  * on this page can proceed — Rust does not allow moving fields out of self in Drop,
- * so ManuallyDrop::drop is used to release the lock at the right moment.
+ * so ManuallyDrop::drop is used to release the lock and upgrade the state at the right moment.
  *
  * transmute is used to extend the guard's lifetime to match the struct,
  * since the borrow checker cannot infer that the guard outlives self here.
@@ -282,9 +282,8 @@ impl<'a> Drop for TempSlotWrite<'a> {
 
 /**
  * The guard is wrapped in ManuallyDrop to control drop order inside Drop::drop.
- * The lock must be released before try_evict() so that other threads waiting
- * on this page can proceed — Rust does not allow moving fields out of self in Drop,
- * so ManuallyDrop::drop is used to release the lock at the right moment.
+ * Rust does not allow moving fields out of self in Drop,
+ * so ManuallyDrop::drop is used to upgrade the state at the right moment.
  *
  * transmute is used to extend the guard's lifetime to match the struct,
  * since the borrow checker cannot infer that the guard outlives self here.
