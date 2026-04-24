@@ -1,4 +1,4 @@
-use std::{cell::Cell, ops::Bound, sync::Arc, time::Duration};
+use std::{cell::Cell, collections::VecDeque, ops::Bound, sync::Arc, time::Duration};
 
 use super::{
   BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, RecordData,
@@ -9,26 +9,16 @@ use crate::{
   disk::Pointer,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
+  thread::BackgroundThread,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::LogFilter,
   wal::{TxId, RESERVED_TX, WAL},
-  Error, Result,
+  Result,
 };
 
 pub enum CompactTask {
   Resume(Arc<TableHandle>, MutationHandle),
   New(Arc<TableHandle>),
-}
-impl CompactTask {
-  fn name(&self) -> String {
-    match self {
-      CompactTask::Resume(table, _) => table,
-      CompactTask::New(table) => table,
-    }
-    .metadata()
-    .get_name()
-    .to_string()
-  }
 }
 
 struct MiniTx<'a> {
@@ -202,6 +192,97 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   }
 }
 
+pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
+
+pub fn wait_compaction(
+  tables: Arc<TableMapper>,
+  buffer_pool: Arc<BufferPool>,
+  versions: Arc<VersionVisibility>,
+  wal: Arc<WAL>,
+  recorder: Arc<PageRecorder>,
+  gc: Arc<GarbageCollector>,
+  logger: LogFilter,
+  compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+) -> impl FnMut(Option<CompactTask>) -> Result {
+  let meta_table = tables.meta_table();
+  let mut triggered = Vec::new();
+  let mut waited = VecDeque::new();
+
+  move |task| {
+    if let Some(task) = task {
+      match task {
+        CompactTask::Resume(old, new) => waited.push_back((old, new)),
+        CompactTask::New(old) => {
+          let table_name = old.metadata().get_name();
+          let (new_table, wait_until) = {
+            let mut tx = MiniTx::start(&versions, &wal, &buffer_pool, &recorder, &gc)?;
+
+            let index = BTreeIndex::new(&tx);
+
+            let mut metadata =
+              match index.get(table_name.as_bytes(), &meta_table)?.flatten() {
+                Some(bytes) => TableMetadata::from_bytes(&bytes)?,
+                None => return Ok(()),
+              };
+
+            if old.metadata().get_id() != metadata.get_id()
+              || metadata.get_compaction_id().is_some()
+            {
+              logger.trace(|| {
+                format!("table {table_name} compacting skipped since already compacted.")
+              });
+              return Ok(());
+            }
+
+            logger.info(|| format!("table {table_name} compacting triggered."));
+            let table_meta = tables.create_metadata(table_name);
+            metadata.set_compaction(&table_meta);
+
+            index.insert_if_matched(
+              table_name.as_bytes(),
+              metadata.to_vec(),
+              &meta_table,
+            )?;
+
+            let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
+
+            tables.insert(new_table.handle().clone());
+
+            index.initialize(new_table.handle())?;
+
+            tx.commit()?;
+            (new_table, tx.state.get_id())
+          };
+
+          logger.info(|| {
+            format!("table {table_name} compacting wait until another tx close.")
+          });
+
+          triggered.push((wait_until, old, new_table));
+        }
+      };
+    }
+
+    for (_, old, new) in
+      triggered.extract_if(.., |(v, _, _)| versions.min_version() >= *v)
+    {
+      waited.push_back((old, new));
+    }
+
+    for _ in 0..waited.len() {
+      match waited.pop_front() {
+        Some((old, new)) => match old.try_mutation() {
+          Some(old) => compaction.dispatch((old, new)),
+          None => waited.push_back((old, new)),
+        },
+        None => return Ok(()),
+      }
+    }
+
+    Ok(())
+  }
+}
+
 pub fn handle_compaction(
   tables: Arc<TableMapper>,
   buffer_pool: Arc<BufferPool>,
@@ -210,136 +291,101 @@ pub fn handle_compaction(
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
   logger: LogFilter,
-) -> impl Fn(CompactTask) -> Result {
+) -> impl Fn((MutationHandle, MutationHandle)) -> Result {
   let meta_table = tables.meta_table();
-  move |task| {
-    let table_name = task.name();
-    let (old_table, new) = match task {
-      CompactTask::Resume(old, new) => (old, new),
-      CompactTask::New(old) => {
-        let (new_table, wait_until) = {
-          let mut tx = MiniTx::start(&versions, &wal, &buffer_pool, &recorder, &gc)?;
+  move |(old, new)| {
+    do_compaction(
+      &buffer_pool,
+      &versions,
+      &wal,
+      &recorder,
+      &gc,
+      &logger,
+      &meta_table,
+      old,
+      new,
+    )
+  }
+}
 
-          let index = BTreeIndex::new(&tx);
+fn do_compaction(
+  buffer_pool: &BufferPool,
+  version_visibility: &VersionVisibility,
+  wal: &WAL,
+  recorder: &PageRecorder,
+  gc: &GarbageCollector,
+  logger: &LogFilter,
+  meta_table: &Arc<TableHandle>,
+  old_table: MutationHandle,
+  new: MutationHandle,
+) -> Result {
+  let table_name = old_table.metadata().get_name();
+  logger.info(|| format!("table {table_name} compacting begin."));
+  let mut moved_count = 0;
 
-          let mut metadata =
-            match index.get(table_name.as_bytes(), &meta_table)?.flatten() {
-              Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-              None => return Err(Error::TableNotFound(table_name)),
-            };
-
-          if old.metadata().get_id() != metadata.get_id() {
-            return Ok(());
-          }
-          if metadata.get_compaction_id().is_some() {
-            return Ok(());
-          }
-
-          logger.info(|| format!("table {table_name} compacting triggered."));
-          let table_meta = tables.create_metadata(&table_name);
-          metadata.set_compaction(&table_meta);
-
-          index.insert_if_matched(
-            table_name.as_bytes(),
-            metadata.to_vec(),
-            &meta_table,
-          )?;
-
-          let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
-
-          tables.insert(new_table.handle().clone());
-
-          index.initialize(new_table.handle())?;
-
-          tx.commit()?;
-          (new_table, tx.state.get_id())
-        };
-
-        logger
-          .info(|| format!("table {table_name} compacting wait until another tx close."));
-
-        while versions.min_version() < wait_until {
-          std::thread::sleep(Duration::from_secs(1));
-        }
-
-        (old, new_table)
-      }
-    };
-
-    let old_table = loop {
-      match old_table.try_mutation() {
-        Some(handle) => break handle,
-        None => std::thread::sleep(Duration::from_secs(1)),
-      }
-    };
-
-    logger.info(|| format!("table {table_name} compacting begin."));
-    let mut moved_count = 0;
-
-    {
-      let old_index = BTreeIndex::new(CompactionReadPolicy {
-        buffer_pool: &buffer_pool,
-        version_visibility: &versions,
-      });
-
-      let mut old_snapshot =
-        old_index.scan(old_table.handle(), &Bound::Unbounded, &Bound::Unbounded)?;
-
-      let new_index = BTreeIndex::new(CompactionWritePolicy {
-        buffer_pool: &buffer_pool,
-        version_visibility: &versions,
-        recorder: &recorder,
-        gc: &gc,
-      });
-
-      'compaction: loop {
-        for _ in 0..1000 {
-          match old_snapshot.snapshot()? {
-            Some(snap) => {
-              new_index.apply_snapshot(snap, new.handle())?;
-              moved_count += 1;
-            }
-            None => break 'compaction,
-          }
-        }
-
-        let tx = MiniTx::start(&versions, &wal, &buffer_pool, &recorder, &gc)?;
-        if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), &meta_table)? {
-          logger.warn(|| format!("table {table_name} already dropped."));
-          return Ok(());
-        }
-      }
-    }
-
-    logger.info(|| {
-      format!(
-        "table {table_name} compacting copied {} count record complete.",
-        moved_count,
-      )
+  {
+    let old_index = BTreeIndex::new(CompactionReadPolicy {
+      buffer_pool,
+      version_visibility,
     });
 
-    let tx_id = {
-      let mut tx = MiniTx::start(&versions, &wal, &buffer_pool, &recorder, &gc)?;
-      let index = BTreeIndex::new(&tx);
+    let mut old_snapshot =
+      old_index.scan(old_table.handle(), &Bound::Unbounded, &Bound::Unbounded)?;
 
-      if !index.contains(table_name.as_bytes(), &meta_table)? {
+    let new_index = BTreeIndex::new(CompactionWritePolicy {
+      buffer_pool,
+      version_visibility,
+      recorder,
+      gc,
+    });
+
+    'compaction: loop {
+      for _ in 0..1000 {
+        match old_snapshot.snapshot()? {
+          Some(snap) => {
+            new_index.apply_snapshot(snap, new.handle())?;
+            moved_count += 1;
+          }
+          None => break 'compaction,
+        }
+      }
+
+      let tx = MiniTx::start(version_visibility, wal, buffer_pool, recorder, gc)?;
+      if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         logger.warn(|| format!("table {table_name} already dropped."));
         return Ok(());
       }
-
-      index.insert_if_matched(
-        table_name.as_bytes(),
-        new.metadata().to_vec(),
-        &meta_table,
-      )?;
-
-      tx.commit()?;
-      tx.state.get_id()
-    };
-
-    gc.release_table(old_table.handle().clone(), tx_id);
-    logger.info(|| format!("table {table_name} compacting totally complete."));
-
-    Ok(())
+    }
   }
+
+  logger.info(|| {
+    format!(
+      "table {table_name} compacting copied {} count record complete.",
+      moved_count,
+    )
+  });
+
+  let tx_id = {
+    let mut tx = MiniTx::start(version_visibility, wal, buffer_pool, recorder, gc)?;
+    let index = BTreeIndex::new(&tx);
+
+    if !index.contains(table_name.as_bytes(), meta_table)? {
+      logger.warn(|| format!("table {table_name} already dropped."));
+      return Ok(());
+    }
+
+    index.insert_if_matched(
+      table_name.as_bytes(),
+      new.metadata().to_vec(),
+      &meta_table,
+    )?;
+
+    tx.commit()?;
+    tx.state.get_id()
+  };
+
+  gc.release_table(old_table.handle().clone(), tx_id);
+  logger.info(|| format!("table {table_name} compacting totally complete."));
+
+  Ok(())
 }

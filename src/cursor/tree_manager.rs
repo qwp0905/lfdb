@@ -3,8 +3,9 @@ use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  handle_compaction, BTreeIndex, BTreeNode, BTreeNodeView, CompactTask, DataEntry,
-  GarbageCollector, ReadonlyPolicy, RecordData, TreeHeader, HEADER_POINTER,
+  handle_compaction, wait_compaction, BTreeIndex, BTreeNode, BTreeNodeView, CompactTask,
+  DataEntry, GarbageCollector, ReadonlyPolicy, RecordData, TreeHeader,
+  COMPACTION_INTERVAL, HEADER_POINTER,
 };
 use crate::{
   buffer_pool::BufferPool,
@@ -46,7 +47,8 @@ impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
  */
 pub struct TreeManager {
   merge_leaf: Box<dyn BackgroundThread<(), Result>>,
-  compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
+  wait_compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
+  do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
 }
 impl TreeManager {
   fn new(
@@ -59,9 +61,8 @@ impl TreeManager {
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Self {
-    let compaction = WorkBuilder::new()
+    let do_compaction = WorkBuilder::new()
       .name("tree compaction")
-      .stack_size(2 << 20)
       .multi(1)
       .shared(handle_compaction(
         tables.clone(),
@@ -72,6 +73,23 @@ impl TreeManager {
         gc.clone(),
         logger.clone(),
       ))
+      .to_arc();
+    let wait_compaction = WorkBuilder::new()
+      .name("tree waiting compaction")
+      .single()
+      .interval(
+        COMPACTION_INTERVAL,
+        wait_compaction(
+          tables.clone(),
+          buffer_pool.clone(),
+          version_visibility.clone(),
+          wal.clone(),
+          recorder.clone(),
+          gc.clone(),
+          logger.clone(),
+          do_compaction.clone(),
+        ),
+      )
       .to_arc();
 
     let merge_leaf = WorkBuilder::new()
@@ -84,7 +102,7 @@ impl TreeManager {
           tables.clone(),
           recorder.clone(),
           gc.clone(),
-          compaction.clone(),
+          wait_compaction.clone(),
           config.compaction_threshold,
           logger.clone(),
         ),
@@ -93,7 +111,8 @@ impl TreeManager {
 
     Self {
       merge_leaf,
-      compaction,
+      wait_compaction,
+      do_compaction,
     }
   }
 
@@ -237,11 +256,12 @@ impl TreeManager {
 
   pub fn close(&self) {
     self.merge_leaf.close();
-    self.compaction.close();
+    self.wait_compaction.close();
+    self.do_compaction.close();
   }
 
   pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle) {
-    self.compaction.dispatch(CompactTask::Resume(old, new));
+    self.wait_compaction.dispatch(CompactTask::Resume(old, new));
   }
 }
 
@@ -376,7 +396,6 @@ fn run_merge_leaf(
       let dead = table.dead_ratio();
       let name = table.metadata().get_name();
       if dead > compaction_threshold && table_id != META_TABLE_ID {
-        logger.debug(|| format!("table {name} dead ratio exceeded as {dead}.",));
         compaction.dispatch(CompactTask::New(table.handle()));
         continue;
       }
