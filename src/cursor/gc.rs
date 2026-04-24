@@ -48,7 +48,7 @@ pub struct GarbageCollector {
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
-  table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId), ()>>,
+  table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
   logger: LogFilter,
 }
 impl GarbageCollector {
@@ -96,8 +96,8 @@ impl GarbageCollector {
   pub fn lazy_release(&self, table: Arc<TableHandle>, pointer: Pointer) {
     self.queue.push(GcPointer::Release(table, pointer))
   }
-  pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId) {
-    self.table.dispatch((table, tx_id));
+  pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
+    self.table.dispatch((table, tx_id, version));
   }
 
   pub fn batch_check_empty(
@@ -283,18 +283,18 @@ fn run_check(
 fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-) -> impl FnMut(Option<(Arc<TableHandle>, TxId)>) {
+) -> impl FnMut(Option<(Arc<TableHandle>, TxId, TxId)>) {
   let mut tables = Vec::new();
   let mut unpinned = Vec::new();
   let mut unreachable = Vec::new();
   move |recv| {
-    if let Some((table, tx_id)) = recv {
-      tables.push((table, tx_id));
+    if let Some((table, tx_id, version)) = recv {
+      tables.push((table, tx_id, version));
     }
 
     let min_version = version_visibility.min_version();
-    for (table, _) in tables.extract_if(.., |(_, tx_id)| {
-      version_visibility.is_aborted(tx_id) || min_version > *tx_id
+    for (table, _, _) in tables.extract_if(.., |(_, tx_id, version)| {
+      version_visibility.is_aborted(tx_id) || min_version >= *version
     }) {
       unpinned.push(table)
     }

@@ -170,7 +170,7 @@ impl Engine {
       handles.insert(table.metadata().get_id(), table);
     }
     for (table, c_table) in compactions.iter() {
-      handles.insert(table.metadata().get_id(), table.clone());
+      handles.insert(table.metadata().get_id(), table.handle().clone());
       handles.insert(c_table.metadata().get_id(), c_table.handle().clone());
     }
 
@@ -209,7 +209,7 @@ impl Engine {
     )?;
 
     for (table, c_table) in compactions {
-      tree_manager.compact(table, c_table);
+      tree_manager.resume_compact(table, c_table);
     }
 
     let orchestrator = TxOrchestrator::initial_checkpoint(

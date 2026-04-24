@@ -3,9 +3,9 @@ use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  handle_compaction, wait_compaction, BTreeIndex, BTreeNode, BTreeNodeView, CompactTask,
-  DataEntry, GarbageCollector, ReadonlyPolicy, RecordData, TreeHeader,
-  COMPACTION_INTERVAL, HEADER_POINTER,
+  after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
+  BTreeNodeView, CompactTask, DataEntry, GarbageCollector, ReadonlyPolicy, RecordData,
+  TreeHeader, COMPACTION_INTERVAL, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -14,7 +14,7 @@ use crate::{
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{LogFilter, ToArc, ToBox},
-  wal::{RESERVED_TX, WAL},
+  wal::{TxId, RESERVED_TX, WAL},
   Result,
 };
 
@@ -49,6 +49,8 @@ pub struct TreeManager {
   merge_leaf: Box<dyn BackgroundThread<(), Result>>,
   wait_compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
   do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+  after_compaction:
+    Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
 }
 impl TreeManager {
   fn new(
@@ -61,6 +63,15 @@ impl TreeManager {
     logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Self {
+    let after_compaction = WorkBuilder::new()
+      .name("tree after compaction")
+      .single()
+      .interval(
+        COMPACTION_INTERVAL,
+        after_compaction(gc.clone(), version_visibility.clone()),
+      )
+      .to_arc();
+
     let do_compaction = WorkBuilder::new()
       .name("tree compaction")
       .multi(1)
@@ -72,8 +83,10 @@ impl TreeManager {
         recorder.clone(),
         gc.clone(),
         logger.clone(),
+        after_compaction.clone(),
       ))
       .to_arc();
+
     let wait_compaction = WorkBuilder::new()
       .name("tree waiting compaction")
       .single()
@@ -113,6 +126,7 @@ impl TreeManager {
       merge_leaf,
       wait_compaction,
       do_compaction,
+      after_compaction,
     }
   }
 
@@ -163,10 +177,7 @@ impl TreeManager {
     block_cache: &BlockCache,
     version_visibility: &VersionVisibility,
     tables: &TableMapper,
-  ) -> Result<(
-    Vec<Arc<TableHandle>>,
-    Vec<(Arc<TableHandle>, MutationHandle)>,
-  )> {
+  ) -> Result<(Vec<Arc<TableHandle>>, Vec<(MutationHandle, MutationHandle)>)> {
     let mut handles = vec![];
     let mut compactions = vec![];
     let meta_table = tables.meta_table();
@@ -182,7 +193,7 @@ impl TreeManager {
       let metadata = TableMetadata::from_bytes(&bytes)?;
       match metadata.get_compaction_metadata() {
         Some(c_meta) => compactions.push((
-          tables.create_handle(&metadata)?,
+          tables.create_handle(&metadata)?.try_mutation().unwrap(),
           tables.create_handle(&c_meta)?.try_mutation().unwrap(),
         )),
         None => handles.push(tables.create_handle(&metadata)?),
@@ -258,10 +269,16 @@ impl TreeManager {
     self.merge_leaf.close();
     self.wait_compaction.close();
     self.do_compaction.close();
+    self.after_compaction.close();
   }
 
-  pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle) {
-    self.wait_compaction.dispatch(CompactTask::Resume(old, new));
+  pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+    self
+      .wait_compaction
+      .dispatch(CompactTask::Wait(old, new, version));
+  }
+  pub fn resume_compact(&self, old: MutationHandle, new: MutationHandle) {
+    self.do_compaction.dispatch((old, new));
   }
 }
 

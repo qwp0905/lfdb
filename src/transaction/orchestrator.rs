@@ -209,16 +209,16 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn drop_table(&self, table: Arc<TableHandle>, version: TxId) {
-    self.gc.release_table(table, version);
+  pub fn drop_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
+    self.gc.release_table(table, tx_id, version);
   }
   #[inline]
   pub fn get_metadata_table(&self) -> Arc<TableHandle> {
     self.tables.meta_table()
   }
   #[inline]
-  pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle) {
-    self.tree_manager.compact(old, new);
+  pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+    self.tree_manager.compact(old, new, version);
   }
 
   /**

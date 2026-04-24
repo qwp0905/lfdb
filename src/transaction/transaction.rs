@@ -11,6 +11,7 @@ use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
   table::{MutationHandle, TableHandle, TableMetadata, MAX_TABLE_NAME_LEN},
+  wal::TxId,
   Error, Result,
 };
 
@@ -24,9 +25,9 @@ pub struct Transaction<'a> {
   snapshot: TxSnapshot<'a>,
   metrics: &'a MetricsRegistry,
   tx_start: Option<Instant>,
-  created_tables: Vec<Arc<TableHandle>>,
-  dropped_tables: Vec<Arc<TableHandle>>,
-  compacted_tables: Vec<(Arc<TableHandle>, MutationHandle)>,
+  created_tables: Vec<(Arc<TableHandle>, TxId)>,
+  dropped_tables: Vec<(Arc<TableHandle>, TxId)>,
+  compacted_tables: Vec<(Arc<TableHandle>, MutationHandle, TxId)>,
   modified: AtomicBool,
 }
 impl<'a> Transaction<'a> {
@@ -131,7 +132,9 @@ impl<'a> Transaction<'a> {
       &self.metrics,
     )?;
     self.orchestrator.commit_table(table.clone());
-    self.created_tables.push(table);
+    self
+      .created_tables
+      .push((table, self.orchestrator.current_version()));
 
     Ok(cursor)
   }
@@ -146,15 +149,16 @@ impl<'a> Transaction<'a> {
       let metadata = TableMetadata::from_bytes(&bytes)?;
       cursor.remove(&name.as_bytes())?;
 
+      let version = self.orchestrator.current_version();
       if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
-        self.dropped_tables.push(table);
+        self.dropped_tables.push((table, version));
       }
 
       if let Some(table) = metadata
         .get_compaction_id()
         .and_then(|id| self.orchestrator.get_table(id))
       {
-        self.dropped_tables.push(table);
+        self.dropped_tables.push((table, version));
       }
     }
 
@@ -202,7 +206,9 @@ impl<'a> Transaction<'a> {
       &self.metrics,
     )?;
     self.orchestrator.commit_table(new_table.handle().clone());
-    self.compacted_tables.push((old, new_table));
+    self
+      .compacted_tables
+      .push((old, new_table, self.orchestrator.current_version()));
 
     Ok(())
   }
@@ -221,14 +227,16 @@ impl<'a> Transaction<'a> {
       return Err(err);
     }
 
-    while let Some(table) = self.dropped_tables.pop() {
-      self.orchestrator.drop_table(table, self.state.get_id());
+    while let Some((table, version)) = self.dropped_tables.pop() {
+      self
+        .orchestrator
+        .drop_table(table, self.state.get_id(), version);
     }
 
     self.state.deactive();
 
-    while let Some((old, new)) = self.compacted_tables.pop() {
-      self.orchestrator.compact_table(old, new);
+    while let Some((old, new, version)) = self.compacted_tables.pop() {
+      self.orchestrator.compact_table(old, new, version);
     }
 
     Ok(())
@@ -244,15 +252,17 @@ impl<'a> Transaction<'a> {
     }
 
     self.orchestrator.abort_tx(self.state.get_id())?;
-    while let Some(table) = self.created_tables.pop() {
-      self.orchestrator.drop_table(table, self.state.get_id());
+    while let Some((table, version)) = self.created_tables.pop() {
+      self
+        .orchestrator
+        .drop_table(table, self.state.get_id(), version);
     }
     self.state.deactive();
 
-    while let Some((_, new)) = self.compacted_tables.pop() {
+    while let Some((_, new, version)) = self.compacted_tables.pop() {
       self
         .orchestrator
-        .drop_table(new.into_inner(), self.state.get_id());
+        .drop_table(new.into_inner(), self.state.get_id(), version);
     }
     Ok(())
   }
