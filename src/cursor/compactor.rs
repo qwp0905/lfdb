@@ -214,7 +214,6 @@ pub fn handle_compaction(
   let meta_table = tables.meta_table();
   move |task| {
     let table_name = task.name();
-    logger.info(|| format!("table {table_name} compacting triggered."));
     let (old_table, new) = match task {
       CompactTask::Resume(old, new) => (old, new),
       CompactTask::New(old) => {
@@ -230,12 +229,13 @@ pub fn handle_compaction(
             };
 
           if old.metadata().get_id() != metadata.get_id() {
-            return Err(Error::TableNotFound(table_name));
+            return Ok(());
           }
           if metadata.get_compaction_id().is_some() {
             return Ok(());
           }
 
+          logger.info(|| format!("table {table_name} compacting triggered."));
           let table_meta = tables.create_metadata(&table_name);
           metadata.set_compaction(&table_meta);
 

@@ -1,12 +1,17 @@
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Arc, Mutex,
-};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
+use std::{
+  collections::HashMap,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+  },
+};
 
 use crossbeam::channel::{unbounded, Sender};
 use lfdb::{Engine, EngineBuilder, Error, LogLevel, Logger};
+use rand::Rng;
 use rand::{rng, seq::IteratorRandom};
 use tempfile::{tempdir_in, TempDir};
 
@@ -17,7 +22,7 @@ impl Logger for TestLogger {
   }
 }
 
-fn build_engine(dir: &TempDir) -> Engine {
+fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)
     .gc_thread_count(3)
@@ -28,8 +33,10 @@ fn build_engine(dir: &TempDir) -> Engine {
     .checkpoint_interval(Duration::from_secs(2))
     .logger(TestLogger)
     .log_level(LogLevel::Trace)
-    .build()
-    .expect("engine bootstrap failed")
+}
+
+fn build_engine(dir: &TempDir) -> Engine {
+  default_options(dir).build().unwrap()
 }
 
 const TEST_TABLE: &str = "test";
@@ -1545,6 +1552,153 @@ fn test_compaction() {
       for i in remove_count..count {
         assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
       }
+    }
+  }
+}
+
+/**
+ * 30. Test auto compaction in heavy workload with multiple tables
+ */
+#[test]
+fn test_auto_compaction() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = Arc::new(
+    default_options(&dir)
+      .compaction_threshold(0.1)
+      .build()
+      .unwrap(),
+  );
+  let rng = &mut rng();
+
+  let mut result = HashMap::<String, HashMap<Vec<u8>, Vec<u8>>>::new();
+
+  let table_count: usize = 10;
+  let key_count: usize = 100_000;
+  let thread_count: usize = 100;
+
+  let table_names: Vec<String> = (0..table_count)
+    .map(|i| format!("table_{:02}", i))
+    .collect();
+
+  for name in &table_names {
+    create_table(&engine, name);
+  }
+
+  // each key is assigned to a table by index % table_count
+  let keys: Vec<(String, Vec<u8>)> = (0..key_count)
+    .map(|i| {
+      let table = table_names[i % table_count].clone();
+      let key = format!("{:06}", i / table_count).as_bytes().to_vec();
+      (table, key)
+    })
+    .choose_multiple(rng, key_count);
+
+  for (t, k) in &keys {
+    result
+      .entry(t.to_string())
+      .or_default()
+      .insert(k.clone(), k.clone());
+  }
+
+  enum Op {
+    Insert(Vec<u8>, Vec<u8>),
+    Get(Vec<u8>),
+    Remove(Vec<u8>),
+  }
+
+  {
+    let mut tx = engine.new_tx().unwrap();
+    for (table, key) in &keys {
+      tx.table(table)
+        .unwrap()
+        .insert(key.clone(), key.clone())
+        .unwrap();
+    }
+    tx.commit().unwrap();
+  }
+
+  let mut waiting = Vec::with_capacity(key_count);
+  let mut threads = Vec::with_capacity(thread_count);
+  let (tx, rx) = unbounded::<(String, Op, Sender<()>)>();
+  for _ in 0..thread_count {
+    let e = engine.clone();
+    let rx = rx.clone();
+    let th = std::thread::spawn(move || {
+      while let Ok((table_name, op, t)) = rx.recv() {
+        let mut r = e.new_tx().expect("start error");
+        let table = r.table(&table_name).expect("table error");
+
+        match op {
+          Op::Insert(k, v) => {
+            table.insert(k.clone(), v.clone()).unwrap();
+            r.commit().unwrap();
+          }
+          Op::Get(k) => {
+            table.get(&k).unwrap();
+          }
+          Op::Remove(k) => {
+            table.remove(&k).unwrap();
+            r.commit().unwrap();
+          }
+        }
+
+        t.send(()).unwrap();
+      }
+    });
+    threads.push(th);
+  }
+
+  for (name, key) in &keys {
+    let (t, r) = unbounded();
+    let op = if rng.random_bool(0.5) {
+      result.get_mut(name).unwrap().remove(key);
+      Op::Remove(key.clone())
+    } else if rng.random_bool(0.5) {
+      Op::Get(key.clone())
+    } else {
+      result
+        .get_mut(name)
+        .unwrap()
+        .insert(key.clone(), key.clone());
+      Op::Insert(key.clone(), key.clone())
+    };
+    tx.send((name.clone(), op, t)).unwrap();
+    waiting.push(r);
+  }
+
+  waiting.into_iter().for_each(|r| r.recv().unwrap());
+  drop(tx);
+  threads.into_iter().for_each(|h| h.join().unwrap());
+
+  // verify each key
+  {
+    let tx = engine.new_tx().unwrap();
+
+    for (name, data) in result.iter() {
+      let table = tx.table(name).unwrap();
+
+      for (k, v) in data.iter() {
+        assert_eq!(table.get(k).unwrap(), Some(v.clone()))
+      }
+    }
+  }
+
+  {
+    let tx = engine.new_tx().unwrap();
+
+    for (name, data) in result.iter() {
+      let table = tx.table(name).unwrap();
+
+      let mut c = 0;
+
+      let mut iter = table.scan::<[_]>(..).unwrap();
+
+      while let Some((k, v)) = iter.try_next().unwrap() {
+        assert_eq!(data.get(&k), Some(&v));
+        c += 1
+      }
+
+      assert_eq!(data.len(), c)
     }
   }
 }
