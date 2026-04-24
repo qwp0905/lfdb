@@ -5,17 +5,17 @@ use crate::{
   Error, Result,
 };
 
-pub enum CursorNodeView<'a> {
+pub enum BTreeNodeView<'a> {
   Internal(InternalNodeView<'a>),
   Leaf(LeafNodeView<'a>),
 }
-impl<'a> TypedObject for CursorNodeView<'a> {
+impl<'a> TypedObject for BTreeNodeView<'a> {
   fn get_type() -> SerializeType {
     SerializeType::CursorNode
   }
 }
 
-impl<'a> Viewable<'a> for CursorNodeView<'a> {
+impl<'a> Viewable<'a> for BTreeNodeView<'a> {
   fn read_from(
     page: &'a crate::disk::Page,
     scanner: &mut PageScanner<'a>,
@@ -30,7 +30,7 @@ impl<'a> Viewable<'a> for CursorNodeView<'a> {
   }
 }
 
-impl<'a> CursorNodeView<'a> {
+impl<'a> BTreeNodeView<'a> {
   #[inline]
   pub fn as_leaf(self) -> Result<LeafNodeView<'a>> {
     match self {
@@ -47,11 +47,11 @@ impl<'a> CursorNodeView<'a> {
   }
 }
 #[derive(Debug)]
-pub enum CursorNode {
+pub enum BTreeNode {
   Internal(InternalNode),
   Leaf(LeafNode),
 }
-impl CursorNode {
+impl BTreeNode {
   pub fn initial_state() -> Self {
     Self::Leaf(LeafNode::new(Default::default(), None))
   }
@@ -68,12 +68,12 @@ impl CursorNode {
     }
   }
 }
-impl TypedObject for CursorNode {
+impl TypedObject for BTreeNode {
   fn get_type() -> SerializeType {
     SerializeType::CursorNode
   }
 }
-impl Serializable for CursorNode {
+impl Serializable for BTreeNode {
   fn write_at(&self, writer: &mut PageWriter) -> Result {
     match self {
       Self::Internal(node) => {
@@ -88,7 +88,7 @@ impl Serializable for CursorNode {
     Ok(())
   }
 }
-impl Deserializable for CursorNode {
+impl Deserializable for BTreeNode {
   fn read_from(scanner: &mut PageScanner) -> Result<Self> {
     match scanner.read()? {
       0 => Ok(Self::Internal(InternalNode::from_scanner(scanner)?)),
@@ -100,14 +100,14 @@ impl Deserializable for CursorNode {
 
 impl LeafNode {
   #[inline]
-  pub fn to_node(self) -> CursorNode {
-    CursorNode::Leaf(self)
+  pub fn to_node(self) -> BTreeNode {
+    BTreeNode::Leaf(self)
   }
 }
 impl InternalNode {
   #[inline]
-  pub fn to_node(self) -> CursorNode {
-    CursorNode::Internal(self)
+  pub fn to_node(self) -> BTreeNode {
+    BTreeNode::Internal(self)
   }
 }
 

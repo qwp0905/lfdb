@@ -16,11 +16,8 @@ pub use gc::*;
 mod types;
 use types::*;
 
-mod iter;
-pub use iter::*;
-
-mod tree;
-pub use tree::*;
+mod tree_manager;
+pub use tree_manager::*;
 
 mod leaf;
 use leaf::*;
@@ -30,3 +27,9 @@ use internal::*;
 
 mod compactor;
 use compactor::*;
+
+mod btree;
+use btree::*;
+
+mod policy;
+use policy::*;

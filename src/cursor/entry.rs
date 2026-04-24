@@ -141,26 +141,6 @@ impl DataEntry {
     self.versions.push_front(record);
   }
 
-  pub fn find_record<F>(&self, tx_id: TxId, is_visible: F) -> Option<&RecordData>
-  where
-    F: Fn(&TxId) -> bool,
-  {
-    for record in self.versions.iter() {
-      if record.owner == tx_id {
-        return Some(&record.data);
-      }
-      if record.version > tx_id {
-        continue;
-      }
-      if !is_visible(&record.owner) {
-        continue;
-      }
-      return Some(&record.data);
-    }
-
-    None
-  }
-
   pub fn is_available(&self, record: &VersionRecord) -> bool {
     let byte_len =
       POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();

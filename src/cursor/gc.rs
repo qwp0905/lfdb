@@ -145,7 +145,7 @@ impl GarbageCollector {
       .single()
       .interval(
         RELEASE_CHECK_INTERVAL,
-        run_release_table(mapper, version_visibility, logger.clone()),
+        run_release_table(mapper, version_visibility),
       )
       .to_box();
 
@@ -283,7 +283,6 @@ fn run_check(
 fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-  logger: LogFilter,
 ) -> impl FnMut(Option<(Arc<TableHandle>, TxId)>) {
   let mut tables = Vec::new();
   let mut unpinned = Vec::new();
@@ -306,7 +305,6 @@ fn run_release_table(
 
     for table in unreachable.extract_if(.., |table| table.truncate().is_ok()) {
       mapper.remove(table.metadata().get_id());
-      logger.debug(|| format!("{} table dropped.", table.metadata().get_name()))
     }
   }
 }
