@@ -1,10 +1,10 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
 use super::{
-  handle_compaction, CompactTask, CursorNode, CursorNodeView, DataEntry,
-  GarbageCollector, RecordData, TreeHeader, HEADER_POINTER,
+  handle_compaction, BTreeIndex, BTreeNode, BTreeNodeView, CompactTask, DataEntry,
+  GarbageCollector, ReadonlyPolicy, RecordData, TreeHeader, HEADER_POINTER,
 };
 use crate::{
   buffer_pool::BufferPool,
@@ -20,6 +20,24 @@ use crate::{
 pub struct TreeManagerConfig {
   pub merge_interval: Duration,
   pub compaction_threshold: f64,
+}
+
+struct TableOpenPolicy<'a> {
+  buffer_pool: &'a BufferPool,
+  version_visibility: &'a VersionVisibility,
+}
+impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
+  fn is_visible(&self, owner: crate::wal::TxId, _: crate::wal::TxId) -> bool {
+    !self.version_visibility.is_aborted(&owner)
+  }
+
+  fn fetch_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<crate::buffer_pool::Slot<'_>> {
+    self.buffer_pool.read(pointer, table.clone())
+  }
 }
 
 /**
@@ -98,7 +116,7 @@ impl TreeManager {
         RESERVED_TX,
         table_id,
         &mut root,
-        &CursorNode::initial_state(),
+        &BTreeNode::initial_state(),
       )?;
 
       let mut header = buffer_pool.read(HEADER_POINTER, table.clone())?.for_write();
@@ -134,70 +152,21 @@ impl TreeManager {
     let mut compactions = vec![];
     let meta_table = tables.meta_table();
 
-    let mut ptr = buffer_pool
-      .read(HEADER_POINTER, meta_table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
+    let index = BTreeIndex::new(TableOpenPolicy {
+      buffer_pool,
+      version_visibility,
+    });
 
-    while let CursorNodeView::Internal(node) = buffer_pool
-      .read(ptr, meta_table.clone())?
-      .for_read()
-      .as_ref()
-      .view()?
-    {
-      ptr = node.first_child();
-    }
+    let mut iter = index.scan(&meta_table, &Bound::Unbounded, &Bound::Unbounded)?;
 
-    let mut next = Some(ptr);
-    while let Some(ptr) = next.take() {
-      let slot = buffer_pool.read(ptr, meta_table.clone())?.for_read();
-      let leaf = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
-      next = leaf.get_next();
-      if leaf.len() == 0 {
-        meta_table.mark_redirection();
-        continue;
-      }
-
-      'outer: for ptr in leaf.get_entry_pointers() {
-        let mut ptr = Some(ptr);
-        while let Some(p) = ptr.take() {
-          let entry = buffer_pool
-            .read(p, meta_table.clone())?
-            .for_read()
-            .as_ref()
-            .deserialize::<DataEntry>()?;
-
-          for record in entry.get_versions() {
-            if version_visibility.is_aborted(&record.owner) {
-              continue;
-            }
-
-            let metadata = match record.data.read_data(|i| {
-              buffer_pool
-                .read(i, meta_table.clone())?
-                .for_read()
-                .as_ref()
-                .deserialize()
-            })? {
-              Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-              None => continue 'outer,
-            };
-
-            match metadata.get_compaction_metadata() {
-              Some(c_meta) => compactions.push((
-                tables.create_handle(&metadata)?,
-                tables.create_handle(&c_meta)?.try_mutation().unwrap(),
-              )),
-              None => handles.push(tables.create_handle(&metadata)?),
-            }
-
-            continue 'outer;
-          }
-
-          ptr = entry.get_next();
-        }
+    while let Some((_, bytes)) = iter.next_kv_skip_tombstone()? {
+      let metadata = TableMetadata::from_bytes(&bytes)?;
+      match metadata.get_compaction_metadata() {
+        Some(c_meta) => compactions.push((
+          tables.create_handle(&metadata)?,
+          tables.create_handle(&c_meta)?.try_mutation().unwrap(),
+        )),
+        None => handles.push(tables.create_handle(&metadata)?),
       }
     }
 
@@ -307,11 +276,11 @@ fn run_merge_leaf(
         .deserialize::<TreeHeader>()?
         .get_root();
 
-      while let CursorNodeView::Internal(node) = buffer_pool
+      while let BTreeNodeView::Internal(node) = buffer_pool
         .peek(ptr, table.handle())?
         .for_read()
         .as_ref()
-        .view::<CursorNodeView>()?
+        .view::<BTreeNodeView>()?
       {
         ptr = node.first_child()
       }
@@ -320,7 +289,7 @@ fn run_merge_leaf(
       while let Some(i) = index.take() {
         {
           let slot = buffer_pool.peek(i, table.handle())?.for_read();
-          let leaf = slot.as_ref().view::<CursorNodeView>()?.as_leaf()?;
+          let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
               leaf
@@ -338,7 +307,7 @@ fn run_merge_leaf(
         }
 
         let mut slot = buffer_pool.peek(i, table.handle())?.for_write();
-        let mut leaf = slot.as_ref().deserialize::<CursorNode>()?.as_leaf()?;
+        let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
         index = leaf.get_next();
 
         let prev_len = leaf.len();
@@ -382,7 +351,7 @@ fn run_merge_leaf(
         });
 
         let mut next_slot = buffer_pool.peek(next, table.handle())?.for_write();
-        let next_leaf = next_slot.as_ref().deserialize::<CursorNode>()?;
+        let next_leaf = next_slot.as_ref().deserialize::<BTreeNode>()?;
         leaf.set_next(slot.get_pointer());
 
         recorder.log_multi(
@@ -440,10 +409,10 @@ fn release_orphaned(
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()
-      .view::<CursorNodeView>()?
+      .view::<BTreeNodeView>()?
     {
-      CursorNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
-      CursorNodeView::Leaf(node) => {
+      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
+      BTreeNodeView::Leaf(node) => {
         if node.len() == 0 {
           table.mark_redirection();
           continue;
