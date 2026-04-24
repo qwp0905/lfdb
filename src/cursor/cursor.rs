@@ -12,7 +12,7 @@ use super::{
   VersionRecord, WritablePolicy, MAX_KEY, MAX_VALUE,
 };
 use crate::{
-  buffer_pool::WritableSlot,
+  cache::WritableSlot,
   disk::Pointer,
   metrics::MetricsRegistry,
   serialize::Serializable,
@@ -40,7 +40,7 @@ impl<'a> ReadonlyPolicy for CursorPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::buffer_pool::Slot<'_>> {
+  ) -> Result<crate::cache::CacheSlot<'_>> {
     self.orchestrator.fetch(pointer, table.clone())
   }
 }

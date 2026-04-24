@@ -14,7 +14,7 @@ The path passed to `EngineBuilder` is used as a dedicated data directory. The en
 use lfdb::EngineBuilder;
 
 let engine = EngineBuilder::new("./data")
-    .buffer_pool_memory_capacity(128 << 20) // 128MB
+    .block_cache_memory_capacity(128 << 20) // 128MB
     .build()?;
 ```
 
@@ -98,7 +98,7 @@ tx.commit()?; // atomic across both tables
 ```rust
 let m = engine.metrics();
 println!("uptime: {}ms", m.uptime_ms);
-println!("cache hit: {}", m.buffer_pool_cache_hit);
+println!("cache hit: {}", m.block_cache_hit);
 println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 ```
 
@@ -112,8 +112,8 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `wal_segment_flush_count` | Maximum number of commits to buffer before triggering a checkpoint for WAL segment reuse. |
 | `checkpoint_interval` | Hard timeout for checkpoint execution — runs regardless of WAL segment pressure. |
 | `group_commit_count` | Maximum commits buffered per WAL segment. Larger values improve write throughput but increase potential data loss on crash in high-latency IO environments. |
-| `buffer_pool_memory_capacity` | Total memory allocated to the buffer pool. Since the engine uses Direct I/O and bypasses the OS page cache, a larger buffer pool is critical for performance. |
-| `buffer_pool_shard_count` | Number of buffer pool shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
+| `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
+| `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
 | `gc_trigger_interval` | Interval at which leaf merge runs. Run more frequently when removes are heavy, less frequently when removes are rare. |
 | `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
 | `compaction_threshold` | Fragmentation ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every `gc_trigger_interval`, and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
@@ -135,7 +135,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
          │        ┌───────┘  │  └───────┐         │
          │        │          │          │         │
 ┌────────▼──────┐ │ ┌────────▼───────┐  │ ┌───────▼───────┐
-│  Buffer Pool  │ │ │  TableMapper   │  │ │    Garbage    │
+│  Block Cache  │ │ │  TableMapper   │  │ │    Garbage    │
 │  2-tier LRU   │ │ │  ┌───────────┐ │  │ │   Collector   │
 │  sharded lock │ │ │  │TableHandle│ │  │ │   2-process   │
 └───────────────┘ │ │  │ FreeList  │ │  │ └───────────────┘

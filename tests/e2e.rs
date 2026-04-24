@@ -26,8 +26,8 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)
     .gc_thread_count(3)
-    .buffer_pool_memory_capacity(32 << 20)
-    .buffer_pool_shard_count(1 << 2)
+    .block_cache_memory_capacity(32 << 20)
+    .block_cache_shard_count(1 << 2)
     .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
     .checkpoint_interval(Duration::from_secs(2))
@@ -825,8 +825,8 @@ fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
   let engine = Arc::new(
     EngineBuilder::new(dir.path())
-      .buffer_pool_memory_capacity(32 << 20)
-      .buffer_pool_shard_count(1 << 2)
+      .block_cache_memory_capacity(32 << 20)
+      .block_cache_shard_count(1 << 2)
       .group_commit_count(10)
       .gc_trigger_interval(Duration::from_millis(50))
       .logger(TestLogger)

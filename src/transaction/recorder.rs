@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  buffer_pool::WritableSlot,
+  cache::WritableSlot,
   error::Result,
   serialize::{Serializable, SerializeFrom},
   table::TableId,

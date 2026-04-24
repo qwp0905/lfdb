@@ -3,7 +3,7 @@ mod wal;
 mod transaction;
 pub use transaction::Transaction;
 
-mod buffer_pool;
+mod cache;
 
 mod serialize;
 

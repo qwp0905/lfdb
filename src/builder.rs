@@ -25,8 +25,8 @@ where
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
-      buffer_pool_shard_count: DEFAULT_BUFFER_POOL_SHARD_COUNT,
-      buffer_pool_memory_capacity: DEFAULT_BUFFER_POOL_MEMORY_CAPACITY,
+      block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
+      block_cache_memory_capacity: DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY,
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
       log_level: DEFAULT_LOG_LEVEL,
       logger: DEFAULT_LOGGER.to_arc(),
@@ -90,21 +90,21 @@ where
     self
   }
   /**
-   * Number of buffer pool shards. More shards reduce lock contention by
+   * Number of block cache shards. More shards reduce lock contention by
    * narrowing each shard's scope, but too many shards shrink each shard's
    * capacity and increase eviction frequency, hurting performance.
    */
-  pub fn buffer_pool_shard_count(mut self, count: usize) -> Self {
-    self.0.buffer_pool_shard_count = count;
+  pub fn block_cache_shard_count(mut self, count: usize) -> Self {
+    self.0.block_cache_shard_count = count;
     self
   }
   /**
-   * Total memory in bytes allocated to the buffer pool. Since the engine uses
-   * direct IO and bypasses the OS page cache, a larger buffer pool is critical
+   * Total memory in bytes allocated to the block cache. Since the engine uses
+   * direct IO and bypasses the OS page cache, a larger block cache is critical
    * for performance.
    */
-  pub fn buffer_pool_memory_capacity(mut self, capacity: usize) -> Self {
-    self.0.buffer_pool_memory_capacity = capacity;
+  pub fn block_cache_memory_capacity(mut self, capacity: usize) -> Self {
+    self.0.block_cache_memory_capacity = capacity;
     self
   }
   /**
@@ -161,8 +161,8 @@ const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_GROUP_COMMIT_COUNT: usize = 512;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(300);
 const DEFAULT_GC_THREAD_COUNT: usize = 5;
-const DEFAULT_BUFFER_POOL_SHARD_COUNT: usize = 1 << 6; // 64
-const DEFAULT_BUFFER_POOL_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
+const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
+const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_LOGGER: NoneLogger = NoneLogger;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;

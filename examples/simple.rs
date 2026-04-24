@@ -8,7 +8,7 @@ impl Logger for DebugLogger {
 }
 fn main() {
   let engine = EngineBuilder::new("./.local")
-    .buffer_pool_memory_capacity(100 << 20)
+    .block_cache_memory_capacity(100 << 20)
     .logger(DebugLogger)
     .log_level(LogLevel::Trace)
     .build()

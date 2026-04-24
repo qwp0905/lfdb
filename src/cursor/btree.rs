@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound, sync::Arc};
 
 use crate::{
-  buffer_pool::{ReadonlySlot, WritableSlot},
+  cache::{ReadonlySlot, WritableSlot},
   disk::Pointer,
   table::TableHandle,
   wal::TxId,
@@ -189,7 +189,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         return self
           .0
           .serialize_and_log(&mut slot, &internal.to_node(), table)
-          .map(|_| None)
+          .map(|_| None);
       }
     };
 
@@ -224,7 +224,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         return self
           .0
           .serialize_and_log(slot, &node.to_node(), table)
-          .map(|_| None)
+          .map(|_| None);
       }
     };
 
@@ -247,8 +247,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     // CAS loop: multiple concurrent splits may race to update the root.
     loop {
       let old_height = stack.len() as u16;
-      while let Some(index) = stack.pop() {
-        match self.apply_split(split_key, split_pointer, index, table)? {
+      while let Some(ptr) = stack.pop() {
+        match self.apply_split(split_key, split_pointer, ptr, table)? {
           Some((k, p)) => {
             split_key = k;
             split_pointer = p;
@@ -354,7 +354,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(&key) {
         NodeFindResult::Found(_, i) => {
-          return self.apply_version_chain(i, record, slot, table)
+          return self.apply_version_chain(i, record, slot, table);
         }
         NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(i) => {
@@ -656,7 +656,7 @@ where
             value,
             owner,
             version,
-          }))
+          }));
         }
       }
     }

@@ -13,37 +13,37 @@ pub struct EngineMetrics {
   pub uptime_ms: u64,
 
   /**
-   * Number of buffer pool page reads total counts.
+   * Number of block cache page reads total counts.
    */
-  pub buffer_pool_read_count: u64,
+  pub block_cache_read_count: u64,
   /**
-   * Average buffer pool read latency in microseconds.
+   * Average block cache read latency in microseconds.
    */
-  pub buffer_pool_read_latency_micros_avg: f64,
+  pub block_cache_read_latency_micros_avg: f64,
   /**
-   * p50 buffer pool read latency in microseconds.
+   * p50 block cache read latency in microseconds.
    */
-  pub buffer_pool_read_latency_micros_p50: f64,
+  pub block_cache_read_latency_micros_p50: f64,
   /**
-   * p95 buffer pool read latency in microseconds.
+   * p95 block cache read latency in microseconds.
    */
-  pub buffer_pool_read_latency_micros_p95: f64,
+  pub block_cache_read_latency_micros_p95: f64,
   /**
-   * p99 buffer pool read latency in microseconds.
+   * p99 block cache read latency in microseconds.
    */
-  pub buffer_pool_read_latency_micros_p99: f64,
+  pub block_cache_read_latency_micros_p99: f64,
   /**
    * Number of reads served from the in-memory cache without hitting disk.
    */
-  pub buffer_pool_cache_hit: u64,
+  pub block_cache_hit: u64,
   /**
-   * Number of buffer pool flush triggered counts.
+   * Number of block cache flush triggered counts.
    */
-  pub buffer_pool_flush_count: u64,
+  pub block_cache_flush_count: u64,
   /**
-   * Average buffer pool flush latency in milliseconds.
+   * Average block cache flush latency in milliseconds.
    */
-  pub buffer_pool_flush_latency_ms_avg: f64,
+  pub block_cache_flush_latency_ms_avg: f64,
 
   /**
    * Number of disk read io counts.
@@ -186,9 +186,9 @@ pub struct EngineMetrics {
   pub operation_remove_latency_micros_p99: f64,
 }
 pub struct MetricsRegistry {
-  pub buffer_pool_read: Histogram,
-  pub buffer_pool_cache_hit: Counter,
-  pub buffer_pool_flush: Histogram,
+  pub block_cache_read: Histogram,
+  pub block_cache_hit: Counter,
+  pub block_cache_flush: Histogram,
 
   pub disk_read: Histogram,
   pub disk_write: Histogram,
@@ -207,9 +207,9 @@ pub struct MetricsRegistry {
 impl MetricsRegistry {
   pub fn new() -> Self {
     Self {
-      buffer_pool_read: Histogram::new(1000, Duration::from_nanos(100)),
-      buffer_pool_cache_hit: Counter::new(),
-      buffer_pool_flush: Histogram::new(10, Duration::from_millis(1)),
+      block_cache_read: Histogram::new(1000, Duration::from_nanos(100)),
+      block_cache_hit: Counter::new(),
+      block_cache_flush: Histogram::new(10, Duration::from_millis(1)),
       transaction_start: Histogram::new(1000, Duration::from_micros(10)),
       transaction_commit: Histogram::new(1000, Duration::from_micros(10)),
       transaction_abort_count: Counter::new(),
@@ -226,8 +226,8 @@ impl MetricsRegistry {
   pub fn snapshot(&self) -> EngineMetrics {
     let transaction_start = self.transaction_start.snapshot();
     let transaction_commit = self.transaction_commit.snapshot();
-    let buffer_pool_read = self.buffer_pool_read.snapshot();
-    let buffer_pool_flush = self.buffer_pool_flush.snapshot();
+    let block_cache_read = self.block_cache_read.snapshot();
+    let block_cache_flush = self.block_cache_flush.snapshot();
     let disk_read = self.disk_read.snapshot();
     let disk_write = self.disk_write.snapshot();
     let operation_get = self.operation_get.snapshot();
@@ -237,16 +237,16 @@ impl MetricsRegistry {
     EngineMetrics {
       uptime_ms: self.started_at.elapsed().as_millis() as u64,
 
-      buffer_pool_read_count: buffer_pool_read.total_count(),
-      buffer_pool_read_latency_micros_avg: buffer_pool_read.average() / 10.0,
-      buffer_pool_read_latency_micros_p50: buffer_pool_read.percentile(0.5) / 10.0,
-      buffer_pool_read_latency_micros_p95: buffer_pool_read.percentile(0.95) / 10.0,
-      buffer_pool_read_latency_micros_p99: buffer_pool_read.percentile(0.99) / 10.0,
+      block_cache_read_count: block_cache_read.total_count(),
+      block_cache_read_latency_micros_avg: block_cache_read.average() / 10.0,
+      block_cache_read_latency_micros_p50: block_cache_read.percentile(0.5) / 10.0,
+      block_cache_read_latency_micros_p95: block_cache_read.percentile(0.95) / 10.0,
+      block_cache_read_latency_micros_p99: block_cache_read.percentile(0.99) / 10.0,
 
-      buffer_pool_cache_hit: self.buffer_pool_cache_hit.load(),
+      block_cache_hit: self.block_cache_hit.load(),
 
-      buffer_pool_flush_count: buffer_pool_flush.total_count(),
-      buffer_pool_flush_latency_ms_avg: buffer_pool_flush.average(),
+      block_cache_flush_count: block_cache_flush.total_count(),
+      block_cache_flush_latency_ms_avg: block_cache_flush.average(),
 
       disk_read_count: disk_read.total_count(),
       disk_read_latency_micros_avg: disk_read.average() / 10.0,

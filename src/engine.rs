@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-  buffer_pool::{BufferPool, BufferPoolConfig},
+  cache::{BlockCache, BlockCacheConfig},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   disk::PAGE_SIZE,
   error::{Error, Result},
@@ -38,8 +38,8 @@ where
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
-  pub buffer_pool_shard_count: usize,
-  pub buffer_pool_memory_capacity: usize,
+  pub block_cache_shard_count: usize,
+  pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
   pub logger: Arc<dyn Logger>,
   pub log_level: LogLevel,
@@ -69,9 +69,9 @@ impl Engine {
       segment_flush_count: config.wal_segment_flush_count,
       segment_flush_delay: config.wal_segment_flush_delay,
     };
-    let buffer_pool_config = BufferPoolConfig {
-      shard_count: config.buffer_pool_shard_count,
-      capacity: config.buffer_pool_memory_capacity / PAGE_SIZE,
+    let block_cache_config = BlockCacheConfig {
+      shard_count: config.block_cache_shard_count,
+      capacity: config.block_cache_memory_capacity / PAGE_SIZE,
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
@@ -89,8 +89,8 @@ impl Engine {
       io_thread_count: config.io_thread_count,
     };
 
-    let buffer_pool =
-      BufferPool::open(buffer_pool_config, logger.clone(), metrics_registry.clone())?
+    let block_cache =
+      BlockCache::open(block_cache_config, logger.clone(), metrics_registry.clone())?
         .to_arc();
     let tables = TableMapper::new(table_config, metrics_registry.clone())?.to_arc();
 
@@ -102,7 +102,7 @@ impl Engine {
       VersionVisibility::new(replay.aborted, replay.last_tx_id).to_arc();
 
     let gc = GarbageCollector::start(
-      buffer_pool.clone(),
+      block_cache.clone(),
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
@@ -114,7 +114,7 @@ impl Engine {
     if tables.is_new() {
       logger.info(|| "engine initial state.");
       let tree_manager = TreeManager::initialize(
-        buffer_pool.clone(),
+        block_cache.clone(),
         tables.clone(),
         recorder.clone(),
         gc.clone(),
@@ -127,7 +127,7 @@ impl Engine {
         tx_config,
         &wal_config,
         wal,
-        buffer_pool,
+        block_cache,
         tables,
         version_visibility,
         gc,
@@ -155,7 +155,7 @@ impl Engine {
       .iter()
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
-      buffer_pool
+      block_cache
         .read(*ptr, meta_table.clone())?
         .for_write()
         .as_mut()
@@ -165,7 +165,7 @@ impl Engine {
 
     let mut handles = HashMap::new();
     let (open_handles, compactions) =
-      TreeManager::open_handles(&buffer_pool, &version_visibility, &tables)?;
+      TreeManager::open_handles(&block_cache, &version_visibility, &tables)?;
     for table in open_handles {
       handles.insert(table.metadata().get_id(), table);
     }
@@ -183,7 +183,7 @@ impl Engine {
         Some(handle) => handle.clone(),
         None => continue,
       };
-      buffer_pool
+      block_cache
         .read(*ptr, handle)?
         .for_write()
         .as_mut()
@@ -194,11 +194,11 @@ impl Engine {
     // Flush replayed pages to disk so disk_len reflects the true file extent.
     // TreeManager::clean_and_start uses disk_len to scan for orphaned blocks
     // (allocated but unreferenced pages) and reclaim them into the free list.
-    buffer_pool.flush()?;
+    block_cache.flush()?;
     tables.replay(handles.into_values())?;
 
     let tree_manager = TreeManager::clean_and_start(
-      buffer_pool.clone(),
+      block_cache.clone(),
       tables.clone(),
       recorder.clone(),
       gc.clone(),
@@ -216,7 +216,7 @@ impl Engine {
       tx_config,
       &wal_config,
       wal,
-      buffer_pool,
+      block_cache,
       tables,
       version_visibility,
       gc,

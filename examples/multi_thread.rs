@@ -15,8 +15,8 @@ fn main() {
   let engine = Arc::new(
     EngineBuilder::new("./.local")
       .group_commit_count(512)
-      .buffer_pool_memory_capacity(512 << 20)
-      .buffer_pool_shard_count(1 << 8)
+      .block_cache_memory_capacity(512 << 20)
+      .block_cache_shard_count(1 << 8)
       .wal_file_size(32 << 20)
       .gc_thread_count(5)
       .logger(DebugLogger)

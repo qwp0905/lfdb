@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
-  buffer_pool::{BufferPool, Slot, WritableSlot},
+  cache::{BlockCache, CacheSlot, WritableSlot},
   cursor::{GarbageCollector, TreeManager},
   disk::Pointer,
   error::Result,
@@ -21,14 +21,14 @@ pub struct TransactionConfig {
 }
 
 /**
- * Composes WAL, buffer pool, GC, version visibility, and tree manager into a
+ * Composes WAL, block cache, GC, version visibility, and tree manager into a
  * unified interface for the cursor layer. Does not contain business logic —
  * it wires subsystems together and exposes transaction lifecycle operations.
  */
 pub struct TxOrchestrator {
   wal: Arc<WAL>,
   tables: Arc<TableMapper>,
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   checkpoint: Arc<dyn BackgroundThread<(), Result>>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
@@ -44,7 +44,7 @@ impl TxOrchestrator {
     config: TransactionConfig,
     wal_config: &WALConfig,
     wal: Arc<WAL>,
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
@@ -60,7 +60,7 @@ impl TxOrchestrator {
         config.checkpoint_interval,
         handle_checkpoint(
           wal.clone(),
-          buffer_pool.clone(),
+          block_cache.clone(),
           gc.clone(),
           version_visibility.clone(),
           logger.clone(),
@@ -73,7 +73,7 @@ impl TxOrchestrator {
     Self {
       wal,
       tables,
-      buffer_pool,
+      block_cache,
       checkpoint,
       version_visibility,
       gc,
@@ -90,7 +90,7 @@ impl TxOrchestrator {
     config: TransactionConfig,
     wal_config: &WALConfig,
     wal: Arc<WAL>,
-    buffer_pool: Arc<BufferPool>,
+    block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
@@ -100,7 +100,7 @@ impl TxOrchestrator {
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
-    run_checkpoint(&wal, &buffer_pool, &gc, &version_visibility, &logger)?;
+    run_checkpoint(&wal, &block_cache, &gc, &version_visibility, &logger)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -110,7 +110,7 @@ impl TxOrchestrator {
       config,
       wal_config,
       wal,
-      buffer_pool,
+      block_cache,
       tables,
       version_visibility,
       gc,
@@ -122,8 +122,12 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn fetch(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<Slot<'_>> {
-    self.buffer_pool.read(pointer, handle)
+  pub fn fetch(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CacheSlot<'_>> {
+    self.block_cache.read(pointer, handle)
   }
 
   #[inline]
@@ -143,7 +147,7 @@ impl TxOrchestrator {
   #[inline]
   pub fn alloc(&self, handle: Arc<TableHandle>) -> Result<WritableSlot<'_>> {
     let free = handle.free().alloc();
-    Ok(self.buffer_pool.read(free, handle)?.for_write())
+    Ok(self.block_cache.read(free, handle)?.for_write())
   }
 
   #[inline]
@@ -229,8 +233,8 @@ impl TxOrchestrator {
     self.checkpoint.close();
     self.logger.info(|| "last checkpoint completed.");
 
-    self.buffer_pool.close();
-    self.logger.info(|| "buffer pool closed.");
+    self.block_cache.close();
+    self.logger.info(|| "block cache closed.");
     self.gc.close();
     self.tables.close();
     self.logger.info(|| "tables closed.");
@@ -242,17 +246,17 @@ impl TxOrchestrator {
 
 fn handle_checkpoint(
   wal: Arc<WAL>,
-  buffer_pool: Arc<BufferPool>,
+  block_cache: Arc<BlockCache>,
   gc: Arc<GarbageCollector>,
   version: Arc<VersionVisibility>,
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
-  move |_| run_checkpoint(&wal, &buffer_pool, &gc, &version, &logger)
+  move |_| run_checkpoint(&wal, &block_cache, &gc, &version, &logger)
 }
 
 fn run_checkpoint(
   wal: &WAL,
-  buffer_pool: &BufferPool,
+  block_cache: &BlockCache,
   gc: &GarbageCollector,
   version: &VersionVisibility,
   logger: &LogFilter,
@@ -265,7 +269,7 @@ fn run_checkpoint(
   version.remove_aborted(&min_version);
   logger.debug(|| format!("checkpoint garbage collected id {log_id}"));
 
-  buffer_pool.flush()?;
+  block_cache.flush()?;
   wal.checkpoint_and_flush(log_id, min_version)?;
   logger.debug(|| format!("checkpoint complete id {log_id}"));
   Ok(())
