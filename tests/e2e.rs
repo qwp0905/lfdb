@@ -1494,7 +1494,7 @@ fn test_compaction() {
     std::thread::scope(|scope| {
       let th1 = scope.spawn(|| {
         let table = tx.table(TEST_TABLE).unwrap();
-        let mut iter = table.scan(..=keys.last().unwrap()).unwrap();
+        let mut iter = table.scan(&keys[remove_count]..).unwrap();
 
         let mut i = remove_count;
         while let Some((k, v)) = iter.try_next().unwrap() {

@@ -1,17 +1,10 @@
-use std::{
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
-  time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 
-use super::{TxOrchestrator, TxSnapshot, TxState};
+use super::{TxContext, TxOrchestrator, TxSnapshot, TxState};
 use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
   table::{MutationHandle, TableHandle, TableMetadata, MAX_TABLE_NAME_LEN},
-  wal::TxId,
   Error, Result,
 };
 
@@ -21,14 +14,12 @@ use crate::{
  */
 pub struct Transaction<'a> {
   orchestrator: &'a TxOrchestrator,
-  state: TxState<'a>,
-  snapshot: TxSnapshot<'a>,
+  context: TxContext<'a>,
   metrics: &'a MetricsRegistry,
   tx_start: Option<Instant>,
-  created_tables: Vec<(Arc<TableHandle>, TxId)>,
-  dropped_tables: Vec<(Arc<TableHandle>, TxId)>,
-  compacted_tables: Vec<(Arc<TableHandle>, MutationHandle, TxId)>,
-  modified: AtomicBool,
+  created_tables: Vec<Arc<TableHandle>>,
+  dropped_tables: Vec<Arc<TableHandle>>,
+  compacted_tables: Vec<(Arc<TableHandle>, MutationHandle)>,
 }
 impl<'a> Transaction<'a> {
   pub fn new(
@@ -38,16 +29,15 @@ impl<'a> Transaction<'a> {
     metrics: &'a MetricsRegistry,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
+    let context = TxContext::new(orchestrator, state, snapshot);
     Self {
       orchestrator,
-      state,
-      snapshot,
+      context,
       metrics,
       tx_start,
       created_tables: Default::default(),
       dropped_tables: Default::default(),
       compacted_tables: Default::default(),
-      modified: AtomicBool::new(false),
     }
   }
 
@@ -57,15 +47,7 @@ impl<'a> Transaction<'a> {
     table: Arc<TableHandle>,
     compaction: Option<Arc<TableHandle>>,
   ) -> Cursor<'_> {
-    Cursor::new(
-      table,
-      compaction,
-      &self.orchestrator,
-      &self.state,
-      &self.snapshot,
-      &self.modified,
-      &self.metrics,
-    )
+    Cursor::new(table, compaction, &self.context, &self.metrics)
   }
 
   pub fn table(&self, name: &str) -> Result<Cursor<'_>> {
@@ -73,7 +55,7 @@ impl<'a> Transaction<'a> {
       return Err(Error::TableNameExceeded(MAX_TABLE_NAME_LEN, name.len()));
     }
 
-    if !self.state.is_available() {
+    if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
 
@@ -100,7 +82,7 @@ impl<'a> Transaction<'a> {
       return Err(Error::TableNameExceeded(MAX_TABLE_NAME_LEN, name.len()));
     }
 
-    if !self.state.is_available() {
+    if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
 
@@ -123,18 +105,9 @@ impl<'a> Transaction<'a> {
     meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
 
     let table = self.orchestrator.open_table(&table_meta)?;
-    let cursor = Cursor::initialize(
-      table.clone(),
-      &self.orchestrator,
-      &self.state,
-      &self.snapshot,
-      &self.modified,
-      &self.metrics,
-    )?;
+    let cursor = Cursor::initialize(table.clone(), &self.context, &self.metrics)?;
     self.orchestrator.commit_table(table.clone());
-    self
-      .created_tables
-      .push((table, self.orchestrator.current_version()));
+    self.created_tables.push(table);
 
     Ok(cursor)
   }
@@ -145,21 +118,22 @@ impl<'a> Transaction<'a> {
     }
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
-    if let Some(bytes) = cursor.get(&name.as_bytes())? {
-      let metadata = TableMetadata::from_bytes(&bytes)?;
-      cursor.remove(&name.as_bytes())?;
+    let metadata = match cursor.get(&name.as_bytes())? {
+      Some(bytes) => TableMetadata::from_bytes(&bytes)?,
+      None => return Ok(()),
+    };
 
-      let version = self.orchestrator.current_version();
-      if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
-        self.dropped_tables.push((table, version));
-      }
+    cursor.remove(&name.as_bytes())?;
 
-      if let Some(table) = metadata
-        .get_compaction_id()
-        .and_then(|id| self.orchestrator.get_table(id))
-      {
-        self.dropped_tables.push((table, version));
-      }
+    if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
+      self.dropped_tables.push(table);
+    }
+
+    if let Some(table) = metadata
+      .get_compaction_id()
+      .and_then(|id| self.orchestrator.get_table(id))
+    {
+      self.dropped_tables.push(table);
     }
 
     Ok(())
@@ -197,45 +171,37 @@ impl<'a> Transaction<'a> {
       .try_mutation()
       .unwrap();
 
-    Cursor::initialize(
-      new_table.handle().clone(),
-      &self.orchestrator,
-      &self.state,
-      &self.snapshot,
-      &self.modified,
-      &self.metrics,
-    )?;
+    Cursor::initialize(new_table.handle().clone(), &self.context, &self.metrics)?;
     self.orchestrator.commit_table(new_table.handle().clone());
-    self
-      .compacted_tables
-      .push((old, new_table, self.orchestrator.current_version()));
+    self.compacted_tables.push((old, new_table));
 
     Ok(())
   }
 
   pub fn commit(&mut self) -> Result {
-    if !self.state.try_commit() {
+    let state = self.context.state();
+    if !state.try_commit() {
       return Err(Error::TransactionClosed);
     }
-    if !self.modified.load(Ordering::Acquire) {
-      self.state.deactive();
+    if !self.context.is_modified() {
+      state.deactive();
       return Ok(());
     }
 
-    if let Err(err) = self.orchestrator.commit_tx(self.state.get_id()) {
-      self.state.make_available();
+    let id = state.get_id();
+    if let Err(err) = self.orchestrator.commit_tx(id) {
+      state.make_available();
       return Err(err);
     }
 
-    while let Some((table, version)) = self.dropped_tables.pop() {
-      self
-        .orchestrator
-        .drop_table(table, self.state.get_id(), version);
+    state.deactive();
+    let version = self.orchestrator.current_version();
+
+    for _ in self.created_tables.drain(..) {}
+    for table in self.dropped_tables.drain(..) {
+      self.orchestrator.drop_table(table, id, version);
     }
-
-    self.state.deactive();
-
-    while let Some((old, new, version)) = self.compacted_tables.pop() {
+    for (old, new) in self.compacted_tables.drain(..) {
       self.orchestrator.compact_table(old, new, version);
     }
 
@@ -243,33 +209,39 @@ impl<'a> Transaction<'a> {
   }
 
   pub fn abort(&mut self) -> Result {
-    if !self.state.try_abort() {
+    let state = self.context.state();
+    if !state.try_abort() {
       return Err(Error::TransactionClosed);
     }
-    if !self.modified.load(Ordering::Acquire) {
-      self.state.deactive();
+    if !self.context.is_modified() {
+      state.deactive();
       return Ok(());
     }
 
-    self.orchestrator.abort_tx(self.state.get_id())?;
-    while let Some((table, version)) = self.created_tables.pop() {
-      self
-        .orchestrator
-        .drop_table(table, self.state.get_id(), version);
-    }
-    self.state.deactive();
+    let id = state.get_id();
+    self.orchestrator.abort_tx(id)?;
+    state.deactive();
 
-    while let Some((_, new, version)) = self.compacted_tables.pop() {
-      self
-        .orchestrator
-        .drop_table(new.into_inner(), self.state.get_id(), version);
-    }
+    self.clear();
     Ok(())
+  }
+
+  fn clear(&mut self) {
+    let id = self.context.state().get_id();
+    let version = self.orchestrator.current_version();
+
+    for table in self.created_tables.drain(..) {
+      self.orchestrator.drop_table(table, id, version);
+    }
+    for (_, new) in self.compacted_tables.drain(..) {
+      self.orchestrator.drop_table(new.into_inner(), id, version);
+    }
   }
 }
 impl<'a> Drop for Transaction<'a> {
   fn drop(&mut self) {
     let _ = self.abort();
     self.metrics.transaction_start.record(self.tx_start.take());
+    self.clear();
   }
 }

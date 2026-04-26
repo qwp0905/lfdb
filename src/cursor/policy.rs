@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use super::{RecordData, VersionRecord};
-
 use crate::{
   cache::{CacheSlot, WritableSlot},
   disk::Pointer,
@@ -53,10 +51,11 @@ pub trait WritablePolicy: ReadonlyPolicy {
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(ptr)
   }
-  fn after_update_entry(&self, _entry_pointer: Pointer, _table: &Arc<TableHandle>) {}
+  fn when_update_entry(&self, _entry_pointer: Pointer, _table: &Arc<TableHandle>) {}
 }
 
 pub trait CreatablePolicy: WritablePolicy {
   fn is_conflict(&self, owner: TxId) -> bool;
-  fn create_record(&self, data: RecordData) -> VersionRecord;
+  fn current_owner(&self) -> TxId;
+  fn current_version(&self) -> TxId;
 }

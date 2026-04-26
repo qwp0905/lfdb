@@ -145,12 +145,6 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn alloc(&self, handle: Arc<TableHandle>) -> Result<WritableSlot<'_>> {
-    let free = handle.free().alloc();
-    Ok(self.block_cache.read(free, handle)?.for_write())
-  }
-
-  #[inline]
   pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
     self.gc.mark(handle, pointer);
   }

@@ -294,7 +294,7 @@ fn run_release_table(
 
     let min_version = version_visibility.min_version();
     for (table, _, _) in tables.extract_if(.., |(_, tx_id, version)| {
-      version_visibility.is_aborted(tx_id) || min_version >= *version
+      version_visibility.is_aborted(tx_id) || min_version > *version
     }) {
       unpinned.push(table)
     }

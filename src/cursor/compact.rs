@@ -1,8 +1,7 @@
 use std::{cell::Cell, collections::VecDeque, ops::Bound, sync::Arc, time::Duration};
 
 use super::{
-  BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, RecordData,
-  VersionRecord, WritablePolicy,
+  BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, WritablePolicy,
 };
 use crate::{
   cache::{BlockCache, WritableSlot},
@@ -120,7 +119,7 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     Ok(())
   }
 
-  fn after_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
+  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
     self.gc.mark(table.clone(), entry);
   }
 }
@@ -128,13 +127,11 @@ impl<'a> CreatablePolicy for &MiniTx<'a> {
   fn is_conflict(&self, owner: TxId) -> bool {
     owner != self.state.get_id() && self.snapshot.is_active(&owner)
   }
-
-  fn create_record(&self, data: RecordData) -> VersionRecord {
-    VersionRecord::new(
-      self.state.get_id(),
-      self.version_visibility.current_version(),
-      data,
-    )
+  fn current_owner(&self) -> TxId {
+    self.state.get_id()
+  }
+  fn current_version(&self) -> TxId {
+    self.version_visibility.current_version()
   }
 }
 
@@ -187,7 +184,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
       .serialize_and_log(RESERVED_TX, table.metadata().get_id(), slot, data)
   }
 
-  fn after_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
+  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
     self.gc.mark(table.clone(), entry)
   }
 }
@@ -264,7 +261,7 @@ pub fn wait_compaction(
     }
 
     let min_version = versions.min_version();
-    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version >= *v) {
+    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version > *v) {
       waited.push_back((old, new));
     }
 
@@ -408,7 +405,7 @@ pub fn after_compaction(
 
     let min_version = version_visibility.min_version();
     for (old, _, tx_id, version) in
-      buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
+      buffered.extract_if(.., |(_, _, _, v)| min_version > *v)
     {
       gc.release_table(old.into_inner(), tx_id, version);
     }
