@@ -13,7 +13,7 @@ use std::{
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
-  disk::PAGE_SIZE,
+  disk::{Pointer, PAGE_SIZE},
   error::{Error, Result},
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableConfig, TableMapper, META_TABLE_ID},
@@ -38,6 +38,7 @@ where
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
+  pub compaction_min_size: usize,
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
@@ -79,6 +80,7 @@ impl Engine {
     let tree_config = TreeManagerConfig {
       merge_interval: config.gc_trigger_interval,
       compaction_threshold: config.compaction_threshold,
+      compaction_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,

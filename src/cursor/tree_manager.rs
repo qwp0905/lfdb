@@ -21,6 +21,7 @@ use crate::{
 pub struct TreeManagerConfig {
   pub merge_interval: Duration,
   pub compaction_threshold: f64,
+  pub compaction_min_size: Pointer,
 }
 
 struct TableOpenPolicy<'a> {
@@ -117,6 +118,7 @@ impl TreeManager {
           gc.clone(),
           wait_compaction.clone(),
           config.compaction_threshold,
+          config.compaction_min_size,
           logger.clone(),
         ),
       )
@@ -289,6 +291,7 @@ fn run_merge_leaf(
   gc: Arc<GarbageCollector>,
   compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
   compaction_threshold: f64,
+  compaction_min_size: Pointer,
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
@@ -408,6 +411,10 @@ fn run_merge_leaf(
         orphaned
           .into_iter()
           .for_each(|ptr| gc.lazy_release(table.handle(), ptr));
+      }
+
+      if table.free().file_len() < compaction_min_size {
+        continue;
       }
 
       let dead = table.dead_ratio();
