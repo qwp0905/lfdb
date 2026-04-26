@@ -335,7 +335,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       entry.set_next(new_ptr);
     }
 
-    self.0.after_update_entry(entry_ptr, table);
+    self.0.when_update_entry(entry_ptr, table);
     Ok(())
   }
 
@@ -392,7 +392,7 @@ where
         NodeFindResult::NotFound(i) => {
           let node = node.writable();
           match self.create_entry(&key, i, &mut slot, node, table, || {
-            self.0.create_record(record)
+            VersionRecord::new(self.0.current_owner(), self.0.current_version(), record)
           })? {
             Some(v) => break v,
             None => return Ok(()),
@@ -405,6 +405,9 @@ where
   }
   pub fn insert(&self, key: Key, data: Vec<u8>, table: &Arc<TableHandle>) -> Result {
     self.insert_record(key, self.create_record(data, table)?, table)
+  }
+  pub fn remove(&self, key: KeyRef, table: &Arc<TableHandle>) -> Result {
+    self.insert_record_if_matched(key, RecordData::Tombstone, table)
   }
 
   /**
@@ -427,11 +430,12 @@ where
       }
     }
 
-    let record = self.0.create_record(data);
+    let record =
+      VersionRecord::new(self.0.current_owner(), self.0.current_version(), data);
 
     if entry.is_available(&record) {
       entry.append(record);
-      self.0.after_update_entry(entry_ptr, table);
+      self.0.when_update_entry(entry_ptr, table);
       return self.0.serialize_and_log(&mut slot, &entry, table);
     }
 
@@ -441,7 +445,7 @@ where
     new_entry.set_next(new_entry_index);
     self.0.serialize_and_log(&mut slot, &new_entry, table)?;
 
-    self.0.after_update_entry(entry_ptr, table);
+    self.0.when_update_entry(entry_ptr, table);
     Ok(())
   }
 
