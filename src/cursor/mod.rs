@@ -32,4 +32,4 @@ mod btree;
 use btree::*;
 
 mod policy;
-use policy::*;
+pub use policy::*;
