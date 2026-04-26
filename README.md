@@ -117,6 +117,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `gc_trigger_interval` | Interval at which leaf merge runs. Run more frequently when removes are heavy, less frequently when removes are rare. |
 | `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
 | `compaction_threshold` | Fragmentation ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every `gc_trigger_interval`, and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
+| `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
 | `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
 
 ## Architecture

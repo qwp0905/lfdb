@@ -1,4 +1,5 @@
 use std::{
+  cmp::Ordering,
   marker::PhantomData,
   ops::{Bound, RangeBounds},
   sync::Arc,
@@ -196,29 +197,30 @@ impl<'a> CursorIterator<'a> {
 
       let (k_old, v_old, k_new, v_new) = match (kv_old, kv_new) {
         (None, None) => return Ok(None),
-        (None, Some((k, Some(v)))) => return Ok(Some((k, v))),
-        (Some((k, Some(v))), None) => return Ok(Some((k, v))),
+        (None, Some((k, Some(v)))) | (Some((k, Some(v))), None) => {
+          return Ok(Some((k, v)))
+        }
         (None, Some((_, None))) | (Some((_, None)), None) => continue,
         (Some((k1, v1)), Some((k2, v2))) => (k1, v1, k2, v2),
       };
 
-      if k_old < k_new {
-        *cb = Some((k_new, v_new));
-        if let Some(v) = v_old {
-          return Ok(Some((k_old, v)));
+      match k_old.cmp(&k_new) {
+        Ordering::Less => {
+          *cb = Some((k_new, v_new));
+          if let Some(v) = v_old {
+            return Ok(Some((k_old, v)));
+          }
         }
-        continue;
-      }
-      if k_new < k_old {
-        self.buffered = Some((k_old, v_old));
-        if let Some(v) = v_new {
-          return Ok(Some((k_new, v)));
+        Ordering::Greater => {
+          self.buffered = Some((k_old, v_old));
+          if let Some(v) = v_new {
+            return Ok(Some((k_new, v)));
+          }
         }
-        continue;
-      }
-
-      if let Some(v) = v_new {
-        return Ok(Some((k_new, v)));
+        Ordering::Equal => match v_new {
+          Some(v) => return Ok(Some((k_new, v))),
+          None => continue,
+        },
       }
     }
   }

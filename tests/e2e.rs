@@ -1565,6 +1565,7 @@ fn test_auto_compaction() {
   let engine = Arc::new(
     default_options(&dir)
       .compaction_threshold(0.1)
+      .compaction_min_size(100 << 10)
       .build()
       .unwrap(),
   );
@@ -1593,13 +1594,6 @@ fn test_auto_compaction() {
     })
     .choose_multiple(rng, key_count);
 
-  for (t, k) in &keys {
-    result
-      .entry(t.to_string())
-      .or_default()
-      .insert(k.clone(), k.clone());
-  }
-
   enum Op {
     Insert(Vec<u8>, Vec<u8>),
     Get(Vec<u8>),
@@ -1615,6 +1609,13 @@ fn test_auto_compaction() {
         .unwrap();
     }
     tx.commit().unwrap();
+  }
+
+  for (t, k) in &keys {
+    result
+      .entry(t.to_string())
+      .or_default()
+      .insert(k.clone(), k.clone());
   }
 
   let mut waiting = Vec::with_capacity(key_count);
@@ -1694,7 +1695,7 @@ fn test_auto_compaction() {
       let mut iter = table.scan::<[_]>(..).unwrap();
 
       while let Some((k, v)) = iter.try_next().unwrap() {
-        assert_eq!(data.get(&k), Some(&v));
+        assert_eq!(data.get(&k), Some(&v), "table {name} key {k:?} not matched");
         c += 1
       }
 

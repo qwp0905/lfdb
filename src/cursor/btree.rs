@@ -650,7 +650,7 @@ where
     }
   }
 
-  pub fn snapshot(&mut self) -> Result<Option<KVSnapshot>> {
+  pub fn next_snapshot(&mut self) -> Result<Option<KVSnapshot>> {
     loop {
       match self.next_record()? {
         Some((_, None)) => continue,

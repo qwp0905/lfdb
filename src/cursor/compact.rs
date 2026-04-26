@@ -344,7 +344,7 @@ fn do_compaction(
 
     'compaction: loop {
       for _ in 0..1000 {
-        match old_snapshot.snapshot()? {
+        match old_snapshot.next_snapshot()? {
           Some(snap) => {
             new_index.apply_snapshot(snap, new.handle())?;
             moved_count += 1;
