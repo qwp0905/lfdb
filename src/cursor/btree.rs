@@ -435,8 +435,9 @@ where
 
     if entry.is_available(&record) {
       entry.append(record);
+      self.0.serialize_and_log(&mut slot, &entry, table)?;
       self.0.when_update_entry(entry_ptr, table);
-      return self.0.serialize_and_log(&mut slot, &entry, table);
+      return Ok(());
     }
 
     let new_entry_index = self.0.alloc_and_log(&entry, table)?;
