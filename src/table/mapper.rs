@@ -13,13 +13,13 @@ use crate::{
   Error, Result,
 };
 
-const FILE_SUFFIX: &str = ".db";
+const FILE_EXT: &str = "db";
 
 pub const META_TABLE: &str = "__meta";
 pub const META_TABLE_ID: TableId = 0;
 
 fn to_path(base: &Path, id: TableId) -> PathBuf {
-  base.join(format!("{id}{FILE_SUFFIX}"))
+  base.join(format!("{id}")).with_extension(FILE_EXT)
 }
 
 pub struct TableConfig {
@@ -68,14 +68,14 @@ impl TableMapper {
     let dir = read_dir(&self.base_path).map_err(Error::IO)?;
     let mut exists = HashSet::new();
     for entry in dir {
-      let entry = entry.map_err(Error::IO)?;
-      if !entry.file_name().to_string_lossy().ends_with(FILE_SUFFIX) {
+      let path = entry.map_err(Error::IO)?.path();
+      if path.extension().map_or(true, |ext| ext != FILE_EXT) {
         continue;
       }
-      if entry.path() == self.metadata.metadata().get_path() {
+      if path == self.metadata.metadata().get_path() {
         continue;
       }
-      exists.insert(entry.path());
+      exists.insert(path);
     }
 
     self.metadata.replay()?;
