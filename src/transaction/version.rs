@@ -151,7 +151,7 @@ pub struct VersionVisibility {
   active: SkipMap<TxId, AtomicU8>,
   last_tx_id: AtomicTxId,
   base_path: PathBuf,
-  file_id: AtomicU32,
+  file_id: AtomicU8,
 }
 impl VersionVisibility {
   pub fn new<T>(base_path: PathBuf, aborted: T, last_tx_id: TxId) -> Self
@@ -163,7 +163,7 @@ impl VersionVisibility {
       active: Default::default(),
       aborted: SkipSet::from_iter(aborted),
       last_tx_id: AtomicTxId::new(last_tx_id),
-      file_id: AtomicU32::new(0),
+      file_id: AtomicU8::new(0),
     }
   }
 
@@ -223,7 +223,7 @@ impl VersionVisibility {
       .file_stem()
       .unwrap()
       .to_string_lossy()
-      .parse::<u32>()
+      .parse::<u8>()
       .map_err(Error::unknown)?;
     self.file_id.store(last + 1, Ordering::Relaxed);
 
