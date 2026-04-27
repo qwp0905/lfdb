@@ -38,16 +38,13 @@ impl WALSegment {
     Ok(generation)
   }
 
-  pub fn open_new<P: AsRef<Path>>(
-    prefix: P,
+  pub fn open_new(
+    prefix: &Path,
     generation: SegmentGeneration,
     flush_count: usize,
     max_len: Pointer,
   ) -> Result<Self> {
-    let path = prefix
-      .as_ref()
-      .join(pad_start(generation))
-      .with_extension(FILE_EXT);
+    let path = prefix.join(pad_start(generation)).with_extension(FILE_EXT);
 
     let file = OpenOptions::new()
       .read(true)
