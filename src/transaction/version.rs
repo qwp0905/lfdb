@@ -3,7 +3,7 @@ use std::{
   io::{IoSlice, Write},
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::atomic::{AtomicU32, AtomicU8, Ordering},
+  sync::atomic::{AtomicU8, Ordering},
 };
 
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
