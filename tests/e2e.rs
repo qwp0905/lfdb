@@ -11,8 +11,9 @@ use std::{
 
 use crossbeam::channel::{unbounded, Sender};
 use lfdb::{Engine, EngineBuilder, Error, LogLevel, Logger};
-use rand::Rng;
+use rand::rngs::StdRng;
 use rand::{rng, seq::IteratorRandom};
+use rand::{Rng, SeedableRng};
 use tempfile::{tempdir_in, TempDir};
 
 struct TestLogger;
@@ -1569,7 +1570,8 @@ fn test_auto_compaction() {
       .build()
       .unwrap(),
   );
-  let rng = &mut rng();
+  let seed = [0; 32];
+  let rng = &mut StdRng::from_seed(seed);
 
   let mut result = HashMap::<String, HashMap<Vec<u8>, Vec<u8>>>::new();
 
@@ -1699,7 +1701,7 @@ fn test_auto_compaction() {
         c += 1
       }
 
-      assert_eq!(data.len(), c)
+      assert_eq!(data.len(), c, "table {name}")
     }
   }
 }
