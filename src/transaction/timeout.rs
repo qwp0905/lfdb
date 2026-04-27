@@ -10,9 +10,9 @@ use crossbeam::{
   channel::{tick, unbounded, Sender},
   select,
 };
-use log::{debug, trace};
 
 use crate::{
+  debug, trace,
   utils::{UnsafeBorrowMut, UnwrappedSender},
   wal::TxId,
 };

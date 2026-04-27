@@ -12,11 +12,11 @@ use crossbeam::{
   queue::SegQueue,
   utils::Backoff,
 };
-use log::info;
 
 use crate::{
   disk::{PagePool, Pointer},
   error::Result,
+  info,
   table::TableId,
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox, UnsafeBorrow},

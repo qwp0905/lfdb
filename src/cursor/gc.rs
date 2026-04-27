@@ -5,11 +5,10 @@ use std::{
   time::Duration,
 };
 
-use log::debug;
-
 use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
   cache::BlockCache,
+  debug,
   disk::Pointer,
   error::Result,
   table::{TableHandle, TableMapper},

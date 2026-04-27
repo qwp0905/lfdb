@@ -1,7 +1,6 @@
 use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
-use log::{debug, info};
 
 use super::{
   after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
@@ -10,7 +9,9 @@ use super::{
 };
 use crate::{
   cache::BlockCache,
+  debug,
   disk::Pointer,
+  info,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata, META_TABLE_ID},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},

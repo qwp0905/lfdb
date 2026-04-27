@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
-use log::{debug, info};
-
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
   cache::{BlockCache, CacheSlot, WritableSlot},
   cursor::{GarbageCollector, TreeManager},
+  debug,
   disk::Pointer,
   error::Result,
+  info,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableId, TableMapper, TableMetadata},

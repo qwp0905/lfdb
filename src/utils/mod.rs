@@ -21,3 +21,5 @@ pub use buffer::*;
 
 mod pin;
 pub use pin::*;
+
+mod log;

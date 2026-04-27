@@ -3,10 +3,10 @@ use std::{
 };
 
 use crossbeam::epoch::{self, Guard};
-use log::debug;
 
 use super::{Acquired, CacheSlot, Frame, LRUTable, Peeked};
 use crate::{
+  debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,

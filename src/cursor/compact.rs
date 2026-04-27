@@ -1,19 +1,19 @@
 use std::{cell::Cell, collections::VecDeque, ops::Bound, sync::Arc, time::Duration};
 
-use log::{info, trace, warn};
-
 use super::{
   BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, WritablePolicy,
 };
 use crate::{
   cache::{BlockCache, WritableSlot},
   disk::Pointer,
+  info,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
   thread::BackgroundThread,
+  trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   wal::{TxId, RESERVED_TX, WAL},
-  Result,
+  warn, Result,
 };
 
 pub enum CompactTask {

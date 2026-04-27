@@ -10,13 +10,13 @@ use std::{
   time::{Duration, Instant},
 };
 
-use log::{error, info};
-
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   disk::{Pointer, PAGE_SIZE},
+  error,
   error::{Error, Result},
+  info,
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableConfig, TableMapper, META_TABLE_ID},
   transaction::{
