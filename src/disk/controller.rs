@@ -159,9 +159,7 @@ impl<const N: usize> IOPool<N> {
       }
     };
 
-    let result = Self::write(metrics, file, values)
-      .map(Ok)
-      .unwrap_or_else(Err);
+    let result = Self::write(metrics, file, values);
     waiting
       .into_iter()
       .for_each(|done| done.fulfill(result.clone()));
