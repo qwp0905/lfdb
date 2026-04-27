@@ -1,16 +1,22 @@
-use lfdb::{EngineBuilder, LogLevel, Logger};
+use lfdb::EngineBuilder;
 
 struct DebugLogger;
-impl Logger for DebugLogger {
-  fn log(&self, level: LogLevel, msg: &[u8]) {
-    println!("[{}] {}", level.to_str(), String::from_utf8_lossy(msg))
+impl log::Log for DebugLogger {
+  fn enabled(&self, _: &log::Metadata) -> bool {
+    true
   }
+
+  fn log(&self, record: &log::Record) {
+    println!("[{}] {}", record.level(), record.args())
+  }
+
+  fn flush(&self) {}
 }
 fn main() {
+  let _ = log::set_logger(&DebugLogger);
+  log::set_max_level(log::LevelFilter::Trace);
   let engine = EngineBuilder::new("./.local")
     .block_cache_memory_capacity(100 << 20)
-    .logger(DebugLogger)
-    .log_level(LogLevel::Trace)
     .build()
     .expect("bootstrap error");
 

@@ -1,18 +1,25 @@
 use std::{thread::sleep, time::Duration};
 
-use lfdb::{Engine, EngineBuilder, LogLevel, Logger};
+use lfdb::{Engine, EngineBuilder};
+use log::Log;
 
 struct DebugLogger;
-impl Logger for DebugLogger {
-  fn log(&self, level: LogLevel, msg: &[u8]) {
-    println!("[{}] {}", level.to_str(), String::from_utf8_lossy(msg))
+impl Log for DebugLogger {
+  fn enabled(&self, _: &log::Metadata) -> bool {
+    true
   }
+
+  fn log(&self, record: &log::Record) {
+    println!("[{}] {}", record.level(), record.args())
+  }
+
+  fn flush(&self) {}
 }
 
 fn build() -> Engine {
+  let _ = log::set_logger(&DebugLogger);
+  log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new("./.local")
-    .logger(DebugLogger)
-    .log_level(LogLevel::Trace)
     .gc_trigger_interval(Duration::from_secs(10))
     .checkpoint_interval(Duration::from_secs(5))
     .build()

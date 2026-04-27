@@ -6,13 +6,14 @@ use super::{
 use crate::{
   cache::{BlockCache, WritableSlot},
   disk::Pointer,
+  info,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
   thread::BackgroundThread,
+  trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
-  utils::LogFilter,
   wal::{TxId, RESERVED_TX, WAL},
-  Result,
+  warn, Result,
 };
 
 pub enum CompactTask {
@@ -198,7 +199,6 @@ pub fn wait_compaction(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
-  logger: LogFilter,
   compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
 ) -> impl FnMut(Option<CompactTask>) -> Result {
   let meta_table = tables.meta_table();
@@ -225,13 +225,11 @@ pub fn wait_compaction(
             if old.metadata().get_id() != metadata.get_id()
               || metadata.get_compaction_id().is_some()
             {
-              logger.trace(|| {
-                format!("table {table_name} compacting skipped since already compacted.")
-              });
+              trace!("table {table_name} compacting skipped since already compacted.");
               return Ok(());
             }
 
-            logger.info(|| format!("table {table_name} compacting triggered."));
+            info!("table {table_name} compacting triggered.");
             let table_meta = tables.create_metadata(table_name);
             metadata.set_compaction(&table_meta);
 
@@ -251,10 +249,7 @@ pub fn wait_compaction(
             (new_table, versions.current_version())
           };
 
-          logger.info(|| {
-            format!("table {table_name} compacting wait until another tx close.")
-          });
-
+          info!("table {table_name} compacting wait until another tx close.");
           triggered.push((old, new_table, wait_until));
         }
       };
@@ -286,7 +281,6 @@ pub fn handle_compaction(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
-  logger: LogFilter,
   after_compaction: Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
@@ -299,7 +293,6 @@ pub fn handle_compaction(
       &wal,
       &recorder,
       &gc,
-      &logger,
       &meta_table,
       old,
       new,
@@ -314,7 +307,6 @@ fn do_compaction(
   wal: &WAL,
   recorder: &PageRecorder,
   gc: &GarbageCollector,
-  logger: &LogFilter,
   meta_table: &Arc<TableHandle>,
   old_table: MutationHandle,
   new: MutationHandle,
@@ -323,7 +315,7 @@ fn do_compaction(
   >,
 ) -> Result {
   let table_name = old_table.metadata().get_name();
-  logger.info(|| format!("table {table_name} compacting begin."));
+  info!("table {table_name} compacting begin.");
   let mut moved_count = 0;
 
   {
@@ -355,25 +347,20 @@ fn do_compaction(
 
       let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
-        logger.warn(|| format!("table {table_name} already dropped."));
+        warn!("table {table_name} already dropped.");
         return Ok(());
       }
     }
   }
 
-  logger.info(|| {
-    format!(
-      "table {table_name} compacting copied {} count record complete.",
-      moved_count,
-    )
-  });
+  info!("table {table_name} compacting copied {moved_count} count record complete.",);
 
   let (tx_id, version) = {
     let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
-      logger.warn(|| format!("table {table_name} already dropped."));
+      warn!("table {table_name} already dropped.");
       return Ok(());
     }
 
@@ -387,7 +374,7 @@ fn do_compaction(
     (tx.state.get_id(), version_visibility.current_version())
   };
 
-  logger.info(|| format!("table {table_name} compacting totally complete."));
+  info!("table {table_name} compacting totally complete.");
   after_compaction.dispatch((old_table, new, tx_id, version));
 
   Ok(())

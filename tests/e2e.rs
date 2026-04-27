@@ -10,20 +10,29 @@ use std::{
 };
 
 use crossbeam::channel::{unbounded, Sender};
-use lfdb::{Engine, EngineBuilder, Error, LogLevel, Logger};
+use lfdb::{Engine, EngineBuilder, Error};
+use log::Log;
 use rand::rngs::StdRng;
 use rand::{rng, seq::IteratorRandom};
 use rand::{Rng, SeedableRng};
 use tempfile::{tempdir_in, TempDir};
 
 struct TestLogger;
-impl Logger for TestLogger {
-  fn log(&self, level: LogLevel, msg: &[u8]) {
-    println!("[{}] {}", level.to_str(), String::from_utf8_lossy(msg))
+impl Log for TestLogger {
+  fn enabled(&self, _: &log::Metadata) -> bool {
+    true
   }
+
+  fn log(&self, record: &log::Record) {
+    println!("[{}] {}", record.level(), record.args())
+  }
+
+  fn flush(&self) {}
 }
 
 fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
+  let _ = log::set_logger(&TestLogger);
+  log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)
     .gc_thread_count(3)
@@ -32,8 +41,6 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
     .checkpoint_interval(Duration::from_secs(2))
-    .logger(TestLogger)
-    .log_level(LogLevel::Trace)
 }
 
 fn build_engine(dir: &TempDir) -> Engine {
@@ -825,15 +832,10 @@ fn test_hard_workload() {
 fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
   let engine = Arc::new(
-    EngineBuilder::new(dir.path())
-      .block_cache_memory_capacity(32 << 20)
-      .block_cache_shard_count(1 << 2)
-      .group_commit_count(10)
+    default_options(&dir)
       .gc_trigger_interval(Duration::from_millis(50))
-      .logger(TestLogger)
-      .log_level(LogLevel::Trace)
       .build()
-      .expect("engine bootstrap failed"),
+      .unwrap(),
   );
 
   create_table(&engine, TEST_TABLE);
@@ -1060,10 +1062,8 @@ fn test_start_not_commit() {
 #[test]
 fn test_timeout() {
   let dir = tempdir_in(".").unwrap();
-  let engine = EngineBuilder::new(dir.path())
+  let engine = default_options(&dir)
     .transaction_timeout(Duration::from_millis(500))
-    .logger(TestLogger)
-    .log_level(LogLevel::Trace)
     .build()
     .unwrap();
   {

@@ -22,7 +22,6 @@ mod error;
 pub use error::*;
 
 mod utils;
-pub use utils::{LogLevel, Logger};
 
 mod disk;
 

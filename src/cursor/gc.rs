@@ -8,12 +8,13 @@ use std::{
 use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
   cache::BlockCache,
+  debug,
   disk::Pointer,
   error::Result,
   table::{TableHandle, TableMapper},
   thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, LogFilter, ToArc, ToBox},
+  utils::{DoubleBuffer, ToArc, ToBox},
   wal::{TxId, RESERVED_TX},
 };
 
@@ -50,16 +51,13 @@ pub struct GarbageCollector {
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
   table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
-  logger: LogFilter,
 }
 impl GarbageCollector {
   pub fn run(&self) -> Result {
     let min_version = self.version_visibility.min_version();
     let queue = self.queue.switch();
 
-    self
-      .logger
-      .debug(|| format!("{} data will check version in this scope.", queue.len()));
+    debug!("{} data will check version in this scope.", queue.len());
     let mut waiting = Vec::new();
     let mut release = BTreeMap::new();
     let mut dedup = HashSet::new();
@@ -76,13 +74,13 @@ impl GarbageCollector {
         }
       }
     }
-    self.logger.debug(|| "all entry cleaning triggered.");
+    debug!("all entry cleaning triggered.");
 
     waiting
       .into_iter()
       .map(|v| v.wait().flatten())
       .collect::<Result>()?;
-    self.logger.debug(|| "unreachable versions all collected.");
+    debug!("unreachable versions all collected.");
 
     self.version_visibility.remove_aborted(&min_version);
 
@@ -124,7 +122,6 @@ impl GarbageCollector {
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
-    logger: LogFilter,
     config: GarbageCollectionConfig,
   ) -> Self {
     let queue = DoubleBuffer::new().to_arc();
@@ -159,7 +156,6 @@ impl GarbageCollector {
       entry,
       queue,
       table,
-      logger,
       version_visibility,
     }
   }

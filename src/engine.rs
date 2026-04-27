@@ -14,13 +14,15 @@ use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
   disk::{Pointer, PAGE_SIZE},
+  error,
   error::{Error, Result},
+  info,
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableConfig, TableMapper, META_TABLE_ID},
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
-  utils::{LogFilter, LogLevel, Logger, ToArc},
+  utils::ToArc,
   wal::{WALConfig, WAL},
 };
 
@@ -42,15 +44,12 @@ where
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
-  pub logger: Arc<dyn Logger>,
-  pub log_level: LogLevel,
 }
 
 pub struct Engine {
   orchestrator: TxOrchestrator,
   available: AtomicBool,
   metrics_registry: Arc<MetricsRegistry>,
-  logger: LogFilter,
 }
 impl Engine {
   pub fn bootstrap<T>(config: EngineConfig<T>) -> Result<Self>
@@ -59,8 +58,8 @@ impl Engine {
   {
     let st = Instant::now();
     let metrics_registry = MetricsRegistry::new().to_arc();
-    let logger = LogFilter::new(config.log_level, config.logger);
-    logger.info(|| "start engine");
+
+    info!("start engine");
 
     fs::create_dir_all(config.base_path.as_ref()).map_err(Error::IO)?;
     let base_path = config
@@ -98,11 +97,10 @@ impl Engine {
     };
 
     let block_cache =
-      BlockCache::open(block_cache_config, logger.clone(), metrics_registry.clone())?
-        .to_arc();
+      BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(table_config, metrics_registry.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, logger.clone())?;
+    let (wal, replay) = WAL::replay(&wal_config)?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -118,13 +116,12 @@ impl Engine {
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
-      logger.clone(),
       gc_config,
     )
     .to_arc();
 
     if tables.is_new() {
-      logger.info(|| "engine initial state.");
+      info!("engine initial state.");
       let tree_manager = TreeManager::initialize(
         block_cache.clone(),
         tables.clone(),
@@ -132,7 +129,6 @@ impl Engine {
         gc.clone(),
         wal.clone(),
         version_visibility.clone(),
-        logger.clone(),
         tree_config,
       )?;
       let orchestrator = TxOrchestrator::new(
@@ -144,21 +140,19 @@ impl Engine {
         version_visibility,
         gc,
         recorder,
-        logger.clone(),
         tree_manager,
         metrics_registry.clone(),
       );
 
-      logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
+      info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
       return Ok(Self {
         orchestrator,
         available: AtomicBool::new(true),
         metrics_registry,
-        logger,
       });
     }
 
-    logger.info(|| "trying to replay...");
+    info!("trying to replay...");
 
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
@@ -216,7 +210,6 @@ impl Engine {
       gc.clone(),
       wal.clone(),
       version_visibility.clone(),
-      logger.clone(),
       tree_config,
     )?;
 
@@ -233,17 +226,15 @@ impl Engine {
       version_visibility,
       gc,
       recorder,
-      logger.clone(),
       tree_manager,
       metrics_registry.clone(),
       replay.segments,
     )?;
 
-    logger.info(|| format!("engine bootstrapped in {} secs.", st.elapsed().as_secs()));
+    info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
     Ok(Self {
       orchestrator,
       available: AtomicBool::new(true),
-      logger,
       metrics_registry,
     })
   }
@@ -292,9 +283,9 @@ impl Drop for Engine {
         .available
         .compare_exchange(true, false, Ordering::Release, Ordering::Acquire)
     {
-      self.logger.info(|| "engine shutdown");
+      info!("engine shutdown");
       if let Err(err) = self.orchestrator.close() {
-        self.logger.error(|| err.to_string());
+        error!("{err}");
       };
     }
   }

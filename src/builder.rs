@@ -1,9 +1,6 @@
 use std::{path::Path, time::Duration};
 
-use crate::{
-  utils::{LogLevel, Logger, NoneLogger, ToArc},
-  Engine, EngineConfig, Result,
-};
+use crate::{Engine, EngineConfig, Result};
 
 pub struct EngineBuilder<T>(EngineConfig<T>)
 where
@@ -29,8 +26,6 @@ where
       block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
       block_cache_memory_capacity: DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY,
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
-      log_level: DEFAULT_LOG_LEVEL,
-      logger: DEFAULT_LOGGER.to_arc(),
     })
   }
 
@@ -132,14 +127,6 @@ where
     self.0.transaction_timeout = timeout;
     self
   }
-  pub fn logger<L: Logger + 'static>(mut self, logger: L) -> Self {
-    self.0.logger = logger.to_arc();
-    self
-  }
-  pub fn log_level(mut self, level: LogLevel) -> Self {
-    self.0.log_level = level;
-    self
-  }
 
   /**
    * Threshold which trigger auto compaction. To disable auto compaction, then set 1.0.
@@ -170,8 +157,6 @@ const DEFAULT_GC_THREAD_COUNT: usize = 5;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
-const DEFAULT_LOGGER: NoneLogger = NoneLogger;
-const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
 const DEFAULT_IO_THREAD_COUNT: usize = 32;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
