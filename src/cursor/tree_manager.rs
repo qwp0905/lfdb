@@ -295,6 +295,8 @@ fn run_merge_leaf(
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
+    gc.run()?;
+
     for table in tables.get_all().into_iter() {
       let table = match table.try_pin() {
         Some(table) => table,

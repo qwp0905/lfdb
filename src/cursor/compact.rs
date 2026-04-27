@@ -261,7 +261,7 @@ pub fn wait_compaction(
     }
 
     let min_version = versions.min_version();
-    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version > *v) {
+    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version >= *v) {
       waited.push_back((old, new));
     }
 
@@ -405,7 +405,7 @@ pub fn after_compaction(
 
     let min_version = version_visibility.min_version();
     for (old, _, tx_id, version) in
-      buffered.extract_if(.., |(_, _, _, v)| min_version > *v)
+      buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
     {
       gc.release_table(old.into_inner(), tx_id, version);
     }

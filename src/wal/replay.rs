@@ -1,10 +1,11 @@
 use std::{
   collections::{BTreeMap, BTreeSet, HashSet},
   fs::read_dir,
+  path::{Path, PathBuf},
 };
 
 use super::{
-  LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_SUFFIX, WAL_BLOCK_SIZE,
+  LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_EXT, WAL_BLOCK_SIZE,
 };
 use crate::{
   disk::{PagePool, Pointer},
@@ -32,6 +33,7 @@ pub struct ReplayResult {
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
   pub segments: Vec<WALSegment>,
   pub generation: SegmentGeneration,
+  pub aborted_snapshot: Option<PathBuf>,
 }
 impl ReplayResult {
   fn empty() -> Self {
@@ -42,26 +44,27 @@ impl ReplayResult {
       aborted: Default::default(),
       redo: Default::default(),
       segments: Default::default(),
+      aborted_snapshot: None,
     }
   }
 }
 
 pub fn replay(
-  base_dir: &str,
+  base_dir: &Path,
   flush_count: usize,
   page_pool: &PagePool<WAL_BLOCK_SIZE>,
 ) -> Result<ReplayResult> {
   let mut files = Vec::new();
   let mut generation = 0;
   for file in read_dir(base_dir).map_err(Error::IO)? {
-    let file = file.map_err(Error::IO)?;
-    if !file.file_name().to_string_lossy().ends_with(FILE_SUFFIX) {
+    let path = file.map_err(Error::IO)?.path();
+    if path.extension().map_or(true, |ext| ext != FILE_EXT) {
       continue;
     }
 
-    let current = WALSegment::parse_generation(&file.file_name().to_string_lossy())?;
+    let current = WALSegment::parse_generation(&path)?;
     generation = generation.max(current + 1);
-    files.push(file.path())
+    files.push(path)
   }
 
   if files.len() == 0 {
@@ -75,6 +78,7 @@ pub fn replay(
   let mut started = BTreeSet::<TxId>::new();
   let mut modified = HashSet::<TxId>::new();
   let mut closed = HashSet::<TxId>::new();
+  let mut aborted_snapshot = None;
 
   let mut segments = Vec::new();
 
@@ -139,7 +143,7 @@ pub fn replay(
           }
           aborted.insert(record.log_id, record.tx_id);
         }
-        Operation::Checkpoint(last_log_id, min_active) => {
+        Operation::Checkpoint(last_log_id, min_active, path) => {
           // Discard redo/abort entries already covered by the checkpoint.
           last_checkpoint = Some(last_checkpoint.unwrap_or(0).max(last_log_id));
           redo = redo.split_off(&last_log_id);
@@ -148,7 +152,13 @@ pub fn replay(
           // Discard started entries below min_active — they are already reflected
           // in the checkpoint's abort set and don't need to be tracked again.
           last_min_active = Some(last_min_active.unwrap_or(0).max(min_active));
-          started = started.split_off(&min_active)
+          started = started.split_off(&min_active);
+
+          if let Some((id, _)) = aborted_snapshot.as_ref() {
+            if *id < record.log_id {
+              aborted_snapshot = Some((record.log_id, path))
+            }
+          }
         }
       };
     }
@@ -172,5 +182,6 @@ pub fn replay(
     redo: redo.into_values().flatten().collect::<Vec<_>>(),
     segments,
     generation,
+    aborted_snapshot: aborted_snapshot.map(|(_, p)| p),
   })
 }

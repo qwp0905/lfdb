@@ -1,14 +1,21 @@
 use std::{
+  fs,
+  io::{IoSlice, Write},
   panic::RefUnwindSafe,
+  path::{Path, PathBuf},
   sync::atomic::{AtomicU8, Ordering},
 };
 
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
 use crate::{
+  disk::{max_iov, Pread},
   utils::OffsetBitmap,
-  wal::{AtomicTxId, TxId},
+  wal::{AtomicTxId, TxId, TX_ID_BYTES},
+  Error, Result,
 };
+
+const FILE_EXT: &str = "abt";
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
@@ -143,16 +150,20 @@ pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: SkipMap<TxId, AtomicU8>,
   last_tx_id: AtomicTxId,
+  base_path: PathBuf,
+  file_id: AtomicU8,
 }
 impl VersionVisibility {
-  pub fn new<T>(aborted: T, last_tx_id: TxId) -> Self
+  pub fn new<T>(base_path: PathBuf, aborted: T, last_tx_id: TxId) -> Self
   where
     T: IntoIterator<Item = TxId>,
   {
     Self {
+      base_path,
       active: Default::default(),
       aborted: SkipSet::from_iter(aborted),
       last_tx_id: AtomicTxId::new(last_tx_id),
+      file_id: AtomicU8::new(0),
     }
   }
 
@@ -205,6 +216,87 @@ impl VersionVisibility {
   #[inline]
   pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
     self.active.get(&tx_id).map(TxState)
+  }
+
+  pub fn replay(&self, path: &Path) -> Result {
+    let last = path
+      .file_stem()
+      .unwrap()
+      .to_string_lossy()
+      .parse::<u8>()
+      .map_err(Error::unknown)?;
+    self.file_id.store(last + 1, Ordering::Relaxed);
+
+    let file = fs::OpenOptions::new()
+      .read(true)
+      .open(&path)
+      .map_err(Error::IO)?;
+    let mut offset = 0;
+    let mut buf = vec![0; 4];
+    file.pread(&mut buf, offset).map_err(Error::IO)?;
+    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
+    offset += 4;
+
+    for _ in 0..len {
+      let mut buf = vec![0; TX_ID_BYTES];
+      file.pread(&mut buf, offset).map_err(Error::IO)?;
+      offset += TX_ID_BYTES as u64;
+
+      let id =
+        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      self.aborted.insert(id);
+    }
+
+    self.clear(path)?;
+    Ok(())
+  }
+
+  pub fn persist_aborted(&self, tx_id: TxId) -> Result<PathBuf> {
+    let current = self
+      .base_path
+      .join(format!("{}", self.file_id.fetch_add(1, Ordering::Relaxed)))
+      .with_extension(FILE_EXT);
+
+    let mut file = fs::OpenOptions::new()
+      .create(true)
+      .write(true)
+      .append(true)
+      .open(&current)
+      .map_err(Error::IO)?;
+    let snapshot = self
+      .aborted
+      .range(..tx_id)
+      .map(|v| v.value().to_le_bytes())
+      .collect::<Vec<_>>();
+    file
+      .write(&(snapshot.len() as u32).to_le_bytes())
+      .map_err(Error::IO)?;
+
+    for chuck in snapshot.chunks(max_iov()) {
+      let v = chuck
+        .into_iter()
+        .map(|v| IoSlice::new(v))
+        .collect::<Vec<_>>();
+      file.write_vectored(&v).map_err(Error::IO)?;
+    }
+
+    file.sync_data().map_err(Error::IO)?;
+
+    Ok(current)
+  }
+
+  pub fn clear(&self, current: &Path) -> Result {
+    for entry in fs::read_dir(&self.base_path).map_err(Error::IO)? {
+      let path = entry.map_err(Error::IO)?.path();
+      if path.extension().map_or(true, |ext| ext != FILE_EXT) {
+        continue;
+      };
+      if path == current {
+        continue;
+      }
+      fs::remove_file(path).map_err(Error::IO)?;
+    }
+    Ok(())
   }
 }
 impl RefUnwindSafe for VersionVisibility {}

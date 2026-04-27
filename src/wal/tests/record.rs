@@ -50,12 +50,17 @@ fn test_insert_roundtrip() {
 
 #[test]
 fn test_checkpoint_roundtrip() {
-  let r = LogRecord::new_checkpoint(5, 200, 123);
+  let log_id = 5;
+  let last_log_id = 200;
+  let min_active = 123;
+  let path: PathBuf = format!("sdfsdf").into();
+  let r = LogRecord::new_checkpoint(log_id, last_log_id, min_active, path.clone());
   let parsed = assert_roundtrip(&r);
   match parsed.operation {
-    Operation::Checkpoint(last_log_id, min_active) => {
-      assert_eq!(last_log_id, 200);
-      assert_eq!(min_active, 123)
+    Operation::Checkpoint(id, mc, p) => {
+      assert_eq!(last_log_id, id);
+      assert_eq!(min_active, mc);
+      assert_eq!(path, p);
     }
     _ => panic!("expected Checkpoint"),
   }

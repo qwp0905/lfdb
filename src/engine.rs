@@ -63,10 +63,16 @@ impl Engine {
     logger.info(|| "start engine");
 
     fs::create_dir_all(config.base_path.as_ref()).map_err(Error::IO)?;
+    let base_path = config
+      .base_path
+      .as_ref()
+      .canonicalize()
+      .map_err(Error::IO)?;
+
     let wal_config = WALConfig {
       group_commit_count: config.group_commit_count,
       max_file_size: config.wal_file_size,
-      base_dir: config.base_path.as_ref().into(),
+      base_dir: base_path.clone(),
       segment_flush_count: config.wal_segment_flush_count,
       segment_flush_delay: config.wal_segment_flush_delay,
     };
@@ -87,7 +93,7 @@ impl Engine {
       checkpoint_interval: config.checkpoint_interval,
     };
     let table_config = TableConfig {
-      base_path: config.base_path.as_ref().into(),
+      base_path: base_path.clone(),
       io_thread_count: config.io_thread_count,
     };
 
@@ -101,7 +107,11 @@ impl Engine {
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
     let version_visibility =
-      VersionVisibility::new(replay.aborted, replay.last_tx_id).to_arc();
+      VersionVisibility::new(base_path.clone(), replay.aborted, replay.last_tx_id)
+        .to_arc();
+    if let Some(path) = replay.aborted_snapshot {
+      version_visibility.replay(&path)?;
+    }
 
     let gc = GarbageCollector::start(
       block_cache.clone(),

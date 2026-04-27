@@ -61,7 +61,6 @@ impl TxOrchestrator {
         handle_checkpoint(
           wal.clone(),
           block_cache.clone(),
-          gc.clone(),
           version_visibility.clone(),
           logger.clone(),
         ),
@@ -100,7 +99,7 @@ impl TxOrchestrator {
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
-    run_checkpoint(&wal, &block_cache, &gc, &version_visibility, &logger)?;
+    run_checkpoint(&wal, &block_cache, &version_visibility, &logger)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -241,30 +240,29 @@ impl TxOrchestrator {
 fn handle_checkpoint(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
-  gc: Arc<GarbageCollector>,
   version: Arc<VersionVisibility>,
   logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
-  move |_| run_checkpoint(&wal, &block_cache, &gc, &version, &logger)
+  move |_| run_checkpoint(&wal, &block_cache, &version, &logger)
 }
 
 fn run_checkpoint(
   wal: &WAL,
   block_cache: &BlockCache,
-  gc: &GarbageCollector,
   version: &VersionVisibility,
   logger: &LogFilter,
 ) -> Result {
   let log_id = wal.current_log_id();
   let min_version = version.min_version();
-  logger.debug(|| format!("checkpoint trigger id {log_id} version {min_version}"));
-
-  gc.run()?;
-  version.remove_aborted(&min_version);
-  logger.debug(|| format!("checkpoint garbage collected id {log_id}"));
+  logger.info(|| format!("checkpoint trigger id {log_id} version {min_version}"));
 
   block_cache.flush()?;
-  wal.checkpoint_and_flush(log_id, min_version)?;
-  logger.debug(|| format!("checkpoint complete id {log_id}"));
+  let path = version.persist_aborted(min_version)?;
+  logger.debug(|| format!("checkpoint aborted set persisted."));
+
+  wal.checkpoint_and_flush(log_id, min_version, path.clone())?;
+  logger.info(|| format!("checkpoint complete id {log_id}"));
+
+  version.clear(&path)?;
   Ok(())
 }

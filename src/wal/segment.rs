@@ -15,7 +15,7 @@ use crate::{
   Error,
 };
 
-pub const FILE_SUFFIX: &str = ".wal";
+pub const FILE_EXT: &str = "wal";
 
 pub type FsyncResult = TaskHandle<Result>;
 
@@ -28,27 +28,23 @@ pub struct WALSegment {
   flush: Box<dyn BackgroundThread<(), Result>>,
 }
 impl WALSegment {
-  pub fn parse_generation<A>(filename: &A) -> Result<SegmentGeneration>
-  where
-    A: AsRef<str>,
-  {
-    let generation: SegmentGeneration = filename
-      .as_ref()
-      .trim_end_matches(FILE_SUFFIX)
+  pub fn parse_generation(path: &Path) -> Result<SegmentGeneration> {
+    let generation = path
+      .file_stem()
+      .unwrap()
+      .to_string_lossy()
       .parse()
       .map_err(Error::unknown)?;
     Ok(generation)
   }
 
-  pub fn open_new<P: AsRef<Path>>(
-    prefix: P,
+  pub fn open_new(
+    prefix: &Path,
     generation: SegmentGeneration,
     flush_count: usize,
     max_len: Pointer,
   ) -> Result<Self> {
-    let path = prefix
-      .as_ref()
-      .join(format!("{}{}", pad_start(generation), FILE_SUFFIX));
+    let path = prefix.join(pad_start(generation)).with_extension(FILE_EXT);
 
     let file = OpenOptions::new()
       .read(true)
@@ -67,17 +63,17 @@ impl WALSegment {
       .and_then(|_| file.set_len(file_len))
       .and_then(|_| file.sync_all()) // sync metadata for replay at once
       .map_err(Error::IO)?;
-    Ok(Self::new(file, path.into(), flush_count))
+    Ok(Self::new(file, path, flush_count))
   }
-  pub fn open_exists<P: AsRef<Path>>(path: P, flush_count: usize) -> Result<Self> {
+  pub fn open_exists(path: &Path, flush_count: usize) -> Result<Self> {
     let file = OpenOptions::new()
       .read(true)
       .write(true)
       .create(true)
-      .direct_io(path.as_ref())
+      .direct_io(path)
       .map_err(Error::IO)?
       .to_arc();
-    Ok(Self::new(file, path.as_ref().into(), flush_count))
+    Ok(Self::new(file, path.to_path_buf(), flush_count))
   }
 
   pub fn read<P: AsMut<Page<WAL_BLOCK_SIZE>>>(
@@ -115,18 +111,11 @@ impl WALSegment {
    * Repurposes this segment for a new generation by renaming it in place.
    * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
    */
-  pub fn reuse<P: AsRef<Path>>(
-    &self,
-    prefix: P,
-    generation: SegmentGeneration,
-  ) -> Result {
-    let new_path =
-      prefix
-        .as_ref()
-        .join(format!("{}{}", pad_start(generation), FILE_SUFFIX));
+  pub fn reuse(&self, prefix: &Path, generation: SegmentGeneration) -> Result {
+    let new_path = prefix.join(pad_start(generation)).with_extension(FILE_EXT);
     let mut path = self.path.l();
     rename(path.as_path(), &new_path).map_err(Error::IO)?;
-    *path = PathBuf::from(new_path);
+    *path = new_path;
     Ok(())
   }
 

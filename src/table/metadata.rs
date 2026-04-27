@@ -1,4 +1,5 @@
 use std::{
+  ffi::OsStr,
   path::{Path, PathBuf},
   ptr::copy_nonoverlapping,
   slice::from_raw_parts,
@@ -120,7 +121,8 @@ impl TableMetadata {
             u32::from_le_bytes((ptr.add(offset) as *const [u8; 4]).read()) as usize;
           offset += 4;
 
-          let path = str::from_utf8_unchecked(from_raw_parts(ptr.add(offset), len));
+          let path =
+            OsStr::from_encoded_bytes_unchecked(from_raw_parts(ptr.add(offset), len));
           offset += len;
           Some((id, PathBuf::from(path)))
         }
@@ -150,7 +152,8 @@ impl TableMetadata {
         return Err(Error::InvalidFormat("metadata crashed."));
       }
 
-      let path = str::from_utf8_unchecked(from_raw_parts(ptr.add(offset), path_len));
+      let path =
+        OsStr::from_encoded_bytes_unchecked(from_raw_parts(ptr.add(offset), path_len));
 
       Ok(Self {
         id,

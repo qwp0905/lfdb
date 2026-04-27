@@ -104,11 +104,7 @@ impl WAL {
     let page_pool = PagePool::new(max_len);
     logger.info(|| "start to replay wal segments");
 
-    let replay_result = replay(
-      config.base_dir.to_string_lossy().as_ref(),
-      config.group_commit_count,
-      &page_pool,
-    )?;
+    let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
 
     logger.info(|| {
       format!(
@@ -122,7 +118,7 @@ impl WAL {
     });
 
     let preloader = SegmentPreload::new(
-      config.base_dir.to_path_buf(),
+      config.base_dir.clone(),
       replay_result.generation,
       config.group_commit_count,
       max_len as Pointer,
@@ -345,9 +341,14 @@ impl WAL {
     )
   }
 
-  pub fn checkpoint_and_flush(&self, last_log_id: LogId, min_active: TxId) -> Result {
+  pub fn checkpoint_and_flush(
+    &self,
+    last_log_id: LogId,
+    min_active: TxId,
+    path: PathBuf,
+  ) -> Result {
     self.append(
-      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, min_active),
+      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, min_active, path),
       true,
     )
   }

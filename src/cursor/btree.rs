@@ -603,6 +603,8 @@ where
   }
 
   fn fill_up(&mut self) -> Result {
+    debug_assert!(self.keys.is_empty());
+
     let ptr = match self.next.take() {
       Some(p) => p,
       None => {
