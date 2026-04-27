@@ -174,7 +174,7 @@ impl<'a> CursorIterator<'a> {
       return Err(Error::TransactionClosed);
     }
 
-    let (compaction, cb) = match &mut self.compaction {
+    let (compaction, c_buffered) = match &mut self.compaction {
       Some(v) => v,
       None => loop {
         match self.table.next_kv()? {
@@ -190,7 +190,7 @@ impl<'a> CursorIterator<'a> {
         Some(kv) => Some(kv),
         None => self.table.next_kv()?,
       };
-      let kv_new = match cb.take() {
+      let kv_new = match c_buffered.take() {
         Some(kv) => Some(kv),
         None => compaction.next_kv()?,
       };
@@ -204,23 +204,19 @@ impl<'a> CursorIterator<'a> {
         (Some((k1, v1)), Some((k2, v2))) => (k1, v1, k2, v2),
       };
 
-      match k_old.cmp(&k_new) {
+      let (k, v) = match k_old.cmp(&k_new) {
         Ordering::Less => {
-          *cb = Some((k_new, v_new));
-          if let Some(v) = v_old {
-            return Ok(Some((k_old, v)));
-          }
+          *c_buffered = Some((k_new, v_new));
+          (k_old, v_old)
         }
         Ordering::Greater => {
           self.buffered = Some((k_old, v_old));
-          if let Some(v) = v_new {
-            return Ok(Some((k_new, v)));
-          }
+          (k_new, v_new)
         }
-        Ordering::Equal => match v_new {
-          Some(v) => return Ok(Some((k_new, v))),
-          None => continue,
-        },
+        Ordering::Equal => (k_new, v_new),
+      };
+      if let Some(v) = v {
+        return Ok(Some((k, v)));
       }
     }
   }
