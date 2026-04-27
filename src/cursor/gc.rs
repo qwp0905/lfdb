@@ -45,6 +45,7 @@ enum GcPointer {
  * emptiness queries, entry does version reclamation.
  */
 pub struct GarbageCollector {
+  version_visibility: Arc<VersionVisibility>,
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
@@ -53,7 +54,9 @@ pub struct GarbageCollector {
 }
 impl GarbageCollector {
   pub fn run(&self) -> Result {
+    let min_version = self.version_visibility.min_version();
     let queue = self.queue.switch();
+
     self
       .logger
       .debug(|| format!("{} data will check version in this scope.", queue.len()));
@@ -80,6 +83,8 @@ impl GarbageCollector {
       .map(|v| v.wait().flatten())
       .collect::<Result>()?;
     self.logger.debug(|| "unreachable versions all collected.");
+
+    self.version_visibility.remove_aborted(&min_version);
 
     // must release after triming because of trim type can contain release type.
     // it could occur dangling pointer reference.
@@ -145,7 +150,7 @@ impl GarbageCollector {
       .single()
       .interval(
         RELEASE_CHECK_INTERVAL,
-        run_release_table(mapper, version_visibility),
+        run_release_table(mapper, version_visibility.clone()),
       )
       .to_box();
 
@@ -155,6 +160,7 @@ impl GarbageCollector {
       queue,
       table,
       logger,
+      version_visibility,
     }
   }
 
@@ -294,7 +300,7 @@ fn run_release_table(
 
     let min_version = version_visibility.min_version();
     for (table, _, _) in tables.extract_if(.., |(_, tx_id, version)| {
-      version_visibility.is_aborted(tx_id) || min_version > *version
+      version_visibility.is_aborted(tx_id) || min_version >= *version
     }) {
       unpinned.push(table)
     }
