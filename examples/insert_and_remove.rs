@@ -17,7 +17,7 @@ impl Log for DebugLogger {
 }
 
 fn build() -> Engine {
-  log::set_logger(&DebugLogger).unwrap();
+  let _ = log::set_logger(&DebugLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new("./.local")
     .gc_trigger_interval(Duration::from_secs(10))

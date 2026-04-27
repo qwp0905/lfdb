@@ -31,7 +31,7 @@ impl Log for TestLogger {
 }
 
 fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
-  log::set_logger(&TestLogger).unwrap();
+  let _ = log::set_logger(&TestLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)

@@ -13,7 +13,7 @@ impl log::Log for DebugLogger {
   fn flush(&self) {}
 }
 fn main() {
-  log::set_logger(&DebugLogger).unwrap();
+  let _ = log::set_logger(&DebugLogger);
   log::set_max_level(log::LevelFilter::Trace);
   let engine = EngineBuilder::new("./.local")
     .block_cache_memory_capacity(100 << 20)
