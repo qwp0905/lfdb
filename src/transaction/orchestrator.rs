@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use log::{debug, info};
+
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
-  utils::{LogFilter, ToArc},
+  utils::ToArc,
   wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
@@ -33,7 +35,6 @@ pub struct TxOrchestrator {
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
-  logger: LogFilter,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   tree_manager: TreeManager,
@@ -49,7 +50,6 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
@@ -58,16 +58,11 @@ impl TxOrchestrator {
       .single()
       .interval(
         config.checkpoint_interval,
-        handle_checkpoint(
-          wal.clone(),
-          block_cache.clone(),
-          version_visibility.clone(),
-          logger.clone(),
-        ),
+        handle_checkpoint(wal.clone(), block_cache.clone(), version_visibility.clone()),
       )
       .to_arc();
     wal.initialize(wal_config, Arc::downgrade(&checkpoint));
-    let timeout_thread = TimeoutThread::new(version_visibility.clone(), logger.clone());
+    let timeout_thread = TimeoutThread::new(version_visibility.clone());
 
     Self {
       wal,
@@ -77,7 +72,6 @@ impl TxOrchestrator {
       version_visibility,
       gc,
       recorder,
-      logger,
       timeout_thread,
       tx_timeout: config.timeout,
       tree_manager,
@@ -94,12 +88,11 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    logger: LogFilter,
     tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
-    run_checkpoint(&wal, &block_cache, &version_visibility, &logger)?;
+    run_checkpoint(&wal, &block_cache, &version_visibility)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -114,7 +107,6 @@ impl TxOrchestrator {
       version_visibility,
       gc,
       recorder,
-      logger,
       tree_manager,
       metrics,
     ))
@@ -224,15 +216,15 @@ impl TxOrchestrator {
     self.timeout_thread.close();
     let wal_close = self.wal.twostep_close();
     self.checkpoint.close();
-    self.logger.info(|| "last checkpoint completed.");
+    info!("last checkpoint completed.");
 
     self.block_cache.close();
-    self.logger.info(|| "block cache closed.");
+    info!("block cache closed.");
     self.gc.close();
     self.tables.close();
-    self.logger.info(|| "tables closed.");
+    info!("tables closed.");
     wal_close();
-    self.logger.info(|| "wal closed.");
+    info!("wal closed.");
     Ok(())
   }
 }
@@ -241,27 +233,25 @@ fn handle_checkpoint(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
-  logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
-  move |_| run_checkpoint(&wal, &block_cache, &version, &logger)
+  move |_| run_checkpoint(&wal, &block_cache, &version)
 }
 
 fn run_checkpoint(
   wal: &WAL,
   block_cache: &BlockCache,
   version: &VersionVisibility,
-  logger: &LogFilter,
 ) -> Result {
   let log_id = wal.current_log_id();
   let min_version = version.min_version();
-  logger.info(|| format!("checkpoint trigger id {log_id} version {min_version}"));
+  info!("checkpoint trigger id {log_id} version {min_version}");
 
   block_cache.flush()?;
   let path = version.persist_aborted(min_version)?;
-  logger.debug(|| format!("checkpoint aborted set persisted."));
+  debug!("checkpoint aborted set persisted.");
 
   wal.checkpoint_and_flush(log_id, min_version, path.clone())?;
-  logger.info(|| format!("checkpoint complete id {log_id}"));
+  info!("checkpoint complete id {log_id}");
 
   version.clear(&path)?;
   Ok(())

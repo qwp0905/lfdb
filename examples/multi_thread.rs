@@ -1,17 +1,24 @@
 use std::{sync::Arc, time::Instant};
 
 use crossbeam::channel::{unbounded, Sender};
-use lfdb::{EngineBuilder, LogLevel, Logger};
+use lfdb::EngineBuilder;
 use rand::{rng, seq::IteratorRandom};
 
 struct DebugLogger;
-impl Logger for DebugLogger {
-  fn log(&self, level: LogLevel, msg: &[u8]) {
-    println!("[{}] {}", level.to_str(), String::from_utf8_lossy(msg))
+impl log::Log for DebugLogger {
+  fn enabled(&self, _: &log::Metadata) -> bool {
+    true
   }
-}
 
+  fn log(&self, record: &log::Record) {
+    println!("[{}] {}", record.level(), record.args())
+  }
+
+  fn flush(&self) {}
+}
 fn main() {
+  log::set_logger(&DebugLogger).unwrap();
+  log::set_max_level(log::LevelFilter::Trace);
   let engine = Arc::new(
     EngineBuilder::new("./.local")
       .group_commit_count(512)
@@ -19,8 +26,6 @@ fn main() {
       .block_cache_shard_count(1 << 8)
       .wal_file_size(32 << 20)
       .gc_thread_count(5)
-      .logger(DebugLogger)
-      .log_level(LogLevel::Trace)
       .build()
       .expect("bootstrap error"),
   );

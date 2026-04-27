@@ -12,13 +12,14 @@ use crossbeam::{
   queue::SegQueue,
   utils::Backoff,
 };
+use log::info;
 
 use crate::{
   disk::{PagePool, Pointer},
   error::Result,
   table::TableId,
   thread::{BackgroundThread, WorkBuilder},
-  utils::{LogFilter, ToArc, ToBox, UnsafeBorrow},
+  utils::{ToArc, ToBox, UnsafeBorrow},
 };
 
 use super::{
@@ -99,23 +100,21 @@ pub struct WAL {
   synced_count: AtomicU64,
 }
 impl WAL {
-  pub fn replay(config: &WALConfig, logger: LogFilter) -> Result<(Self, ReplayResult)> {
+  pub fn replay(config: &WALConfig) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(max_len);
-    logger.info(|| "start to replay wal segments");
+    info!("start to replay wal segments");
 
     let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
 
-    logger.info(|| {
-      format!(
-        "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
-        replay_result.last_log_id,
-        replay_result.last_tx_id,
-        replay_result.aborted.len(),
-        replay_result.redo.len(),
-        replay_result.segments.len()
-      )
-    });
+    info!(
+      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
+      replay_result.last_log_id,
+      replay_result.last_tx_id,
+      replay_result.aborted.len(),
+      replay_result.redo.len(),
+      replay_result.segments.len()
+    );
 
     let preloader = SegmentPreload::new(
       config.base_dir.clone(),

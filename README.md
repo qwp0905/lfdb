@@ -212,6 +212,10 @@ On startup, the engine replays the WAL and redoes all committed transactions sin
 
 **Durability guarantee**: `commit()` returns only after the WAL record has been fsynced to disk. If `commit()` returned `Ok`, the transaction will survive a crash.
 
+### Logging
+
+LFDB emits logs through the [`log`](https://crates.io/crates/log) crate facade. Refer to its documentation for backend setup and filter configuration.
+
 ## Limitations
 
 - **Key size**: maximum 256 bytes
