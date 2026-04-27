@@ -9,11 +9,13 @@ use super::{
 };
 use crate::{
   cache::BlockCache,
+  debug,
   disk::Pointer,
+  info,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata, META_TABLE_ID},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{LogFilter, ToArc, ToBox},
+  utils::{ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
   Result,
 };
@@ -61,7 +63,6 @@ impl TreeManager {
     gc: Arc<GarbageCollector>,
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
-    logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Self {
     let after_compaction = WorkBuilder::new()
@@ -83,7 +84,6 @@ impl TreeManager {
         wal.clone(),
         recorder.clone(),
         gc.clone(),
-        logger.clone(),
         after_compaction.clone(),
       ))
       .to_arc();
@@ -100,7 +100,6 @@ impl TreeManager {
           wal.clone(),
           recorder.clone(),
           gc.clone(),
-          logger.clone(),
           do_compaction.clone(),
         ),
       )
@@ -119,7 +118,6 @@ impl TreeManager {
           wait_compaction.clone(),
           config.compaction_threshold,
           config.compaction_min_size,
-          logger.clone(),
         ),
       )
       .to_box();
@@ -139,7 +137,6 @@ impl TreeManager {
     gc: Arc<GarbageCollector>,
     wal: Arc<WAL>,
     version_visibility: Arc<VersionVisibility>,
-    logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
     let table = tables.meta_table();
@@ -170,7 +167,6 @@ impl TreeManager {
       gc,
       version_visibility,
       wal,
-      logger,
       config,
     ))
   }
@@ -219,7 +215,6 @@ impl TreeManager {
     gc: Arc<GarbageCollector>,
     wal: Arc<WAL>,
     version_visibility: Arc<VersionVisibility>,
-    logger: LogFilter,
     config: TreeManagerConfig,
   ) -> Result<Self> {
     let open_handles = SegQueue::new().to_arc();
@@ -232,17 +227,14 @@ impl TreeManager {
       .map(|_| {
         let block_cache = block_cache.clone();
         let gc = gc.clone();
-        let logger = logger.clone();
         let open_handles = open_handles.clone();
         once(move || {
           while let Some(table) = open_handles.pop() {
-            logger.debug(|| {
-              format!(
-                "table {} start to collect orphaned blocks.",
-                table.metadata().get_name()
-              )
-            });
-            release_orphaned(&block_cache, &gc, &logger, table)?;
+            debug!(
+              "table {} start to collect orphaned blocks.",
+              table.metadata().get_name(),
+            );
+            release_orphaned(&block_cache, &gc, table)?;
           }
           Ok(())
         })
@@ -254,7 +246,7 @@ impl TreeManager {
       .map(|th| th.wait().flatten())
       .collect::<Result>()?;
 
-    logger.info(|| "orphaned block has released successfully.");
+    info!("orphaned block has released successfully.");
     Ok(Self::new(
       block_cache,
       tables,
@@ -262,7 +254,6 @@ impl TreeManager {
       gc,
       version_visibility,
       wal,
-      logger,
       config,
     ))
   }
@@ -292,7 +283,6 @@ fn run_merge_leaf(
   compaction: Arc<dyn BackgroundThread<CompactTask, Result>>,
   compaction_threshold: f64,
   compaction_min_size: Pointer,
-  logger: LogFilter,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
     gc.run()?;
@@ -303,12 +293,10 @@ fn run_merge_leaf(
         None => continue,
       };
 
-      logger.debug(|| {
-        format!(
-          "clean leaf table {} collect start.",
-          table.metadata().get_name()
-        )
-      });
+      debug!(
+        "clean leaf table {} collect start.",
+        table.metadata().get_name()
+      );
       let table_id = table.metadata().get_id();
 
       let mut ptr = block_cache
@@ -388,9 +376,7 @@ fn run_merge_leaf(
         };
 
         // merge without propagating to internal nodes.
-        logger.debug(|| {
-          format!("trying to start merge {} with {}", slot.get_pointer(), next)
-        });
+        debug!("trying to start merge {} with {}", slot.get_pointer(), next);
 
         let mut next_slot = block_cache.peek(next, table.handle())?.for_write();
         let next_leaf = next_slot.as_ref().deserialize::<BTreeNode>()?;
@@ -426,7 +412,7 @@ fn run_merge_leaf(
         continue;
       }
 
-      logger.debug(|| format!("clean leaf table {name} collect end. dead ratio {dead}",));
+      debug!("clean leaf table {name} collect end. dead ratio {dead}");
     }
     Ok(())
   }
@@ -435,7 +421,6 @@ fn run_merge_leaf(
 fn release_orphaned(
   block_cache: &BlockCache,
   gc: &GarbageCollector,
-  logger: &LogFilter,
   table: Arc<TableHandle>,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
@@ -471,7 +456,7 @@ fn release_orphaned(
   entry_stack
     .iter()
     .for_each(|&ptr| gc.mark(table.clone(), ptr));
-  logger.debug(|| format!("{} entry queued for initial gc.", entry_stack.len()));
+  debug!("{} entry queued for initial gc.", entry_stack.len());
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);

@@ -1,9 +1,6 @@
 mod lock;
 pub use lock::*;
 
-mod logger;
-pub use logger::*;
-
 mod channel;
 pub use channel::*;
 
@@ -24,3 +21,5 @@ pub use buffer::*;
 
 mod pin;
 pub use pin::*;
+
+mod log;

@@ -6,12 +6,13 @@ use crossbeam::epoch::{self, Guard};
 
 use super::{Acquired, CacheSlot, Frame, LRUTable, Peeked};
 use crate::{
+  debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
-  utils::{AtomicBitmap, ExclusivePin, LogFilter, SharedToken, ToArc, ToBox},
+  utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
 
 const PRE_FLUSH_THRESHOLD: usize = 100;
@@ -27,17 +28,12 @@ pub struct BlockCache {
   frame: Arc<Vec<MaybeUninit<Frame>>>,
   pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
-  logger: LogFilter,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BlockCache {
-  pub fn open(
-    config: BlockCacheConfig,
-    logger: LogFilter,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Result<Self> {
+  pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
     let page_pool = PagePool::new(config.capacity).to_arc();
 
     // 90% of page pool capacity reserved for frames; the remaining 10% is kept
@@ -67,7 +63,6 @@ impl BlockCache {
       pins,
       table: LRUTable::new(config.shard_count, frame_cap),
       dirty,
-      logger,
       page_pool,
       pre_flush,
       metrics,
@@ -171,12 +166,12 @@ impl BlockCache {
   }
 
   pub fn flush(&self) -> Result {
-    self.logger.debug(|| "block cache flush triggered.");
+    debug!("block cache flush triggered.");
     self
       .metrics
       .block_cache_flush
       .measure(|| self.pre_flush.execute(()).wait().flatten())?;
-    self.logger.debug(|| "block cache synced.");
+    debug!("block cache synced.");
     Ok(())
   }
 

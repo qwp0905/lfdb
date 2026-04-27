@@ -12,7 +12,8 @@ use crossbeam::{
 };
 
 use crate::{
-  utils::{LogFilter, UnsafeBorrowMut, UnwrappedSender},
+  debug, trace,
+  utils::{UnsafeBorrowMut, UnwrappedSender},
   wal::TxId,
 };
 
@@ -213,12 +214,11 @@ pub struct TimeoutThread {
   channel: Sender<Msg>,
 }
 impl TimeoutThread {
-  pub fn new(version_visibility: Arc<VersionVisibility>, logger: LogFilter) -> Self {
+  pub fn new(version_visibility: Arc<VersionVisibility>) -> Self {
     let (tx, rx) = unbounded();
     let th = Builder::new()
       .name("timeout".to_string())
       .spawn(move || {
-        let logger_c = logger.clone();
         let mut wheel = TimingWheel::new(move |tx_id: TxId| {
           let state = match version_visibility.get_active_state(tx_id) {
             Some(s) => s,
@@ -227,7 +227,7 @@ impl TimeoutThread {
           if !state.try_timeout() {
             return;
           }
-          logger_c.trace(|| format!("tx {} timeout reached", state.get_id()));
+          trace!("tx {} timeout reached", state.get_id());
 
           version_visibility.set_abort(state.get_id());
           state.deactive();
@@ -239,7 +239,7 @@ impl TimeoutThread {
             Msg::Register(id, timeout) => wheel.register(id, timeout),
             Msg::Term => return,
           }
-          logger.debug(|| "timeout thread wake up.");
+          debug!("timeout thread wake up.");
 
           while !wheel.is_empty() {
             select! {
@@ -250,7 +250,7 @@ impl TimeoutThread {
               }
             }
           }
-          logger.debug(|| "timeout thread switches to idle.");
+          debug!("timeout thread switches to idle.");
         }
       })
       .unwrap();
