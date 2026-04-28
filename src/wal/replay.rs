@@ -154,10 +154,11 @@ pub fn replay(
           last_min_active = Some(last_min_active.unwrap_or(0).max(min_active));
           started = started.split_off(&min_active);
 
-          if let Some((id, _)) = aborted_snapshot.as_ref() {
-            if *id < record.log_id {
-              aborted_snapshot = Some((record.log_id, path))
-            }
+          if aborted_snapshot
+            .as_ref()
+            .map_or(true, |(id, _)| *id < record.log_id)
+          {
+            aborted_snapshot = Some((record.log_id, path))
           }
         }
       };

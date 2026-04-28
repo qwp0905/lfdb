@@ -206,11 +206,11 @@ impl WAL {
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
     let record = create_record(log_id).to_bytes_with_len();
     let len = record.len();
-    let guard = &epoch::pin();
     let backoff = Backoff::new();
 
     loop {
-      let buffer_ptr = self.buffer.load(Ordering::Acquire, guard);
+      let guard = epoch::pin();
+      let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
 
       buffer.pin_segment();
@@ -268,7 +268,7 @@ impl WAL {
         Owned::init(replacement),
         Ordering::Release,
         Ordering::Acquire,
-        guard,
+        &guard,
       ) {
         if failed.new.get_pointer() > 0 {
           failed.current.as_raw().borrow_unsafe().unpin_segment();
@@ -384,10 +384,10 @@ impl WAL {
   }
 
   pub fn close(&self) {
-    let guard = &epoch::pin();
     let backoff = Backoff::new();
     loop {
-      let ptr = self.buffer.load(Ordering::Acquire, guard);
+      let guard = epoch::pin();
+      let ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = ptr.as_raw().borrow_unsafe();
       if buffer.load_offset() >= WAL_BLOCK_SIZE {
         backoff.snooze();

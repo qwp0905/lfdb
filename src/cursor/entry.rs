@@ -6,7 +6,7 @@ use crate::{
     Deserializable, Serializable, SerializeType, TypedObject, SERIALIZABLE_BYTES,
   },
   wal::{TxId, TX_ID_BYTES},
-  Error, Result,
+  Error,
 };
 
 pub const MAX_KEY: usize = 1 << 8;
@@ -37,25 +37,6 @@ impl RecordData {
       RecordData::Chunked(pointers) => 1 + 1 + POINTER_BYTES * pointers.len(),
       RecordData::Tombstone => 1,
     }
-  }
-
-  pub fn read_data<F>(&self, read_chunk: F) -> Result<Option<Vec<u8>>>
-  where
-    F: Fn(Pointer) -> Result<DataChunk>,
-  {
-    let pointers = match self {
-      RecordData::Data(data) => return Ok(Some(data.clone())),
-      RecordData::Tombstone => return Ok(None),
-      RecordData::Chunked(p) => p,
-    };
-
-    let mut data = Vec::new();
-    for &ptr in pointers {
-      let chunk: DataChunk = read_chunk(ptr)?;
-      data.extend_from_slice(chunk.get_data());
-    }
-
-    Ok(Some(data))
   }
 }
 

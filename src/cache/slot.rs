@@ -55,13 +55,13 @@ impl<'a> CacheSlot<'a> {
     })
   }
   #[inline]
-  pub fn for_read<'b>(self) -> ReadonlySlot<'b>
+  pub fn for_read<'b>(self, guard: &'b Guard) -> ReadonlySlot<'b>
   where
     'a: 'b,
   {
     match self {
-      CacheSlot::Temp(temp) => ReadonlySlot::Temp(temp.for_read()),
-      CacheSlot::Page(page) => ReadonlySlot::Page(page.for_read()),
+      CacheSlot::Temp(temp) => ReadonlySlot::Temp(temp.for_read(guard)),
+      CacheSlot::Page(page) => ReadonlySlot::Page(page.for_read(guard)),
     }
   }
 
@@ -70,9 +70,10 @@ impl<'a> CacheSlot<'a> {
   where
     'a: 'b,
   {
+    let guard = pin();
     match self {
-      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write()),
-      CacheSlot::Page(page) => WritableSlot::Page(page.for_write()),
+      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write(&guard)),
+      CacheSlot::Page(page) => WritableSlot::Page(page.for_write(&guard)),
     }
   }
 }
@@ -131,29 +132,27 @@ pub struct PageSlot<'a> {
 }
 impl<'a> PageSlot<'a> {
   #[inline]
-  fn for_read<'b>(self) -> PageSlotRead<'b>
+  fn for_read<'b>(self, guard: &'b Guard) -> PageSlotRead<'b>
   where
     'a: 'b,
   {
-    let guard = pin();
     let page = self.block.load_page(&guard);
     PageSlotRead {
-      _guard: guard,
       page,
+      _guard: guard,
       _token: self.token,
     }
   }
 
-  fn for_write<'b>(self) -> PageSlotWrite<'b>
+  fn for_write<'b>(self, guard: &Guard) -> PageSlotWrite<'b>
   where
     'a: 'b,
   {
-    let guard = pin();
     let mut shadow = self.page_pool.acquire();
     let _latch = self.block.latch();
     shadow
       .as_mut()
-      .copy_from(self.block.load_page(&guard).borrow_unsafe().as_ref());
+      .copy_from(self.block.load_page(guard).borrow_unsafe().as_ref());
     PageSlotWrite {
       shadow: ManuallyDrop::new(shadow),
       block: self.block,
@@ -188,8 +187,8 @@ impl<'a> Drop for PageSlotWrite<'a> {
 
 pub struct PageSlotRead<'a> {
   page: *const PageRef<PAGE_SIZE>,
+  _guard: &'a Guard,
   _token: SharedToken<'a>,
-  _guard: Guard,
 }
 
 pub struct TempSlot<'a> {
@@ -200,26 +199,23 @@ pub struct TempSlot<'a> {
 }
 impl<'a> TempSlot<'a> {
   #[inline]
-  fn for_read<'b>(self) -> TempSlotRead<'b>
+  fn for_read<'b>(self, guard: &'b Guard) -> TempSlotRead<'b>
   where
     'a: 'b,
   {
-    let write_guard = pin();
-    let page = self.state.load_page(&write_guard);
+    let page = self.state.load_page(&guard);
     TempSlotRead {
       state: ManuallyDrop::new(self.state),
       page,
       pointer: self.pointer,
-      block_guard: self.guard,
-      write_guard,
+      guard: self.guard,
     }
   }
 
-  fn for_write<'b>(self) -> TempSlotWrite<'b>
+  fn for_write<'b>(self, guard: &Guard) -> TempSlotWrite<'b>
   where
     'a: 'b,
   {
-    let guard = pin();
     let mut shadow = self.page_pool.acquire();
     let latch = unsafe { transmute(self.state.latch()) };
     shadow
@@ -292,8 +288,7 @@ pub struct TempSlotRead<'a> {
   state: ManuallyDrop<TempBlockRef<'a, SharedToken<'a>>>,
   page: *const PageRef<PAGE_SIZE>,
   pointer: Pointer,
-  block_guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
-  write_guard: Guard,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
 }
 impl<'a> TempSlotRead<'a> {
   fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
@@ -302,7 +297,8 @@ impl<'a> TempSlotRead<'a> {
       return;
     }
 
-    let page = state.load_page(&self.write_guard);
+    let guard = pin();
+    let page = state.load_page(&guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
   }
 }
@@ -311,7 +307,7 @@ impl<'a> Drop for TempSlotRead<'a> {
   fn drop(&mut self) {
     // block_guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some((guard, handle)) = self.block_guard.take() {
+    if let Some((guard, handle)) = self.guard.take() {
       return self.release(handle, guard);
     }
 
