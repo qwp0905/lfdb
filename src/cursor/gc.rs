@@ -5,7 +5,7 @@ use std::{
   time::Duration,
 };
 
-use super::{DataEntry, RecordData, VersionRecord};
+use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
   cache::BlockCache,
   debug,
@@ -253,11 +253,8 @@ const fn run_entry(
         }
       };
 
-      let next_entry: DataEntry = block_cache
-        .peek(next, table.handle())?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
+      let next_slot = block_cache.peek(next, table.handle())?.for_read();
+      let next_entry: DataEntryView = next_slot.as_ref().view()?;
       recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &next_entry)?;
       ptr = Some(i);
 
@@ -271,14 +268,8 @@ const fn run_check(
   block_cache: Arc<BlockCache>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
   move |(table, pointer)| {
-    Ok(
-      block_cache
-        .peek(pointer, table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntry>()?
-        .is_empty(),
-    )
+    let slot = block_cache.peek(pointer, table)?.for_read();
+    Ok(slot.as_ref().view::<DataEntryView>()?.is_empty())
   }
 }
 

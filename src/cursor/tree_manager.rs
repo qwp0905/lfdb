@@ -4,7 +4,7 @@ use crossbeam::queue::SegQueue;
 
 use super::{
   after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
-  BTreeNodeView, CompactTask, DataEntry, GarbageCollector, ReadonlyPolicy, RecordData,
+  BTreeNodeView, CompactTask, DataEntryView, GarbageCollector, ReadonlyPolicy,
   TreeHeader, COMPACTION_INTERVAL, HEADER_POINTER,
 };
 use crate::{
@@ -460,16 +460,14 @@ fn release_orphaned(
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let entry: DataEntry = block_cache
-      .read(ptr, table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize()?;
-    for record in entry.get_versions() {
-      if let RecordData::Chunked(pointers) = &record.data {
-        visited.extend(pointers);
-      }
+
+    let slot = block_cache.read(ptr, table.clone())?.for_read();
+    let entry = slot.as_ref().view::<DataEntryView>()?;
+
+    for pointers in entry.chunked_pointers() {
+      visited.extend(pointers);
     }
+
     if let Some(i) = entry.get_next() {
       entry_stack.push(i)
     }

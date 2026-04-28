@@ -9,9 +9,10 @@ use crate::{
 };
 
 use super::{
-  BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataEntry, InternalNode, Key,
-  KeyRef, LeafNode, NodeFindResult, ReadonlyPolicy, RecordData, TreeHeader,
-  VersionRecord, WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
+  BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
+  DataEntryView, InternalNode, Key, KeyRef, LeafNode, NodeFindResult, ReadonlyPolicy,
+  RecordData, RecordDataRef, TreeHeader, VersionRecord, WritablePolicy, CHUNK_SIZE,
+  HEADER_POINTER, LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -66,23 +67,40 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     let _ = replace(&mut slot, self.0.fetch_slot(ptr, table)?.for_read());
 
     loop {
-      let entry: DataEntry = slot.as_ref().deserialize()?;
-
+      let entry: DataEntryView = slot.as_ref().view()?;
       for record in entry.get_versions() {
         if self.0.is_visible(record.owner, record.version) {
-          return Ok(Some(
-            record
-              .data
-              .read_data(|i| self.0.fetch_and_deserialize(i, table))?,
-          ));
+          return match &record.data {
+            RecordDataRef::Data(data) => Ok(Some(Some(data.to_vec()))),
+            RecordDataRef::Chunked(pointers) => {
+              Ok(Some(Some(Self::read_chunk(&self.0, pointers, table)?)))
+            }
+            RecordDataRef::Tombstone => Ok(Some(None)),
+          };
         }
       }
 
-      match entry.get_next() {
-        Some(i) => drop(replace(&mut slot, self.0.fetch_slot(i, table)?.for_read())),
+      let next = match entry.get_next() {
+        Some(i) => self.0.fetch_slot(i, table)?.for_read(),
         None => return Ok(None),
-      }
+      };
+      let _ = replace(&mut slot, next);
     }
+  }
+
+  fn read_chunk(
+    policy: &Policy,
+    pointers: &[Pointer],
+    table: &Arc<TableHandle>,
+  ) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+
+    for &ptr in pointers {
+      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let chunk: DataChunkView = slot.as_ref().view()?;
+      data.extend_from_slice(chunk.get_data());
+    }
+    Ok(data)
   }
 
   pub fn contains(&self, key: KeyRef, table: &Arc<TableHandle>) -> Result<bool> {
@@ -94,18 +112,22 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     let _ = replace(&mut slot, self.0.fetch_slot(ptr, table)?.for_read());
 
     loop {
-      let entry: DataEntry = slot.as_ref().deserialize()?;
+      let entry: DataEntryView = slot.as_ref().view()?;
 
       for record in entry.get_versions() {
         if self.0.is_visible(record.owner, record.version) {
-          return Ok(true);
+          return match &record.data {
+            RecordDataRef::Chunked(_) | RecordDataRef::Data(_) => Ok(true),
+            RecordDataRef::Tombstone => Ok(false),
+          };
         }
       }
 
-      match entry.get_next() {
-        Some(i) => drop(replace(&mut slot, self.0.fetch_slot(i, table)?.for_read())),
+      let next = match entry.get_next() {
+        Some(i) => self.0.fetch_slot(i, table)?.for_read(),
         None => return Ok(false),
-      }
+      };
+      let _ = replace(&mut slot, next);
     }
   }
 
@@ -578,27 +600,29 @@ where
   fn find_value(&self, ptr: Pointer) -> Result<Option<Option<(Vec<u8>, TxId, TxId)>>> {
     let mut slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
     loop {
-      let entry = slot.as_ref().deserialize::<DataEntry>()?;
+      let entry = slot.as_ref().view::<DataEntryView>()?;
 
       for record in entry.get_versions() {
         if self.policy.is_visible(record.owner, record.version) {
-          return match record
-            .data
-            .read_data(|i| self.policy.fetch_and_deserialize(i, &self.table))?
-          {
-            Some(v) => Ok(Some(Some((v, record.owner, record.version)))),
-            None => Ok(Some(None)),
+          return match &record.data {
+            RecordDataRef::Data(data) => {
+              Ok(Some(Some((data.to_vec(), record.owner, record.version))))
+            }
+            RecordDataRef::Chunked(pointers) => Ok(Some(Some((
+              BTreeIndex::read_chunk(self.policy, pointers, &self.table)?,
+              record.owner,
+              record.version,
+            )))),
+            RecordDataRef::Tombstone => Ok(Some(None)),
           };
         }
       }
 
-      match entry.get_next() {
-        Some(i) => drop(replace(
-          &mut slot,
-          self.policy.fetch_slot(i, &self.table)?.for_read(),
-        )),
+      let next = match entry.get_next() {
+        Some(i) => self.policy.fetch_slot(i, &self.table)?.for_read(),
         None => return Ok(None),
-      }
+      };
+      let _ = replace(&mut slot, next);
     }
   }
 
