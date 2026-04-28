@@ -84,7 +84,7 @@ impl LogBuffer {
   /**
    * if segment is not full, then copy pointers and recreate buffer
    */
-  pub fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
+  pub const fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
     Self::new(
       entry,
       self.segment_ptr + 1,
@@ -95,7 +95,7 @@ impl LogBuffer {
     )
   }
 
-  fn new(
+  const fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment_ptr: Pointer,
     segment_pin: *const AtomicU32,
@@ -200,7 +200,7 @@ impl LogBuffer {
   pub fn is_ready_to_flush(&self) -> bool {
     self.segment_ptr <= self.written_count.borrow_unsafe().load(Ordering::Acquire) + 1
   }
-  pub fn get_generation(&self) -> SegmentGeneration {
+  pub const fn get_generation(&self) -> SegmentGeneration {
     self.generation
   }
 }

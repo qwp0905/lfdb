@@ -167,7 +167,7 @@ impl GarbageCollector {
   }
 }
 
-fn run_entry(
+const fn run_entry(
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
@@ -267,7 +267,7 @@ fn run_entry(
   }
 }
 
-fn run_check(
+const fn run_check(
   block_cache: Arc<BlockCache>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
   move |(table, pointer)| {
@@ -282,7 +282,7 @@ fn run_check(
   }
 }
 
-fn run_release_table(
+const fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(Arc<TableHandle>, TxId, TxId)>) {

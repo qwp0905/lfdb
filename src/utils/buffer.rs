@@ -11,7 +11,7 @@ pub struct DoubleBuffer<T> {
   queues: [SegQueue<T>; 2],
 }
 impl<T> DoubleBuffer<T> {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self {
       active: AtomicBool::new(false),
       queues: [SegQueue::new(), SegQueue::new()],

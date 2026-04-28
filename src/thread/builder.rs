@@ -28,9 +28,9 @@ pub struct WorkBuilder {
   stack_size: usize,
 }
 impl WorkBuilder {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     WorkBuilder {
-      name: Default::default(),
+      name: String::new(),
       stack_size: DEFAULT_STACK_SIZE,
     }
   }
@@ -39,17 +39,17 @@ impl WorkBuilder {
     self
   }
   #[allow(dead_code)]
-  pub fn stack_size(mut self, size: usize) -> Self {
+  pub const fn stack_size(mut self, size: usize) -> Self {
     self.stack_size = size;
     self
   }
-  pub fn multi(self, count: usize) -> MultiThreadBuilder {
+  pub const fn multi(self, count: usize) -> MultiThreadBuilder {
     MultiThreadBuilder {
       builder: self,
       count,
     }
   }
-  pub fn single(self) -> SingleThreadBuilder {
+  pub const fn single(self) -> SingleThreadBuilder {
     SingleThreadBuilder { builder: self }
   }
 }

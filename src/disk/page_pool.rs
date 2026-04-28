@@ -14,7 +14,7 @@ pub struct PageRef<const N: usize> {
   store: Arc<PageStore<N>>,
 }
 impl<const N: usize> PageRef<N> {
-  fn from_exists(store: Arc<PageStore<N>>, page: Page<N>) -> Self {
+  const fn from_exists(store: Arc<PageStore<N>>, page: Page<N>) -> Self {
     Self {
       page: ManuallyDrop::new(page),
       store,

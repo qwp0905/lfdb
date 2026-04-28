@@ -63,7 +63,7 @@ impl InternalNode {
   pub fn initialize(key: Key, left: Pointer, right: Pointer) -> Self {
     Self::new(vec![key], vec![left, right], None)
   }
-  pub fn new(
+  pub const fn new(
     keys: Vec<Key>,
     children: Vec<Pointer>,
     right: Option<(Pointer, Key)>,
@@ -169,7 +169,7 @@ impl<'a> InternalNodeView<'a> {
     Ok(Self::new(page, keys, children, right))
   }
 
-  pub fn new(
+  pub const fn new(
     page: &'a Page,
     keys: Vec<(usize, usize)>,
     children: Vec<Pointer>,

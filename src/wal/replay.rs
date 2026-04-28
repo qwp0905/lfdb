@@ -36,14 +36,14 @@ pub struct ReplayResult {
   pub aborted_snapshot: Option<PathBuf>,
 }
 impl ReplayResult {
-  fn empty() -> Self {
+  const fn empty() -> Self {
     Self {
       last_log_id: 0,
       last_tx_id: RESERVED_TX + 1,
       generation: 0,
-      aborted: Default::default(),
-      redo: Default::default(),
-      segments: Default::default(),
+      aborted: BTreeSet::new(),
+      redo: Vec::new(),
+      segments: Vec::new(),
       aborted_snapshot: None,
     }
   }

@@ -35,9 +35,9 @@ impl<'a> Transaction<'a> {
       context,
       metrics,
       tx_start,
-      created_tables: Default::default(),
-      dropped_tables: Default::default(),
-      compacted_tables: Default::default(),
+      created_tables: Vec::new(),
+      dropped_tables: Vec::new(),
+      compacted_tables: Vec::new(),
     }
   }
 

@@ -10,7 +10,7 @@ impl<T> EngineBuilder<T>
 where
   T: AsRef<Path>,
 {
-  pub fn new(base_path: T) -> Self {
+  pub const fn new(base_path: T) -> Self {
     Self(EngineConfig {
       base_path,
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
@@ -33,7 +33,7 @@ where
    * Number of background IO worker threads shared across tables for write batching.
    * Each table holds at most one worker at a time.
    */
-  pub fn io_thread_count(mut self, count: usize) -> Self {
+  pub const fn io_thread_count(mut self, count: usize) -> Self {
     self.0.io_thread_count = count;
     self
   }
@@ -43,7 +43,7 @@ where
    * Larger segments improve write throughput by reducing rotation/checkpoint frequency,
    * but extend recovery time on crash since more records must be replayed before the engine becomes available.
    */
-  pub fn wal_file_size(mut self, size: usize) -> Self {
+  pub const fn wal_file_size(mut self, size: usize) -> Self {
     self.0.wal_file_size = size;
     self
   }
@@ -53,7 +53,7 @@ where
    * after which the segment is reused.
    * Maximum time to wait before triggering a checkpoint for segment reuse.
    */
-  pub fn wal_segment_flush_delay(mut self, delay: Duration) -> Self {
+  pub const fn wal_segment_flush_delay(mut self, delay: Duration) -> Self {
     self.0.wal_segment_flush_delay = delay;
     self
   }
@@ -63,7 +63,7 @@ where
    * after which the segment is reused.
    * Maximum number of commits to buffer before triggering a checkpoint for segment reuse.
    */
-  pub fn wal_segment_flush_count(mut self, count: usize) -> Self {
+  pub const fn wal_segment_flush_count(mut self, count: usize) -> Self {
     self.0.wal_segment_flush_count = count;
     self
   }
@@ -72,7 +72,7 @@ where
    * regardless of WAL segment pressure, ensuring GC and durability are not
    * indefinitely deferred during idle periods.
    */
-  pub fn checkpoint_interval(mut self, interval: Duration) -> Self {
+  pub const fn checkpoint_interval(mut self, interval: Duration) -> Self {
     self.0.checkpoint_interval = interval;
     self
   }
@@ -81,7 +81,7 @@ where
    * improves write throughput but increases potential data loss on crash in
    * high-latency IO environments.
    */
-  pub fn group_commit_count(mut self, count: usize) -> Self {
+  pub const fn group_commit_count(mut self, count: usize) -> Self {
     self.0.group_commit_count = count;
     self
   }
@@ -90,7 +90,7 @@ where
    * narrowing each shard's scope, but too many shards shrink each shard's
    * capacity and increase eviction frequency, hurting performance.
    */
-  pub fn block_cache_shard_count(mut self, count: usize) -> Self {
+  pub const fn block_cache_shard_count(mut self, count: usize) -> Self {
     self.0.block_cache_shard_count = count;
     self
   }
@@ -99,7 +99,7 @@ where
    * direct IO and bypasses the OS page cache, a larger block cache is critical
    * for performance.
    */
-  pub fn block_cache_memory_capacity(mut self, capacity: usize) -> Self {
+  pub const fn block_cache_memory_capacity(mut self, capacity: usize) -> Self {
     self.0.block_cache_memory_capacity = capacity;
     self
   }
@@ -107,7 +107,7 @@ where
    * Interval at which leaf merge runs. Run more frequently when removes are
    * heavy, less frequently when removes are rare, to maintain scan performance.
    */
-  pub fn gc_trigger_interval(mut self, interval: Duration) -> Self {
+  pub const fn gc_trigger_interval(mut self, interval: Duration) -> Self {
     self.0.gc_trigger_interval = interval;
     self
   }
@@ -116,14 +116,14 @@ where
    * checkpoint completion. In write-heavy workloads with frequent WAL segment
    * rotation, increasing this can improve write throughput.
    */
-  pub fn gc_thread_count(mut self, count: usize) -> Self {
+  pub const fn gc_thread_count(mut self, count: usize) -> Self {
     self.0.gc_thread_count = count;
     self
   }
   /**
    * Maximum lifetime of a transaction before it is automatically aborted.
    */
-  pub fn transaction_timeout(mut self, timeout: Duration) -> Self {
+  pub const fn transaction_timeout(mut self, timeout: Duration) -> Self {
     self.0.transaction_timeout = timeout;
     self
   }
@@ -131,19 +131,19 @@ where
   /**
    * Threshold which trigger auto compaction. To disable auto compaction, then set 1.0.
    */
-  pub fn compaction_threshold(mut self, threshold: f64) -> Self {
+  pub const fn compaction_threshold(mut self, threshold: f64) -> Self {
     assert!(threshold <= 1.0);
     self.0.compaction_threshold = threshold;
     self
   }
 
-  pub fn compaction_min_size(mut self, size: usize) -> Self {
+  pub const fn compaction_min_size(mut self, size: usize) -> Self {
     self.0.compaction_min_size = size;
     self
   }
 
-  pub fn build(self) -> Result<Engine> {
-    Engine::bootstrap(self.0)
+  pub fn build(&self) -> Result<Engine> {
+    Engine::bootstrap(&self.0)
   }
 }
 

@@ -15,9 +15,9 @@ pub enum SerializeType {
   DataEntry,
   DataChunk,
 }
-impl From<SerializeType> for u8 {
-  fn from(value: SerializeType) -> Self {
-    match value {
+impl SerializeType {
+  const fn byte(&self) -> u8 {
+    match self {
       SerializeType::Header => 1,
       SerializeType::CursorNode => 2,
       SerializeType::DataEntry => 3,
@@ -37,7 +37,7 @@ pub trait Deserializable: Sized + TypedObject {
   fn deserialize(value: &Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = value.scanner();
 
-    let expected = u8::from(Self::get_type());
+    let expected = Self::get_type().byte();
     let received = reader.read()?;
     if expected != received {
       return Err(Error::DeserializeError(expected, received));
@@ -50,7 +50,7 @@ pub trait Deserializable: Sized + TypedObject {
 pub trait Serializable: Sized + TypedObject {
   fn serialize_at(&self, page: &mut Page<PAGE_SIZE>) -> Result<usize> {
     let mut writer = page.writer();
-    writer.write(&[u8::from(Self::get_type())])?;
+    writer.write(&[Self::get_type().byte()])?;
     self.write_at(&mut writer)?;
     Ok(writer.finalize())
   }
@@ -85,7 +85,7 @@ pub trait Viewable<'a>: Sized + TypedObject {
   fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
     let mut scanner = page.scanner();
 
-    let expected = u8::from(Self::get_type());
+    let expected = Self::get_type().byte();
     let received = scanner.read()?;
     if expected != received {
       return Err(Error::DeserializeError(expected, received));

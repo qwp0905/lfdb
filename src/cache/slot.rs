@@ -25,7 +25,7 @@ pub enum CacheSlot<'a> {
 }
 impl<'a> CacheSlot<'a> {
   #[inline]
-  pub fn temp(
+  pub const fn temp(
     state: TempStateRef<'a, SharedToken<'a>>,
     pointer: Pointer,
     guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
@@ -39,7 +39,7 @@ impl<'a> CacheSlot<'a> {
     })
   }
   #[inline]
-  pub fn page(
+  pub const fn page(
     frame: &'a Frame,
     dirty: &'a AtomicBitmap,
     frame_id: FrameId,
@@ -100,7 +100,7 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
 }
 impl<'a> WritableSlot<'a> {
   #[inline]
-  pub fn get_pointer(&self) -> Pointer {
+  pub const fn get_pointer(&self) -> Pointer {
     match self {
       WritableSlot::Temp(temp) => temp.pointer,
       WritableSlot::Page(page) => page.frame.get_pointer(),

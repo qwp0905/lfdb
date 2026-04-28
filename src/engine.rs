@@ -52,7 +52,7 @@ pub struct Engine {
   metrics_registry: Arc<MetricsRegistry>,
 }
 impl Engine {
-  pub fn bootstrap<T>(config: EngineConfig<T>) -> Result<Self>
+  pub fn bootstrap<T>(config: &EngineConfig<T>) -> Result<Self>
   where
     T: AsRef<Path>,
   {

@@ -121,10 +121,7 @@ impl WALSegment {
 
   fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
     let io = WorkBuilder::new()
-      .name(format!(
-        "{} buffered write",
-        path.as_path().to_string_lossy()
-      ))
+      .name(format!("{:?} buffered write", path.as_path().as_os_str()))
       .single()
       .eager_buffering(max_iov(), handle_write(file.clone()))
       .to_box();
@@ -149,19 +146,20 @@ impl WALSegment {
 
   #[inline]
   pub fn truncate(self) -> Result {
-    self.flush.close();
+    self.close();
     remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
   }
 
   #[inline]
   pub fn close(&self) {
+    self.io.close();
     self.flush.close();
   }
 }
 
 #[inline]
-fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> Result {
+const fn handle_flush(file: Arc<File>) -> impl Fn(Vec<()>) -> Result {
   move |_| file.sync_data().map_err(Error::IO)
 }
 
@@ -173,7 +171,7 @@ fn pad_start(n: SegmentGeneration) -> String {
   format!("{:0>20}", n)
 }
 
-fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
+const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];

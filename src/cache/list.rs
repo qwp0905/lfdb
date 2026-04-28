@@ -1,79 +1,74 @@
 use std::ptr::NonNull;
 
-use crate::utils::UnsafeBorrowMut;
-
 use super::Bucket;
 
 pub struct LRUList<K, V> {
   head: Option<NonNull<Bucket<K, V>>>,
   tail: Option<NonNull<Bucket<K, V>>>,
-  len_: usize,
+  len: usize,
 }
 impl<K, V> LRUList<K, V> {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self {
       head: None,
       tail: None,
-      len_: 0,
+      len: 0,
     }
   }
 
-  // pub fn clear(&mut self) {
-  //   self.head = None;
-  //   self.tail = None;
-  //   self.len_ = 0;
-  // }
-
-  pub fn push_head(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
-    self.len_ += 1;
+  pub const fn push_head(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
     match &self.head {
-      Some(head) => {
-        head.borrow_mut_unsafe().set_prev(Some(*bucket));
-        bucket.borrow_mut_unsafe().set_next(Some(*head));
-      }
+      Some(mut head) => unsafe {
+        head.as_mut().set_prev(Some(*bucket));
+        bucket.as_mut().set_next(Some(head));
+      },
       None => {
         self.tail = Some(*bucket);
       }
     }
-    self.head = Some(*bucket)
+    self.head = Some(*bucket);
+
+    self.len += 1;
   }
 
-  pub fn remove(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
-    if self.len_ == 0 {
+  pub const fn remove(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
+    if self.len == 0 {
       return;
     }
 
-    let bucket = bucket.borrow_mut_unsafe();
+    let bucket = unsafe { bucket.as_mut() };
     let n = bucket.set_next(None);
     let p = bucket.set_prev(None);
 
-    if let Some(next) = &n {
-      next.borrow_mut_unsafe().set_prev(p.clone());
+    if let Some(mut next) = &n {
+      unsafe { next.as_mut() }.set_prev(p);
     } else {
       self.tail = p;
     }
 
-    if let Some(prev) = &p {
-      prev.borrow_mut_unsafe().set_next(n);
+    if let Some(mut prev) = &p {
+      unsafe { prev.as_mut() }.set_next(n);
     } else {
       self.head = n;
     }
 
-    self.len_ -= 1;
+    self.len -= 1;
   }
 
-  pub fn move_to_head(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
+  pub const fn move_to_head(&mut self, bucket: &mut NonNull<Bucket<K, V>>) {
     self.remove(bucket);
     self.push_head(bucket);
   }
 
-  pub fn pop_tail(&mut self) -> Option<NonNull<Bucket<K, V>>> {
-    let mut tail = self.tail?;
-    self.remove(&mut tail);
-    Some(tail)
+  pub const fn pop_tail(&mut self) -> Option<NonNull<Bucket<K, V>>> {
+    if let Some(mut tail) = self.tail {
+      self.remove(&mut tail);
+      return Some(tail);
+    }
+    None
   }
 
-  pub fn len(&self) -> usize {
-    self.len_
+  pub const fn len(&self) -> usize {
+    self.len
   }
 }

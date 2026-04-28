@@ -37,8 +37,7 @@ impl BlockCache {
     let page_pool = PagePool::new(config.capacity).to_arc();
 
     // 90% of page pool capacity reserved for frames; the remaining 10% is kept
-    // free for DiskController writes, which acquire a pooled page per write to
-    // copy data before releasing the frame lock.
+    // free for copy on write.
     let frame_cap = (config.capacity * 9) / 10;
     let mut frame = Vec::with_capacity(frame_cap);
     frame.resize_with(frame_cap, MaybeUninit::uninit);
@@ -190,16 +189,16 @@ impl Drop for BlockCache {
   }
 }
 
-fn handle_flush(
+fn __flush(waiting: &mut Vec<(TaskHandle<()>, Guard)>) -> Result {
+  waiting.drain(..).map(|(w, _guard)| w.wait()).collect()
+}
+const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
+
+const fn handle_flush(
   frame: Arc<Vec<MaybeUninit<Frame>>>,
   pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
-  const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
-  fn flush(waiting: &mut Vec<(TaskHandle<()>, Guard)>) -> Result {
-    waiting.drain(..).map(|(w, _guard)| w.wait()).collect()
-  }
-
   move |trigger| {
     let mut waits = Vec::with_capacity(MAX_BATCHING);
     let mut tables = BTreeMap::new();
@@ -238,10 +237,10 @@ fn handle_flush(
       if waits.len() < MAX_BATCHING {
         continue;
       }
-      flush(&mut waits)?;
+      __flush(&mut waits)?;
     }
 
-    flush(&mut waits)?;
+    __flush(&mut waits)?;
 
     let mut threads = Vec::with_capacity(tables.len());
 

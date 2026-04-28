@@ -26,7 +26,7 @@ where
   T: Send + UnwindSafe + 'static,
   R: Send + 'static,
 {
-  pub fn new(f: Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>) -> Self {
+  pub const fn new(f: Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>) -> Self {
     Self(f)
   }
   #[inline]
@@ -63,9 +63,8 @@ impl<R> TaskHandle<R> {
   pub fn wait(self) -> Result<R> {
     self.0.wait()?
   }
-}
-impl<R> From<Oneshot<Result<R>>> for TaskHandle<R> {
-  fn from(v: Oneshot<Result<R>>) -> Self {
+
+  pub const fn new(v: Oneshot<Result<R>>) -> Self {
     TaskHandle(v)
   }
 }
@@ -91,7 +90,7 @@ impl<T> OnceHandle<T> {
   }
 
   #[inline]
-  pub fn new(handle: JoinHandle<T>) -> Self {
+  pub const fn new(handle: JoinHandle<T>) -> Self {
     Self(handle)
   }
 }

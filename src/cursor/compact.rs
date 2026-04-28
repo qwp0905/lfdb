@@ -380,7 +380,7 @@ fn do_compaction(
   Ok(())
 }
 
-pub fn after_compaction(
+pub const fn after_compaction(
   gc: Arc<GarbageCollector>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {

@@ -31,7 +31,7 @@ pub enum RecordData {
   Tombstone,
 }
 impl RecordData {
-  pub fn len(&self) -> usize {
+  pub const fn len(&self) -> usize {
     match self {
       RecordData::Data(data) => 1 + 2 + data.len(),
       RecordData::Chunked(pointers) => 1 + 1 + POINTER_BYTES * pointers.len(),
@@ -72,14 +72,14 @@ pub struct VersionRecord {
   pub data: RecordData,
 }
 impl VersionRecord {
-  pub fn new(owner: TxId, version: TxId, data: RecordData) -> Self {
+  pub const fn new(owner: TxId, version: TxId, data: RecordData) -> Self {
     Self {
       owner,
       version,
       data,
     }
   }
-  fn byte_len(&self) -> usize {
+  const fn byte_len(&self) -> usize {
     (POINTER_BYTES << 1) + self.data.len() // owner 8byte + version 8byte + data
   }
 }
@@ -96,10 +96,10 @@ pub struct DataEntry {
   versions: VecDeque<VersionRecord>,
 }
 impl DataEntry {
-  pub fn empty() -> Self {
+  pub const fn empty() -> Self {
     Self {
       next: None,
-      versions: Default::default(),
+      versions: VecDeque::new(),
     }
   }
   pub fn init(version: VersionRecord) -> Self {
@@ -130,10 +130,10 @@ impl DataEntry {
     self.versions.front().map(|v| v.owner)
   }
 
-  pub fn get_next(&self) -> Option<Pointer> {
+  pub const fn get_next(&self) -> Option<Pointer> {
     self.next
   }
-  pub fn set_next(&mut self, ptr: Pointer) {
+  pub const fn set_next(&mut self, ptr: Pointer) {
     self.next = Some(ptr);
   }
 
@@ -229,7 +229,7 @@ pub struct DataChunk {
   chunk: Vec<u8>,
 }
 impl DataChunk {
-  pub fn new(chunk: Vec<u8>) -> Self {
+  pub const fn new(chunk: Vec<u8>) -> Self {
     Self { chunk }
   }
 

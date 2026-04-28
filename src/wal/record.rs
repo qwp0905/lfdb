@@ -48,30 +48,30 @@ pub enum Operation {
   ),
 }
 impl Operation {
-  fn type_byte(&self) -> u8 {
+  const fn type_byte(&self) -> u8 {
     match self {
-      Operation::Insert(..) => 1,
-      Operation::Start => 2,
-      Operation::Commit => 3,
-      Operation::Abort => 4,
-      Operation::Checkpoint(..) => 5,
-      Operation::Multi(..) => 6,
+      Self::Insert(..) => 1,
+      Self::Start => 2,
+      Self::Commit => 3,
+      Self::Abort => 4,
+      Self::Checkpoint(..) => 5,
+      Self::Multi(..) => 6,
     }
   }
 
   fn byte_len(&self) -> u16 {
     1 + match self {
-      Operation::Insert(_, _, data) => {
+      Self::Insert(_, _, data) => {
         POINTER_BYTES as u16 + TABLE_ID_BYTES as u16 + data.len() as u16
       }
-      Operation::Multi(_, _, d1, _, d2) => {
+      Self::Multi(_, _, d1, _, d2) => {
         ((POINTER_BYTES as u16) << 1)
           + TABLE_ID_BYTES as u16
           + 2
           + d1.len() as u16
           + d2.len() as u16
       }
-      Operation::Checkpoint(_, _, path) => {
+      Self::Checkpoint(_, _, path) => {
         TX_ID_BYTES as u16 + LOG_ID_BYTES as u16 + path.as_os_str().len() as u16
       }
       _ => 0,
@@ -87,52 +87,52 @@ pub struct LogRecord {
 }
 impl LogRecord {
   #[inline]
-  fn new(log_id: LogId, tx_id: TxId, operation: Operation) -> Self {
-    LogRecord {
+  const fn new(log_id: LogId, tx_id: TxId, operation: Operation) -> Self {
+    Self {
       tx_id,
       operation,
       log_id,
     }
   }
-  pub fn new_insert(
+  pub const fn new_insert(
     log_id: LogId,
     tx_id: TxId,
     table_id: TableId,
     page_pointer: Pointer,
     data: Vec<u8>,
   ) -> Self {
-    LogRecord::new(
+    Self::new(
       log_id,
       tx_id,
       Operation::Insert(table_id, page_pointer, data),
     )
   }
 
-  pub fn new_start(log_id: LogId, tx_id: TxId) -> Self {
-    LogRecord::new(log_id, tx_id, Operation::Start)
+  pub const fn new_start(log_id: LogId, tx_id: TxId) -> Self {
+    Self::new(log_id, tx_id, Operation::Start)
   }
 
-  pub fn new_commit(log_id: LogId, tx_id: TxId) -> Self {
-    LogRecord::new(log_id, tx_id, Operation::Commit)
+  pub const fn new_commit(log_id: LogId, tx_id: TxId) -> Self {
+    Self::new(log_id, tx_id, Operation::Commit)
   }
 
-  pub fn new_abort(log_id: LogId, tx_id: TxId) -> Self {
-    LogRecord::new(log_id, tx_id, Operation::Abort)
+  pub const fn new_abort(log_id: LogId, tx_id: TxId) -> Self {
+    Self::new(log_id, tx_id, Operation::Abort)
   }
 
-  pub fn new_checkpoint(
+  pub const fn new_checkpoint(
     log_id: LogId,
     last_log_id: LogId,
     min_active: TxId,
     snapshot_path: PathBuf,
   ) -> Self {
-    LogRecord::new(
+    Self::new(
       log_id,
       0,
       Operation::Checkpoint(last_log_id, min_active, snapshot_path),
     )
   }
-  pub fn new_multi(
+  pub const fn new_multi(
     log_id: LogId,
     tx_id: TxId,
     table_id: TableId,
@@ -141,7 +141,7 @@ impl LogRecord {
     ptr2: Pointer,
     data2: Vec<u8>,
   ) -> Self {
-    LogRecord::new(
+    Self::new(
       log_id,
       tx_id,
       Operation::Multi(table_id, ptr1, data1, ptr2, data2),

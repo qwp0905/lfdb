@@ -30,12 +30,12 @@ impl Frame {
       page: Atomic::new(page),
       pointer,
       handle,
-      latch: Default::default(),
+      latch: Mutex::new(()),
     }
   }
 
   #[inline]
-  pub fn get_pointer(&self) -> Pointer {
+  pub const fn get_pointer(&self) -> Pointer {
     self.pointer
   }
 
@@ -69,7 +69,7 @@ impl Frame {
   }
 
   #[inline]
-  pub fn handle(&self) -> &Arc<TableHandle> {
+  pub const fn handle(&self) -> &Arc<TableHandle> {
     &self.handle
   }
 }

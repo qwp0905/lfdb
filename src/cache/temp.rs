@@ -34,12 +34,12 @@ pub struct TempFrameState {
 }
 
 impl TempFrameState {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
       page: Atomic::null(),
       dirty: AtomicBool::new(false),
-      latch: Default::default(),
+      latch: Mutex::new(()),
     }
   }
 

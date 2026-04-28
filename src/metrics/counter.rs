@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Counter(AtomicU64);
 impl Counter {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self(AtomicU64::new(0))
   }
   #[inline]

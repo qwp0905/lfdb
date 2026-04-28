@@ -21,7 +21,7 @@ pub struct PageRecorder {
 }
 impl PageRecorder {
   #[inline]
-  pub fn new(wal: Arc<WAL>) -> Self {
+  pub const fn new(wal: Arc<WAL>) -> Self {
     Self { wal }
   }
   #[inline]

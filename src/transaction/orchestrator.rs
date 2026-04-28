@@ -214,7 +214,7 @@ impl TxOrchestrator {
   pub fn close(&self) -> Result {
     self.tree_manager.close();
     self.timeout_thread.close();
-    let wal_close = self.wal.twostep_close();
+    self.wal.half_close();
     self.checkpoint.close();
     info!("last checkpoint completed.");
 
@@ -223,13 +223,13 @@ impl TxOrchestrator {
     self.gc.close();
     self.tables.close();
     info!("tables closed.");
-    wal_close();
+    self.wal.close();
     info!("wal closed.");
     Ok(())
   }
 }
 
-fn handle_checkpoint(
+const fn handle_checkpoint(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,

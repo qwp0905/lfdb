@@ -8,7 +8,7 @@ const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
 pub struct ExclusivePin(AtomicUsize);
 impl ExclusivePin {
   #[inline]
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self(AtomicUsize::new(0))
   }
 
@@ -53,7 +53,7 @@ pub struct SharedToken<'a> {
 }
 impl<'a> SharedToken<'a> {
   #[inline]
-  fn new(pin: &'a AtomicUsize) -> Self {
+  const fn new(pin: &'a AtomicUsize) -> Self {
     Self {
       pin,
       upgrade: false,
@@ -89,7 +89,7 @@ pub struct ExclusiveToken<'a> {
 }
 impl<'a> ExclusiveToken<'a> {
   #[inline]
-  fn new(pin: &'a AtomicUsize) -> Self {
+  const fn new(pin: &'a AtomicUsize) -> Self {
     Self {
       pin,
       downgrade: false,

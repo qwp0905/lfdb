@@ -16,7 +16,7 @@ use super::{
 
 pub struct BTreeIndex<Policy>(Policy);
 impl<Policy> BTreeIndex<Policy> {
-  pub fn new(policy: Policy) -> Self {
+  pub const fn new(policy: Policy) -> Self {
     Self(policy)
   }
 }

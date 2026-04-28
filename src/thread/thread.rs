@@ -20,13 +20,13 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe 
   fn execute(&self, v: T) -> TaskHandle<R> {
     let (done_r, done_t) = oneshot();
     if self.register(Context::Work(v, done_t)) {
-      return TaskHandle::from(done_r);
+      return TaskHandle::new(done_r);
     }
 
     drop(done_r);
     let (done_r, done_t) = oneshot();
     done_t.fulfill(Err(Error::WorkerClosed));
-    TaskHandle::from(done_r)
+    TaskHandle::new(done_r)
   }
 
   fn dispatch(&self, v: T) {
