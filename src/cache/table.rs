@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{LRUShard, TempFrameState, TempStateRef};
+use super::{LRUShard, TempBlockRef, TempBlockState};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -16,7 +16,7 @@ use crate::{
 
 type Key = (TableId, Pointer);
 
-pub type FrameId = usize;
+pub type BlockId = usize;
 
 /**
  * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
@@ -25,27 +25,27 @@ pub type FrameId = usize;
  * at any given time, the performance difference is negligible.
  */
 struct Shard {
-  lru: LRUShard<Key, FrameId>,
+  lru: LRUShard<Key, BlockId>,
   eviction: BTreeSet<Key>, // evicting pointers
-  temporary: BTreeMap<Key, Arc<TempFrameState>>, // temporary pages for gc without promote
+  temporary: BTreeMap<Key, Arc<TempBlockState>>, // temporary pages for gc without promote
 }
 
 /**
- * Holds exclusive control over a frame during eviction.
+ * Holds exclusive control over a block during eviction.
  *
  * Two pointers are blocked simultaneously while this guard is alive:
  * - The old pointer is added to the eviction set, preventing other threads
  *   from reading a dirty page that has not yet been written to disk.
- * - The new pointer maps to a frame in EVICTION_BIT state, preventing access
+ * - The new pointer maps to a block in EVICTION_BIT state, preventing access
  *   before the page has been loaded from disk.
  *
  * Call commit() to finalize the eviction and unblock both pointers.
  * If dropped without commit (e.g. on IO failure), the old mapping is
- * restored and the frame is returned to an evictable state.
+ * restored and the block is returned to an evictable state.
  */
 pub struct EvictionGuard<'a> {
   evicted: Option<(Key, u64)>,
-  frame_id: FrameId,
+  block_id: BlockId,
   token: ManuallyDrop<ExclusiveToken<'a>>,
   guard: &'a Mutex<Shard>,
   hasher: &'a RandomState,
@@ -57,7 +57,7 @@ pub struct EvictionGuard<'a> {
 impl<'a> EvictionGuard<'a> {
   const fn new(
     evicted: Option<(Key, u64)>,
-    frame_id: usize,
+    block_id: usize,
     token: ExclusiveToken<'a>,
     guard: &'a Mutex<Shard>,
     hasher: &'a RandomState,
@@ -66,7 +66,7 @@ impl<'a> EvictionGuard<'a> {
   ) -> Self {
     Self {
       evicted,
-      frame_id,
+      block_id,
       token: ManuallyDrop::new(token),
       guard,
       hasher,
@@ -76,8 +76,8 @@ impl<'a> EvictionGuard<'a> {
     }
   }
 
-  pub const fn get_frame_id(&self) -> usize {
-    self.frame_id
+  pub const fn get_block_id(&self) -> usize {
+    self.block_id
   }
   pub const fn is_evicted(&self) -> bool {
     self.evicted.is_some()
@@ -101,13 +101,13 @@ impl<'a> Drop for EvictionGuard<'a> {
       let mut shard = self.guard.l();
       if let Some((i, h)) = self.evicted {
         shard.eviction.remove(&i);
-        shard.lru.insert(i, self.frame_id, h, self.hasher);
+        shard.lru.insert(i, self.block_id, h, self.hasher);
       }
       shard
         .lru
         .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     }
-    // No ownership claimed — frame is immediately available for eviction.
+    // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }
 }
@@ -130,19 +130,19 @@ impl<'a> Drop for TempGuard<'a> {
 }
 
 pub enum Acquired<'a> {
-  Hit(FrameId, SharedToken<'a>),
-  Temp(TempStateRef<'a, SharedToken<'a>>),
+  Hit(BlockId, SharedToken<'a>),
+  Temp(TempBlockRef<'a, SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 pub enum Peeked<'a> {
-  Hit(FrameId, SharedToken<'a>),
-  Temp(TempStateRef<'a, SharedToken<'a>>),
-  DiskRead(TempStateRef<'a, ExclusiveToken<'a>>, TempGuard<'a>),
+  Hit(BlockId, SharedToken<'a>),
+  Temp(TempBlockRef<'a, SharedToken<'a>>),
+  DiskRead(TempBlockRef<'a, ExclusiveToken<'a>>, TempGuard<'a>),
 }
 
 pub struct LRUTable {
   shards: Vec<Mutex<Shard>>,
-  offset: Vec<FrameId>,
+  offset: Vec<BlockId>,
   hasher: RandomState,
 }
 impl LRUTable {
@@ -205,7 +205,7 @@ impl LRUTable {
       }
 
       if let Some(state) = shard.temporary.get(&key) {
-        if let Some(state_ref) = TempStateRef::shared(state) {
+        if let Some(state_ref) = TempBlockRef::shared(state) {
           return Peeked::Temp(state_ref);
         }
 
@@ -224,8 +224,8 @@ impl LRUTable {
         continue;
       }
 
-      let state = TempFrameState::new().to_arc();
-      let state_ref = TempStateRef::exclusive(&state);
+      let state = TempBlockState::new().to_arc();
+      let state_ref = TempBlockRef::exclusive(&state);
       shard.temporary.insert(key, state_ref.get_state());
       return Peeked::DiskRead(state_ref, TempGuard::new(s, key));
     }
@@ -234,11 +234,11 @@ impl LRUTable {
   /**
    * Acquires access to a page by index, following this order:
    *
-   * 1. If the index is being evicted, wait — the frame is temporarily inaccessible.
+   * 1. If the index is being evicted, wait — the block is temporarily inaccessible.
    * 2. If GC has allocated a temp page for this index, return it — the temp page
    *    takes precedence over the LRU since it reflects the latest state.
    * 3. If the index is in the LRU cache, return a hit.
-   * 4. If the LRU has an empty slot, allocate a new frame without eviction.
+   * 4. If the LRU has an empty slot, allocate a new block without eviction.
    * 5. Otherwise, evict the LRU tail and return an EvictionGuard for the caller
    *    to perform the necessary IO.
    *
@@ -253,7 +253,7 @@ impl LRUTable {
     get_pin: F,
   ) -> Acquired<'a>
   where
-    F: Fn(FrameId) -> &'a ExclusivePin,
+    F: Fn(BlockId) -> &'a ExclusivePin,
   {
     let key = (table_id, pointer);
     let (hash, s, offset) = self.get_shard(key);
@@ -269,7 +269,7 @@ impl LRUTable {
       }
 
       if let Some(state) = shard.temporary.get(&key) {
-        if let Some(state_ref) = TempStateRef::shared(state) {
+        if let Some(state_ref) = TempBlockRef::shared(state) {
           return Acquired::Temp(state_ref);
         }
 
@@ -288,8 +288,8 @@ impl LRUTable {
         continue;
       }
 
-      // Each shard owns a dedicated range of frame IDs [offset, offset + cap_per_shard).
-      // This ensures shards never access the same frame, eliminating contention
+      // Each shard owns a dedicated range of block IDs [offset, offset + cap_per_shard).
+      // This ensures shards never access the same block, eliminating contention
       // between shards entirely.
       if !shard.lru.is_full() {
         let fid = shard.lru.len() + offset;

@@ -4,7 +4,7 @@ use std::{
 
 use crossbeam::epoch::{self, Guard};
 
-use super::{Acquired, CacheSlot, Frame, LRUTable, Peeked};
+use super::{Acquired, CacheSlot, CachedBlock, LRUTable, Peeked};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -25,7 +25,10 @@ pub struct BlockCacheConfig {
 
 pub struct BlockCache {
   table: LRUTable,
-  frame: Arc<Vec<MaybeUninit<Frame>>>,
+  cached_blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
+  /**
+   * pin to protect each block in cached blocks from eviction
+   */
   pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
@@ -36,31 +39,31 @@ impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
     let page_pool = PagePool::new(config.capacity).to_arc();
 
-    // 90% of page pool capacity reserved for frames; the remaining 10% is kept
+    // 90% of page pool capacity reserved for blocks; the remaining 10% is kept
     // free for copy on write.
-    let frame_cap = (config.capacity * 9) / 10;
-    let mut frame = Vec::with_capacity(frame_cap);
-    frame.resize_with(frame_cap, MaybeUninit::uninit);
-    let mut pins = Vec::with_capacity(frame_cap);
-    pins.resize_with(frame_cap, ExclusivePin::new);
+    let block_cap = (config.capacity * 9) / 10;
+    let mut blocks = Vec::with_capacity(block_cap);
+    blocks.resize_with(block_cap, MaybeUninit::uninit);
+    let mut pins = Vec::with_capacity(block_cap);
+    pins.resize_with(block_cap, ExclusivePin::new);
 
-    let frame = frame.to_arc();
+    let cached_blocks = blocks.to_arc();
     let pins = pins.to_arc();
-    let dirty = AtomicBitmap::new(frame_cap).to_arc();
+    let dirty = AtomicBitmap::new(block_cap).to_arc();
 
     let pre_flush = WorkBuilder::new()
       .name("block cache pre-flush")
       .single()
       .interval(
         PRE_FLUSH_INTERVAL,
-        handle_flush(frame.clone(), pins.clone(), dirty.clone()),
+        handle_flush(cached_blocks.clone(), pins.clone(), dirty.clone()),
       )
       .to_box();
 
     Ok(Self {
-      frame,
+      cached_blocks,
       pins,
-      table: LRUTable::new(config.shard_count, frame_cap),
+      table: LRUTable::new(config.shard_count, block_cap),
       dirty,
       page_pool,
       pre_flush,
@@ -71,7 +74,7 @@ impl BlockCache {
   #[inline]
   fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
     CacheSlot::page(
-      unsafe { self.frame[id].assume_init_ref() },
+      unsafe { self.cached_blocks[id].assume_init_ref() },
       &self.dirty,
       id,
       token,
@@ -124,32 +127,32 @@ impl BlockCache {
         self.metrics.block_cache_hit.inc();
         return Ok(CacheSlot::temp(state, pointer, None, &self.page_pool));
       }
-      Acquired::Hit(frame_id, token) => {
+      Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
-        return Ok(self.page_slot(frame_id, token));
+        return Ok(self.page_slot(block_id, token));
       }
       Acquired::Evicted(guard) => guard,
     };
 
-    let frame_id = guard.get_frame_id();
+    let block_id = guard.get_block_id();
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
 
-    let new_frame = Frame::new(pointer, new, handle);
-    let ptr = self.frame[frame_id].as_ptr() as *mut Frame;
+    let new_block = CachedBlock::new(pointer, new, handle);
+    let ptr = self.cached_blocks[block_id].as_ptr() as *mut CachedBlock;
     if !guard.is_evicted() {
-      unsafe { ptr.write(new_frame) };
-      return Ok(self.page_slot(frame_id, guard.commit()));
+      unsafe { ptr.write(new_block) };
+      return Ok(self.page_slot(block_id, guard.commit()));
     }
 
-    let old = unsafe { ptr.replace(new_frame) };
-    if self.dirty.contains(frame_id) {
+    let old = unsafe { ptr.replace(new_block) };
+    if self.dirty.contains(block_id) {
       let guard = epoch::pin();
       old.flush_async(&guard).wait()?;
-      self.dirty.remove(frame_id);
+      self.dirty.remove(block_id);
     }
 
-    Ok(self.page_slot(frame_id, guard.commit()))
+    Ok(self.page_slot(block_id, guard.commit()))
   }
 
   #[inline]
@@ -183,7 +186,7 @@ impl Drop for BlockCache {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
       for i in offset..offset + len {
-        unsafe { drop_in_place(self.frame[i].as_ptr() as *mut Frame) };
+        unsafe { drop_in_place(self.cached_blocks[i].as_ptr() as *mut CachedBlock) };
       }
     }
   }
@@ -195,7 +198,7 @@ fn __flush(waiting: &mut Vec<(TaskHandle<()>, Guard)>) -> Result {
 const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
 
 const fn handle_flush(
-  frame: Arc<Vec<MaybeUninit<Frame>>>,
+  blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
   pins: Arc<Vec<ExclusivePin>>,
   dirty: Arc<AtomicBitmap>,
 ) -> impl Fn(Option<()>) -> Result {
@@ -217,8 +220,8 @@ const fn handle_flush(
           None => continue,
         };
 
-        let frame = unsafe { frame[id].assume_init_ref() };
-        let _lock = frame.latch();
+        let block = unsafe { blocks[id].assume_init_ref() };
+        let _lock = block.latch();
         if !dirty.remove(id) {
           continue;
         };
@@ -228,10 +231,10 @@ const fn handle_flush(
         // Writing synchronously one by one would bypass this optimization
         // and issue a separate syscall per page.
         let guard = epoch::pin();
-        waits.push((frame.flush_async(&guard), guard));
+        waits.push((block.flush_async(&guard), guard));
         tables
-          .entry(frame.handle().metadata().get_id())
-          .or_insert_with(|| frame.handle().clone());
+          .entry(block.handle().metadata().get_id())
+          .or_insert_with(|| block.handle().clone());
       }
 
       if waits.len() < MAX_BATCHING {
