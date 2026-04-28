@@ -9,13 +9,13 @@ use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 use super::{Bucket, LRUList};
 use hashbrown::{raw::RawTable, Equivalent};
 
-fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
+const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
 ) -> impl Fn(&NonNull<Bucket<K, V>>) -> bool + 'a {
   move |ptr| key.equivalent(ptr.borrow_unsafe().get_key())
 }
 
-fn make_hasher<'a, K, V, S>(
+const fn make_hasher<'a, K, V, S>(
   hash_builder: &'a S,
 ) -> impl Fn(&NonNull<Bucket<K, V>>) -> u64 + 'a
 where
@@ -43,7 +43,7 @@ pub struct LRUShard<K, V> {
 }
 
 impl<K, V> LRUShard<K, V> {
-  pub fn new(capacity: usize) -> Self {
+  pub const fn new(capacity: usize) -> Self {
     Self {
       old_entries: RawTable::new(),
       old_sub_list: LRUList::new(),
@@ -180,11 +180,11 @@ where
     Some(value)
   }
 
-  pub fn len(&self) -> usize {
-    self.new_entries.len() + self.old_entries.len()
+  pub const fn len(&self) -> usize {
+    self.new_sub_list.len() + self.old_sub_list.len()
   }
 
-  pub fn is_full(&self) -> bool {
+  pub const fn is_full(&self) -> bool {
     self.len() == self.capacity
   }
 }

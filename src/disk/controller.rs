@@ -61,7 +61,7 @@ impl<const N: usize> WriteHandle<N> {
     page: &'static PageRef<N>,
   ) -> TaskHandle<()> {
     let (o, f) = oneshot();
-    let handle = TaskHandle::from(o);
+    let handle = TaskHandle::new(o);
     if self.closed.load(Ordering::Acquire) {
       f.fulfill(Ok(()));
       return handle;
@@ -118,8 +118,8 @@ impl<const N: usize> IOPool<N> {
       return metrics
         .disk_write
         .measure(|| file.pwrite(slice.as_ref().as_ref(), p * Self::SIZE))
-        .map_err(Error::IO)
-        .map(drop);
+        .map(|_| ())
+        .map_err(Error::IO);
     }
 
     // last caller wins on duplicate pointers
@@ -135,7 +135,7 @@ impl<const N: usize> IOPool<N> {
       .map(|g| g.unzip())
       .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| ((ptrs[0] * Self::SIZE), bufs))
       .map(|(offset, bufs)| metrics.disk_write.measure(|| file.pwritev(&bufs, offset)))
-      .map(|r| r.map(drop).map_err(Error::IO))
+      .map(|r| r.map(|_| ()).map_err(Error::IO))
       .collect()
   }
 

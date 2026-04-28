@@ -17,7 +17,7 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
  * The callback is called once per batch and the result is cloned to each
  * waiter — hence R: Clone.
  */
-fn make_flush<'a, T, R>(
+const fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
 ) -> impl FnMut(&mut Vec<(T, Option<OneshotFulfill<Result<R>>>)>) -> bool + 'a
 where

@@ -17,7 +17,7 @@ use crate::{
 
 use super::{BackgroundThread, Context, SharedFn};
 
-fn worker_loop<T, R>(
+const fn worker_loop<T, R>(
   receiver: Receiver<Context<T, R>>,
   work: SharedFn<'static, T, R>,
 ) -> impl Fn()

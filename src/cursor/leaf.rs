@@ -26,7 +26,7 @@ pub struct LeafNode {
   next: Option<Pointer>,
 }
 impl LeafNode {
-  pub fn new(entries: Vec<(Key, Pointer)>, next: Option<Pointer>) -> Self {
+  pub const fn new(entries: Vec<(Key, Pointer)>, next: Option<Pointer>) -> Self {
     Self { entries, next }
   }
 
@@ -54,7 +54,7 @@ impl LeafNode {
     Ok(Self::new(entries, (next != 0).then(|| next)))
   }
 
-  pub fn len(&self) -> usize {
+  pub const fn len(&self) -> usize {
     self.entries.len()
   }
 
@@ -66,10 +66,10 @@ impl LeafNode {
     self.entries = entries;
   }
 
-  pub fn get_next(&self) -> Option<Pointer> {
+  pub const fn get_next(&self) -> Option<Pointer> {
     self.next
   }
-  pub fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
+  pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
     self.next.replace(pointer)
   }
 
@@ -116,7 +116,7 @@ pub struct LeafNodeView<'a> {
   next: Option<Pointer>,
 }
 impl<'a> LeafNodeView<'a> {
-  fn new(
+  const fn new(
     page: &'a Page,
     entries: Vec<(usize, usize, Pointer)>,
     next: Option<Pointer>,
@@ -176,11 +176,11 @@ impl<'a> LeafNodeView<'a> {
     self.entries.iter().map(|(_, _, p)| *p)
   }
 
-  pub fn get_next(&self) -> Option<Pointer> {
+  pub const fn get_next(&self) -> Option<Pointer> {
     self.next
   }
 
-  pub fn len(&self) -> usize {
+  pub const fn len(&self) -> usize {
     self.entries.len()
   }
 }

@@ -55,7 +55,7 @@ pub struct EvictionGuard<'a> {
 }
 
 impl<'a> EvictionGuard<'a> {
-  fn new(
+  const fn new(
     evicted: Option<(Key, u64)>,
     frame_id: usize,
     token: ExclusiveToken<'a>,
@@ -76,10 +76,10 @@ impl<'a> EvictionGuard<'a> {
     }
   }
 
-  pub fn get_frame_id(&self) -> usize {
+  pub const fn get_frame_id(&self) -> usize {
     self.frame_id
   }
-  pub fn is_evicted(&self) -> bool {
+  pub const fn is_evicted(&self) -> bool {
     self.evicted.is_some()
   }
   pub fn commit(mut self) -> SharedToken<'a> {
@@ -118,7 +118,7 @@ pub struct TempGuard<'a> {
 }
 impl<'a> TempGuard<'a> {
   #[inline]
-  fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
+  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
     Self { shard, key }
   }
 }
@@ -163,7 +163,7 @@ impl LRUTable {
     Self {
       shards,
       offset,
-      hasher: Default::default(),
+      hasher: RandomState::new(),
     }
   }
   fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {

@@ -34,7 +34,7 @@ impl<'a> Cursor<'a> {
     Ok(cursor)
   }
 
-  pub fn new(
+  pub const fn new(
     table: Arc<TableHandle>,
     compaction: Option<Arc<TableHandle>>,
     context: &'a TxContext<'a>,

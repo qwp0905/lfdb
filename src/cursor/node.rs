@@ -52,8 +52,8 @@ pub enum BTreeNode {
   Leaf(LeafNode),
 }
 impl BTreeNode {
-  pub fn initial_state() -> Self {
-    Self::Leaf(LeafNode::new(Default::default(), None))
+  pub const fn initial_state() -> Self {
+    Self::Leaf(LeafNode::new(Vec::new(), None))
   }
   pub fn as_leaf(self) -> Result<LeafNode> {
     match self {
@@ -100,13 +100,13 @@ impl Deserializable for BTreeNode {
 
 impl LeafNode {
   #[inline]
-  pub fn to_node(self) -> BTreeNode {
+  pub const fn to_node(self) -> BTreeNode {
     BTreeNode::Leaf(self)
   }
 }
 impl InternalNode {
   #[inline]
-  pub fn to_node(self) -> BTreeNode {
+  pub const fn to_node(self) -> BTreeNode {
     BTreeNode::Internal(self)
   }
 }

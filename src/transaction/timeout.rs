@@ -50,15 +50,15 @@ struct Task<T> {
   data: T,
 }
 impl<T> Task<T> {
-  fn new(data: T, execute_at: u64) -> Self {
+  const fn new(data: T, execute_at: u64) -> Self {
     Self { execute_at, data }
   }
   #[inline]
-  fn get_bucket_index(&self, layer_index: u64) -> u64 {
+  const fn get_bucket_index(&self, layer_index: u64) -> u64 {
     (self.execute_at >> (layer_index * LAYER_PER_BUCKET_BIT)) & LAYER_PER_BUCKET_MASK
   }
   #[inline]
-  fn layer_size(&self) -> usize {
+  const fn layer_size(&self) -> usize {
     (64 - self.execute_at.leading_zeros() as u64).div_ceil(LAYER_PER_BUCKET_BIT) as usize
   }
   fn take(self) -> T {
@@ -75,7 +75,7 @@ struct BucketLayer<T> {
 }
 impl<T> BucketLayer<T> {
   #[inline]
-  fn new(layer_index: u64) -> Self {
+  const fn new(layer_index: u64) -> Self {
     Self {
       buckets: [const { None }; LAYER_PER_BUCKET],
       layer_index,
@@ -91,7 +91,7 @@ impl<T> BucketLayer<T> {
   }
 
   #[inline]
-  fn is_empty(&self) -> bool {
+  const fn is_empty(&self) -> bool {
     self.size == 0
   }
 
@@ -194,7 +194,7 @@ where
   }
 
   #[inline]
-  fn is_empty(&self) -> bool {
+  const fn is_empty(&self) -> bool {
     self.tasks == 0
   }
 }

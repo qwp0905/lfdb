@@ -8,10 +8,7 @@ use std::{
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::{
-  utils::{ToArc, UnsafeBorrow, UnsafeBorrowMut},
-  Error, Result,
-};
+use crate::{utils::ToArc, Error, Result};
 
 /**
  * Creates a single-use channel pair (Oneshot, OneshotFulfill).
@@ -40,7 +37,7 @@ struct OneshotInner<T> {
   caller: UnsafeCell<Option<Thread>>,
 }
 impl<T> OneshotInner<T> {
-  fn new() -> Self {
+  const fn new() -> Self {
     Self {
       state: AtomicCell::new(State::Waiting),
       value: UnsafeCell::new(MaybeUninit::uninit()),
@@ -48,16 +45,16 @@ impl<T> OneshotInner<T> {
     }
   }
   #[inline]
-  fn get_value(&self) -> &MaybeUninit<T> {
-    self.value.get().borrow_unsafe()
+  const fn get_value(&self) -> &MaybeUninit<T> {
+    unsafe { &*self.value.get() }
   }
   #[inline]
-  fn get_value_mut(&self) -> &mut MaybeUninit<T> {
-    self.value.get().borrow_mut_unsafe()
+  const fn get_value_mut(&self) -> &mut MaybeUninit<T> {
+    unsafe { &mut *self.value.get() }
   }
   #[inline]
-  fn get_caller_mut(&self) -> &mut Option<Thread> {
-    self.caller.get().borrow_mut_unsafe()
+  const fn get_caller_mut(&self) -> &mut Option<Thread> {
+    unsafe { &mut *self.caller.get() }
   }
 }
 

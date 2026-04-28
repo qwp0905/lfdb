@@ -16,21 +16,21 @@ pub struct TreeHeader {
 }
 
 impl TreeHeader {
-  pub fn new(root: Pointer) -> Self {
+  pub const fn new(root: Pointer) -> Self {
     Self { root, height: 0 }
   }
 
-  pub fn get_root(&self) -> Pointer {
+  pub const fn get_root(&self) -> Pointer {
     self.root
   }
 
-  pub fn set_root(&mut self, pointer: Pointer) {
+  pub const fn set_root(&mut self, pointer: Pointer) {
     self.root = pointer
   }
-  pub fn increase_height(&mut self) {
+  pub const fn increase_height(&mut self) {
     self.height += 1;
   }
-  pub fn get_height(&self) -> u16 {
+  pub const fn get_height(&self) -> u16 {
     self.height
   }
 }

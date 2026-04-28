@@ -160,7 +160,7 @@ impl VersionVisibility {
   {
     Self {
       base_path,
-      active: Default::default(),
+      active: SkipMap::new(),
       aborted: SkipSet::from_iter(aborted),
       last_tx_id: AtomicTxId::new(last_tx_id),
       file_id: AtomicU8::new(0),

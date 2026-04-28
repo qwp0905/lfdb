@@ -102,10 +102,10 @@ pub struct HistogramSnapshot {
 }
 impl HistogramSnapshot {
   #[inline]
-  pub fn total_count(&self) -> u64 {
+  pub const fn total_count(&self) -> u64 {
     self.total_count
   }
-  pub fn average(&self) -> f64 {
+  pub const fn average(&self) -> f64 {
     if self.sample_count == 0 {
       return 0.0;
     }

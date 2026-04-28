@@ -371,7 +371,7 @@ impl WAL {
    * Step 2 (returned closure): flushes the remaining buffer to disk and closes
    * the current segment. Called after the final checkpoint completes.
    */
-  pub fn twostep_close<'a>(&'a self) -> impl Fn() + 'a {
+  pub fn half_close(&self) {
     self.wait_checkpoint.wait().close();
 
     while let Some(f) = self.fsync_queue.pop() {
@@ -381,27 +381,27 @@ impl WAL {
     while let Some(seg) = self.checkpoint_failed.pop() {
       self.preloader.reuse(seg);
     }
+  }
 
-    || {
-      let guard = &epoch::pin();
-      let backoff = Backoff::new();
-      loop {
-        let ptr = self.buffer.load(Ordering::Acquire, guard);
-        let buffer = ptr.as_raw().borrow_unsafe();
-        if buffer.load_offset() >= WAL_BLOCK_SIZE {
-          backoff.snooze();
-          continue;
-        }
-        if buffer.load_segment_pinned() > 0 {
-          backoff.snooze();
-          continue;
-        }
-
-        let taken = unsafe { ptr.into_owned() };
-        let segment = taken.take_segment();
-        let _ = self.preloader.close();
-        return segment.close();
+  pub fn close(&self) {
+    let guard = &epoch::pin();
+    let backoff = Backoff::new();
+    loop {
+      let ptr = self.buffer.load(Ordering::Acquire, guard);
+      let buffer = ptr.as_raw().borrow_unsafe();
+      if buffer.load_offset() >= WAL_BLOCK_SIZE {
+        backoff.snooze();
+        continue;
       }
+      if buffer.load_segment_pinned() > 0 {
+        backoff.snooze();
+        continue;
+      }
+
+      let taken = unsafe { ptr.into_owned() };
+      let segment = taken.take_segment();
+      let _ = self.preloader.close();
+      return segment.close();
     }
   }
 }

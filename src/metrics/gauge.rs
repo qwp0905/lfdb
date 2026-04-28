@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Gauge(AtomicU64);
 impl Gauge {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self(AtomicU64::new(0))
   }
 

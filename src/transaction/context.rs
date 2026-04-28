@@ -23,7 +23,7 @@ pub struct TxContext<'a> {
 }
 impl<'a> TxContext<'a> {
   #[inline]
-  pub fn new(
+  pub const fn new(
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,
@@ -47,7 +47,7 @@ impl<'a> TxContext<'a> {
   }
 
   #[inline]
-  pub fn state(&self) -> &'_ TxState<'a> {
+  pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
   }
 }

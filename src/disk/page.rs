@@ -33,7 +33,7 @@ impl<const T: usize> Page<T> {
     Self(unsafe { alloc_zeroed(Self::LAYOUT) }, PhantomData)
   }
   #[inline(always)]
-  pub fn as_ptr(&self) -> *const u8 {
+  pub const fn as_ptr(&self) -> *const u8 {
     self.0 as *const u8
   }
   #[inline]
@@ -49,15 +49,15 @@ impl<const T: usize> Page<T> {
     data
   }
   #[inline]
-  pub fn scanner(&self) -> PageScanner<'_, T> {
+  pub const fn scanner(&self) -> PageScanner<'_, T> {
     PageScanner::new(self.0)
   }
   #[inline]
-  pub fn writer(&mut self) -> PageWriter<'_, T> {
+  pub const fn writer(&mut self) -> PageWriter<'_, T> {
     PageWriter::new(self.0)
   }
   #[inline]
-  pub fn range(&self, range: Range<usize>) -> &[u8] {
+  pub const fn range(&self, range: Range<usize>) -> &[u8] {
     unsafe { from_raw_parts(self.0.add(range.start), range.end - range.start) }
   }
 }
@@ -111,15 +111,15 @@ pub struct PageScanner<'a, const T: usize = PAGE_SIZE> {
   _marker: PhantomData<&'a Page<T>>,
 }
 impl<'a, const T: usize> PageScanner<'a, T> {
-  fn new(inner: *const u8) -> Self {
+  const fn new(inner: *const u8) -> Self {
     Self {
       inner,
       offset: 0,
-      _marker: Default::default(),
+      _marker: PhantomData,
     }
   }
 
-  pub fn advance(&mut self, n: usize) -> Result<usize> {
+  pub const fn advance(&mut self, n: usize) -> Result<usize> {
     let end = self.offset + n;
     if end > T {
       return Err(Error::EOF);
@@ -127,7 +127,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(replace(&mut self.offset, end))
   }
 
-  pub fn read(&mut self) -> Result<u8> {
+  pub const fn read(&mut self) -> Result<u8> {
     if self.offset >= T {
       return Err(Error::EOF);
     }
@@ -136,7 +136,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(v)
   }
 
-  pub fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
+  pub const fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
     let end = self.offset + n;
     if end > T {
       return Err(Error::EOF);
@@ -146,21 +146,23 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
-  fn read_const_n<const N: usize>(&mut self) -> Result<[u8; N]> {
-    if self.offset + N > T {
+  #[inline(always)]
+  pub const fn read_u64(&mut self) -> Result<u64> {
+    if self.offset + 8 > T {
       return Err(Error::EOF);
     }
-    let v = unsafe { (self.inner.add(self.offset) as *const [u8; N]).read() };
-    self.offset += N;
-    Ok(v)
+    let v = unsafe { (self.inner.add(self.offset) as *const [u8; 8]).read() };
+    self.offset += 8;
+    Ok(u64::from_le_bytes(v))
   }
   #[inline(always)]
-  pub fn read_u64(&mut self) -> Result<u64> {
-    self.read_const_n::<8>().map(u64::from_le_bytes)
-  }
-  #[inline(always)]
-  pub fn read_u16(&mut self) -> Result<u16> {
-    self.read_const_n::<2>().map(u16::from_le_bytes)
+  pub const fn read_u16(&mut self) -> Result<u16> {
+    if self.offset + 2 > T {
+      return Err(Error::EOF);
+    }
+    let v = unsafe { (self.inner.add(self.offset) as *const [u8; 2]).read() };
+    self.offset += 2;
+    Ok(u16::from_le_bytes(v))
   }
 }
 
@@ -177,15 +179,15 @@ pub struct PageWriter<'a, const T: usize = PAGE_SIZE> {
   marker: PhantomData<&'a Page<T>>,
 }
 impl<'a, const T: usize> PageWriter<'a, T> {
-  fn new(inner: *mut u8) -> Self {
+  const fn new(inner: *mut u8) -> Self {
     Self {
       inner,
       offset: 0,
-      marker: Default::default(),
+      marker: PhantomData,
     }
   }
 
-  pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+  pub const fn write(&mut self, bytes: &[u8]) -> Result<()> {
     let len = bytes.len();
     let end = self.offset + len;
     if end > T {
@@ -197,20 +199,20 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   }
 
   #[inline(always)]
-  pub fn write_u64(&mut self, value: u64) -> Result<()> {
+  pub const fn write_u64(&mut self, value: u64) -> Result {
     self.write(&value.to_le_bytes())
   }
   #[inline(always)]
-  pub fn write_u16(&mut self, value: u16) -> Result {
+  pub const fn write_u16(&mut self, value: u16) -> Result {
     self.write(&value.to_le_bytes())
   }
   #[inline(always)]
-  pub fn write_u8(&mut self, value: u8) -> Result {
+  pub const fn write_u8(&mut self, value: u8) -> Result {
     self.write(&value.to_le_bytes())
   }
 
   #[inline(always)]
-  pub fn finalize(self) -> usize {
+  pub const fn finalize(self) -> usize {
     self.offset
   }
 }

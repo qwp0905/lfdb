@@ -22,7 +22,7 @@ pub struct TableMetadata {
   compaction: Option<(TableId, PathBuf)>,
 }
 impl TableMetadata {
-  pub fn new(id: TableId, name: String, path: PathBuf) -> Self {
+  pub const fn new(id: TableId, name: String, path: PathBuf) -> Self {
     Self {
       id,
       name,
@@ -35,8 +35,11 @@ impl TableMetadata {
     self.compaction = Some((metadata.get_id(), metadata.get_path().into()))
   }
 
-  pub fn get_compaction_id(&self) -> Option<TableId> {
-    self.compaction.as_ref().map(|(id, _)| *id)
+  pub const fn get_compaction_id(&self) -> Option<TableId> {
+    match &self.compaction {
+      Some((id, _)) => Some(*id),
+      None => None,
+    }
   }
   pub fn get_compaction_metadata(&self) -> Option<TableMetadata> {
     let (id, path) = self.compaction.as_ref()?;
@@ -165,7 +168,7 @@ impl TableMetadata {
   }
 
   #[inline]
-  pub fn get_id(&self) -> TableId {
+  pub const fn get_id(&self) -> TableId {
     self.id
   }
   #[inline]

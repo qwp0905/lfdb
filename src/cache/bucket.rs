@@ -7,7 +7,7 @@ pub struct Bucket<K, V> {
   next: Option<NonNull<Bucket<K, V>>>,
 }
 impl<K, V> Bucket<K, V> {
-  fn new(key: K, value: V) -> Self {
+  const fn new(key: K, value: V) -> Self {
     Self {
       key,
       value,
@@ -20,29 +20,29 @@ impl<K, V> Bucket<K, V> {
     NonNull::from(Box::leak(Box::new(Self::new(key, value))))
   }
 
-  pub fn set_prev(
+  pub const fn set_prev(
     &mut self,
     prev: Option<NonNull<Bucket<K, V>>>,
   ) -> Option<NonNull<Bucket<K, V>>> {
     replace(&mut self.prev, prev)
   }
 
-  pub fn set_next(
+  pub const fn set_next(
     &mut self,
     next: Option<NonNull<Bucket<K, V>>>,
   ) -> Option<NonNull<Bucket<K, V>>> {
     replace(&mut self.next, next)
   }
 
-  pub fn get_value(&self) -> &V {
+  pub const fn get_value(&self) -> &V {
     &self.value
   }
 
-  pub fn set_value(&mut self, value: V) -> V {
+  pub const fn set_value(&mut self, value: V) -> V {
     replace(&mut self.value, value)
   }
 
-  pub fn get_key(&self) -> &K {
+  pub const fn get_key(&self) -> &K {
     &self.key
   }
 
