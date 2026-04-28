@@ -91,8 +91,6 @@ impl<const T: usize> From<&[u8]> for Page<T> {
   }
 }
 
-// Safety: concurrent access to Page is controlled by the block cache's
-// RwLock<Frame> and TempFrameState pin/lock above this layer.
 // Page itself is a plain byte buffer with no internal synchronization.
 unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}

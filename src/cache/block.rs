@@ -9,17 +9,13 @@ use crate::{
   utils::{ShortenedMutex, UnsafeBorrow},
 };
 
-pub struct Frame {
+pub struct CachedBlock {
   page: Atomic<PageRef<PAGE_SIZE>>,
-  /**
-   * pointer can be wrong if nothing allocated.
-   * only lru table is the single truth source.
-   */
   pointer: Pointer,
   handle: Arc<TableHandle>,
   latch: Mutex<()>,
 }
-impl Frame {
+impl CachedBlock {
   #[inline]
   pub fn new(
     pointer: Pointer,
@@ -74,7 +70,7 @@ impl Frame {
   }
 }
 
-impl Drop for Frame {
+impl Drop for CachedBlock {
   fn drop(&mut self) {
     let g = pin();
     let old = self.page.swap(Shared::null(), Ordering::Release, &g);
