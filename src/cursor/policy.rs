@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
   cache::{CacheSlot, WritableSlot},
   disk::Pointer,
-  serialize::{Deserializable, Serializable},
+  serialize::Serializable,
   table::TableHandle,
   wal::TxId,
   Result,
@@ -16,21 +16,6 @@ pub trait ReadonlyPolicy {
     pointer: Pointer,
     table: &Arc<TableHandle>,
   ) -> Result<CacheSlot<'_>>;
-
-  fn fetch_and_deserialize<T>(
-    &self,
-    pointer: Pointer,
-    table: &Arc<TableHandle>,
-  ) -> Result<T>
-  where
-    T: Deserializable,
-  {
-    self
-      .fetch_slot(pointer, table)?
-      .for_read()
-      .as_ref()
-      .deserialize()
-  }
 }
 
 pub trait WritablePolicy: ReadonlyPolicy {
