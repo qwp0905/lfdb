@@ -1,6 +1,6 @@
 use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{epoch::pin, queue::SegQueue};
 
 use super::{
   after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
@@ -293,22 +293,20 @@ fn run_merge_leaf(
         None => continue,
       };
 
-      debug!(
-        "clean leaf table {} collect start.",
-        table.metadata().get_name()
-      );
+      let name = table.metadata().get_name();
+      debug!("clean leaf table {name} collect start.",);
       let table_id = table.metadata().get_id();
 
       let mut ptr = block_cache
         .peek(HEADER_POINTER, table.handle())?
-        .for_read()
+        .for_read(&pin())
         .as_ref()
         .deserialize::<TreeHeader>()?
         .get_root();
 
       while let BTreeNodeView::Internal(node) = block_cache
         .peek(ptr, table.handle())?
-        .for_read()
+        .for_read(&pin())
         .as_ref()
         .view::<BTreeNodeView>()?
       {
@@ -318,7 +316,8 @@ fn run_merge_leaf(
       let mut next_ptr = Some(ptr);
       while let Some(i) = next_ptr.take() {
         {
-          let slot = block_cache.peek(i, table.handle())?.for_read();
+          let guard = pin();
+          let slot = block_cache.peek(i, table.handle())?.for_read(&guard);
           let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
@@ -406,7 +405,6 @@ fn run_merge_leaf(
       }
 
       let dead = table.dead_ratio();
-      let name = table.metadata().get_name();
       if dead > compaction_threshold && table_id != META_TABLE_ID {
         compaction.dispatch(CompactTask::New(table.handle()));
         continue;
@@ -426,7 +424,7 @@ fn release_orphaned(
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
     .read(HEADER_POINTER, table.clone())?
-    .for_read()
+    .for_read(&pin())
     .as_ref()
     .deserialize::<TreeHeader>()?
     .get_root();
@@ -437,7 +435,7 @@ fn release_orphaned(
     visited.insert(ptr);
     match block_cache
       .read(ptr, table.clone())?
-      .for_read()
+      .for_read(&pin())
       .as_ref()
       .view::<BTreeNodeView>()?
     {
@@ -462,7 +460,7 @@ fn release_orphaned(
     visited.insert(ptr);
     let entry: DataEntry = block_cache
       .read(ptr, table.clone())?
-      .for_read()
+      .for_read(&pin())
       .as_ref()
       .deserialize()?;
     for record in entry.get_versions() {

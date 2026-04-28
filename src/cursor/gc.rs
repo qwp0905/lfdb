@@ -17,6 +17,7 @@ use crate::{
   utils::{DoubleBuffer, ToArc, ToBox},
   wal::{TxId, RESERVED_TX},
 };
+use crossbeam::epoch::pin;
 
 pub struct GarbageCollectionConfig {
   pub thread_count: usize,
@@ -255,7 +256,7 @@ const fn run_entry(
 
       let next_entry: DataEntry = block_cache
         .peek(next, table.handle())?
-        .for_read()
+        .for_read(&pin())
         .as_ref()
         .deserialize()?;
       recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &next_entry)?;
@@ -274,7 +275,7 @@ const fn run_check(
     Ok(
       block_cache
         .peek(pointer, table)?
-        .for_read()
+        .for_read(&pin())
         .as_ref()
         .deserialize::<DataEntry>()?
         .is_empty(),
