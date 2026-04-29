@@ -104,12 +104,15 @@ impl Engine {
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
-    let version_visibility =
-      VersionVisibility::new(base_path.clone(), replay.aborted, replay.last_tx_id)
-        .to_arc();
-    if let Some(path) = replay.aborted_snapshot {
-      version_visibility.replay(&path)?;
-    }
+    let version_visibility = VersionVisibility::replay(
+      base_path.clone(),
+      replay.last_tx_id,
+      replay.aborted,
+      replay.started,
+      replay.closed,
+      replay.last_snapshot,
+    )?
+    .to_arc();
 
     let gc = GarbageCollector::start(
       block_cache.clone(),

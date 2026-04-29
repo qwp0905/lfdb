@@ -108,13 +108,12 @@ impl WAL {
     let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
 
     info!(
-      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {} aborted set {:?}",
+      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
       replay_result.last_log_id,
       replay_result.last_tx_id,
       replay_result.aborted.len(),
       replay_result.redo.len(),
       replay_result.segments.len(),
-      replay_result.aborted_snapshot,
     );
 
     let preloader = SegmentPreload::new(
@@ -342,17 +341,9 @@ impl WAL {
     )
   }
 
-  pub fn checkpoint_and_flush(
-    &self,
-    last_log_id: LogId,
-    min_active: TxId,
-    current_version: TxId,
-    path: PathBuf,
-  ) -> Result {
+  pub fn checkpoint_and_flush(&self, last_log_id: LogId, path: PathBuf) -> Result {
     self.append(
-      |log_id| {
-        LogRecord::new_checkpoint(log_id, last_log_id, min_active, current_version, path)
-      },
+      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, path),
       true,
     )
   }
