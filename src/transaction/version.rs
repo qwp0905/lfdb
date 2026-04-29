@@ -1,4 +1,5 @@
 use std::{
+  collections::BTreeSet,
   fs,
   io::{IoSlice, Write},
   panic::RefUnwindSafe,
@@ -15,7 +16,7 @@ use crate::{
   Error, Result,
 };
 
-const FILE_EXT: &str = "abt";
+const FILE_EXT: &str = "snapshot";
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
@@ -151,10 +152,15 @@ pub struct VersionVisibility {
   active: SkipMap<TxId, AtomicU8>,
   last_tx_id: AtomicTxId,
   base_path: PathBuf,
-  file_id: AtomicU8,
+  snapshot_id: AtomicU8,
 }
 impl VersionVisibility {
-  pub fn new<T>(base_path: PathBuf, aborted: T, last_tx_id: TxId) -> Self
+  pub fn new<T>(
+    base_path: PathBuf,
+    aborted: T,
+    last_tx_id: TxId,
+    last_snapshot_id: u8,
+  ) -> Self
   where
     T: IntoIterator<Item = TxId>,
   {
@@ -163,8 +169,55 @@ impl VersionVisibility {
       active: SkipMap::new(),
       aborted: SkipSet::from_iter(aborted),
       last_tx_id: AtomicTxId::new(last_tx_id),
-      file_id: AtomicU8::new(0),
+      snapshot_id: AtomicU8::new(last_snapshot_id),
     }
+  }
+
+  pub fn replay(
+    base_path: PathBuf,
+    last_tx_id: TxId,
+    aborted: BTreeSet<TxId>,
+    started: BTreeSet<TxId>,
+    closed: BTreeSet<TxId>,
+    last_snapshot: Option<PathBuf>,
+  ) -> Result<Self> {
+    let path = match last_snapshot {
+      Some(p) => p,
+      None => {
+        return Ok(Self {
+          base_path,
+          active: SkipMap::new(),
+          aborted: aborted
+            .into_iter()
+            .chain(started)
+            .filter(|c| !closed.contains(c))
+            .collect(),
+          last_tx_id: AtomicTxId::new(last_tx_id),
+          snapshot_id: AtomicU8::new(0),
+        })
+      }
+    };
+
+    let mut tx_id = last_tx_id;
+
+    let (active_s, aborted_s, snap_id) = Self::replay_snapshot(&path)?;
+    for &id in started.iter().chain(active_s.iter()) {
+      tx_id = tx_id.max(id + 1);
+    }
+
+    Ok(Self {
+      aborted: active_s
+        .into_iter()
+        .chain(started)
+        .chain(aborted_s)
+        .chain(aborted)
+        .filter(|c| !closed.contains(c))
+        .collect(),
+      active: SkipMap::new(),
+      last_tx_id: AtomicTxId::new(tx_id),
+      base_path,
+      snapshot_id: AtomicU8::new(snap_id + 1),
+    })
   }
 
   /**
@@ -218,14 +271,15 @@ impl VersionVisibility {
     self.active.get(&tx_id).map(TxState)
   }
 
-  pub fn replay(&self, path: &Path) -> Result {
-    let last = path
+  fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>, u8)> {
+    let snapshot_id = path
       .file_stem()
       .unwrap()
       .to_string_lossy()
       .parse::<u8>()
       .map_err(Error::unknown)?;
-    self.file_id.store(last + 1, Ordering::Relaxed);
+    let mut active = BTreeSet::new();
+    let mut aborted = BTreeSet::new();
 
     let file = fs::OpenOptions::new()
       .read(true)
@@ -244,17 +298,33 @@ impl VersionVisibility {
 
       let id =
         TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
-      self.aborted.insert(id);
+      active.insert(id);
     }
 
-    self.clear(path)?;
-    Ok(())
+    file.pread(&mut buf, offset).map_err(Error::IO)?;
+    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
+    offset += 4;
+
+    for _ in 0..len {
+      let mut buf = vec![0; TX_ID_BYTES];
+      file.pread(&mut buf, offset).map_err(Error::IO)?;
+      offset += TX_ID_BYTES as u64;
+
+      let id =
+        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      aborted.insert(id);
+    }
+
+    Ok((active, aborted, snapshot_id))
   }
 
-  pub fn persist_aborted(&self, tx_id: TxId) -> Result<PathBuf> {
+  pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
     let current = self
       .base_path
-      .join(format!("{}", self.file_id.fetch_add(1, Ordering::Relaxed)))
+      .join(format!(
+        "{}",
+        self.snapshot_id.fetch_add(1, Ordering::Relaxed)
+      ))
       .with_extension(FILE_EXT);
 
     let mut file = fs::OpenOptions::new()
@@ -263,16 +333,33 @@ impl VersionVisibility {
       .append(true)
       .open(&current)
       .map_err(Error::IO)?;
-    let snapshot = self
+
+    let active = self
+      .active
+      .range(..tx_id)
+      .map(|v| v.key().to_le_bytes())
+      .collect::<Vec<_>>();
+    file
+      .write(&(active.len() as u32).to_le_bytes())
+      .map_err(Error::IO)?;
+    for chuck in active.chunks(max_iov()) {
+      let v = chuck
+        .into_iter()
+        .map(|v| IoSlice::new(v))
+        .collect::<Vec<_>>();
+      file.write_vectored(&v).map_err(Error::IO)?;
+    }
+
+    let aborted = self
       .aborted
       .range(..tx_id)
       .map(|v| v.value().to_le_bytes())
       .collect::<Vec<_>>();
     file
-      .write(&(snapshot.len() as u32).to_le_bytes())
+      .write(&(aborted.len() as u32).to_le_bytes())
       .map_err(Error::IO)?;
 
-    for chuck in snapshot.chunks(max_iov()) {
+    for chuck in aborted.chunks(max_iov()) {
       let v = chuck
         .into_iter()
         .map(|v| IoSlice::new(v))
