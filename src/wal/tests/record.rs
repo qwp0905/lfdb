@@ -53,13 +53,21 @@ fn test_checkpoint_roundtrip() {
   let log_id = 5;
   let last_log_id = 200;
   let min_active = 123;
+  let current_version = 6;
   let path: PathBuf = format!("sdfsdf").into();
-  let r = LogRecord::new_checkpoint(log_id, last_log_id, min_active, path.clone());
+  let r = LogRecord::new_checkpoint(
+    log_id,
+    last_log_id,
+    min_active,
+    current_version,
+    path.clone(),
+  );
   let parsed = assert_roundtrip(&r);
   match parsed.operation {
-    Operation::Checkpoint(id, mc, p) => {
+    Operation::Checkpoint(id, mc, v, p) => {
       assert_eq!(last_log_id, id);
       assert_eq!(min_active, mc);
+      assert_eq!(current_version, v);
       assert_eq!(path, p);
     }
     _ => panic!("expected Checkpoint"),
@@ -71,27 +79,39 @@ fn test_entry_roundtrip() {
   let mut page = Page::new();
   let mut writer = page.writer();
 
-  let _ = writer.write(&(3 as u16).to_le_bytes());
+  let _ = writer.write(&(4 as u16).to_le_bytes());
   let r1 = LogRecord::new_start(1, 1);
   let r2 = LogRecord::new_insert(2, 1, 0, 10, vec![]);
-  let r3 = LogRecord::new_commit(3, 1);
+  let r4 = LogRecord::new_checkpoint(3, 123, 456, 1, format!("sdlfkj").into());
+  let r3 = LogRecord::new_commit(4, 1);
   let _ = writer.write(&r1.to_bytes_with_len());
   let _ = writer.write(&r2.to_bytes_with_len());
+  let _ = writer.write(&r4.to_bytes_with_len());
   let _ = writer.write(&r3.to_bytes_with_len());
 
   let (d, complete) = (&page).into();
   assert_eq!(complete, false);
 
-  assert_eq!(d.len(), 3);
+  assert_eq!(d.len(), 4);
+
   assert_eq!(d[0].log_id, 1);
   assert_eq!(d[0].tx_id, 1);
   assert!(matches!(d[0].operation, Operation::Start));
+
   assert_eq!(d[1].log_id, 2);
   assert_eq!(d[1].tx_id, 1);
   assert!(matches!(d[1].operation, Operation::Insert(0, 10, _)));
+
   assert_eq!(d[2].log_id, 3);
-  assert_eq!(d[2].tx_id, 1);
-  assert!(matches!(d[2].operation, Operation::Commit));
+  assert!(matches!(
+    &d[2].operation,
+    Operation::Checkpoint(123, 456, 1, s) if
+    *s == PathBuf::from("sdlfkj"),
+  ));
+
+  assert_eq!(d[3].log_id, 4);
+  assert_eq!(d[3].tx_id, 1);
+  assert!(matches!(d[3].operation, Operation::Commit));
 }
 
 #[test]
