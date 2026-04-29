@@ -59,9 +59,10 @@ impl<'a> MiniTx<'a> {
     if self.committed.get() {
       return Ok(());
     }
+
     if self.modified.get() {
-      self.version_visibility.set_abort(self.state.get_id());
       self.wal.append_abort(self.state.get_id())?;
+      self.version_visibility.set_abort(self.state.get_id());
     }
     self.committed.set(true);
     self.state.deactive();
@@ -391,7 +392,7 @@ pub const fn after_compaction(
     }
 
     let min_version = version_visibility.min_version();
-    for (old, _, tx_id, version) in
+    for (old, _new, tx_id, version) in
       buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
     {
       gc.release_table(old.into_inner(), tx_id, version);
