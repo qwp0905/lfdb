@@ -38,7 +38,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
-          NodeFindResult::Found(i) => {
+          NodeFindResult::Found(_, i) => {
             drop(slot);
             return Ok(Some((guard, i)));
           }
@@ -53,14 +53,13 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     policy: &Policy,
     pointers: &[Pointer],
     table: &Arc<TableHandle>,
-    guard: &Guard,
   ) -> Result<Vec<u8>> {
     let mut data = Vec::new();
 
     for &ptr in pointers {
       let chunk: DataChunk = policy
         .fetch_slot(ptr, table)?
-        .for_read(guard)
+        .for_read(&pin())
         .as_ref()
         .deserialize()?;
       data.extend_from_slice(chunk.get_data());
@@ -94,7 +93,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
           return Ok(Some(match &record.data {
             RecordData::Data(data) => Some(data.to_vec()),
             RecordData::Chunked(pointers) => {
-              Some(Self::read_chunk(&self.0, pointers, table, &guard)?)
+              Some(Self::read_chunk(&self.0, pointers, table)?)
             }
             RecordData::Tombstone => None,
           }));
@@ -385,7 +384,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
 
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(&key) {
-        NodeFindResult::Found(i) => {
+        NodeFindResult::Found(_, i) => {
           return self.apply_version_chain(i, record, slot, table)
         }
         NodeFindResult::Move(i) => ptr = i,
@@ -419,7 +418,7 @@ where
 
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(&key) {
-        NodeFindResult::Found(i) => return self.insert_at(i, record, slot, table),
+        NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot, table),
         NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(i) => {
           let node = node.writable();
@@ -519,12 +518,17 @@ where
       let slot = self.0.fetch_slot(ptr, table)?.for_write();
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(key) {
-        NodeFindResult::Found(i) => return self.insert_at(i, record, slot, table),
+        NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot, table),
         NodeFindResult::NotFound(_) => return Ok(()),
         NodeFindResult::Move(i) => ptr = i,
       }
     }
   }
+}
+
+enum Buffered {
+  Data(Vec<u8>),
+  Chunked(Vec<Pointer>),
 }
 
 pub struct KVSnapshot {
@@ -534,14 +538,11 @@ pub struct KVSnapshot {
   version: TxId,
 }
 
-const MAX_BUFFERED: usize = 16;
-
 pub struct BTreeIterator<'a, Policy> {
   policy: &'a Policy,
   table: Arc<TableHandle>,
-  buffered: VecDeque<(Key, Option<(Vec<u8>, TxId, TxId)>)>,
-  current_leaf: Pointer,
-  start: Bound<Key>,
+  buffered: VecDeque<(Key, Option<(Buffered, TxId, TxId)>)>,
+  next: Option<Pointer>,
   end: Bound<Key>,
   closed: bool,
 }
@@ -562,9 +563,9 @@ where
       .deserialize::<TreeHeader>()?
       .get_root();
 
-    let mut buffered = VecDeque::with_capacity(MAX_BUFFERED);
+    let mut buffered = VecDeque::new();
 
-    loop {
+    'outer: loop {
       let guard = pin();
       let slot = policy.fetch_slot(ptr, table)?.for_read(&guard);
       match slot.as_ref().view::<BTreeNodeView>()? {
@@ -574,38 +575,49 @@ where
           Bound::Unbounded => ptr = node.first_child(),
         },
         BTreeNodeView::Leaf(node) => {
-          for (k, p) in node.range_entries(&start, &end) {
-            if buffered.len() >= MAX_BUFFERED {
-              return Ok(Self {
-                policy,
-                table: table.clone(),
-                buffered,
-                current_leaf: ptr,
-                start: Bound::Included(k.to_vec()),
-                end: end.clone(),
-                closed: false,
-              });
+          let pos = 'inner: loop {
+            match &start {
+              Bound::Included(k) => match node.find(k) {
+                NodeFindResult::Found(i, _) => break 'inner i,
+                NodeFindResult::NotFound(i) => break 'inner i,
+                NodeFindResult::Move(i) => {
+                  ptr = i;
+                  continue 'outer;
+                }
+              },
+              Bound::Excluded(k) => match node.find(k) {
+                NodeFindResult::Found(i, _) => break 'inner i + 1,
+                NodeFindResult::NotFound(i) => break 'inner i,
+                NodeFindResult::Move(i) => {
+                  ptr = i;
+                  continue 'outer;
+                }
+              },
+              Bound::Unbounded => break 0,
             }
+          };
+          let mut count = 0;
+          for (k, p) in node.get_entries_while(end).skip(pos) {
+            count += 1;
 
             if let Some(found) = Self::__find(policy, p, table, &guard)? {
-              buffered.push_back((k.to_vec(), found))
+              buffered.push_back((k.to_vec(), found));
             }
           }
 
-          match node.get_next() {
-            Some(i) => ptr = i,
-            None => {
-              return Ok(Self {
-                policy,
-                table: table.clone(),
-                buffered,
-                current_leaf: ptr,
-                start: start.clone(),
-                end: start.clone(),
-                closed: true,
-              })
-            }
+          let mut next = None;
+          if count == node.len() - pos {
+            next = node.get_next();
           }
+
+          return Ok(Self {
+            policy,
+            table: table.clone(),
+            buffered,
+            next,
+            end: end.clone(),
+            closed: false,
+          });
         }
       }
     }
@@ -616,7 +628,7 @@ where
     ptr: Pointer,
     table: &Arc<TableHandle>,
     guard: &Guard,
-  ) -> Result<Option<Option<(Vec<u8>, TxId, TxId)>>> {
+  ) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
     let mut next = Some(ptr);
 
     while let Some(ptr) = next.take() {
@@ -629,9 +641,11 @@ where
       for record in entry.get_versions() {
         if policy.is_visible(record.owner, record.version) {
           return Ok(Some(match &record.data {
-            RecordData::Data(data) => Some((data.to_vec(), record.owner, record.version)),
+            RecordData::Data(data) => {
+              Some((Buffered::Data(data.to_vec()), record.owner, record.version))
+            }
             RecordData::Chunked(pointers) => Some((
-              BTreeIndex::read_chunk(policy, pointers, table, guard)?,
+              Buffered::Chunked(pointers.to_vec()),
               record.owner,
               record.version,
             )),
@@ -650,55 +664,58 @@ where
     &self,
     ptr: Pointer,
     guard: &Guard,
-  ) -> Result<Option<Option<(Vec<u8>, TxId, TxId)>>> {
+  ) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
     Self::__find(self.policy, ptr, &self.table, guard)
   }
 
   fn fill_up(&mut self) -> Result {
     debug_assert!(self.buffered.is_empty());
 
-    loop {
-      let guard = pin();
-      let slot = self
-        .policy
-        .fetch_slot(self.current_leaf, &self.table)?
-        .for_read(&guard);
-      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-
-      let mut next = None;
-      for (k, p) in node.range_entries(&self.start, &self.end) {
-        if self.buffered.len() >= MAX_BUFFERED {
-          next = Some(k.to_vec());
-          break;
-        }
-
-        if let Some(found) = self.find_value(p, &guard)? {
-          self.buffered.push_back((k.to_vec(), found))
-        }
-      }
-
-      if let Some(start) = next {
-        self.start = Bound::Included(start);
+    let ptr = match self.next.take() {
+      Some(v) => v,
+      None => {
+        self.closed = true;
         return Ok(());
       }
+    };
 
-      match node.get_next() {
-        Some(i) => self.current_leaf = i,
-        None => {
-          self.closed = true;
-          return Ok(());
-        }
+    let guard = pin();
+    let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read(&guard);
+    let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+
+    let mut count = 0;
+    for (k, p) in node.get_entries_while(&self.end) {
+      count += 1;
+      if let Some(found) = self.find_value(p, &guard)? {
+        self.buffered.push_back((k.to_vec(), found))
       }
     }
+
+    if count == node.len() {
+      self.next = node.get_next();
+    }
+    Ok(())
   }
 
   fn next_record(&mut self) -> Result<Option<(Key, Option<(Vec<u8>, TxId, TxId)>)>> {
     loop {
-      if let Some((key, found)) = self.buffered.pop_front() {
-        return Ok(Some((key, found)));
-      }
       if self.closed {
         return Ok(None);
+      }
+
+      if let Some((key, found)) = self.buffered.pop_front() {
+        return Ok(Some(match found {
+          Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
+          Some((Buffered::Chunked(pointers), o, v)) => (
+            key,
+            Some((
+              BTreeIndex::read_chunk(self.policy, &pointers, &self.table)?,
+              o,
+              v,
+            )),
+          ),
+          None => (key, None),
+        }));
       }
 
       self.fill_up()?;

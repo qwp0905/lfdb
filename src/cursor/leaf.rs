@@ -14,7 +14,7 @@ use crate::{
  * mechanism used at the internal level when a search key >= high key.
  */
 pub enum NodeFindResult {
-  Found(Pointer),
+  Found(usize, Pointer),
   Move(Pointer),
   NotFound(usize),
 }
@@ -151,7 +151,7 @@ impl<'a> LeafNodeView<'a> {
 
   pub fn find(&self, key: KeyRef) -> NodeFindResult {
     match self.binary_search(key) {
-      Ok(i) => NodeFindResult::Found(self.entries[i].2),
+      Ok(i) => NodeFindResult::Found(i, self.entries[i].2),
       Err(i) => {
         if i == self.entries.len() {
           if let Some(p) = self.next {
@@ -171,22 +171,16 @@ impl<'a> LeafNodeView<'a> {
       .binary_search_by(|(s, e, _)| (self.page.range(*s..*e)).cmp(key))
   }
 
-  pub fn range_entries<'b: 'a>(
+  pub fn get_entries_while<'b: 'a>(
     &self,
-    start: &'b Bound<Key>,
     end: &'b Bound<Key>,
   ) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {
-    let s = match start {
-      Bound::Included(k) => self.binary_search(k).unwrap_or_else(|i| i),
-      Bound::Excluded(k) => self.binary_search(k).map(|i| i + 1).unwrap_or_else(|i| i),
-      Bound::Unbounded => 0,
-    };
     let e = match end {
       Bound::Included(k) => self.binary_search(k).map(|i| i + 1).unwrap_or_else(|i| i),
       Bound::Excluded(k) => self.binary_search(k).unwrap_or_else(|i| i),
       Bound::Unbounded => self.len(),
     };
-    self.get_entries().take(e).skip(s)
+    self.get_entries().take(e)
   }
 
   pub fn get_entries(&self) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {
