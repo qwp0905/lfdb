@@ -243,14 +243,14 @@ fn run_checkpoint(
   version: &VersionVisibility,
 ) -> Result {
   let log_id = wal.current_log_id();
-  let min_version = version.min_version();
-  info!("checkpoint trigger id {log_id} version {min_version}");
+  let current_version = version.current_version();
+  info!("checkpoint trigger id {log_id} version {current_version}");
 
   block_cache.flush()?;
-  let path = version.persist_aborted(min_version)?;
-  debug!("checkpoint aborted set persisted.");
+  let path = version.persist_snapshot(current_version)?;
+  debug!("checkpoint snapshot persisted.");
 
-  wal.checkpoint_and_flush(log_id, min_version, path.clone())?;
+  wal.checkpoint_and_flush(log_id, path.clone())?;
   info!("checkpoint complete id {log_id}");
 
   version.clear(&path)?;

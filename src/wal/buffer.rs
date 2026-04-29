@@ -32,7 +32,7 @@ pub struct LogBuffer {
    */
   entry: PageRef<WAL_BLOCK_SIZE>,
   /**
-   * writtne complete count for data entry which has valid offset
+   * written complete count for data entry which has valid offset
    */
   commit_count: AtomicU32,
   /**

@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use super::{Key, KeyRef};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
@@ -148,10 +150,7 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn find(&self, key: KeyRef) -> NodeFindResult {
-    match self
-      .entries
-      .binary_search_by(|(s, e, _)| (self.page.range(*s..*e)).cmp(key))
-    {
+    match self.binary_search(key) {
       Ok(i) => NodeFindResult::Found(i, self.entries[i].2),
       Err(i) => {
         if i == self.entries.len() {
@@ -163,6 +162,25 @@ impl<'a> LeafNodeView<'a> {
         NodeFindResult::NotFound(i)
       }
     }
+  }
+
+  #[inline]
+  fn binary_search(&self, key: KeyRef) -> std::result::Result<usize, usize> {
+    self
+      .entries
+      .binary_search_by(|(s, e, _)| (self.page.range(*s..*e)).cmp(key))
+  }
+
+  pub fn get_entries_while<'b: 'a>(
+    &self,
+    end: &'b Bound<Key>,
+  ) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {
+    let e = match end {
+      Bound::Included(k) => self.binary_search(k).map(|i| i + 1).unwrap_or_else(|i| i),
+      Bound::Excluded(k) => self.binary_search(k).unwrap_or_else(|i| i),
+      Bound::Unbounded => self.len(),
+    };
+    self.get_entries().take(e)
   }
 
   pub fn get_entries(&self) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {

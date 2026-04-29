@@ -43,8 +43,7 @@ pub enum Operation {
    */
   Checkpoint(
     LogId,   // last log id
-    TxId,    // min active version
-    PathBuf, // aborted set snapshot path
+    PathBuf, // mvcc snapshot path
   ),
 }
 impl Operation {
@@ -71,9 +70,7 @@ impl Operation {
           + d1.len() as u16
           + d2.len() as u16
       }
-      Self::Checkpoint(_, _, path) => {
-        TX_ID_BYTES as u16 + LOG_ID_BYTES as u16 + path.as_os_str().len() as u16
-      }
+      Self::Checkpoint(_, path) => LOG_ID_BYTES as u16 + path.as_os_str().len() as u16,
       _ => 0,
     }
   }
@@ -123,14 +120,9 @@ impl LogRecord {
   pub const fn new_checkpoint(
     log_id: LogId,
     last_log_id: LogId,
-    min_active: TxId,
     snapshot_path: PathBuf,
   ) -> Self {
-    Self::new(
-      log_id,
-      0,
-      Operation::Checkpoint(last_log_id, min_active, snapshot_path),
-    )
+    Self::new(log_id, 0, Operation::Checkpoint(last_log_id, snapshot_path))
   }
   pub const fn new_multi(
     log_id: LogId,
@@ -184,15 +176,9 @@ impl LogRecord {
         copy_nonoverlapping(data.as_ptr(), ptr.add(offset), data_len);
         offset += data_len;
       }
-      Operation::Checkpoint(log_id, min_active, path) => {
+      Operation::Checkpoint(log_id, path) => {
         copy_nonoverlapping(log_id.to_le_bytes().as_ptr(), ptr.add(offset), LOG_ID_BYTES);
         offset += LOG_ID_BYTES;
-        copy_nonoverlapping(
-          min_active.to_le_bytes().as_ptr(),
-          ptr.add(offset),
-          TX_ID_BYTES,
-        );
-        offset += TX_ID_BYTES;
 
         copy_nonoverlapping(
           path.as_os_str().as_encoded_bytes().as_ptr(),
@@ -310,21 +296,18 @@ impl TryFrom<&[u8]> for LogRecord {
         Operation::Abort
       }
       5 => unsafe {
-        if len < offset + LOG_ID_BYTES + TX_ID_BYTES {
+        if len < offset + LOG_ID_BYTES {
           return Err(Error::InvalidFormat("invalid len for checkpoint log."));
         }
         let log_id =
           LogId::from_le_bytes((ptr.add(offset) as *const [u8; LOG_ID_BYTES]).read());
         offset += LOG_ID_BYTES;
-        let min_active =
-          TxId::from_le_bytes((ptr.add(offset) as *const [u8; TX_ID_BYTES]).read());
-        offset += TX_ID_BYTES;
 
         let path = OsStr::from_encoded_bytes_unchecked(from_raw_parts(
           ptr.add(offset),
           len - offset,
         ));
-        Operation::Checkpoint(log_id, min_active, path.into())
+        Operation::Checkpoint(log_id, path.into())
       },
       6 => unsafe {
         let table_id =
