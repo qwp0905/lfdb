@@ -5,7 +5,7 @@ use std::{
 
 use crossbeam::epoch::{pin, Guard};
 
-use super::{BlockId, CachedBlock, TempBlockRef, TempGuard};
+use super::{BlockId, CachedBlock, DirtyTables, TempBlockRef, TempGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
@@ -28,7 +28,7 @@ impl<'a> CacheSlot<'a> {
   pub const fn temp(
     state: TempBlockRef<'a, SharedToken<'a>>,
     pointer: Pointer,
-    guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
+    guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
     page_pool: &'a PagePool<PAGE_SIZE>,
   ) -> Self {
     Self::Temp(TempSlot {
@@ -194,7 +194,7 @@ pub struct PageSlotRead<'a> {
 pub struct TempSlot<'a> {
   state: TempBlockRef<'a, SharedToken<'a>>,
   pointer: Pointer,
-  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
 impl<'a> TempSlot<'a> {
@@ -245,18 +245,24 @@ pub struct TempSlotWrite<'a> {
   shadow: ManuallyDrop<PageRef<PAGE_SIZE>>,
   state: ManuallyDrop<TempBlockRef<'a, SharedToken<'a>>>,
   pointer: Pointer,
-  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
   latch: ManuallyDrop<MutexGuard<'a, ()>>,
 }
 
 impl<'a> TempSlotWrite<'a> {
-  fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
+  fn release(
+    &mut self,
+    handle: Arc<TableHandle>,
+    _guard: TempGuard<'a>,
+    dirty: &'a DirtyTables,
+  ) {
     unsafe { ManuallyDrop::drop(&mut self.latch) };
     let state = unsafe { ManuallyDrop::take(&mut self.state) }.upgrade();
 
     let guard = pin();
     let page = state.load_page(&guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
+    dirty.mark(&handle);
   }
 }
 impl<'a> Drop for TempSlotWrite<'a> {
@@ -267,8 +273,8 @@ impl<'a> Drop for TempSlotWrite<'a> {
 
     // guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some((guard, handle)) = self.guard.take() {
-      return self.release(handle, guard);
+    if let Some((guard, handle, dirty)) = self.guard.take() {
+      return self.release(handle, guard, dirty);
     }
     self.state.mark_dirty();
     unsafe { ManuallyDrop::drop(&mut self.latch) };
@@ -288,10 +294,15 @@ pub struct TempSlotRead<'a> {
   state: ManuallyDrop<TempBlockRef<'a, SharedToken<'a>>>,
   page: *const PageRef<PAGE_SIZE>,
   pointer: Pointer,
-  guard: Option<(TempGuard<'a>, Arc<TableHandle>)>,
+  guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
 }
 impl<'a> TempSlotRead<'a> {
-  fn release(&mut self, handle: Arc<TableHandle>, _guard: TempGuard<'a>) {
+  fn release(
+    &mut self,
+    handle: Arc<TableHandle>,
+    _guard: TempGuard<'a>,
+    dirty: &'a DirtyTables,
+  ) {
     let state = unsafe { ManuallyDrop::take(&mut self.state) }.upgrade();
     if !state.is_dirty() {
       return;
@@ -300,6 +311,7 @@ impl<'a> TempSlotRead<'a> {
     let guard = pin();
     let page = state.load_page(&guard);
     let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
+    dirty.mark(&handle);
   }
 }
 impl<'a> Drop for TempSlotRead<'a> {
@@ -307,8 +319,8 @@ impl<'a> Drop for TempSlotRead<'a> {
   fn drop(&mut self) {
     // block_guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some((guard, handle)) = self.guard.take() {
-      return self.release(handle, guard);
+    if let Some((guard, handle, dirty)) = self.guard.take() {
+      return self.release(handle, guard, dirty);
     }
 
     unsafe { ManuallyDrop::drop(&mut self.state) }

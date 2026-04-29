@@ -1,10 +1,8 @@
-use std::{
-  collections::BTreeMap, mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration,
-};
+use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
 use crossbeam::epoch::{self, Guard};
 
-use super::{Acquired, CacheSlot, CachedBlock, LRUTable, Peeked};
+use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable, Peeked};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -30,10 +28,11 @@ pub struct BlockCache {
    * pin to protect each block in cached blocks from eviction
    */
   pins: Arc<Vec<ExclusivePin>>,
-  dirty: Arc<AtomicBitmap>,
+  dirty_frames: Arc<AtomicBitmap>,
   page_pool: Arc<PagePool<PAGE_SIZE>>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
+  dirty_tables: Arc<DirtyTables>,
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
@@ -51,12 +50,19 @@ impl BlockCache {
     let pins = pins.to_arc();
     let dirty = AtomicBitmap::new(block_cap).to_arc();
 
+    let dirty_tables = DirtyTables::new().to_arc();
+
     let pre_flush = WorkBuilder::new()
       .name("block cache pre-flush")
       .single()
       .interval(
         PRE_FLUSH_INTERVAL,
-        handle_flush(cached_blocks.clone(), pins.clone(), dirty.clone()),
+        handle_flush(
+          cached_blocks.clone(),
+          pins.clone(),
+          dirty.clone(),
+          dirty_tables.clone(),
+        ),
       )
       .to_box();
 
@@ -64,10 +70,11 @@ impl BlockCache {
       cached_blocks,
       pins,
       table: LRUTable::new(config.shard_count, block_cap),
-      dirty,
+      dirty_frames: dirty,
       page_pool,
       pre_flush,
       metrics,
+      dirty_tables,
     })
   }
 
@@ -75,7 +82,7 @@ impl BlockCache {
   fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
     CacheSlot::page(
       unsafe { self.cached_blocks[id].assume_init_ref() },
-      &self.dirty,
+      &self.dirty_frames,
       id,
       token,
       &self.page_pool,
@@ -115,7 +122,7 @@ impl BlockCache {
     Ok(CacheSlot::temp(
       state_ref.downgrade(),
       pointer,
-      Some((guard, handle)),
+      Some((guard, handle, &self.dirty_tables)),
       &self.page_pool,
     ))
   }
@@ -146,10 +153,10 @@ impl BlockCache {
     }
 
     let old = unsafe { ptr.replace(new_block) };
-    if self.dirty.contains(block_id) {
-      let guard = epoch::pin();
-      old.flush_async(&guard).wait()?;
-      self.dirty.remove(block_id);
+    if self.dirty_frames.contains(block_id) {
+      old.flush_async(&epoch::pin()).wait()?;
+      self.dirty_frames.remove(block_id);
+      self.dirty_tables.mark(old.handle());
     }
 
     Ok(self.page_slot(block_id, guard.commit()))
@@ -200,17 +207,17 @@ const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
 const fn handle_flush(
   blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
   pins: Arc<Vec<ExclusivePin>>,
-  dirty: Arc<AtomicBitmap>,
+  dirty_frames: Arc<AtomicBitmap>,
+  dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(Option<()>) -> Result {
   move |trigger| {
     let mut waits = Vec::with_capacity(MAX_BATCHING);
-    let mut tables = BTreeMap::new();
 
-    if trigger.is_none() && dirty.len() < PRE_FLUSH_THRESHOLD {
+    if trigger.is_none() && dirty_frames.len() < PRE_FLUSH_THRESHOLD {
       return Ok(());
     }
 
-    for id in dirty
+    for id in dirty_frames
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
@@ -222,7 +229,7 @@ const fn handle_flush(
 
         let block = unsafe { blocks[id].assume_init_ref() };
         let _lock = block.latch();
-        if !dirty.remove(id) {
+        if !dirty_frames.remove(id) {
           continue;
         };
 
@@ -232,9 +239,7 @@ const fn handle_flush(
         // and issue a separate syscall per page.
         let guard = epoch::pin();
         waits.push((block.flush_async(&guard), guard));
-        tables
-          .entry(block.handle().metadata().get_id())
-          .or_insert_with(|| block.handle().clone());
+        dirty_tables.mark(block.handle());
       }
 
       if waits.len() < MAX_BATCHING {
@@ -245,10 +250,9 @@ const fn handle_flush(
 
     __flush(&mut waits)?;
 
-    let mut threads = Vec::with_capacity(tables.len());
-
-    for table in tables.into_values() {
-      threads.push(once(move || table.disk().fsync()))
+    let mut threads = Vec::new();
+    for table in dirty_tables.drain() {
+      threads.push(once(move || table.disk().fsync()));
     }
 
     threads
