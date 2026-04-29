@@ -108,12 +108,13 @@ impl WAL {
     let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
 
     info!(
-      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
+      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {} aborted set {:?}",
       replay_result.last_log_id,
       replay_result.last_tx_id,
       replay_result.aborted.len(),
       replay_result.redo.len(),
-      replay_result.segments.len()
+      replay_result.segments.len(),
+      replay_result.aborted_snapshot,
     );
 
     let preloader = SegmentPreload::new(
@@ -238,11 +239,13 @@ impl WAL {
         buffer.unpin_segment();
 
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
-          if let Some(f) = self.fsync_queue.pop() {
-            f.wait().flatten()?;
-            self.synced_count.fetch_add(1, Ordering::Release);
+          match self.fsync_queue.pop() {
+            Some(f) => {
+              f.wait().flatten()?;
+              self.synced_count.fetch_add(1, Ordering::Release);
+            }
+            None => backoff.snooze(),
           }
-          backoff.snooze()
         }
         return f.wait().flatten();
       }
@@ -277,7 +280,6 @@ impl WAL {
         }
 
         let segment = failed.new.take_segment();
-        self.synced_count.fetch_add(1, Ordering::Release);
         self.preloader.reuse(segment);
         continue;
       }
@@ -344,10 +346,13 @@ impl WAL {
     &self,
     last_log_id: LogId,
     min_active: TxId,
+    current_version: TxId,
     path: PathBuf,
   ) -> Result {
     self.append(
-      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, min_active, path),
+      |log_id| {
+        LogRecord::new_checkpoint(log_id, last_log_id, min_active, current_version, path)
+      },
       true,
     )
   }
@@ -379,7 +384,7 @@ impl WAL {
       self.synced_count.fetch_add(1, Ordering::Release);
     }
     while let Some(seg) = self.checkpoint_failed.pop() {
-      self.preloader.reuse(seg);
+      seg.close();
     }
   }
 
