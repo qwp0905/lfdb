@@ -106,45 +106,46 @@ pub fn replay(
       match record.operation {
         Operation::Insert(table_id, ptr, page) => {
           modified.insert(record.tx_id);
-          if last_checkpoint.map_or(false, |c| c >= record.log_id) {
-            continue;
+          if last_checkpoint.map_or(true, |c| c <= record.log_id) {
+            redo
+              .entry(record.log_id)
+              .or_default()
+              .push((table_id, ptr, page));
           }
-          redo
-            .entry(record.log_id)
-            .or_default()
-            .push((table_id, ptr, page));
         }
         Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
           modified.insert(record.tx_id);
-          if last_checkpoint.map_or(false, |c| c >= record.log_id) {
-            continue;
+          if last_checkpoint.map_or(true, |c| c <= record.log_id) {
+            let e = redo.entry(record.log_id).or_default();
+            e.push((table_id, ptr1, data1));
+            e.push((table_id, ptr2, data2));
           }
-          let e = redo.entry(record.log_id).or_default();
-          e.push((table_id, ptr1, data1));
-          e.push((table_id, ptr2, data2));
         }
         Operation::Start => {
           // Transactions older than min_active are already captured in the checkpoint's
           // abort set — no need to track them again.
-          if let Some(&id) = last_min_active.as_ref() {
-            if id > record.tx_id {
-              continue;
-            }
+          if last_min_active.map_or(true, |id| id <= record.tx_id) {
+            started.insert(record.tx_id);
           }
-          started.insert(record.tx_id);
         }
         Operation::Commit => {
           closed.insert(record.tx_id);
         }
         Operation::Abort => {
           closed.insert(record.tx_id);
-          if last_checkpoint.map_or(false, |c| c >= record.log_id) {
-            continue;
+          if last_checkpoint.map_or(true, |c| c <= record.log_id) {
+            aborted.insert(record.log_id, record.tx_id);
           }
-          aborted.insert(record.log_id, record.tx_id);
         }
-        Operation::Checkpoint(last_log_id, min_active, path) => {
-          // Discard redo/abort entries already covered by the checkpoint.
+        Operation::Checkpoint(last_log_id, min_active, current_version, path) => {
+          tx_id = tx_id.max(current_version);
+
+          // Discard redo/abort entries already covered by the checkpoint.\
+
+          if last_checkpoint.map_or(true, |id| id < last_log_id) {
+            last_checkpoint = Some(last_log_id);
+            aborted_snapshot = Some(path)
+          }
           last_checkpoint = Some(last_checkpoint.unwrap_or(0).max(last_log_id));
           redo = redo.split_off(&last_log_id);
           aborted = aborted.split_off(&last_log_id);
@@ -153,13 +154,6 @@ pub fn replay(
           // in the checkpoint's abort set and don't need to be tracked again.
           last_min_active = Some(last_min_active.unwrap_or(0).max(min_active));
           started = started.split_off(&min_active);
-
-          if aborted_snapshot
-            .as_ref()
-            .map_or(true, |(id, _)| *id < record.log_id)
-          {
-            aborted_snapshot = Some((record.log_id, path))
-          }
         }
       };
     }
@@ -183,6 +177,6 @@ pub fn replay(
     redo: redo.into_values().flatten().collect::<Vec<_>>(),
     segments,
     generation,
-    aborted_snapshot: aborted_snapshot.map(|(_, p)| p),
+    aborted_snapshot,
   })
 }
