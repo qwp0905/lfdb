@@ -107,6 +107,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | Option | Description |
 |--------|-------------|
 | `wal_file_size` | Size limit of a single WAL segment file. When exceeded, a new segment is created. Larger segments improve write throughput by reducing rotation/checkpoint frequency, but extend recovery time on crash since more records must be replayed before the engine becomes available. |
+| `wal_buffer_size` | Soft limit of WAL buffer size. |
 | `io_thread_count` | Number of background IO worker threads shared across tables for write batching. Each table holds at most one worker at a time. |
 | `wal_segment_flush_delay` | Maximum time to wait before triggering a checkpoint for WAL segment reuse. |
 | `wal_segment_flush_count` | Maximum number of commits to buffer before triggering a checkpoint for WAL segment reuse. |
