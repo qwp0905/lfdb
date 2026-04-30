@@ -27,7 +27,7 @@ type ThreadArg<const N: usize> = (
   Arc<AtomicBool>,
 );
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
-type WriteTask<const N: usize> = (Pointer, &'static PageRef<N>);
+type WriteTask<const N: usize> = (Pointer, Arc<PageRef<N>>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
@@ -58,7 +58,7 @@ impl<const N: usize> WriteHandle<N> {
     &self,
     file: &Arc<File>,
     pointer: Pointer,
-    page: &'static PageRef<N>,
+    page: Arc<PageRef<N>>,
   ) -> TaskHandle<()> {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
@@ -100,7 +100,7 @@ impl<const N: usize> IOPool<N> {
   }
 
   #[inline]
-  pub fn open_controller<P: AsRef<Path>>(&self, path: P) -> Result<DiskController<N>> {
+  pub fn open_controller(&self, path: &Path) -> Result<DiskController<N>> {
     DiskController::open(
       path,
       WriteHandle::new(self.thread.clone()),
@@ -212,8 +212,8 @@ pub struct DiskController<const N: usize> {
 impl<const N: usize> DiskController<N> {
   const SIZE: Pointer = N as Pointer;
 
-  fn open<P: AsRef<Path>>(
-    path: P,
+  fn open(
+    path: &Path,
     write_handle: WriteHandle<N>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
@@ -225,7 +225,7 @@ impl<const N: usize> DiskController<N> {
       .read(true)
       .write(true)
       .create(true)
-      .direct_io(path.as_ref())
+      .direct_io(path)
       .map_err(Error::IO)?
       .to_arc();
 
@@ -240,25 +240,17 @@ impl<const N: usize> DiskController<N> {
     self
       .metrics
       .disk_read
-      .measure(|| {
-        self
-          .file
-          .pread(page.as_mut().as_mut(), pointer * Self::SIZE)
-      })
+      .measure(|| self.file.pread(page.as_mut(), pointer * Self::SIZE))
       .map(|_| ())
       .map_err(Error::IO)
   }
 
   #[inline]
-  pub fn write_async(
-    &self,
-    pointer: Pointer,
-    page: &'static PageRef<N>,
-  ) -> TaskHandle<()> {
+  pub fn write_async(&self, pointer: Pointer, page: Arc<PageRef<N>>) -> TaskHandle<()> {
     self.write_handle.execute(&self.file, pointer, page)
   }
   #[inline]
-  pub fn write(&self, pointer: Pointer, page: &'static PageRef<N>) -> Result {
+  pub fn write(&self, pointer: Pointer, page: Arc<PageRef<N>>) -> Result {
     self.write_async(pointer, page).wait()
   }
 
@@ -278,7 +270,7 @@ impl<const N: usize> DiskController<N> {
     Ok(meta.len() / Self::SIZE)
   }
 
-  pub fn truncate<P: AsRef<Path>>(&self, path: P) -> Result {
+  pub fn truncate(&self, path: &Path) -> Result {
     let backoff = Backoff::new();
     loop {
       match self.write_handle.pin.try_exclusive() {
