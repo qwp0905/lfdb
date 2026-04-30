@@ -15,6 +15,7 @@ where
       base_path,
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
+      wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       wal_segment_flush_count: DEFAULT_WAL_SEGMENT_FLUSH_COUNT,
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
       checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
@@ -45,6 +46,13 @@ where
    */
   pub const fn wal_file_size(mut self, size: usize) -> Self {
     self.0.wal_file_size = size;
+    self
+  }
+  /**
+   * Soft limit of WAL buffer size.
+   */
+  pub const fn wal_buffer_size(mut self, size: usize) -> Self {
+    self.0.wal_buffer_size = size;
     self
   }
   /**
@@ -148,6 +156,7 @@ where
 }
 
 const DEFAULT_WAL_FILE_SIZE: usize = 512 << 20; // 512 mb
+const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(10);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 32;
 const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);

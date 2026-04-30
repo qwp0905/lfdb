@@ -8,7 +8,7 @@ use super::{
   LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_EXT, WAL_BLOCK_SIZE,
 };
 use crate::{
-  disk::{PagePool, Pointer},
+  disk::{Page, PagePool, Pointer},
   error::{Error, Result},
   table::TableId,
 };
@@ -95,7 +95,7 @@ pub fn replay(
       let mut page = page_pool.acquire();
       wal.read(i, &mut page)?;
 
-      let (r, complete) = page.as_ref().into();
+      let (r, complete) = (&page as &Page<_>).into();
       records.extend(r.into_iter());
       if complete {
         break;

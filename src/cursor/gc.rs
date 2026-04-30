@@ -5,6 +5,8 @@ use std::{
   time::Duration,
 };
 
+use crossbeam::epoch;
+
 use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
   cache::BlockCache,
@@ -17,7 +19,6 @@ use crate::{
   utils::{DoubleBuffer, ToArc, ToBox},
   wal::{TxId, RESERVED_TX},
 };
-use crossbeam::epoch::pin;
 
 pub struct GarbageCollectionConfig {
   pub thread_count: usize,
@@ -85,12 +86,15 @@ impl GarbageCollector {
 
     self.version_visibility.remove_aborted(&min_version);
 
-    // must release after triming because of trim type can contain release type.
+    // must release after trimming because of trim type can contain release type.
     // it could occur dangling pointer reference.
+
     release
       .into_iter()
       .filter(|(_, table)| !table.is_closed())
-      .for_each(|((_, ptr), table)| table.free().dealloc(ptr));
+      .for_each(|((_, ptr), table)| {
+        epoch::pin().defer(move || table.free().dealloc(ptr))
+      });
     Ok(())
   }
 
@@ -192,7 +196,10 @@ const fn run_entry(
 
     let release = |record: VersionRecord| {
       if let RecordData::Chunked(pointers) = record.data {
-        pointers.into_iter().for_each(|p| table.free().dealloc(p));
+        for ptr in pointers {
+          let handle = table.handle();
+          epoch::pin().defer(move || handle.free().dealloc(ptr));
+        }
       }
     };
 
@@ -256,13 +263,14 @@ const fn run_entry(
 
       let next_entry: DataEntry = block_cache
         .peek(next, table.handle())?
-        .for_read(&pin())
+        .for_read()
         .as_ref()
         .deserialize()?;
       recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &next_entry)?;
       ptr = Some(i);
 
-      table.free().dealloc(next);
+      let handle = table.handle();
+      epoch::pin().defer(move || handle.free().dealloc(next));
     }
     Ok(())
   }
@@ -275,7 +283,7 @@ const fn run_check(
     Ok(
       block_cache
         .peek(pointer, table)?
-        .for_read(&pin())
+        .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?
         .is_empty(),

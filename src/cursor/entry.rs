@@ -102,9 +102,15 @@ impl DataEntry {
     self.versions = new_versions;
   }
 
-  #[allow(unused)]
   pub fn get_versions(&self) -> impl Iterator<Item = &VersionRecord> {
     self.versions.iter()
+  }
+
+  pub fn find<P>(&self, predicate: P) -> Option<&VersionRecord>
+  where
+    P: FnMut(&&VersionRecord) -> bool,
+  {
+    self.versions.iter().find(predicate)
   }
 
   pub fn get_last_owner(&self) -> Option<TxId> {

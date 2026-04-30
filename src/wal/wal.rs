@@ -33,6 +33,7 @@ pub struct WALConfig {
   pub segment_flush_count: usize,
   pub group_commit_count: usize,
   pub max_file_size: usize,
+  pub max_buffer_size: usize,
 }
 
 /**
@@ -102,7 +103,7 @@ pub struct WAL {
 impl WAL {
   pub fn replay(config: &WALConfig) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(max_len);
+    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     info!("start to replay wal segments");
 
     let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;

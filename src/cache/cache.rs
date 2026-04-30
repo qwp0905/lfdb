@@ -1,7 +1,5 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
-use crossbeam::epoch::{self, Guard};
-
 use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable, Peeked};
 use crate::{
   debug,
@@ -12,9 +10,6 @@ use crate::{
   thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
-
-const PRE_FLUSH_THRESHOLD: usize = 100;
-const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct BlockCacheConfig {
   pub shard_count: usize,
@@ -118,7 +113,7 @@ impl BlockCache {
 
     let mut page = self.page_pool.acquire();
     handle.disk().read(pointer, &mut page)?;
-    state_ref.store(page);
+    state_ref.init(page);
     Ok(CacheSlot::temp(
       state_ref.downgrade(),
       pointer,
@@ -154,7 +149,7 @@ impl BlockCache {
 
     let old = unsafe { ptr.replace(new_block) };
     if self.dirty_frames.contains(block_id) {
-      old.flush_async(&epoch::pin()).wait()?;
+      old.flush_async().wait()?;
       self.dirty_frames.remove(block_id);
       self.dirty_tables.mark(old.handle());
     }
@@ -199,10 +194,13 @@ impl Drop for BlockCache {
   }
 }
 
-fn __flush(waiting: &mut Vec<(TaskHandle<()>, Guard)>) -> Result {
-  waiting.drain(..).map(|(w, _guard)| w.wait()).collect()
+fn __flush(waiting: &mut Vec<TaskHandle<()>>) -> Result {
+  waiting.drain(..).map(|w| w.wait()).collect()
 }
-const MAX_BATCHING: usize = PRE_FLUSH_THRESHOLD;
+
+const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+const PRE_FLUSH_THRESHOLD: usize = 100;
+const MAX_BATCHING: usize = 16;
 
 const fn handle_flush(
   blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
@@ -237,8 +235,7 @@ const fn handle_flush(
         // buffer and sort them, then batch into a single pwritev call.
         // Writing synchronously one by one would bypass this optimization
         // and issue a separate syscall per page.
-        let guard = epoch::pin();
-        waits.push((block.flush_async(&guard), guard));
+        waits.push(block.flush_async());
         dirty_tables.mark(block.handle());
       }
 

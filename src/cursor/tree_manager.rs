@@ -1,6 +1,6 @@
 use std::{collections::HashSet, ops::Bound, sync::Arc, time::Duration};
 
-use crossbeam::{epoch::pin, queue::SegQueue};
+use crossbeam::queue::SegQueue;
 
 use super::{
   after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
@@ -299,14 +299,14 @@ fn run_merge_leaf(
 
       let mut ptr = block_cache
         .peek(HEADER_POINTER, table.handle())?
-        .for_read(&pin())
+        .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?
         .get_root();
 
       while let BTreeNodeView::Internal(node) = block_cache
         .peek(ptr, table.handle())?
-        .for_read(&pin())
+        .for_read()
         .as_ref()
         .view::<BTreeNodeView>()?
       {
@@ -316,8 +316,7 @@ fn run_merge_leaf(
       let mut next_ptr = Some(ptr);
       while let Some(i) = next_ptr.take() {
         {
-          let guard = pin();
-          let slot = block_cache.peek(i, table.handle())?.for_read(&guard);
+          let slot = block_cache.peek(i, table.handle())?.for_read();
           let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
@@ -424,7 +423,7 @@ fn release_orphaned(
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
     .read(HEADER_POINTER, table.clone())?
-    .for_read(&pin())
+    .for_read()
     .as_ref()
     .deserialize::<TreeHeader>()?
     .get_root();
@@ -435,7 +434,7 @@ fn release_orphaned(
     visited.insert(ptr);
     match block_cache
       .read(ptr, table.clone())?
-      .for_read(&pin())
+      .for_read()
       .as_ref()
       .view::<BTreeNodeView>()?
     {
@@ -460,7 +459,7 @@ fn release_orphaned(
     visited.insert(ptr);
     let entry: DataEntry = block_cache
       .read(ptr, table.clone())?
-      .for_read(&pin())
+      .for_read()
       .as_ref()
       .deserialize()?;
     for record in entry.get_versions() {

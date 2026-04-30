@@ -1,18 +1,20 @@
 use std::{
+  cell::Cell,
   marker::PhantomData,
-  mem::transmute,
+  mem::{transmute, MaybeUninit},
   ops::Deref,
+  ptr::drop_in_place,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
   },
 };
 
-use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
+use crossbeam::utils::Backoff;
 
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
 };
 
 /**
@@ -27,33 +29,56 @@ use crate::{
  *    the LRU eviction path.
  */
 pub struct TempBlockState {
-  pin: ExclusivePin,
-  page: Atomic<PageRef<PAGE_SIZE>>,
+  block_pin: ExclusivePin,
+  page: MaybeUninit<Arc<PageRef<PAGE_SIZE>>>,
+  page_pin: ExclusivePin,
   dirty: AtomicBool,
   latch: Mutex<()>,
+  initialized: Cell<bool>,
 }
 
 impl TempBlockState {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self {
-      pin: ExclusivePin::new(),
-      page: Atomic::null(),
+      block_pin: ExclusivePin::new(),
+      page_pin: ExclusivePin::new(),
+      page: MaybeUninit::uninit(),
+      initialized: Cell::new(false),
       dirty: AtomicBool::new(false),
       latch: Mutex::new(()),
     }
   }
 
-  pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
-    self.page.load(Ordering::Acquire, guard).as_raw()
+  pub fn load_page<'a>(&self) -> Arc<PageRef<PAGE_SIZE>> {
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_shared() {
+        return unsafe { self.page.assume_init_ref() }.clone();
+      }
+      backoff.snooze();
+    }
   }
 
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    let g = pin();
-    let old = self.page.swap(Owned::new(page), Ordering::Release, &g);
-    if old.is_null() {
-      return;
+    let page = page.to_arc();
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_shared() {
+        let _ = unsafe { self.cast().replace(page) };
+        return;
+      }
+      backoff.snooze();
     }
-    unsafe { g.defer_destroy(old) };
+  }
+
+  pub fn init(&self, page: PageRef<PAGE_SIZE>) {
+    self.initialized.set(true);
+    unsafe { self.cast().write(page.to_arc()) }
+  }
+
+  #[inline]
+  const fn cast(&self) -> *mut Arc<PageRef<PAGE_SIZE>> {
+    self.page.as_ptr() as *mut Arc<PageRef<PAGE_SIZE>>
   }
 
   #[inline]
@@ -67,7 +92,7 @@ impl TempBlockState {
 
   #[inline]
   pub fn try_pin(&self) -> Option<SharedToken<'_>> {
-    self.pin.try_shared()
+    self.block_pin.try_shared()
   }
 
   #[inline]
@@ -77,12 +102,10 @@ impl TempBlockState {
 }
 impl Drop for TempBlockState {
   fn drop(&mut self) {
-    let g = pin();
-    let old = self.page.swap(Shared::null(), Ordering::Release, &g);
-    if old.is_null() {
+    if !self.initialized.get() {
       return;
     }
-    unsafe { g.defer_destroy(old) };
+    unsafe { drop_in_place(self.cast()) };
   }
 }
 
@@ -127,7 +150,7 @@ impl<'a> TempBlockRef<'a, SharedToken<'a>> {
 impl<'a> TempBlockRef<'a, ExclusiveToken<'a>> {
   #[inline]
   pub fn exclusive(state: &Arc<TempBlockState>) -> Self {
-    let token = state.pin.try_exclusive().unwrap();
+    let token = state.block_pin.try_exclusive().unwrap();
     Self {
       state: state.clone(),
       token: unsafe { transmute(token) },

@@ -3,13 +3,11 @@ use std::{
   sync::{Arc, MutexGuard},
 };
 
-use crossbeam::epoch::{pin, Guard};
-
 use super::{BlockId, CachedBlock, DirtyTables, TempBlockRef, TempGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
-  utils::{AtomicBitmap, SharedToken, UnsafeBorrow},
+  utils::{AtomicBitmap, SharedToken},
 };
 
 /**
@@ -55,13 +53,13 @@ impl<'a> CacheSlot<'a> {
     })
   }
   #[inline]
-  pub fn for_read<'b>(self, guard: &'b Guard) -> ReadonlySlot<'b>
+  pub fn for_read<'b>(self) -> ReadonlySlot<'b>
   where
     'a: 'b,
   {
     match self {
-      CacheSlot::Temp(temp) => ReadonlySlot::Temp(temp.for_read(guard)),
-      CacheSlot::Page(page) => ReadonlySlot::Page(page.for_read(guard)),
+      CacheSlot::Temp(temp) => ReadonlySlot::Temp(temp.for_read()),
+      CacheSlot::Page(page) => ReadonlySlot::Page(page.for_read()),
     }
   }
 
@@ -70,10 +68,9 @@ impl<'a> CacheSlot<'a> {
   where
     'a: 'b,
   {
-    let guard = pin();
     match self {
-      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write(&guard)),
-      CacheSlot::Page(page) => WritableSlot::Page(page.for_write(&guard)),
+      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write()),
+      CacheSlot::Page(page) => WritableSlot::Page(page.for_write()),
     }
   }
 }
@@ -85,8 +82,8 @@ impl<'a> AsMut<Page<PAGE_SIZE>> for WritableSlot<'a> {
   #[inline]
   fn as_mut(&mut self) -> &mut Page<PAGE_SIZE> {
     match self {
-      WritableSlot::Temp(temp) => temp.shadow.as_mut(),
-      WritableSlot::Page(page) => page.shadow.as_mut(),
+      WritableSlot::Temp(temp) => &mut temp.shadow,
+      WritableSlot::Page(page) => &mut page.shadow,
     }
   }
 }
@@ -94,8 +91,8 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
   #[inline]
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     match self {
-      WritableSlot::Temp(temp) => temp.shadow.as_ref(),
-      WritableSlot::Page(page) => page.shadow.as_ref(),
+      WritableSlot::Temp(temp) => &temp.shadow,
+      WritableSlot::Page(page) => &page.shadow,
     }
   }
 }
@@ -117,8 +114,8 @@ impl<'a> AsRef<Page<PAGE_SIZE>> for ReadonlySlot<'a> {
   #[inline]
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     match self {
-      ReadonlySlot::Temp(temp) => temp.page.borrow_unsafe().as_ref(),
-      ReadonlySlot::Page(page) => page.page.borrow_unsafe().as_ref(),
+      ReadonlySlot::Temp(temp) => &temp.page,
+      ReadonlySlot::Page(page) => &page.page,
     }
   }
 }
@@ -132,27 +129,24 @@ pub struct PageSlot<'a> {
 }
 impl<'a> PageSlot<'a> {
   #[inline]
-  fn for_read<'b>(self, guard: &'b Guard) -> PageSlotRead<'b>
+  fn for_read<'b>(self) -> PageSlotRead<'b>
   where
     'a: 'b,
   {
-    let page = self.block.load_page(&guard);
+    let page = self.block.load_page();
     PageSlotRead {
       page,
-      _guard: guard,
       _token: self.token,
     }
   }
 
-  fn for_write<'b>(self, guard: &Guard) -> PageSlotWrite<'b>
+  fn for_write<'b>(self) -> PageSlotWrite<'b>
   where
     'a: 'b,
   {
     let mut shadow = self.page_pool.acquire();
     let _latch = self.block.latch();
-    shadow
-      .as_mut()
-      .copy_from(self.block.load_page(guard).borrow_unsafe().as_ref());
+    shadow.copy_from(self.block.load_page().as_ref().as_ref());
     PageSlotWrite {
       shadow: ManuallyDrop::new(shadow),
       block: self.block,
@@ -186,8 +180,7 @@ impl<'a> Drop for PageSlotWrite<'a> {
 }
 
 pub struct PageSlotRead<'a> {
-  page: *const PageRef<PAGE_SIZE>,
-  _guard: &'a Guard,
+  page: Arc<PageRef<PAGE_SIZE>>,
   _token: SharedToken<'a>,
 }
 
@@ -199,28 +192,26 @@ pub struct TempSlot<'a> {
 }
 impl<'a> TempSlot<'a> {
   #[inline]
-  fn for_read<'b>(self, guard: &'b Guard) -> TempSlotRead<'b>
+  fn for_read<'b>(self) -> TempSlotRead<'b>
   where
     'a: 'b,
   {
-    let page = self.state.load_page(&guard);
+    let page = self.state.load_page();
     TempSlotRead {
       state: ManuallyDrop::new(self.state),
-      page,
+      page: ManuallyDrop::new(page),
       pointer: self.pointer,
-      guard: self.guard,
+      temp_guard: self.guard,
     }
   }
 
-  fn for_write<'b>(self, guard: &Guard) -> TempSlotWrite<'b>
+  fn for_write<'b>(self) -> TempSlotWrite<'b>
   where
     'a: 'b,
   {
     let mut shadow = self.page_pool.acquire();
     let latch = unsafe { transmute(self.state.latch()) };
-    shadow
-      .as_mut()
-      .copy_from(self.state.load_page(&guard).borrow_unsafe().as_ref());
+    shadow.copy_from(self.state.load_page().as_ref().as_ref());
 
     TempSlotWrite {
       shadow: ManuallyDrop::new(shadow),
@@ -259,9 +250,7 @@ impl<'a> TempSlotWrite<'a> {
     unsafe { ManuallyDrop::drop(&mut self.latch) };
     let state = unsafe { ManuallyDrop::take(&mut self.state) }.upgrade();
 
-    let guard = pin();
-    let page = state.load_page(&guard);
-    let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
+    let _ = handle.disk().write(self.pointer, state.load_page());
     dirty.mark(&handle);
   }
 }
@@ -292,9 +281,9 @@ impl<'a> Drop for TempSlotWrite<'a> {
  */
 pub struct TempSlotRead<'a> {
   state: ManuallyDrop<TempBlockRef<'a, SharedToken<'a>>>,
-  page: *const PageRef<PAGE_SIZE>,
+  page: ManuallyDrop<Arc<PageRef<PAGE_SIZE>>>,
   pointer: Pointer,
-  guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
+  temp_guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
 }
 impl<'a> TempSlotRead<'a> {
   fn release(
@@ -308,18 +297,17 @@ impl<'a> TempSlotRead<'a> {
       return;
     }
 
-    let guard = pin();
-    let page = state.load_page(&guard);
-    let _ = handle.disk().write(self.pointer, page.borrow_unsafe());
+    let _ = handle.disk().write(self.pointer, state.load_page());
     dirty.mark(&handle);
   }
 }
 impl<'a> Drop for TempSlotRead<'a> {
   #[inline]
   fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.page) };
     // block_guard identifies the creator of this temp page, who is responsible
     // for cleanup (disk write + remove_temp). Non-creators simply unpin and exit.
-    if let Some((guard, handle, dirty)) = self.guard.take() {
+    if let Some((guard, handle, dirty)) = self.temp_guard.take() {
       return self.release(handle, guard, dirty);
     }
 

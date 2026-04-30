@@ -33,6 +33,7 @@ where
   pub base_path: T,
   pub io_thread_count: usize,
   pub wal_file_size: usize,
+  pub wal_buffer_size: usize,
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
   pub checkpoint_interval: Duration,
@@ -71,6 +72,7 @@ impl Engine {
     let wal_config = WALConfig {
       group_commit_count: config.group_commit_count,
       max_file_size: config.wal_file_size,
+      max_buffer_size: config.wal_buffer_size,
       base_dir: base_path.clone(),
       segment_flush_count: config.wal_segment_flush_count,
       segment_flush_delay: config.wal_segment_flush_delay,

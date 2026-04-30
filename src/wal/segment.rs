@@ -76,28 +76,20 @@ impl WALSegment {
     Ok(Self::new(file, path.to_path_buf(), flush_count))
   }
 
-  pub fn read<P: AsMut<Page<WAL_BLOCK_SIZE>>>(
-    &self,
-    pointer: Pointer,
-    page: &mut P,
-  ) -> Result {
+  pub fn read(&self, pointer: Pointer, page: &mut Page<WAL_BLOCK_SIZE>) -> Result {
     self
       .file
-      .pread(page.as_mut().as_mut(), pointer * SIZE)
+      .pread(page.as_mut(), pointer * SIZE)
       .map(|_| ())
       .map_err(Error::IO)
   }
-  pub fn write<P: AsRef<Page<WAL_BLOCK_SIZE>>>(
-    &self,
-    pointer: Pointer,
-    page: &P,
-  ) -> Result {
+  pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> Result {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
     self
       .io
-      .execute((pointer, unsafe { transmute(page.as_ref().as_ref()) }))
+      .execute((pointer, unsafe { transmute(page.as_ref()) }))
       .wait()
       .flatten()
   }
