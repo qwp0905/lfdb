@@ -1,4 +1,8 @@
-use std::{mem::ManuallyDrop, sync::Arc};
+use std::{
+  mem::ManuallyDrop,
+  ops::{Deref, DerefMut},
+  sync::Arc,
+};
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
@@ -25,15 +29,17 @@ impl<const N: usize> PageRef<N> {
     Self::from_exists(store, Page::new())
   }
 }
-impl<const N: usize> AsRef<Page<N>> for PageRef<N> {
+impl<const N: usize> Deref for PageRef<N> {
+  type Target = Page<N>;
+
   #[inline]
-  fn as_ref(&self) -> &Page<N> {
+  fn deref(&self) -> &Self::Target {
     &self.page
   }
 }
-impl<const N: usize> AsMut<Page<N>> for PageRef<N> {
+impl<const N: usize> DerefMut for PageRef<N> {
   #[inline]
-  fn as_mut(&mut self) -> &mut Page<N> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.page
   }
 }
