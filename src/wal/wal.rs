@@ -47,7 +47,7 @@ pub struct WALConfig {
  * rotates to the next block (or a new segment if the current segment is full).
  * Rotated segments are fsynced asynchronously and queued for checkpoint.
  *
- * flush=true callers (commit, checkpoint) wait for all prior segment fsyncs to
+ * flush=true callers (commit, checkpoint) wait for all prior segment fsync to
  * complete before returning, guaranteeing durability across segment boundaries.
  */
 pub struct WAL {
@@ -104,6 +104,7 @@ impl WAL {
   pub fn replay(config: &WALConfig) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let max_len = max_len as Pointer;
     info!("start to replay wal segments");
 
     let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
@@ -121,11 +122,11 @@ impl WAL {
       config.base_dir.clone(),
       replay_result.generation,
       config.group_commit_count,
-      max_len as Pointer,
+      max_len,
     )
     .to_arc();
 
-    let not_flushed = SegQueue::new().to_arc();
+    let checkpoint_failed = SegQueue::new().to_arc();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((
@@ -134,9 +135,9 @@ impl WAL {
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
-        max_len: max_len as Pointer,
+        max_len,
         wait_checkpoint: OnceLock::new(),
-        checkpoint_failed: not_flushed,
+        checkpoint_failed,
         fsync_queue: SegQueue::new(),
         synced_count: AtomicU64::new(0),
       },
@@ -163,6 +164,7 @@ impl WAL {
       )
       .to_box();
 
+    debug_assert!(self.wait_checkpoint.get().is_none());
     let _ = self.wait_checkpoint.set(wait_checkpoint);
   }
 

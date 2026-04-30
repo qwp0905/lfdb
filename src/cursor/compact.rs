@@ -1,4 +1,6 @@
-use std::{cell::Cell, collections::VecDeque, ops::Bound, sync::Arc, time::Duration};
+use std::{
+  cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
+};
 
 use super::{
   BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, WritablePolicy,
@@ -261,13 +263,10 @@ pub fn wait_compaction(
       waited.push_back((old, new));
     }
 
-    for _ in 0..waited.len() {
-      match waited.pop_front() {
-        Some((old, new)) => match old.try_mutation() {
-          Some(old) => compaction.dispatch((old, new)),
-          None => waited.push_back((old, new)),
-        },
-        None => return Ok(()),
+    for (old, new) in take(&mut waited) {
+      match old.try_mutation() {
+        Some(old) => compaction.dispatch((old, new)),
+        None => waited.push_back((old, new)),
       }
     }
 
@@ -354,7 +353,7 @@ fn do_compaction(
     }
   }
 
-  info!("table {table_name} compacting copied {moved_count} count record complete.",);
+  info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
     let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;

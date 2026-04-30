@@ -208,8 +208,8 @@ impl TxOrchestrator {
 
   /**
    * Closes components in dependency order — higher-level components first.
-   * wal.twostep_close() step 1 stops new checkpoint triggers; checkpoint.close()
-   * performs the final checkpoint; step 2 (wal_close) finalizes the WAL.
+   * wal.half_close() step 1 stops new checkpoint triggers; checkpoint.close()
+   * performs the final checkpoint; step 2 wal.close() finalizes the WAL.
    */
   pub fn close(&self) -> Result {
     self.tree_manager.close();
