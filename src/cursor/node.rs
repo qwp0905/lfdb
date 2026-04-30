@@ -11,7 +11,7 @@ pub enum BTreeNodeView<'a> {
 }
 impl<'a> TypedObject for BTreeNodeView<'a> {
   fn get_type() -> SerializeType {
-    SerializeType::CursorNode
+    SerializeType::BTreeNode
   }
 }
 
@@ -70,7 +70,7 @@ impl BTreeNode {
 }
 impl TypedObject for BTreeNode {
   fn get_type() -> SerializeType {
-    SerializeType::CursorNode
+    SerializeType::BTreeNode
   }
 }
 impl Serializable for BTreeNode {

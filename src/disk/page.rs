@@ -144,7 +144,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(b)
   }
 
-  #[inline(always)]
+  #[inline]
   pub const fn read_u64(&mut self) -> Result<u64> {
     if self.offset + 8 > T {
       return Err(Error::EOF);
@@ -153,7 +153,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     self.offset += 8;
     Ok(u64::from_le_bytes(v))
   }
-  #[inline(always)]
+  #[inline]
   pub const fn read_u16(&mut self) -> Result<u16> {
     if self.offset + 2 > T {
       return Err(Error::EOF);

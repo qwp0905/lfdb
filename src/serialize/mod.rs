@@ -11,7 +11,7 @@ use crate::{
 #[derive(Debug)]
 pub enum SerializeType {
   Header,
-  CursorNode,
+  BTreeNode,
   DataEntry,
   DataChunk,
 }
@@ -19,7 +19,7 @@ impl SerializeType {
   const fn byte(&self) -> u8 {
     match self {
       SerializeType::Header => 1,
-      SerializeType::CursorNode => 2,
+      SerializeType::BTreeNode => 2,
       SerializeType::DataEntry => 3,
       SerializeType::DataChunk => 4,
     }
