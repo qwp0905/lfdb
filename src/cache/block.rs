@@ -1,14 +1,21 @@
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::{
+  cell::UnsafeCell,
+  panic::RefUnwindSafe,
+  sync::{Arc, Mutex, MutexGuard},
+};
+
+use crossbeam::utils::Backoff;
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
   thread::TaskHandle,
-  utils::{ShortenedMutex, ShortenedRwLock, ToArc},
+  utils::{ExclusivePin, ShortenedMutex, ToArc, UnsafeBorrow},
 };
 
 pub struct CachedBlock {
-  page: RwLock<Arc<PageRef<PAGE_SIZE>>>,
+  page: UnsafeCell<Arc<PageRef<PAGE_SIZE>>>,
+  page_pin: ExclusivePin,
   pointer: Pointer,
   handle: Arc<TableHandle>,
   latch: Mutex<()>,
@@ -21,7 +28,8 @@ impl CachedBlock {
     handle: Arc<TableHandle>,
   ) -> Self {
     Self {
-      page: RwLock::new(page.to_arc()),
+      page: UnsafeCell::new(page.to_arc()),
+      page_pin: ExclusivePin::new(),
       pointer,
       handle,
       latch: Mutex::new(()),
@@ -35,10 +43,24 @@ impl CachedBlock {
 
   #[inline]
   pub fn load_page(&self) -> Arc<PageRef<PAGE_SIZE>> {
-    self.page.rl().clone()
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_shared() {
+        return self.page.get().borrow_unsafe().clone();
+      }
+      backoff.snooze();
+    }
   }
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    *self.page.wl() = page.to_arc();
+    let page = page.to_arc();
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_exclusive() {
+        let _ = unsafe { self.page.get().replace(page) };
+        return;
+      }
+      backoff.snooze();
+    }
   }
 
   #[inline]
@@ -59,3 +81,6 @@ impl CachedBlock {
     &self.handle
   }
 }
+unsafe impl Send for CachedBlock {}
+unsafe impl Sync for CachedBlock {}
+impl RefUnwindSafe for CachedBlock {}

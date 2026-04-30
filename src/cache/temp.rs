@@ -6,15 +6,15 @@ use std::{
   ptr::drop_in_place,
   sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, MutexGuard, RwLock,
+    Arc, Mutex, MutexGuard,
   },
 };
 
+use crossbeam::utils::Backoff;
+
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{
-    ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ShortenedRwLock, ToArc,
-  },
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
 };
 
 /**
@@ -29,8 +29,9 @@ use crate::{
  *    the LRU eviction path.
  */
 pub struct TempBlockState {
-  pin: ExclusivePin,
-  page: MaybeUninit<RwLock<Arc<PageRef<PAGE_SIZE>>>>,
+  block_pin: ExclusivePin,
+  page: MaybeUninit<Arc<PageRef<PAGE_SIZE>>>,
+  page_pin: ExclusivePin,
   dirty: AtomicBool,
   latch: Mutex<()>,
   initialized: Cell<bool>,
@@ -39,7 +40,8 @@ pub struct TempBlockState {
 impl TempBlockState {
   pub fn new() -> Self {
     Self {
-      pin: ExclusivePin::new(),
+      block_pin: ExclusivePin::new(),
+      page_pin: ExclusivePin::new(),
       page: MaybeUninit::uninit(),
       initialized: Cell::new(false),
       dirty: AtomicBool::new(false),
@@ -48,21 +50,35 @@ impl TempBlockState {
   }
 
   pub fn load_page<'a>(&self) -> Arc<PageRef<PAGE_SIZE>> {
-    unsafe { self.page.assume_init_ref() }.rl().clone()
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_shared() {
+        return unsafe { self.page.assume_init_ref() }.clone();
+      }
+      backoff.snooze();
+    }
   }
 
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    *unsafe { self.page.assume_init_ref() }.wl() = page.to_arc();
+    let page = page.to_arc();
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.page_pin.try_shared() {
+        let _ = unsafe { self.cast().replace(page) };
+        return;
+      }
+      backoff.snooze();
+    }
   }
 
   pub fn init(&self, page: PageRef<PAGE_SIZE>) {
     self.initialized.set(true);
-    unsafe { self.cast().write(RwLock::new(page.to_arc())) }
+    unsafe { self.cast().write(page.to_arc()) }
   }
 
   #[inline]
-  const fn cast(&self) -> *mut RwLock<Arc<PageRef<PAGE_SIZE>>> {
-    self.page.as_ptr() as *mut RwLock<Arc<PageRef<PAGE_SIZE>>>
+  const fn cast(&self) -> *mut Arc<PageRef<PAGE_SIZE>> {
+    self.page.as_ptr() as *mut Arc<PageRef<PAGE_SIZE>>
   }
 
   #[inline]
@@ -76,7 +92,7 @@ impl TempBlockState {
 
   #[inline]
   pub fn try_pin(&self) -> Option<SharedToken<'_>> {
-    self.pin.try_shared()
+    self.block_pin.try_shared()
   }
 
   #[inline]
@@ -134,7 +150,7 @@ impl<'a> TempBlockRef<'a, SharedToken<'a>> {
 impl<'a> TempBlockRef<'a, ExclusiveToken<'a>> {
   #[inline]
   pub fn exclusive(state: &Arc<TempBlockState>) -> Self {
-    let token = state.pin.try_exclusive().unwrap();
+    let token = state.block_pin.try_exclusive().unwrap();
     Self {
       state: state.clone(),
       token: unsafe { transmute(token) },
