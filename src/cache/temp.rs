@@ -10,11 +10,9 @@ use std::{
   },
 };
 
-use crossbeam::utils::Backoff;
-
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{AtomicArc, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 /**
@@ -30,8 +28,7 @@ use crate::{
  */
 pub struct TempBlockState {
   block_pin: ExclusivePin,
-  page: MaybeUninit<Arc<PageRef<PAGE_SIZE>>>,
-  page_pin: ExclusivePin,
+  page: MaybeUninit<AtomicArc<PageRef<PAGE_SIZE>>>,
   dirty: AtomicBool,
   latch: Mutex<()>,
   initialized: Cell<bool>,
@@ -41,7 +38,6 @@ impl TempBlockState {
   pub fn new() -> Self {
     Self {
       block_pin: ExclusivePin::new(),
-      page_pin: ExclusivePin::new(),
       page: MaybeUninit::uninit(),
       initialized: Cell::new(false),
       dirty: AtomicBool::new(false),
@@ -49,36 +45,28 @@ impl TempBlockState {
     }
   }
 
-  pub fn load_page<'a>(&self) -> Arc<PageRef<PAGE_SIZE>> {
-    let backoff = Backoff::new();
-    loop {
-      if let Some(_token) = self.page_pin.try_shared() {
-        return unsafe { self.page.assume_init_ref() }.clone();
-      }
-      backoff.snooze();
-    }
-  }
-
-  pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    let page = page.to_arc();
-    let backoff = Backoff::new();
-    loop {
-      if let Some(_token) = self.page_pin.try_shared() {
-        let _ = unsafe { self.cast().replace(page) };
-        return;
-      }
-      backoff.snooze();
-    }
-  }
-
-  pub fn init(&self, page: PageRef<PAGE_SIZE>) {
-    self.initialized.set(true);
-    unsafe { self.cast().write(page.to_arc()) }
+  #[inline]
+  pub fn load_page(&self) -> Arc<PageRef<PAGE_SIZE>> {
+    debug_assert!(self.initialized.get(), "temp slot must be initialized");
+    unsafe { self.page.assume_init_ref() }.load()
   }
 
   #[inline]
-  const fn cast(&self) -> *mut Arc<PageRef<PAGE_SIZE>> {
-    self.page.as_ptr() as *mut Arc<PageRef<PAGE_SIZE>>
+  pub fn store(&self, page: PageRef<PAGE_SIZE>) {
+    debug_assert!(self.initialized.get(), "temp slot must be initialized");
+    unsafe { self.page.assume_init_ref() }.store(page);
+  }
+
+  pub fn init(&self, page: PageRef<PAGE_SIZE>) {
+    debug_assert!(!self.initialized.get(), "temp slot must not be initialized");
+
+    self.initialized.set(true);
+    unsafe { self.cast().write(AtomicArc::new(page)) }
+  }
+
+  #[inline]
+  const fn cast(&self) -> *mut AtomicArc<PageRef<PAGE_SIZE>> {
+    self.page.as_ptr() as *mut _
   }
 
   #[inline]

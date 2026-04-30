@@ -23,3 +23,6 @@ mod pin;
 pub use pin::*;
 
 mod log;
+
+mod atomic;
+pub use atomic::*;
