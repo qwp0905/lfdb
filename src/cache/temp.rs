@@ -1,18 +1,20 @@
 use std::{
+  cell::Cell,
   marker::PhantomData,
-  mem::transmute,
+  mem::{transmute, MaybeUninit},
   ops::Deref,
+  ptr::drop_in_place,
   sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard, RwLock,
   },
 };
 
-use crossbeam::epoch::{pin, Atomic, Guard, Owned, Shared};
-
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{
+    ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ShortenedRwLock, ToArc,
+  },
 };
 
 /**
@@ -28,32 +30,39 @@ use crate::{
  */
 pub struct TempBlockState {
   pin: ExclusivePin,
-  page: Atomic<PageRef<PAGE_SIZE>>,
+  page: MaybeUninit<RwLock<Arc<PageRef<PAGE_SIZE>>>>,
   dirty: AtomicBool,
   latch: Mutex<()>,
+  initialized: Cell<bool>,
 }
 
 impl TempBlockState {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
-      page: Atomic::null(),
+      page: MaybeUninit::uninit(),
+      initialized: Cell::new(false),
       dirty: AtomicBool::new(false),
       latch: Mutex::new(()),
     }
   }
 
-  pub fn load_page<'a>(&self, guard: &'a Guard) -> *const PageRef<PAGE_SIZE> {
-    self.page.load(Ordering::Acquire, guard).as_raw()
+  pub fn load_page<'a>(&self) -> Arc<PageRef<PAGE_SIZE>> {
+    unsafe { self.page.assume_init_ref() }.rl().clone()
   }
 
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    let g = pin();
-    let old = self.page.swap(Owned::new(page), Ordering::Release, &g);
-    if old.is_null() {
-      return;
-    }
-    unsafe { g.defer_destroy(old) };
+    *unsafe { self.page.assume_init_ref() }.wl() = page.to_arc();
+  }
+
+  pub fn init(&self, page: PageRef<PAGE_SIZE>) {
+    self.initialized.set(true);
+    unsafe { self.cast().write(RwLock::new(page.to_arc())) }
+  }
+
+  #[inline]
+  const fn cast(&self) -> *mut RwLock<Arc<PageRef<PAGE_SIZE>>> {
+    self.page.as_ptr() as *mut RwLock<Arc<PageRef<PAGE_SIZE>>>
   }
 
   #[inline]
@@ -77,12 +86,10 @@ impl TempBlockState {
 }
 impl Drop for TempBlockState {
   fn drop(&mut self) {
-    let g = pin();
-    let old = self.page.swap(Shared::null(), Ordering::Release, &g);
-    if old.is_null() {
+    if !self.initialized.get() {
       return;
     }
-    unsafe { g.defer_destroy(old) };
+    unsafe { drop_in_place(self.cast()) };
   }
 }
 
