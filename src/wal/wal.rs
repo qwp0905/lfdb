@@ -407,7 +407,7 @@ impl WAL {
 unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
 
-fn waiting_checkpoint(
+const fn waiting_checkpoint(
   checkpoint: Weak<impl BackgroundThread<(), Result>>,
   preloader: Arc<SegmentPreload>,
   failed: Arc<SegQueue<WALSegment>>,

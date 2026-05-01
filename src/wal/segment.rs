@@ -29,12 +29,10 @@ pub struct WALSegment {
 }
 impl WALSegment {
   pub fn parse_generation(path: &Path) -> Result<SegmentGeneration> {
-    let generation = path
-      .file_stem()
-      .unwrap()
-      .to_string_lossy()
-      .parse()
-      .map_err(Error::unknown)?;
+    let generation =
+      unsafe { str::from_utf8_unchecked(path.file_stem().unwrap().as_encoded_bytes()) }
+        .parse()
+        .map_err(Error::unknown)?;
     Ok(generation)
   }
 
