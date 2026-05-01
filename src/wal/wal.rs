@@ -190,7 +190,7 @@ impl WAL {
    *
    * 7.  if obtained offset exceed the threshold(eg. WAL_BLOCK_SIZE), yield and move to 2 and retry.
    *
-   * 8.  if obtained offset exceed the thredhold at first, then start to rotate current buffer.
+   * 8.  if obtained offset exceed the threshold at first, then start to rotate current buffer.
    *   8-1. if current buffer segment pointer has been exceed the threshold(eg. max len),
    *          then trying to rotate buffer with rotated segment.
    *
@@ -199,7 +199,7 @@ impl WAL {
    * 10. if succeeded to rotate buffer,
    *   10-1. wait previous writes in entry, and write records count, and write to disk.
    *   10-2. if current segment has not been rotated, then unpin segment and continue.
-   *   10-3. if current segment has been rotated, wait until pin is emtpy.
+   *   10-3. if current segment has been rotated, wait until pin is empty.
    *   10-4. take segment raw pointer in buffer, and then trigger checkpoint.
    */
   fn append<F>(&self, create_record: F, flush: bool) -> Result
