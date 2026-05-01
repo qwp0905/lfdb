@@ -59,6 +59,3 @@ impl CachedBlock {
     &self.handle
   }
 }
-// unsafe impl Send for CachedBlock {}
-// unsafe impl Sync for CachedBlock {}
-// impl RefUnwindSafe for CachedBlock {}

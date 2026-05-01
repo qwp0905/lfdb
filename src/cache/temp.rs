@@ -1,9 +1,8 @@
 use std::{
-  cell::Cell,
+  cell::OnceCell,
   marker::PhantomData,
-  mem::{transmute, MaybeUninit},
+  mem::transmute,
   ops::Deref,
-  ptr::drop_in_place,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, MutexGuard,
@@ -27,19 +26,17 @@ use crate::{
  *    the LRU eviction path.
  */
 pub struct TempBlockState {
+  page: OnceCell<AtomicArc<PageRef<PAGE_SIZE>>>,
   block_pin: ExclusivePin,
-  page: MaybeUninit<AtomicArc<PageRef<PAGE_SIZE>>>,
   dirty: AtomicBool,
   latch: Mutex<()>,
-  initialized: Cell<bool>,
 }
 
 impl TempBlockState {
   pub fn new() -> Self {
     Self {
+      page: OnceCell::new(),
       block_pin: ExclusivePin::new(),
-      page: MaybeUninit::uninit(),
-      initialized: Cell::new(false),
       dirty: AtomicBool::new(false),
       latch: Mutex::new(()),
     }
@@ -47,26 +44,16 @@ impl TempBlockState {
 
   #[inline]
   pub fn load_page(&self) -> Arc<PageRef<PAGE_SIZE>> {
-    debug_assert!(self.initialized.get(), "temp slot must be initialized");
-    unsafe { self.page.assume_init_ref() }.load()
+    self.page.get().unwrap().load()
   }
 
   #[inline]
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
-    debug_assert!(self.initialized.get(), "temp slot must be initialized");
-    unsafe { self.page.assume_init_ref() }.store(page);
+    self.page.get().unwrap().store(page);
   }
 
   pub fn init(&self, page: PageRef<PAGE_SIZE>) {
-    debug_assert!(!self.initialized.get(), "temp slot must not be initialized");
-
-    self.initialized.set(true);
-    unsafe { self.cast().write(AtomicArc::new(page)) }
-  }
-
-  #[inline]
-  const fn cast(&self) -> *mut AtomicArc<PageRef<PAGE_SIZE>> {
-    self.page.as_ptr() as *mut _
+    let _ = self.page.set(AtomicArc::new(page));
   }
 
   #[inline]
@@ -86,14 +73,6 @@ impl TempBlockState {
   #[inline]
   pub fn latch(&self) -> MutexGuard<'_, ()> {
     self.latch.l()
-  }
-}
-impl Drop for TempBlockState {
-  fn drop(&mut self) {
-    if !self.initialized.get() {
-      return;
-    }
-    unsafe { drop_in_place(self.cast()) };
   }
 }
 
@@ -137,13 +116,13 @@ impl<'a> TempBlockRef<'a, SharedToken<'a>> {
 
 impl<'a> TempBlockRef<'a, ExclusiveToken<'a>> {
   #[inline]
-  pub fn exclusive(state: &Arc<TempBlockState>) -> Self {
-    let token = state.block_pin.try_exclusive().unwrap();
-    Self {
+  pub fn exclusive(state: &Arc<TempBlockState>) -> Option<Self> {
+    let token = state.block_pin.try_exclusive()?;
+    Some(Self {
       state: state.clone(),
       token: unsafe { transmute(token) },
       _marker: PhantomData,
-    }
+    })
   }
 
   pub fn get_state(&self) -> Arc<TempBlockState> {

@@ -15,17 +15,17 @@ use crate::utils::ToArc;
  */
 pub struct PageRef<const N: usize> {
   page: ManuallyDrop<Page<N>>,
-  store: Arc<PageStore<N>>,
+  store: Arc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PageRef<N> {
-  const fn from_exists(store: Arc<PageStore<N>>, page: Page<N>) -> Self {
+  const fn from_exists(store: Arc<ArrayQueue<Page<N>>>, page: Page<N>) -> Self {
     Self {
       page: ManuallyDrop::new(page),
       store,
     }
   }
 
-  fn new(store: Arc<PageStore<N>>) -> Self {
+  fn new(store: Arc<ArrayQueue<Page<N>>>) -> Self {
     Self::from_exists(store, Page::new())
   }
 }
@@ -47,7 +47,6 @@ impl<const N: usize> Drop for PageRef<N> {
   fn drop(&mut self) {
     let _ = self
       .store
-      .data
       .push(unsafe { ManuallyDrop::take(&mut self.page) });
   }
 }
@@ -58,19 +57,19 @@ impl<const N: usize> Drop for PageRef<N> {
  * Dropped pages are returned to the pool; excess pages beyond capacity are freed.
  */
 pub struct PagePool<const N: usize> {
-  store: Arc<PageStore<N>>,
+  store: Arc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PagePool<N> {
   pub fn new(cap: usize) -> Self {
     Self {
-      store: PageStore::new(cap).to_arc(),
+      store: ArrayQueue::new(cap).to_arc(),
     }
   }
 
   pub fn acquire(&self) -> PageRef<N> {
     let backoff = Backoff::new();
     while !backoff.is_completed() {
-      if let Some(page) = self.store.data.pop() {
+      if let Some(page) = self.store.pop() {
         return PageRef::from_exists(self.store.clone(), page);
       }
       backoff.snooze();
@@ -80,18 +79,7 @@ impl<const N: usize> PagePool<N> {
 
   #[allow(unused)]
   pub fn len(&self) -> usize {
-    self.store.data.len()
-  }
-}
-
-struct PageStore<const N: usize> {
-  data: ArrayQueue<Page<N>>,
-}
-impl<const N: usize> PageStore<N> {
-  fn new(cap: usize) -> Self {
-    Self {
-      data: ArrayQueue::new(cap),
-    }
+    self.store.len()
   }
 }
 

@@ -225,7 +225,7 @@ impl LRUTable {
       }
 
       let state = TempBlockState::new().to_arc();
-      let state_ref = TempBlockRef::exclusive(&state);
+      let state_ref = TempBlockRef::exclusive(&state).unwrap();
       shard.temporary.insert(key, state_ref.get_state());
       return Peeked::DiskRead(state_ref, TempGuard::new(s, key));
     }

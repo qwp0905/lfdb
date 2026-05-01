@@ -51,9 +51,9 @@ impl TableHandle {
 
   pub fn try_mutation(self: &Arc<Self>) -> Option<MutationHandle> {
     let token = self.pin.try_exclusive()?;
+    // transmute allowed since arc guarantees the lifespan
     Some(MutationHandle {
       handle: self.clone(),
-      // transmute allowed since arc guarantees the lifespan
       _token: unsafe { transmute(token) },
     })
   }
@@ -83,12 +83,11 @@ impl TableHandle {
    */
   #[inline]
   pub fn try_close(&self) -> bool {
-    if let Some(token) = self.pin.try_exclusive() {
-      forget(token);
-      self.closed.fetch_or(true, Ordering::Release);
-      return true;
+    if self.pin.try_exclusive().map(forget).is_none() {
+      return false;
     }
-    false
+    self.closed.fetch_or(true, Ordering::Release);
+    true
   }
 
   pub fn is_closed(&self) -> bool {

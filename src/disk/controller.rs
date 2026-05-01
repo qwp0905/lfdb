@@ -165,7 +165,7 @@ impl<const N: usize> IOPool<N> {
       .for_each(|done| done.fulfill(result.clone()));
   }
 
-  fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg<N>) {
+  const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg<N>) {
     let count = max_iov();
     move |(file, queue, occupied, pin, closed)| {
       metrics.active_io_threads.inc();
