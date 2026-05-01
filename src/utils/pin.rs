@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+  mem::forget,
+  sync::atomic::{AtomicUsize, Ordering},
+};
 
 use crossbeam::utils::Backoff;
 
@@ -25,7 +28,7 @@ impl ExclusivePin {
         .compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
-        return Some(SharedToken::new(&self.0));
+        return Some(SharedToken(&self.0));
       }
       backoff.spin();
     }
@@ -37,7 +40,7 @@ impl ExclusivePin {
       .0
       .compare_exchange(0, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
       .ok()
-      .map(|_| ExclusiveToken::new(&self.0))
+      .map(|_| ExclusiveToken(&self.0))
   }
 
   #[inline]
@@ -47,73 +50,47 @@ impl ExclusivePin {
   }
 }
 
-pub struct SharedToken<'a> {
-  pin: &'a AtomicUsize,
-  upgrade: bool,
-}
+pub struct SharedToken<'a>(&'a AtomicUsize);
 impl<'a> SharedToken<'a> {
-  #[inline]
-  const fn new(pin: &'a AtomicUsize) -> Self {
-    Self {
-      pin,
-      upgrade: false,
-    }
-  }
-  pub fn upgrade(mut self) -> ExclusiveToken<'a> {
+  pub fn upgrade(self) -> ExclusiveToken<'a> {
     let backoff = Backoff::new();
+    let pin = self.0;
 
     while let Err(_) =
-      self
-        .pin
-        .compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
+      pin.compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
     {
       backoff.snooze();
     }
-    self.upgrade = true;
-    ExclusiveToken::new(self.pin)
+
+    forget(self);
+    ExclusiveToken(pin)
   }
 }
 impl<'a> Drop for SharedToken<'a> {
   #[inline]
   fn drop(&mut self) {
-    if self.upgrade {
-      return;
-    }
-    self.pin.fetch_sub(1, Ordering::Release);
+    self.0.fetch_sub(1, Ordering::Release);
   }
 }
 
-pub struct ExclusiveToken<'a> {
-  pin: &'a AtomicUsize,
-  downgrade: bool,
-}
+pub struct ExclusiveToken<'a>(&'a AtomicUsize);
 impl<'a> ExclusiveToken<'a> {
   #[inline]
-  const fn new(pin: &'a AtomicUsize) -> Self {
-    Self {
-      pin,
-      downgrade: false,
-    }
-  }
+  pub fn downgrade(self) -> SharedToken<'a> {
+    let pin = self.0;
+    debug_assert_eq!(pin.load(Ordering::Acquire), EXCLUSIVE);
 
-  #[inline]
-  pub fn downgrade(mut self) -> SharedToken<'a> {
-    self.downgrade = true;
+    pin.store(1, Ordering::Release);
+    forget(self);
 
-    debug_assert_eq!(self.pin.load(Ordering::Acquire), EXCLUSIVE);
-    self.pin.store(1, Ordering::Release);
-    SharedToken::new(self.pin)
+    SharedToken(pin)
   }
 }
 impl<'a> Drop for ExclusiveToken<'a> {
   #[inline]
   fn drop(&mut self) {
-    if self.downgrade {
-      return;
-    }
-
-    debug_assert_eq!(self.pin.load(Ordering::Acquire), EXCLUSIVE);
-    self.pin.store(0, Ordering::Release);
+    debug_assert_eq!(self.0.load(Ordering::Acquire), EXCLUSIVE);
+    self.0.store(0, Ordering::Release);
   }
 }
 
