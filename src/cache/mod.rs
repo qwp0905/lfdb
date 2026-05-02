@@ -24,3 +24,6 @@ use block::*;
 
 mod dirty;
 use dirty::*;
+
+mod latch;
+use latch::*;
