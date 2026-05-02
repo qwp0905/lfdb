@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, HashSet, VecDeque},
+  collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
   mem::replace,
   sync::Arc,
   time::Duration,
@@ -13,7 +13,7 @@ use crate::{
   debug,
   disk::Pointer,
   error::Result,
-  table::{TableHandle, TableMapper},
+  table::{TableHandle, TableId, TableMapper},
   thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{DoubleBuffer, ToArc, ToBox},
@@ -61,7 +61,7 @@ impl GarbageCollector {
 
     debug!("{} data will check version in this scope.", queue.len());
     let mut waiting = Vec::new();
-    let mut release = BTreeMap::new();
+    let mut release = BTreeMap::<TableId, (Arc<TableHandle>, BTreeSet<Pointer>)>::new();
     let mut dedup = HashSet::new();
     while let Some(ptr) = queue.pop() {
       match ptr {
@@ -72,7 +72,11 @@ impl GarbageCollector {
           waiting.push(self.entry.execute((table, ptr)));
         }
         GcPointer::Release(table, ptr) => {
-          release.insert((table.metadata().get_id(), ptr), table);
+          release
+            .entry(table.metadata().get_id())
+            .or_insert_with(|| (table, Default::default()))
+            .1
+            .insert(ptr);
         }
       }
     }
@@ -89,10 +93,10 @@ impl GarbageCollector {
     // must release after trimming because of trim type can contain release type.
     // it could occur dangling pointer reference.
 
-    release
-      .into_iter()
-      .filter(|(_, table)| !table.is_closed())
-      .for_each(|((_, ptr), table)| defer(move || table.free().dealloc(ptr)));
+    for (table, pointers) in release.into_values() {
+      defer(move || pointers.into_iter().for_each(|p| table.free().dealloc(p)));
+    }
+
     Ok(())
   }
 
@@ -198,10 +202,8 @@ const fn run_entry(
         _ => return,
       };
 
-      for ptr in pointers {
-        let handle = table.handle();
-        defer(move || handle.free().dealloc(ptr));
-      }
+      let handle = table.handle();
+      defer(move || pointers.into_iter().for_each(|p| handle.free().dealloc(p)));
     };
 
     let serialize_and_log = |slot: &mut WritableSlot, entry: &DataEntry| {
@@ -211,7 +213,7 @@ const fn run_entry(
     while let Some(ptr) = next.take() {
       if max_found {
         let mut entry = block_cache
-          .peek(ptr, table.handle())?
+          .read(ptr, table.handle())?
           .for_read()
           .as_ref()
           .deserialize::<DataEntry>()?;
@@ -222,7 +224,7 @@ const fn run_entry(
         continue;
       }
 
-      let mut slot = block_cache.peek(ptr, table.handle())?.for_lazy_write();
+      let mut slot = block_cache.read(ptr, table.handle())?.for_lazy_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -273,7 +275,7 @@ const fn run_entry(
       };
 
       let next_entry = block_cache
-        .peek(next_ptr, table.handle())?
+        .read(next_ptr, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?;
@@ -294,7 +296,7 @@ const fn run_check(
   move |(table, pointer)| {
     Ok(
       block_cache
-        .peek(pointer, table)?
+        .read(pointer, table)?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?
