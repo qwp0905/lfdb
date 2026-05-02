@@ -16,9 +16,6 @@ pub use cache::*;
 mod slot;
 pub use slot::*;
 
-mod temp;
-use temp::*;
-
 mod block;
 use block::*;
 
