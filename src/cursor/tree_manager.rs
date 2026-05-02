@@ -334,7 +334,7 @@ fn run_merge_leaf(
           }
         }
 
-        let mut slot = block_cache.peek(i, table.handle())?.for_write();
+        let mut slot = block_cache.peek(i, table.handle())?.for_lazy_write();
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
         next_ptr = leaf.get_next();
 
@@ -376,7 +376,7 @@ fn run_merge_leaf(
         // merge without propagating to internal nodes.
         debug!("trying to start merge {} with {}", slot.get_pointer(), next);
 
-        let mut next_slot = block_cache.peek(next, table.handle())?.for_write();
+        let mut next_slot = block_cache.peek(next, table.handle())?.for_lazy_write();
         let next_leaf = next_slot.as_ref().deserialize::<BTreeNode>()?;
         leaf.set_next(slot.get_pointer());
 

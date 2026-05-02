@@ -1,9 +1,9 @@
 use std::{
   mem::{transmute, ManuallyDrop},
-  sync::{Arc, MutexGuard},
+  sync::Arc,
 };
 
-use super::{BlockId, CachedBlock, DirtyTables, TempBlockRef, TempGuard};
+use super::{BlockId, CachedBlock, DirtyTables, LatchGuard, TempBlockRef, TempGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
@@ -71,6 +71,16 @@ impl<'a> CacheSlot<'a> {
     match self {
       CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_write()),
       CacheSlot::Page(page) => WritableSlot::Page(page.for_write()),
+    }
+  }
+  #[inline]
+  pub fn for_lazy_write<'b>(self) -> WritableSlot<'b>
+  where
+    'a: 'b,
+  {
+    match self {
+      CacheSlot::Temp(temp) => WritableSlot::Temp(temp.for_lazy_write()),
+      CacheSlot::Page(page) => WritableSlot::Page(page.for_lazy_write()),
     }
   }
 }
@@ -156,6 +166,23 @@ impl<'a> PageSlot<'a> {
       _latch,
     }
   }
+
+  fn for_lazy_write<'b>(self) -> PageSlotWrite<'b>
+  where
+    'a: 'b,
+  {
+    let mut shadow = self.page_pool.acquire();
+    let _latch = self.block.lazy_latch();
+    shadow.copy_from(self.block.load_page().as_ref().as_ref());
+    PageSlotWrite {
+      shadow: ManuallyDrop::new(shadow),
+      block: self.block,
+      dirty: self.dirty,
+      block_id: self.block_id,
+      _token: self.token,
+      _latch,
+    }
+  }
 }
 pub struct PageSlotWrite<'a> {
   shadow: ManuallyDrop<PageRef<PAGE_SIZE>>,
@@ -163,7 +190,7 @@ pub struct PageSlotWrite<'a> {
   dirty: &'a AtomicBitmap,
   block_id: BlockId,
   _token: SharedToken<'a>,
-  _latch: MutexGuard<'a, ()>,
+  _latch: LatchGuard<'a>,
 }
 
 impl<'a> Drop for PageSlotWrite<'a> {
@@ -221,6 +248,22 @@ impl<'a> TempSlot<'a> {
       latch: ManuallyDrop::new(latch),
     }
   }
+  fn for_lazy_write<'b>(self) -> TempSlotWrite<'b>
+  where
+    'a: 'b,
+  {
+    let mut shadow = self.page_pool.acquire();
+    let latch = unsafe { transmute(self.state.lazy_latch()) };
+    shadow.copy_from(self.state.load_page().as_ref().as_ref());
+
+    TempSlotWrite {
+      shadow: ManuallyDrop::new(shadow),
+      state: ManuallyDrop::new(self.state),
+      pointer: self.pointer,
+      guard: self.guard,
+      latch: ManuallyDrop::new(latch),
+    }
+  }
 }
 
 /**
@@ -237,7 +280,7 @@ pub struct TempSlotWrite<'a> {
   state: ManuallyDrop<TempBlockRef<'a, SharedToken<'a>>>,
   pointer: Pointer,
   guard: Option<(TempGuard<'a>, Arc<TableHandle>, &'a DirtyTables)>,
-  latch: ManuallyDrop<MutexGuard<'a, ()>>,
+  latch: ManuallyDrop<LatchGuard<'a>>,
 }
 
 impl<'a> TempSlotWrite<'a> {
