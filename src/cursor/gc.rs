@@ -222,7 +222,7 @@ const fn run_entry(
         continue;
       }
 
-      let mut slot = block_cache.peek(ptr, table.handle())?.for_write();
+      let mut slot = block_cache.peek(ptr, table.handle())?.for_lazy_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();

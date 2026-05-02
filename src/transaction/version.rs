@@ -155,24 +155,6 @@ pub struct VersionVisibility {
   snapshot_id: AtomicU8,
 }
 impl VersionVisibility {
-  pub fn new<T>(
-    base_path: PathBuf,
-    aborted: T,
-    last_tx_id: TxId,
-    last_snapshot_id: u8,
-  ) -> Self
-  where
-    T: IntoIterator<Item = TxId>,
-  {
-    Self {
-      base_path,
-      active: SkipMap::new(),
-      aborted: SkipSet::from_iter(aborted),
-      last_tx_id: AtomicTxId::new(last_tx_id),
-      snapshot_id: AtomicU8::new(last_snapshot_id),
-    }
-  }
-
   pub fn replay(
     base_path: PathBuf,
     last_tx_id: TxId,

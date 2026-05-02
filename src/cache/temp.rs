@@ -5,13 +5,14 @@ use std::{
   ops::Deref,
   sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex, MutexGuard,
+    Arc,
   },
 };
 
+use super::{Latch, LatchGuard};
 use crate::{
   disk::{PageRef, PAGE_SIZE},
-  utils::{AtomicArc, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{AtomicArc, ExclusivePin, ExclusiveToken, SharedToken},
 };
 
 /**
@@ -29,7 +30,7 @@ pub struct TempBlockState {
   page: OnceCell<AtomicArc<PageRef<PAGE_SIZE>>>,
   block_pin: ExclusivePin,
   dirty: AtomicBool,
-  latch: Mutex<()>,
+  latch: Latch,
 }
 
 impl TempBlockState {
@@ -38,7 +39,7 @@ impl TempBlockState {
       page: OnceCell::new(),
       block_pin: ExclusivePin::new(),
       dirty: AtomicBool::new(false),
-      latch: Mutex::new(()),
+      latch: Latch::new(),
     }
   }
 
@@ -71,8 +72,12 @@ impl TempBlockState {
   }
 
   #[inline]
-  pub fn latch(&self) -> MutexGuard<'_, ()> {
-    self.latch.l()
+  pub fn latch(&self) -> LatchGuard<'_> {
+    self.latch.lock_immediately()
+  }
+  #[inline]
+  pub fn lazy_latch(&self) -> LatchGuard<'_> {
+    self.latch.lock_lazily()
   }
 }
 
