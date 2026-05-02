@@ -16,7 +16,7 @@ use crate::{
   Error, Result,
 };
 
-const FILE_EXT: &str = "snapshot";
+const FILE_EXT: &str = "snap";
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress

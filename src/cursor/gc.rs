@@ -9,7 +9,7 @@ use crossbeam::epoch;
 
 use super::{DataEntry, RecordData, VersionRecord};
 use crate::{
-  cache::BlockCache,
+  cache::{BlockCache, WritableSlot},
   debug,
   disk::Pointer,
   error::Result,
@@ -92,9 +92,7 @@ impl GarbageCollector {
     release
       .into_iter()
       .filter(|(_, table)| !table.is_closed())
-      .for_each(|((_, ptr), table)| {
-        epoch::pin().defer(move || table.free().dealloc(ptr))
-      });
+      .for_each(|((_, ptr), table)| defer(move || table.free().dealloc(ptr)));
     Ok(())
   }
 
@@ -191,26 +189,47 @@ const fn run_entry(
     };
 
     let table_id = table.metadata().get_id();
-    let mut ptr = Some(pointer);
+    let mut next = Some(pointer);
     let mut max_found = false;
 
     let release = |record: VersionRecord| {
-      if let RecordData::Chunked(pointers) = record.data {
-        for ptr in pointers {
-          let handle = table.handle();
-          epoch::pin().defer(move || handle.free().dealloc(ptr));
-        }
+      let pointers = match record.data {
+        RecordData::Chunked(pointers) => pointers,
+        _ => return,
+      };
+
+      for ptr in pointers {
+        let handle = table.handle();
+        defer(move || handle.free().dealloc(ptr));
       }
     };
 
-    while let Some(i) = ptr.take() {
-      let mut slot = block_cache.peek(i, table.handle())?.for_write();
+    let serialize_and_log = |slot: &mut WritableSlot, entry: &DataEntry| {
+      recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
+    };
+
+    while let Some(ptr) = next.take() {
+      if max_found {
+        let mut entry = block_cache
+          .peek(ptr, table.handle())?
+          .for_read()
+          .as_ref()
+          .deserialize::<DataEntry>()?;
+        entry.take_versions().for_each(release);
+        next = entry.get_next();
+        let handle = table.handle();
+        defer(move || handle.free().dealloc(ptr));
+        continue;
+      }
+
+      let mut slot = block_cache.peek(ptr, table.handle())?.for_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
       let mut expired_max: Option<VersionRecord> = None;
       let min_version = version_visibility.min_version();
       let mut new_versions = VecDeque::new();
+
       for record in entry.take_versions() {
         if version_visibility.is_aborted(&record.owner) {
           release(record);
@@ -218,10 +237,6 @@ const fn run_entry(
         }
         if record.version > min_version {
           new_versions.push_back(record);
-          continue;
-        }
-        if max_found {
-          release(record);
           continue;
         }
 
@@ -235,43 +250,40 @@ const fn run_entry(
         };
       }
 
-      if !max_found {
-        if let Some(record) = expired_max.take() {
-          new_versions.push_back(record);
-          max_found = true;
-        }
+      if let Some(record) = expired_max.take() {
+        new_versions.push_back(record);
+        max_found = true;
       }
 
       if new_versions.len() == prev_len {
-        ptr = entry.get_next();
+        next = entry.get_next();
         continue;
       }
 
       if new_versions.len() > 0 {
         entry.set_versions(new_versions);
-        recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &entry)?;
-        ptr = entry.get_next();
+        serialize_and_log(&mut slot, &entry)?;
+        next = entry.get_next();
         continue;
       }
 
-      let next = match entry.get_next() {
-        Some(i) => i,
-        None => {
-          return recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &entry)
-        }
+      let next_ptr = match entry.get_next() {
+        Some(ptr) => ptr,
+        None => return serialize_and_log(&mut slot, &entry),
       };
 
-      let next_entry: DataEntry = block_cache
-        .peek(next, table.handle())?
+      let next_entry = block_cache
+        .peek(next_ptr, table.handle())?
         .for_read()
         .as_ref()
-        .deserialize()?;
-      recorder.serialize_and_log(RESERVED_TX, table_id, &mut slot, &next_entry)?;
-      ptr = Some(i);
+        .deserialize::<DataEntry>()?;
+      serialize_and_log(&mut slot, &next_entry)?;
+      next = Some(ptr);
 
       let handle = table.handle();
-      epoch::pin().defer(move || handle.free().dealloc(next));
+      defer(move || handle.free().dealloc(next_ptr))
     }
+
     Ok(())
   }
 }
@@ -318,4 +330,11 @@ const fn run_release_table(
       mapper.remove(table.metadata().get_id());
     }
   }
+}
+
+fn defer<F, R>(f: F)
+where
+  F: FnOnce() -> R + Send + 'static,
+{
+  epoch::pin().defer(f)
 }

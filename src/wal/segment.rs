@@ -15,7 +15,7 @@ use crate::{
   Error,
 };
 
-pub const FILE_EXT: &str = "wal";
+pub const FILE_EXT: &str = "log";
 
 pub type FsyncResult = TaskHandle<Result>;
 
