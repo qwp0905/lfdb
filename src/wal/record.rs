@@ -8,7 +8,7 @@ use crate::{
   Error,
 };
 
-// Sized to hold at least 2 base pages (base page = 8KB) with room for headers.
+// Sized to hold at least 2 base pages (base page = 4KB) with room for headers.
 pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb
 
 #[derive(Debug)]
