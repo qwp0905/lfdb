@@ -72,6 +72,8 @@ impl<'a> Transaction<'a> {
           ),
         );
       }
+
+      unreachable!("get table must have opened table handle.")
     }
 
     Err(Error::TableNotFound(name.to_string()))
@@ -99,6 +101,8 @@ impl<'a> Transaction<'a> {
           ),
         );
       }
+
+      unreachable!("get table must have opened table handle.")
     }
 
     let table_meta = self.orchestrator.create_table_metadata(name);

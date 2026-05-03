@@ -131,7 +131,9 @@ pub fn replay(
         Operation::Abort => {
           aborted.insert(record.log_id, record.tx_id);
         }
-        Operation::Checkpoint(last_log_id, path) => {
+        Operation::Checkpoint(last_log_id, current_version, path) => {
+          tx_id = tx_id.max(current_version);
+
           redo = redo.split_off(&last_log_id);
           aborted = aborted.split_off(&last_log_id);
           started = started.split_off(&last_log_id);

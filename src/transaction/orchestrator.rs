@@ -250,7 +250,7 @@ fn run_checkpoint(
   let path = version.persist_snapshot(current_version)?;
   debug!("checkpoint snapshot persisted.");
 
-  wal.checkpoint_and_flush(log_id, path.clone())?;
+  wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
   info!("checkpoint complete id {log_id}");
 
   version.clear(&path)?;

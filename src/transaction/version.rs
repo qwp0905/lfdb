@@ -180,13 +180,7 @@ impl VersionVisibility {
       }
     };
 
-    let mut tx_id = last_tx_id;
-
     let (active_s, aborted_s, snap_id) = Self::replay_snapshot(&path)?;
-    for &id in started.iter().chain(active_s.iter()) {
-      tx_id = tx_id.max(id + 1);
-    }
-
     Ok(Self {
       aborted: active_s
         .into_iter()
@@ -196,7 +190,7 @@ impl VersionVisibility {
         .filter(|c| !closed.contains(c))
         .collect(),
       active: SkipMap::new(),
-      last_tx_id: AtomicTxId::new(tx_id),
+      last_tx_id: AtomicTxId::new(last_tx_id),
       base_path,
       snapshot_id: AtomicU8::new(snap_id + 1),
     })

@@ -57,35 +57,30 @@ impl<K, V> LRUShard<K, V>
 where
   K: Eq + Hash,
 {
-  #[inline]
-  fn promote_bucket<Q: ?Sized, S>(
-    &mut self,
-    key: &Q,
-    hash: u64,
-    hasher: &S,
-  ) -> Option<&mut Bucket<K, V>>
+  pub fn get<Q: ?Sized, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<&V>
   where
     K: Borrow<Q>,
     Q: Hash + Eq,
     S: BuildHasher,
   {
-    if let Some(ptr) = self.new_entries.get_mut(hash, equivalent(key)) {
+    let eq = equivalent(key);
+    if let Some(ptr) = self.new_entries.get_mut(hash, &eq) {
       let bucket = ptr.borrow_mut_unsafe();
       if !bucket.promote() {
-        return Some(bucket);
+        return Some(bucket.get_value());
       }
 
       self.new_sub_list.move_to_head(ptr);
-      return Some(bucket);
+      return Some(bucket.get_value());
     }
 
-    let table_bucket = self.old_entries.find(hash, equivalent(key))?;
+    let table_bucket = self.old_entries.find(hash, &eq)?;
     let bucket = table_bucket
       .as_ptr()
       .borrow_mut_unsafe()
       .borrow_mut_unsafe();
     if !bucket.promote() {
-      return Some(bucket);
+      return Some(bucket.get_value());
     }
 
     let (mut ptr, _) = unsafe { self.old_entries.remove(table_bucket) };
@@ -93,16 +88,7 @@ where
     self.new_sub_list.push_head(&mut ptr);
     self.new_entries.insert(hash, ptr, make_hasher(hasher));
     self.rebalance(hasher);
-    Some(bucket)
-  }
-
-  pub fn get<Q: ?Sized, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<&V>
-  where
-    K: Borrow<Q>,
-    Q: Hash + Eq,
-    S: BuildHasher,
-  {
-    Some(self.promote_bucket(key, hash, hasher)?.get_value())
+    Some(bucket.get_value())
   }
 
   /**
@@ -144,19 +130,48 @@ where
   where
     S: BuildHasher,
   {
-    if let Some(bucket) = self.promote_bucket(&key, hash, hasher) {
+    let eq = equivalent(&key);
+    if let Some(ptr) = self.new_entries.get_mut(hash, &eq) {
+      let bucket = ptr.borrow_mut_unsafe();
+      if !bucket.promote() {
+        return Some(bucket.set_value(value));
+      }
+
+      self.new_sub_list.move_to_head(ptr);
       return Some(bucket.set_value(value));
     }
-
-    let mut ptr = Bucket::new_ptr(key, value);
 
     // Insert into the head of the old segment, not the tail.
     // This gives the page a chance to be promoted to the new segment
     // on a subsequent access before being evicted — the core of
     // midpoint insertion.
-    self.old_sub_list.push_head(&mut ptr);
-    self.old_entries.insert(hash, ptr, make_hasher(hasher));
-    None
+    let raw_bucket =
+      match self
+        .old_entries
+        .find_or_find_insert_slot(hash, &eq, make_hasher(hasher))
+      {
+        Ok(v) => v,
+        Err(slot) => {
+          drop(eq);
+          let mut ptr = Bucket::new_ptr(key, value);
+          unsafe { self.old_entries.insert_in_slot(hash, slot, ptr) };
+          self.old_sub_list.push_head(&mut ptr);
+          return None;
+        }
+      };
+
+    // let table_bucket = self.old_entries.find(hash, equivalent(key))?;
+    let bucket = raw_bucket.as_ptr().borrow_mut_unsafe().borrow_mut_unsafe();
+    if !bucket.promote() {
+      return Some(bucket.set_value(value));
+    }
+
+    let (mut ptr, _) = unsafe { self.old_entries.remove(raw_bucket) };
+    self.old_sub_list.remove(&mut ptr);
+    self.new_sub_list.push_head(&mut ptr);
+    self.new_entries.insert(hash, ptr, make_hasher(hasher));
+    self.rebalance(hasher);
+    Some(bucket.set_value(value))
   }
 
   pub fn remove<Q, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<V>
