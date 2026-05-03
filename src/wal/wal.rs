@@ -344,9 +344,14 @@ impl WAL {
     )
   }
 
-  pub fn checkpoint_and_flush(&self, last_log_id: LogId, path: PathBuf) -> Result {
+  pub fn checkpoint_and_flush(
+    &self,
+    last_log_id: LogId,
+    current_version: TxId,
+    path: PathBuf,
+  ) -> Result {
     self.append(
-      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, path),
+      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, current_version, path),
       true,
     )
   }

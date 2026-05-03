@@ -1,6 +1,6 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
-use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable, Peeked};
+use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -24,14 +24,14 @@ pub struct BlockCache {
    */
   pins: Arc<Vec<ExclusivePin>>,
   dirty_frames: Arc<AtomicBitmap>,
-  page_pool: Arc<PagePool<PAGE_SIZE>>,
+  page_pool: PagePool<PAGE_SIZE>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.capacity).to_arc();
+    let page_pool = PagePool::new(config.capacity);
 
     // 90% of page pool capacity reserved for blocks; the remaining 10% is kept
     // free for copy on write.
@@ -74,8 +74,8 @@ impl BlockCache {
   }
 
   #[inline]
-  fn page_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
-    CacheSlot::page(
+  fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
+    CacheSlot::new(
       unsafe { self.cached_blocks[id].assume_init_ref() },
       &self.dirty_frames,
       id,
@@ -84,54 +84,12 @@ impl BlockCache {
     )
   }
 
-  /**
-   * Reading block cache without promotion.
-   * Used for reads that should not affect LRU, like gc.
-   *
-   * DiskRead: another thread has already registered a temp slot for this
-   * page but hasn't finished loading it yet. We must read from disk here
-   * rather than waiting, but we still take the temp slot to prevent a
-   * concurrent read() from promoting this page into the LRU while we
-   * are reading — which would create two live copies of the same page.
-   */
-  pub fn peek(
-    &self,
-    pointer: Pointer,
-    handle: Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>> {
-    let table_id = handle.metadata().get_id();
-    let (state_ref, guard) = match self
-      .table
-      .peek_or_temp(table_id, pointer, |id| &self.pins[id])
-    {
-      Peeked::Hit(id, token) => return Ok(self.page_slot(id, token)),
-      Peeked::Temp(state) => {
-        return Ok(CacheSlot::temp(state, pointer, None, &self.page_pool))
-      }
-      Peeked::DiskRead(state, guard) => (state, guard),
-    };
-
-    let mut page = self.page_pool.acquire();
-    handle.disk().read(pointer, &mut page)?;
-    state_ref.init(page);
-    Ok(CacheSlot::temp(
-      state_ref.downgrade(),
-      pointer,
-      Some((guard, handle, &self.dirty_tables)),
-      &self.page_pool,
-    ))
-  }
-
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CacheSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
-      Acquired::Temp(state) => {
-        self.metrics.block_cache_hit.inc();
-        return Ok(CacheSlot::temp(state, pointer, None, &self.page_pool));
-      }
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
-        return Ok(self.page_slot(block_id, token));
+        return Ok(self.cache_slot(block_id, token));
       }
       Acquired::Evicted(guard) => guard,
     };
@@ -144,7 +102,7 @@ impl BlockCache {
     let ptr = self.cached_blocks[block_id].as_ptr() as *mut CachedBlock;
     if !guard.is_evicted() {
       unsafe { ptr.write(new_block) };
-      return Ok(self.page_slot(block_id, guard.commit()));
+      return Ok(self.cache_slot(block_id, guard.commit()));
     }
 
     let old = unsafe { ptr.replace(new_block) };
@@ -154,7 +112,7 @@ impl BlockCache {
       self.dirty_tables.mark(old.handle());
     }
 
-    Ok(self.page_slot(block_id, guard.commit()))
+    Ok(self.cache_slot(block_id, guard.commit()))
   }
 
   #[inline]

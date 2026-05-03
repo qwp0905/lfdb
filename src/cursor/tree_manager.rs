@@ -298,14 +298,14 @@ fn run_merge_leaf(
       let table_id = table.metadata().get_id();
 
       let mut ptr = block_cache
-        .peek(HEADER_POINTER, table.handle())?
+        .read(HEADER_POINTER, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<TreeHeader>()?
         .get_root();
 
       while let BTreeNodeView::Internal(node) = block_cache
-        .peek(ptr, table.handle())?
+        .read(ptr, table.handle())?
         .for_read()
         .as_ref()
         .view::<BTreeNodeView>()?
@@ -316,7 +316,7 @@ fn run_merge_leaf(
       let mut next_ptr = Some(ptr);
       while let Some(i) = next_ptr.take() {
         {
-          let slot = block_cache.peek(i, table.handle())?.for_read();
+          let slot = block_cache.read(i, table.handle())?.for_read();
           let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
           if !gc
             .batch_check_empty(
@@ -334,7 +334,7 @@ fn run_merge_leaf(
           }
         }
 
-        let mut slot = block_cache.peek(i, table.handle())?.for_lazy_write();
+        let mut slot = block_cache.read(i, table.handle())?.for_lazy_write();
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
         next_ptr = leaf.get_next();
 
@@ -376,7 +376,7 @@ fn run_merge_leaf(
         // merge without propagating to internal nodes.
         debug!("trying to start merge {} with {}", slot.get_pointer(), next);
 
-        let mut next_slot = block_cache.peek(next, table.handle())?.for_lazy_write();
+        let mut next_slot = block_cache.read(next, table.handle())?.for_lazy_write();
         let next_leaf = next_slot.as_ref().deserialize::<BTreeNode>()?;
         leaf.set_next(slot.get_pointer());
 

@@ -1,17 +1,17 @@
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::BTreeSet,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::{Arc, Mutex},
+  sync::Mutex,
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{LRUShard, TempBlockRef, TempBlockState};
+use super::LRUShard;
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -27,7 +27,6 @@ pub type BlockId = usize;
 struct Shard {
   lru: LRUShard<Key, BlockId>,
   eviction: BTreeSet<Key>, // evicting pointers
-  temporary: BTreeMap<Key, Arc<TempBlockState>>, // temporary pages for gc without promote
 }
 
 /**
@@ -112,32 +111,9 @@ impl<'a> Drop for EvictionGuard<'a> {
   }
 }
 
-pub struct TempGuard<'a> {
-  shard: &'a Mutex<Shard>,
-  key: Key,
-}
-impl<'a> TempGuard<'a> {
-  #[inline]
-  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
-    Self { shard, key }
-  }
-}
-impl<'a> Drop for TempGuard<'a> {
-  #[inline]
-  fn drop(&mut self) {
-    self.shard.l().temporary.remove(&self.key);
-  }
-}
-
 pub enum Acquired<'a> {
   Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<'a, SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
-}
-pub enum Peeked<'a> {
-  Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<'a, SharedToken<'a>>),
-  DiskRead(TempBlockRef<'a, ExclusiveToken<'a>>, TempGuard<'a>),
 }
 
 pub struct LRUTable {
@@ -154,7 +130,6 @@ impl LRUTable {
       let shard = Shard {
         lru: LRUShard::new(cap_per_shard),
         eviction: BTreeSet::new(),
-        temporary: BTreeMap::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
@@ -172,63 +147,6 @@ impl LRUTable {
     let shard = &self.shards[i];
     let offset = self.offset[i];
     (h, shard, offset)
-  }
-
-  /**
-   * Reads a page without promoting it in the LRU (used by GC).
-   *
-   * 1. If the pointer is being evicted, wait.
-   * 2. If a temp page is already allocated for this pointer, return it.
-   * 3. If the pointer is in the LRU, return it without promotion.
-   * 4. If not found anywhere, allocate a new temp page exclusive state
-   *    and return DiskRead — the caller is responsible for loading from disk.
-   */
-  pub fn peek_or_temp<'a, F>(
-    &'a self,
-    table_id: TableId,
-    pointer: Pointer,
-    get_pin: F,
-  ) -> Peeked<'a>
-  where
-    F: Fn(usize) -> &'a ExclusivePin,
-  {
-    let key = (table_id, pointer);
-    let (hash, s, _) = self.get_shard(key);
-    let backoff = Backoff::new();
-
-    loop {
-      let mut shard = s.l();
-      if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(state) = shard.temporary.get(&key) {
-        if let Some(state_ref) = TempBlockRef::shared(state) {
-          return Peeked::Temp(state_ref);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(&fid) = shard.lru.peek(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Peeked::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      let state = TempBlockState::new().to_arc();
-      let state_ref = TempBlockRef::exclusive(&state).unwrap();
-      shard.temporary.insert(key, state_ref.get_state());
-      return Peeked::DiskRead(state_ref, TempGuard::new(s, key));
-    }
   }
 
   /**
@@ -263,16 +181,6 @@ impl LRUTable {
     loop {
       let mut shard = s.l();
       if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(state) = shard.temporary.get(&key) {
-        if let Some(state_ref) = TempBlockRef::shared(state) {
-          return Acquired::Temp(state_ref);
-        }
-
         drop(shard);
         backoff.snooze();
         continue;

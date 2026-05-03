@@ -1,18 +1,25 @@
-use std::{mem::replace, ptr::NonNull};
+use std::{
+  mem::replace,
+  ptr::NonNull,
+  time::{Duration, Instant},
+};
+const PROMOTE_THRESHOLD: Duration = Duration::from_secs(1);
 
 pub struct Bucket<K, V> {
   key: K,
   value: V,
   prev: Option<NonNull<Bucket<K, V>>>,
   next: Option<NonNull<Bucket<K, V>>>,
+  last_promoted: Instant,
 }
 impl<K, V> Bucket<K, V> {
-  const fn new(key: K, value: V) -> Self {
+  fn new(key: K, value: V) -> Self {
     Self {
       key,
       value,
       prev: None,
       next: None,
+      last_promoted: Instant::now(),
     }
   }
 
@@ -48,5 +55,14 @@ impl<K, V> Bucket<K, V> {
 
   pub fn take(self) -> (K, V) {
     (self.key, self.value)
+  }
+
+  pub fn promote(&mut self) -> bool {
+    if self.last_promoted.elapsed() < PROMOTE_THRESHOLD {
+      return false;
+    }
+
+    self.last_promoted = Instant::now();
+    true
   }
 }

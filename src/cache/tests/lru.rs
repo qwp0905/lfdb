@@ -1,4 +1,4 @@
-use std::hash::RandomState;
+use std::{hash::RandomState, time::Duration};
 
 use super::*;
 
@@ -69,13 +69,18 @@ fn test_get_promotes_and_evict_order() {
   let mut shard = LRUShard::<usize, usize>::new(cap);
   let hasher = RandomState::new();
 
+  const T: Duration = Duration::from_millis(1001);
+
   for i in 0..cap {
     shard.insert(i, i * 10, h(&hasher, i), &hasher);
+    std::thread::sleep(T);
   }
 
   // access 0 and 1 to promote them
   shard.get(&0, h(&hasher, 0), &hasher);
+  std::thread::sleep(T);
   shard.get(&1, h(&hasher, 1), &hasher);
+  std::thread::sleep(T);
 
   // evict all and collect keys
   let mut evicted = Vec::new();
