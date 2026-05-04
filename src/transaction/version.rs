@@ -124,7 +124,7 @@ impl<'a> TxSnapshot<'a> {
       entry = e.next();
     }
 
-    TxSnapshot {
+    Self {
       active: snapshot,
       aborted,
     }
@@ -163,24 +163,10 @@ impl VersionVisibility {
     closed: BTreeSet<TxId>,
     last_snapshot: Option<PathBuf>,
   ) -> Result<Self> {
-    let path = match last_snapshot {
-      Some(p) => p,
-      None => {
-        return Ok(Self {
-          base_path,
-          active: SkipMap::new(),
-          aborted: aborted
-            .into_iter()
-            .chain(started)
-            .filter(|c| !closed.contains(c))
-            .collect(),
-          last_tx_id: AtomicTxId::new(last_tx_id),
-          snapshot_id: AtomicU8::new(0),
-        })
-      }
+    let (active_s, aborted_s, snap_id) = match last_snapshot {
+      Some(path) => Self::replay_snapshot(&path)?,
+      None => (BTreeSet::new(), BTreeSet::new(), 0),
     };
-
-    let (active_s, aborted_s, snap_id) = Self::replay_snapshot(&path)?;
     Ok(Self {
       aborted: active_s
         .into_iter()
@@ -192,7 +178,7 @@ impl VersionVisibility {
       active: SkipMap::new(),
       last_tx_id: AtomicTxId::new(last_tx_id),
       base_path,
-      snapshot_id: AtomicU8::new(snap_id + 1),
+      snapshot_id: AtomicU8::new(snap_id),
     })
   }
 
@@ -291,7 +277,7 @@ impl VersionVisibility {
       aborted.insert(id);
     }
 
-    Ok((active, aborted, snapshot_id))
+    Ok((active, aborted, snapshot_id + 1))
   }
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
