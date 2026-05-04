@@ -11,6 +11,7 @@ pub struct Bucket<K, V> {
   prev: Option<NonNull<Bucket<K, V>>>,
   next: Option<NonNull<Bucket<K, V>>>,
   last_promoted: Instant,
+  is_new: bool,
 }
 impl<K, V> Bucket<K, V> {
   fn new(key: K, value: V) -> Self {
@@ -20,6 +21,7 @@ impl<K, V> Bucket<K, V> {
       prev: None,
       next: None,
       last_promoted: Instant::now(),
+      is_new: false,
     }
   }
 
@@ -64,5 +66,13 @@ impl<K, V> Bucket<K, V> {
 
     self.last_promoted = Instant::now();
     true
+  }
+
+  pub const fn is_new(&self) -> bool {
+    self.is_new
+  }
+
+  pub const fn set_is_new(&mut self, is_new: bool) {
+    self.is_new = is_new;
   }
 }

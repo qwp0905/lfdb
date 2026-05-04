@@ -102,9 +102,7 @@ impl<'a> Drop for EvictionGuard<'a> {
         shard.eviction.remove(&i);
         shard.lru.insert(i, self.block_id, h, self.hasher);
       }
-      shard
-        .lru
-        .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
+      shard.lru.remove(&self.new_pointer, self.new_pointer_hash);
     }
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
@@ -186,7 +184,7 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(&fid) = shard.lru.get(&key, hash, hasher) {
+      if let Some(&fid) = shard.lru.get(&key, hash) {
         if let Some(token) = get_pin(fid).try_shared() {
           return Acquired::Hit(fid, token);
         }
