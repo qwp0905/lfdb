@@ -34,14 +34,14 @@ enum State {
 struct OneshotInner<T> {
   state: AtomicCell<State>,
   value: UnsafeCell<MaybeUninit<T>>,
-  caller: UnsafeCell<Option<Thread>>,
+  caller: AtomicCell<Option<Thread>>,
 }
 impl<T> OneshotInner<T> {
   const fn new() -> Self {
     Self {
       state: AtomicCell::new(State::Waiting),
       value: UnsafeCell::new(MaybeUninit::uninit()),
-      caller: UnsafeCell::new(None),
+      caller: AtomicCell::new(None),
     }
   }
   #[inline]
@@ -52,10 +52,6 @@ impl<T> OneshotInner<T> {
   const fn get_value_mut(&self) -> &mut MaybeUninit<T> {
     unsafe { &mut *self.value.get() }
   }
-  #[inline]
-  const fn get_caller_mut(&self) -> &mut Option<Thread> {
-    unsafe { &mut *self.caller.get() }
-  }
 }
 
 pub struct Oneshot<T>(Arc<OneshotInner<T>>);
@@ -64,7 +60,7 @@ impl<T> Oneshot<T> {
     // Register the caller thread before checking state. If fulfill() runs
     // first and finds caller as None, it won't call unpark() — causing park()
     // to block forever.
-    unsafe { self.0.caller.get().write(Some(current())) };
+    self.0.caller.store(Some(current()));
     loop {
       match self
         .0
@@ -98,10 +94,10 @@ impl<T> OneshotFulfill<T> {
       .compare_exchange(State::Waiting, State::Fulfilled)
       .unwrap_or_else(|s| s)
     {
-      State::Waiting => {
-        self.0.get_caller_mut().take().map(|th| th.unpark());
-      }
-      // MaybeUninit does not auto-drop — explicit drop required to prevent memory leak.
+      State::Waiting => match self.0.caller.take() {
+        Some(th) => th.unpark(),
+        None => return,
+      },
       State::Disconnected => unsafe { value.assume_init_drop() },
       State::Fulfilled => unreachable!(),
     }
@@ -109,13 +105,13 @@ impl<T> OneshotFulfill<T> {
 }
 impl<T> Drop for OneshotFulfill<T> {
   fn drop(&mut self) {
-    if let Ok(_) = self
+    self
       .0
       .state
       .compare_exchange(State::Waiting, State::Disconnected)
-    {
-      self.0.get_caller_mut().take().map(|th| th.unpark());
-    }
+      .ok()
+      .and_then(|_| self.0.caller.take())
+      .map(|th| th.unpark());
   }
 }
 
