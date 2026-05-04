@@ -23,7 +23,10 @@ pub struct BlockCache {
    * pin to protect each block in cached blocks from eviction
    */
   pins: Arc<Vec<ExclusivePin>>,
-  dirty_frames: Arc<AtomicBitmap>,
+  /**
+   * each dirty bits are protected by each block's latch
+   */
+  dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
@@ -65,7 +68,7 @@ impl BlockCache {
       cached_blocks,
       pins,
       table: LRUTable::new(config.shard_count, block_cap),
-      dirty_frames: dirty,
+      dirty_blocks: dirty,
       page_pool,
       pre_flush,
       metrics,
@@ -77,7 +80,7 @@ impl BlockCache {
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
     CacheSlot::new(
       unsafe { self.cached_blocks[id].assume_init_ref() },
-      &self.dirty_frames,
+      &self.dirty_blocks,
       id,
       token,
       &self.page_pool,
@@ -106,9 +109,9 @@ impl BlockCache {
     }
 
     let old = unsafe { ptr.replace(new_block) };
-    if self.dirty_frames.contains(block_id) {
+    if self.dirty_blocks.contains(block_id) {
       old.flush_async().wait()?;
-      self.dirty_frames.remove(block_id);
+      self.dirty_blocks.remove(block_id);
       self.dirty_tables.mark(old.handle());
     }
 
@@ -163,17 +166,17 @@ const MAX_BATCHING: usize = 16;
 const fn handle_flush(
   blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
   pins: Arc<Vec<ExclusivePin>>,
-  dirty_frames: Arc<AtomicBitmap>,
+  dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(Option<()>) -> Result {
   move |trigger| {
     let mut waits = Vec::with_capacity(MAX_BATCHING);
 
-    if trigger.is_none() && dirty_frames.len() < PRE_FLUSH_THRESHOLD {
+    if trigger.is_none() && dirty_blocks.len() < PRE_FLUSH_THRESHOLD {
       return Ok(());
     }
 
-    for id in dirty_frames
+    for id in dirty_blocks
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
@@ -185,7 +188,7 @@ const fn handle_flush(
 
         let block = unsafe { blocks[id].assume_init_ref() };
         let _lock = block.latch();
-        if !dirty_frames.remove(id) {
+        if !dirty_blocks.remove(id) {
           continue;
         };
 

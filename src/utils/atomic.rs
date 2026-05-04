@@ -6,7 +6,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use crate::utils::ExclusivePin;
+use super::ExclusivePin;
 
 pub struct AtomicArc<T> {
   value: UnsafeCell<Arc<T>>,

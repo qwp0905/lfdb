@@ -1,6 +1,5 @@
 use std::{
   cmp::Ordering,
-  marker::PhantomData,
   ops::{Bound, RangeBounds},
   sync::Arc,
 };
@@ -12,7 +11,6 @@ use crate::{
 
 /**
  * A handle for a single table, providing read and write operations.
- * Must be used on a single thread; cross-thread behavior is untested.
  */
 pub struct Cursor<'a> {
   context: &'a TxContext<'a>,
@@ -20,7 +18,6 @@ pub struct Cursor<'a> {
   table: Arc<TableHandle>,
   compaction: Option<Arc<TableHandle>>,
   metrics: &'a MetricsRegistry,
-  _marker: PhantomData<*const ()>,
 }
 impl<'a> Cursor<'a> {
   pub fn initialize(
@@ -46,7 +43,6 @@ impl<'a> Cursor<'a> {
       table,
       metrics,
       compaction,
-      _marker: PhantomData,
     }
   }
 
@@ -174,15 +170,9 @@ impl<'a> CursorIterator<'a> {
       return Err(Error::TransactionClosed);
     }
 
-    let (compaction, c_buffered) = match &mut self.compaction {
+    let (compaction, c_buffered) = match self.compaction.as_mut() {
       Some(v) => v,
-      None => loop {
-        match self.table.next_kv()? {
-          Some((_, None)) => continue,
-          Some((k, Some(v))) => return Ok(Some((k, v))),
-          None => return Ok(None),
-        }
-      },
+      None => return self.table.next_kv_skip_tombstone(),
     };
 
     loop {

@@ -14,9 +14,9 @@ fn test_insert_and_get() {
   assert_eq!(shard.insert(1, 100, h(&hasher, 1), &hasher), None);
   assert_eq!(shard.insert(2, 200, h(&hasher, 2), &hasher), None);
 
-  assert_eq!(shard.get(&1, h(&hasher, 1), &hasher), Some(&100));
-  assert_eq!(shard.get(&2, h(&hasher, 2), &hasher), Some(&200));
-  assert_eq!(shard.get(&3, h(&hasher, 3), &hasher), None);
+  assert_eq!(shard.get(&1, h(&hasher, 1),), Some(&100));
+  assert_eq!(shard.get(&2, h(&hasher, 2),), Some(&200));
+  assert_eq!(shard.get(&3, h(&hasher, 3),), None);
   assert_eq!(shard.len(), 2);
 }
 
@@ -27,7 +27,7 @@ fn test_insert_duplicate_key() {
 
   assert_eq!(shard.insert(1, 100, h(&hasher, 1), &hasher), None);
   assert_eq!(shard.insert(1, 200, h(&hasher, 1), &hasher), Some(100));
-  assert_eq!(shard.get(&1, h(&hasher, 1), &hasher), Some(&200));
+  assert_eq!(shard.get(&1, h(&hasher, 1),), Some(&200));
   assert_eq!(shard.len(), 1);
 }
 
@@ -77,9 +77,9 @@ fn test_get_promotes_and_evict_order() {
   }
 
   // access 0 and 1 to promote them
-  shard.get(&0, h(&hasher, 0), &hasher);
+  shard.get(&0, h(&hasher, 0));
   std::thread::sleep(T);
-  shard.get(&1, h(&hasher, 1), &hasher);
+  shard.get(&1, h(&hasher, 1));
   std::thread::sleep(T);
 
   // evict all and collect keys

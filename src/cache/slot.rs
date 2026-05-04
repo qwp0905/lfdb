@@ -42,9 +42,8 @@ impl<'a> CacheSlot<'a> {
   where
     'a: 'b,
   {
-    let page = self.block.load_page();
     ReadonlySlot {
-      page,
+      page: self.block.load_page(),
       _token: self.token,
     }
   }

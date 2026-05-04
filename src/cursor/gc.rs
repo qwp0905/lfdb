@@ -93,8 +93,13 @@ impl GarbageCollector {
     // must release after trimming because of trim type can contain release type.
     // it could occur dangling pointer reference.
 
-    for (table, pointers) in release.into_values() {
-      defer(move || pointers.into_iter().for_each(|p| table.free().dealloc(p)));
+    for (table, pointers) in release.into_values().filter(|(t, _)| !t.is_closed()) {
+      defer(move || {
+        if table.is_closed() {
+          return;
+        }
+        pointers.into_iter().for_each(|p| table.free().dealloc(p));
+      });
     }
 
     Ok(())
