@@ -735,9 +735,9 @@ where
   pub fn next_kv_skip_tombstone(&mut self) -> Result<Option<(Key, Vec<u8>)>> {
     loop {
       match self.next_record()? {
+        Some((key, Some((value, _, _)))) => return Ok(Some((key, value))),
         Some((_, None)) => continue,
         None => return Ok(None),
-        Some((key, Some((value, _, _)))) => return Ok(Some((key, value))),
       }
     }
   }
