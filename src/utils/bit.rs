@@ -127,10 +127,7 @@ impl OffsetBitmap {
   const MASK: u64 = MASK as u64;
   pub fn new(offset: u64, capacity: u64) -> Self {
     let cap = ((capacity + Self::MASK) >> SHIFT) as usize;
-    let mut bits = Vec::with_capacity(cap);
-    for _ in 0..cap {
-      bits.push(0);
-    }
+    let bits = vec![0; cap];
     Self { offset, bits }
   }
 
