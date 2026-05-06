@@ -5,6 +5,7 @@ use crate::utils::ShortenedMutex;
 struct State {
   locked: bool,
   high_waiters: usize,
+  low_waiters: usize,
 }
 
 pub struct Latch {
@@ -18,6 +19,7 @@ impl Latch {
       state: Mutex::new(State {
         locked: false,
         high_waiters: 0,
+        low_waiters: 0,
       }),
       high_cv: Condvar::new(),
       low_cv: Condvar::new(),
@@ -45,7 +47,9 @@ impl Latch {
   {
     let mut state = self.state.l();
     while state.locked || state.high_waiters > 0 {
+      state.low_waiters += 1;
       state = self.low_cv.wait(state).unwrap();
+      state.low_waiters -= 1;
     }
     state.locked = true;
 
@@ -56,10 +60,12 @@ impl Latch {
     let mut state = self.state.l();
     state.locked = false;
     if state.high_waiters > 0 {
-      self.high_cv.notify_one();
-    } else {
-      self.low_cv.notify_one();
+      return self.high_cv.notify_one();
     }
+    if state.low_waiters == 0 {
+      return;
+    }
+    self.low_cv.notify_one();
   }
 }
 
