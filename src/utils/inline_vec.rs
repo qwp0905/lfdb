@@ -67,6 +67,13 @@ impl<T, const N: usize> Array<T, N> {
   const fn len(&self) -> usize {
     self.len
   }
+  fn into_vec(mut self) -> Vec<T> {
+    let mut vector = Vec::with_capacity(self.len);
+    unsafe { vector.set_len(self.len) };
+    unsafe { copy_nonoverlapping(self.as_ptr(), vector.as_mut_ptr(), self.len) };
+    self.len = 0;
+    vector
+  }
 }
 impl<T, const N: usize> Drop for Array<T, N> {
   fn drop(&mut self) {
@@ -210,6 +217,13 @@ impl<T, const N: usize> InlineVec<T, N> {
       Type::Heap(vector) => vector.as_mut_ptr(),
     }
   }
+  pub fn as_slice(&self) -> &[T] {
+    match &self.0 {
+      Type::Inline(array) => array.as_slice(),
+      Type::Heap(vector) => vector.as_slice(),
+    }
+  }
+
   pub fn iter(&self) -> InlineVecIter<'_, T, N> {
     InlineVecIter {
       ptr: self.as_ptr(),
@@ -223,10 +237,7 @@ impl<T, const N: usize> Deref for InlineVec<T, N> {
   type Target = [T];
 
   fn deref(&self) -> &Self::Target {
-    match &self.0 {
-      Type::Inline(array) => array.as_slice(),
-      Type::Heap(vector) => vector.as_slice(),
-    }
+    self.as_slice()
   }
 }
 impl<T, const N: usize> DerefMut for InlineVec<T, N> {
@@ -276,6 +287,30 @@ impl<T, const N: usize> IndexMut<std::ops::Range<usize>> for InlineVec<T, N> {
 impl<T, const N: usize> From<Vec<T>> for InlineVec<T, N> {
   fn from(value: Vec<T>) -> Self {
     Self(Type::Heap(value))
+  }
+}
+impl<T, const N: usize> From<InlineVec<T, N>> for Vec<T> {
+  fn from(value: InlineVec<T, N>) -> Self {
+    match value.0 {
+      Type::Inline(array) => array.into_vec(),
+      Type::Heap(vector) => vector,
+    }
+  }
+}
+impl<T: PartialEq, const N: usize> PartialEq for InlineVec<T, N> {
+  fn eq(&self, other: &Self) -> bool {
+    self.as_slice().eq(other.as_slice())
+  }
+}
+impl<T: Eq, const N: usize> Eq for InlineVec<T, N> {}
+impl<T: PartialOrd, const N: usize> PartialOrd for InlineVec<T, N> {
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    self.as_slice().partial_cmp(other.as_slice())
+  }
+}
+impl<T: Ord, const N: usize> Ord for InlineVec<T, N> {
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    self.as_slice().cmp(other.as_slice())
   }
 }
 impl<T: Copy, const N: usize> From<&[T]> for InlineVec<T, N> {

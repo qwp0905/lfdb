@@ -23,7 +23,7 @@ impl InternalNode {
     if scanner.read()? == 1 {
       let ptr = scanner.read_u64()?;
       let len = scanner.read_u16()? as usize;
-      let key = scanner.read_n(len)?.to_vec();
+      let key = scanner.read_n(len)?.into();
       right = Some((ptr, key));
     };
 
@@ -31,7 +31,7 @@ impl InternalNode {
     let mut keys = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
-      keys.push(scanner.read_n(l)?.to_vec());
+      keys.push(scanner.read_n(l)?.into());
     }
 
     let mut children = Vec::with_capacity(len + 1);

@@ -49,7 +49,7 @@ impl LeafNode {
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
-      let key = scanner.read_n(l)?.to_vec();
+      let key = scanner.read_n(l)?.into();
       let ptr = scanner.read_u64()?;
       entries.push((key, ptr));
     }
@@ -144,7 +144,7 @@ impl<'a> LeafNodeView<'a> {
 
   pub fn writable(self) -> LeafNode {
     let mut entries = Vec::with_capacity(self.len() + 1);
-    entries.extend(self.get_entries().map(|(k, p)| (k.to_vec(), p)));
+    entries.extend(self.get_entries().map(|(k, p)| (k.into(), p)));
     LeafNode {
       entries,
       next: self.next,

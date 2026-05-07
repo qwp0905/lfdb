@@ -81,7 +81,7 @@ impl<'a> Cursor<'a> {
     self
       .metrics
       .operation_insert
-      .measure(|| self.index.insert(key, value, table))
+      .measure(|| self.index.insert(key.into(), value, table))
       .map(|_| ())
   }
 
@@ -100,7 +100,7 @@ impl<'a> Cursor<'a> {
         .measure(|| {
           self
             .index
-            .insert_record(key.as_ref().to_vec(), RecordData::Tombstone, table)
+            .insert_record(key.as_ref().into(), RecordData::Tombstone, table)
         })
         .map(|_| ());
     }
@@ -129,8 +129,8 @@ impl<'a> Cursor<'a> {
       &self.table,
       self.compaction.as_ref(),
       &self.index,
-      range.start_bound().map(|k| k.as_ref().to_vec()),
-      range.end_bound().map(|k| k.as_ref().to_vec()),
+      range.start_bound().map(|k| k.as_ref().into()),
+      range.end_bound().map(|k| k.as_ref().into()),
     )
   }
 }
@@ -140,9 +140,9 @@ pub struct CursorIterator<'a> {
   table: BTreeIterator<'a, &'a TxContext<'a>>,
   compaction: Option<(
     BTreeIterator<'a, &'a TxContext<'a>>,
-    Option<(Vec<u8>, Option<Vec<u8>>)>,
+    Option<(Key, Option<Vec<u8>>)>,
   )>,
-  buffered: Option<(Vec<u8>, Option<Vec<u8>>)>,
+  buffered: Option<(Key, Option<Vec<u8>>)>,
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(
@@ -165,14 +165,19 @@ impl<'a> CursorIterator<'a> {
       buffered: None,
     })
   }
-  pub fn try_next(&mut self) -> Result<Option<(Key, Vec<u8>)>> {
+  pub fn try_next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
 
     let (compaction, c_buffered) = match self.compaction.as_mut() {
       Some(v) => v,
-      None => return self.table.next_kv_skip_tombstone(),
+      None => {
+        return self
+          .table
+          .next_kv_skip_tombstone()
+          .map(|r| r.map(|(k, v)| (k.into(), v)));
+      }
     };
 
     loop {
@@ -188,7 +193,7 @@ impl<'a> CursorIterator<'a> {
       let (k_old, v_old, k_new, v_new) = match (kv_old, kv_new) {
         (None, None) => return Ok(None),
         (None, Some((k, Some(v)))) | (Some((k, Some(v))), None) => {
-          return Ok(Some((k, v)))
+          return Ok(Some((k.into(), v)))
         }
         (None, Some((_, None))) | (Some((_, None)), None) => continue,
         (Some((k1, v1)), Some((k2, v2))) => (k1, v1, k2, v2),
@@ -206,7 +211,7 @@ impl<'a> CursorIterator<'a> {
         Ordering::Equal => (k_new, v_new),
       };
       if let Some(v) = v {
-        return Ok(Some((k, v)));
+        return Ok(Some((k.into(), v)));
       }
     }
   }

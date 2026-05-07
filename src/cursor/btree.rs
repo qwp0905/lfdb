@@ -237,7 +237,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let entry = DataEntry::init(create_record());
     let entry_ptr = self.0.alloc_and_log(&entry, table)?;
 
-    let split = match node.insert_and_split(pos, key.to_vec(), entry_ptr) {
+    let split = match node.insert_and_split(pos, key.into(), entry_ptr) {
       Some(split) => split,
       None => {
         return self
@@ -587,7 +587,7 @@ where
             count += 1;
 
             if let Some(found) = Self::__find(policy, p, table)? {
-              buffered.push_back((k.to_vec(), found));
+              buffered.push_back((k.into(), found));
             }
           }
 
@@ -664,7 +664,7 @@ where
     for (k, p) in node.get_entries_while(&self.end) {
       count += 1;
       if let Some(found) = self.find_value(p)? {
-        self.buffered.push_back((k.to_vec(), found))
+        self.buffered.push_back((k.into(), found))
       }
     }
 
