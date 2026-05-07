@@ -36,9 +36,7 @@ impl TreeHeader {
 }
 
 impl TypedObject for TreeHeader {
-  fn get_type() -> SerializeType {
-    SerializeType::Header
-  }
+  const TYPE: SerializeType = SerializeType::Header;
 }
 
 impl Serializable for TreeHeader {

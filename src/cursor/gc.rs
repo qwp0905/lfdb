@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::epoch;
 
-use super::{DataEntry, RecordData, VersionRecord};
+use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
   cache::{BlockCache, WritableSlot},
   debug,
@@ -214,6 +214,9 @@ const fn run_entry(
     let serialize_and_log = |slot: &mut WritableSlot, entry: &DataEntry| {
       recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
     };
+    let serialize_and_log_view = |slot: &mut WritableSlot, entry: &DataEntryView| {
+      recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
+    };
 
     while let Some(ptr) = next.take() {
       if max_found {
@@ -279,12 +282,9 @@ const fn run_entry(
         None => return serialize_and_log(&mut slot, &entry),
       };
 
-      let next_entry = block_cache
-        .read(next_ptr, table.handle())?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntry>()?;
-      serialize_and_log(&mut slot, &next_entry)?;
+      let next_slot = block_cache.read(next_ptr, table.handle())?.for_read();
+      let next_entry: DataEntryView = next_slot.as_ref().view()?;
+      serialize_and_log_view(&mut slot, &next_entry)?;
       next = Some(ptr);
 
       let handle = table.handle();
@@ -299,14 +299,9 @@ const fn run_check(
   block_cache: Arc<BlockCache>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
   move |(table, pointer)| {
-    Ok(
-      block_cache
-        .read(pointer, table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntry>()?
-        .is_empty(),
-    )
+    let slot = block_cache.read(pointer, table)?.for_read();
+    let entry: DataEntryView = slot.as_ref().view()?;
+    Ok(entry.is_empty())
   }
 }
 

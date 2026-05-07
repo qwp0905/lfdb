@@ -7,6 +7,9 @@ use node::*;
 mod entry;
 use entry::*;
 
+mod entry_view;
+use entry_view::*;
+
 mod cursor;
 pub use cursor::*;
 

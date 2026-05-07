@@ -143,8 +143,10 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn writable(self) -> LeafNode {
+    let mut entries = Vec::with_capacity(self.len() + 1);
+    entries.extend(self.get_entries().map(|(k, p)| (k.to_vec(), p)));
     LeafNode {
-      entries: self.get_entries().map(|(k, p)| (k.to_vec(), p)).collect(),
+      entries,
       next: self.next,
     }
   }

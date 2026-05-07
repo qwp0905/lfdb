@@ -5,6 +5,7 @@ use crate::{
   serialize::{
     Deserializable, Serializable, SerializeType, TypedObject, SERIALIZABLE_BYTES,
   },
+  utils::InlineVec,
   wal::{TxId, TX_ID_BYTES},
   Error,
 };
@@ -27,7 +28,7 @@ pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 #[derive(Debug)]
 pub enum RecordData {
   Data(Vec<u8>),
-  Chunked(Vec<Pointer>),
+  Chunked(InlineVec<Pointer, 3>),
   Tombstone,
 }
 impl RecordData {
@@ -106,13 +107,6 @@ impl DataEntry {
     self.versions.iter()
   }
 
-  pub fn find<P>(&self, predicate: P) -> Option<&VersionRecord>
-  where
-    P: FnMut(&&VersionRecord) -> bool,
-  {
-    self.versions.iter().find(predicate)
-  }
-
   pub fn get_last_owner(&self) -> Option<TxId> {
     self.versions.front().map(|v| v.owner)
   }
@@ -133,24 +127,9 @@ impl DataEntry {
       POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();
     record.byte_len() + byte_len <= SERIALIZABLE_BYTES
   }
-
-  pub fn is_empty(&self) -> bool {
-    if self.versions.is_empty() {
-      return true;
-    }
-    if self.versions.len() > 1 {
-      return false;
-    }
-    if let RecordData::Tombstone = self.versions[0].data {
-      return true;
-    }
-    false
-  }
 }
 impl TypedObject for DataEntry {
-  fn get_type() -> SerializeType {
-    SerializeType::DataEntry
-  }
+  const TYPE: SerializeType = SerializeType::DataEntry;
 }
 impl Serializable for DataEntry {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
@@ -183,7 +162,7 @@ impl Deserializable for DataEntry {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let next = reader.read_u64()?;
     let len = reader.read_u16()? as usize;
-    let mut versions = VecDeque::with_capacity(len);
+    let mut versions = VecDeque::with_capacity(len + 1);
     for _ in 0..len {
       let version = reader.read_u64()?;
       let owner = reader.read_u64()?;
@@ -195,7 +174,7 @@ impl Deserializable for DataEntry {
         1 => RecordData::Tombstone,
         2 => {
           let l = reader.read()? as usize;
-          let mut pointers = Vec::with_capacity(l);
+          let mut pointers = InlineVec::with_capacity(l);
           for _ in 0..l {
             pointers.push(reader.read_u64()?);
           }
@@ -219,15 +198,9 @@ impl DataChunk {
   pub const fn new(chunk: Vec<u8>) -> Self {
     Self { chunk }
   }
-
-  pub fn get_data(&self) -> &[u8] {
-    &self.chunk
-  }
 }
 impl TypedObject for DataChunk {
-  fn get_type() -> SerializeType {
-    SerializeType::DataChunk
-  }
+  const TYPE: SerializeType = SerializeType::DataChunk;
 }
 impl Serializable for DataChunk {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {

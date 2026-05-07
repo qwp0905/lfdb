@@ -1,15 +1,17 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound, sync::Arc};
 
 use crate::{
-  cache::WritableSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
+  cache::WritableSlot, disk::Pointer, table::TableHandle, utils::InlineVec, wal::TxId,
+  Error, Result,
 };
 
 use crossbeam::epoch::{pin, Guard};
 
 use super::{
-  BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataEntry, InternalNode, Key,
-  KeyRef, LeafNode, NodeFindResult, ReadonlyPolicy, RecordData, TreeHeader,
-  VersionRecord, WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
+  BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
+  DataEntryView, InternalNode, Key, KeyRef, LeafNode, NodeFindResult, ReadonlyPolicy,
+  RecordData, RecordDataView, TreeHeader, VersionRecord, WritablePolicy, CHUNK_SIZE,
+  HEADER_POINTER, LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -56,11 +58,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     let mut data = Vec::new();
 
     for &ptr in pointers {
-      let chunk: DataChunk = policy
-        .fetch_slot(ptr, table)?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
+      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let chunk = slot.as_ref().view::<DataChunkView>()?;
       data.extend_from_slice(chunk.get_data());
     }
 
@@ -80,22 +79,17 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
       let new_guard = pin();
-      let entry: DataEntry = self
-        .0
-        .fetch_slot(ptr, table)?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      let entry: DataEntryView = slot.as_ref().view()?;
       if let Some(record) =
-        entry.find(|&record| self.0.is_visible(record.owner, record.version))
+        entry.find(|&owner, &version| self.0.is_visible(owner, version))
       {
         return Ok(Some(match &record.data {
-          RecordData::Data(data) => Some(data.to_vec()),
-          RecordData::Chunked(pointers) => {
+          RecordDataView::Data(data) => Some(data.to_vec()),
+          RecordDataView::Chunked(pointers) => {
             Some(Self::read_chunk(&self.0, pointers, table)?)
           }
-          RecordData::Tombstone => None,
+          RecordDataView::Tombstone => None,
         }));
       }
 
@@ -115,19 +109,14 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
       let new_guard = pin();
-      let entry: DataEntry = self
-        .0
-        .fetch_slot(ptr, table)?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      let entry: DataEntryView = slot.as_ref().view()?;
       if let Some(record) =
-        entry.find(|&record| self.0.is_visible(record.owner, record.version))
+        entry.find(|&owner, &version| self.0.is_visible(owner, version))
       {
         return Ok(match &record.data {
-          RecordData::Chunked(_) | RecordData::Data(_) => true,
-          RecordData::Tombstone => false,
+          RecordDataView::Chunked(_) | RecordDataView::Data(_) => true,
+          RecordDataView::Tombstone => false,
         });
       };
 
@@ -142,7 +131,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     &self,
     key: KeyRef,
     table: &Arc<TableHandle>,
-  ) -> Result<(Pointer, Vec<Pointer>)> {
+  ) -> Result<(Pointer, InlineVec<Pointer, 3>)> {
     let (mut ptr, height) = {
       let header = self
         .0
@@ -152,7 +141,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
         .deserialize::<TreeHeader>()?;
       (header.get_root(), header.get_height())
     };
-    let mut stack = vec![];
+    let mut stack = InlineVec::with_capacity(height as usize);
 
     while let BTreeNodeView::Internal(node) = self
       .0
@@ -271,7 +260,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     &self,
     mut split_key: Key,
     mut split_pointer: Pointer,
-    mut stack: Vec<Pointer>,
+    mut stack: InlineVec<Pointer, 3>,
     table: &Arc<TableHandle>,
   ) -> Result {
     // CAS loop: multiple concurrent splits may race to update the root.
@@ -323,12 +312,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       return Ok(RecordData::Data(data));
     }
 
-    let mut pointers = Vec::with_capacity(data.len().div_ceil(CHUNK_SIZE));
+    let mut pointers = InlineVec::with_capacity(data.len().div_ceil(CHUNK_SIZE));
     while data.len() > CHUNK_SIZE {
       let remain = data.split_off(CHUNK_SIZE);
-      let chunk = DataChunk::new(data);
+      let chunk = DataChunk::new(replace(&mut data, remain));
       pointers.push(self.0.alloc_and_log(&chunk, table)?);
-      data = remain;
     }
     pointers.push(self.0.alloc_and_log(&DataChunk::new(data), table)?);
 
@@ -629,25 +617,21 @@ where
     let mut next = Some(ptr);
 
     while let Some(ptr) = next.take() {
-      let entry: DataEntry = policy
-        .fetch_slot(ptr, table)?
-        .for_read()
-        .as_ref()
-        .deserialize()?;
-
+      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let entry: DataEntryView = slot.as_ref().view()?;
       if let Some(record) =
-        entry.find(|record| policy.is_visible(record.owner, record.version))
+        entry.find(|&owner, &version| policy.is_visible(owner, version))
       {
         return Ok(Some(match &record.data {
-          RecordData::Data(data) => {
+          RecordDataView::Data(data) => {
             Some((Buffered::Data(data.to_vec()), record.owner, record.version))
           }
-          RecordData::Chunked(pointers) => Some((
+          RecordDataView::Chunked(pointers) => Some((
             Buffered::Chunked(pointers.to_vec()),
             record.owner,
             record.version,
           )),
-          RecordData::Tombstone => None,
+          RecordDataView::Tombstone => None,
         }));
       }
 

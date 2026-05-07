@@ -29,7 +29,7 @@ impl SerializeType {
 pub const SERIALIZABLE_BYTES: usize = PAGE_SIZE - 1; // 1 byte reserved for SerializeType tag
 
 pub trait TypedObject {
-  fn get_type() -> SerializeType;
+  const TYPE: SerializeType;
 }
 
 pub trait Deserializable: Sized + TypedObject {
@@ -37,7 +37,7 @@ pub trait Deserializable: Sized + TypedObject {
   fn deserialize(value: &Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = value.scanner();
 
-    let expected = Self::get_type().byte();
+    let expected = Self::TYPE.byte();
     let received = reader.read()?;
     if expected != received {
       return Err(Error::DeserializeError(expected, received));
@@ -50,7 +50,7 @@ pub trait Deserializable: Sized + TypedObject {
 pub trait Serializable: Sized + TypedObject {
   fn serialize_at(&self, page: &mut Page<PAGE_SIZE>) -> Result<usize> {
     let mut writer = page.writer();
-    writer.write(&[Self::get_type().byte()])?;
+    writer.write(&[Self::TYPE.byte()])?;
     self.write_at(&mut writer)?;
     Ok(writer.finalize())
   }
@@ -85,7 +85,7 @@ pub trait Viewable<'a>: Sized + TypedObject {
   fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
     let mut scanner = page.scanner();
 
-    let expected = Self::get_type().byte();
+    let expected = Self::TYPE.byte();
     let received = scanner.read()?;
     if expected != received {
       return Err(Error::DeserializeError(expected, received));
