@@ -26,3 +26,6 @@ mod log;
 
 mod atomic;
 pub use atomic::*;
+
+mod inline_vec;
+pub use inline_vec::*;
