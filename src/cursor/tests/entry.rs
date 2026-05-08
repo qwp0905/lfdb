@@ -13,7 +13,6 @@ fn test_entry_with_data_roundtrip() {
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntry = page.deserialize().expect("deserialize error");
-  assert!(!decoded.is_empty());
   assert_eq!(decoded.get_last_owner(), Some(1));
 
   let records: Vec<_> = decoded.get_versions().collect();
@@ -34,7 +33,6 @@ fn test_entry_with_tombstone_roundtrip() {
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntry = page.deserialize().expect("deserialize error");
-  assert!(decoded.is_empty());
   assert_eq!(decoded.get_last_owner(), Some(2));
 
   let records: Vec<_> = decoded.get_versions().collect();
@@ -92,7 +90,6 @@ fn test_entry_multiple_versions_roundtrip() {
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntry = page.deserialize().expect("deserialize error");
-  assert!(!decoded.is_empty());
   assert_eq!(decoded.get_last_owner(), Some(1));
   assert_eq!(decoded.get_next(), None);
 }

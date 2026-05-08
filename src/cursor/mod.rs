@@ -7,6 +7,9 @@ use node::*;
 mod entry;
 use entry::*;
 
+mod entry_view;
+use entry_view::*;
+
 mod cursor;
 pub use cursor::*;
 
@@ -14,7 +17,7 @@ mod gc;
 pub use gc::*;
 
 mod types;
-use types::*;
+pub use types::*;
 
 mod tree_manager;
 pub use tree_manager::*;

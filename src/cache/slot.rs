@@ -38,14 +38,9 @@ impl<'a> CacheSlot<'a> {
     }
   }
   #[inline]
-  pub fn for_read<'b>(self) -> ReadonlySlot<'b>
-  where
-    'a: 'b,
-  {
-    ReadonlySlot {
-      page: self.block.load_page(),
-      _token: self.token,
-    }
+  pub fn for_read(self) -> ReadonlySlot {
+    let page = self.block.load_page();
+    ReadonlySlot { page }
   }
 
   #[inline]
@@ -110,14 +105,20 @@ impl<'a> WritableSlot<'a> {
   }
 }
 
-pub struct ReadonlySlot<'a> {
+pub struct ReadonlySlot {
   page: Arc<PageRef<PAGE_SIZE>>,
-  _token: SharedToken<'a>,
 }
-impl<'a> AsRef<Page<PAGE_SIZE>> for ReadonlySlot<'a> {
+impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   #[inline]
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     &self.page
+  }
+}
+impl Clone for ReadonlySlot {
+  fn clone(&self) -> Self {
+    Self {
+      page: self.page.clone(),
+    }
   }
 }
 

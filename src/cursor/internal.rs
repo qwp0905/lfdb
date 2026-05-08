@@ -1,4 +1,4 @@
-use super::{Key, KeyRef};
+use super::{StaticKey, StaticKeyRef};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
@@ -13,9 +13,9 @@ use crate::{
  */
 #[derive(Debug)]
 pub struct InternalNode {
-  keys: Vec<Key>,
+  keys: Vec<StaticKey>,
   children: Vec<Pointer>,
-  right: Option<(Pointer, Key)>,
+  right: Option<(Pointer, StaticKey)>,
 }
 impl InternalNode {
   pub fn from_scanner(scanner: &mut PageScanner) -> Result<Self> {
@@ -60,13 +60,13 @@ impl InternalNode {
     }
     Ok(())
   }
-  pub fn initialize(key: Key, left: Pointer, right: Pointer) -> Self {
+  pub fn initialize(key: StaticKey, left: Pointer, right: Pointer) -> Self {
     Self::new(vec![key], vec![left, right], None)
   }
   pub const fn new(
-    keys: Vec<Key>,
+    keys: Vec<StaticKey>,
     children: Vec<Pointer>,
-    right: Option<(Pointer, Key)>,
+    right: Option<(Pointer, StaticKey)>,
   ) -> Self {
     Self {
       keys,
@@ -77,7 +77,7 @@ impl InternalNode {
 
   pub fn insert_or_next(
     &mut self,
-    key: &Key,
+    key: &StaticKey,
     pointer: Pointer,
   ) -> std::result::Result<(), Pointer> {
     if let Some((right, high)) = &self.right {
@@ -109,7 +109,7 @@ impl InternalNode {
       + self.keys.len() * 2
   }
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, Key)> {
+  pub fn split_if_needed(&mut self) -> Option<(InternalNode, StaticKey)> {
     let bytes_len = self.bytes_len();
     if bytes_len <= SERIALIZABLE_BYTES {
       return None;
@@ -133,7 +133,11 @@ impl InternalNode {
     ))
   }
 
-  pub fn set_right(&mut self, key: &Key, ptr: Pointer) -> Option<(Pointer, Key)> {
+  pub fn set_right(
+    &mut self,
+    key: &StaticKey,
+    ptr: Pointer,
+  ) -> Option<(Pointer, StaticKey)> {
     self.right.replace((ptr, key.clone()))
   }
 }
@@ -182,7 +186,7 @@ impl<'a> InternalNodeView<'a> {
       right,
     }
   }
-  pub fn find(&self, key: KeyRef) -> std::result::Result<Pointer, Pointer> {
+  pub fn find(&self, key: StaticKeyRef) -> std::result::Result<Pointer, Pointer> {
     if let Some((right, s, e)) = &self.right {
       if self.page.range(*s..*e) <= key {
         return Err(*right);

@@ -184,7 +184,7 @@ fn test_page_copy() {
   writer.write(&test_data).unwrap();
 
   // Create copy and verify data
-  let copied = page.copy_n(5);
+  let copied = page.copy_range(0..5);
   for (i, e) in copied.iter().enumerate() {
     assert_eq!(e, &test_data[i]);
   }

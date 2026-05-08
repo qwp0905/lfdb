@@ -139,7 +139,7 @@ impl LogBuffer {
     self.write_at(&((count & U16_MASK) as u16).to_le_bytes(), 0)
   }
   pub fn write_at(&self, record: &[u8], offset: usize) {
-    let ptr = self.entry.as_ref().as_ptr() as *mut u8;
+    let ptr = self.entry.as_ptr();
     let len = record.len();
     unsafe { copy_nonoverlapping(record.as_ptr(), ptr.add(offset), len) };
   }

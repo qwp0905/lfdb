@@ -40,7 +40,7 @@ impl PageRecorder {
     let byte_len = page.serialize_from(data)?;
     self
       .wal
-      .append_insert(tx_id, table_id, ptr, page.copy_n(byte_len))
+      .append_insert(tx_id, table_id, ptr, page.copy_range(0..byte_len))
   }
 
   pub fn log_multi<T, R>(
@@ -59,12 +59,12 @@ impl PageRecorder {
     let ptr1 = slot1.get_pointer();
     let page = slot1.as_mut();
     let byte_len = page.serialize_from(data1)?;
-    let data1 = page.copy_n(byte_len);
+    let data1 = page.copy_range(0..byte_len);
 
     let ptr2 = slot2.get_pointer();
     let page = slot2.as_mut();
     let byte_len = page.serialize_from(data2)?;
-    let data2 = page.copy_n(byte_len);
+    let data2 = page.copy_range(0..byte_len);
 
     self
       .wal

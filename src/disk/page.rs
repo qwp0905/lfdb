@@ -33,8 +33,8 @@ impl<const T: usize> Page<T> {
     Self(unsafe { alloc_zeroed(Self::LAYOUT) }, PhantomData)
   }
   #[inline(always)]
-  pub const fn as_ptr(&self) -> *const u8 {
-    self.0 as *const u8
+  pub const fn as_ptr(&self) -> *mut u8 {
+    self.0
   }
   #[inline]
   pub fn copy_from<V: AsRef<[u8]>>(&mut self, data: V) {
@@ -43,9 +43,11 @@ impl<const T: usize> Page<T> {
     unsafe { copy_nonoverlapping(data.as_ptr(), self.0, len) };
   }
   #[inline]
-  pub fn copy_n(&mut self, byte_len: usize) -> Vec<u8> {
-    let mut data = vec![0; byte_len];
-    unsafe { copy_nonoverlapping(self.0, data.as_mut_ptr(), byte_len) };
+  pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
+    let len = range.end - range.start;
+    let mut data = Vec::with_capacity(len);
+    unsafe { copy_nonoverlapping(self.0.add(range.start), data.as_mut_ptr(), len) };
+    unsafe { data.set_len(len) };
     data
   }
   #[inline]
@@ -86,7 +88,7 @@ impl<const T: usize> From<&[u8]> for Page<T> {
   fn from(value: &[u8]) -> Self {
     let page = Self::new();
     let len = value.len().min(T);
-    unsafe { copy_nonoverlapping(value.as_ptr(), page.as_ptr() as *mut u8, len) };
+    unsafe { copy_nonoverlapping(value.as_ptr(), page.as_ptr(), len) };
     page
   }
 }

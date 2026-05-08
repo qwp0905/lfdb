@@ -4,7 +4,9 @@ use std::{
   sync::Arc,
 };
 
-use super::{BTreeIndex, BTreeIterator, Key, RecordData, MAX_KEY, MAX_VALUE};
+use super::{
+  BTreeIndex, BTreeIterator, RecordData, StaticKey, VecRef, MAX_KEY, MAX_VALUE,
+};
 use crate::{
   metrics::MetricsRegistry, table::TableHandle, transaction::TxContext, Error, Result,
 };
@@ -46,7 +48,7 @@ impl<'a> Cursor<'a> {
     }
   }
 
-  pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<Vec<u8>>> {
+  pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<VecRef>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -140,9 +142,9 @@ pub struct CursorIterator<'a> {
   table: BTreeIterator<'a, &'a TxContext<'a>>,
   compaction: Option<(
     BTreeIterator<'a, &'a TxContext<'a>>,
-    Option<(Vec<u8>, Option<Vec<u8>>)>,
+    Option<(VecRef, Option<VecRef>)>,
   )>,
-  buffered: Option<(Vec<u8>, Option<Vec<u8>>)>,
+  buffered: Option<(VecRef, Option<VecRef>)>,
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(
@@ -150,8 +152,8 @@ impl<'a> CursorIterator<'a> {
     table: &'a Arc<TableHandle>,
     compaction: Option<&'a Arc<TableHandle>>,
     index: &'a BTreeIndex<&'a TxContext<'a>>,
-    start: Bound<Key>,
-    end: Bound<Key>,
+    start: Bound<StaticKey>,
+    end: Bound<StaticKey>,
   ) -> Result<Self> {
     let compaction = match compaction {
       Some(table) => Some((index.scan(table, &start, &end)?, None)),
@@ -165,7 +167,7 @@ impl<'a> CursorIterator<'a> {
       buffered: None,
     })
   }
-  pub fn try_next(&mut self) -> Result<Option<(Key, Vec<u8>)>> {
+  pub fn try_next(&mut self) -> Result<Option<(VecRef, VecRef)>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
