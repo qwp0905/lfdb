@@ -28,13 +28,13 @@ impl InternalNode {
     };
 
     let len = scanner.read_u16()? as usize;
-    let mut keys = Vec::with_capacity(len);
+    let mut keys = Vec::with_capacity(len + 1);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
       keys.push(scanner.read_n(l)?.into());
     }
 
-    let mut children = Vec::with_capacity(len + 1);
+    let mut children = Vec::with_capacity(len + 2);
     for _ in 0..=len {
       children.push(scanner.read_u64()?);
     }

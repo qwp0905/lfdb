@@ -249,10 +249,6 @@ impl<const N: usize> DiskController<N> {
   pub fn write_async(&self, pointer: Pointer, page: Arc<PageRef<N>>) -> TaskHandle<()> {
     self.write_handle.execute(&self.file, pointer, page)
   }
-  #[inline]
-  pub fn write(&self, pointer: Pointer, page: Arc<PageRef<N>>) -> Result {
-    self.write_async(pointer, page).wait()
-  }
 
   #[inline]
   pub fn fsync(&self) -> Result {
