@@ -8,8 +8,7 @@ fn test_serialize_internal() {
   let children = vec![10];
   let next = None;
   let mut page = Page::new();
-  let node =
-    BTreeNode::Internal(InternalNode::new(keys.clone(), children.clone(), next));
+  let node = BTreeNode::Internal(InternalNode::new(keys.clone(), children.clone(), next));
   page.serialize_from(&node).expect("serialize error");
 
   let d = match page.view::<BTreeNodeView>().expect("deserialize error") {

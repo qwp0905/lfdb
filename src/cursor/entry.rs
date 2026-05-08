@@ -84,7 +84,7 @@ impl DataEntry {
     }
   }
   pub fn init(version: VersionRecord) -> Self {
-    let mut versions = VecDeque::new();
+    let mut versions = VecDeque::with_capacity(1);
     versions.push_front(version);
     Self {
       next: None,
@@ -106,13 +106,6 @@ impl DataEntry {
     self.versions.iter()
   }
 
-  pub fn find<P>(&self, predicate: P) -> Option<&VersionRecord>
-  where
-    P: FnMut(&&VersionRecord) -> bool,
-  {
-    self.versions.iter().find(predicate)
-  }
-
   pub fn get_last_owner(&self) -> Option<TxId> {
     self.versions.front().map(|v| v.owner)
   }
@@ -132,19 +125,6 @@ impl DataEntry {
     let byte_len =
       POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();
     record.byte_len() + byte_len <= SERIALIZABLE_BYTES
-  }
-
-  pub fn is_empty(&self) -> bool {
-    if self.versions.is_empty() {
-      return true;
-    }
-    if self.versions.len() > 1 {
-      return false;
-    }
-    if let RecordData::Tombstone = self.versions[0].data {
-      return true;
-    }
-    false
   }
 }
 impl TypedObject for DataEntry {
@@ -183,7 +163,7 @@ impl Deserializable for DataEntry {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let next = reader.read_u64()?;
     let len = reader.read_u16()? as usize;
-    let mut versions = VecDeque::with_capacity(len);
+    let mut versions = VecDeque::with_capacity(len + 1);
     for _ in 0..len {
       let version = reader.read_u64()?;
       let owner = reader.read_u64()?;
@@ -218,10 +198,6 @@ pub struct DataChunk {
 impl DataChunk {
   pub const fn new(chunk: Vec<u8>) -> Self {
     Self { chunk }
-  }
-
-  pub fn get_data(&self) -> &[u8] {
-    &self.chunk
   }
 }
 impl TypedObject for DataChunk {

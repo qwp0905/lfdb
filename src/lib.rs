@@ -16,7 +16,7 @@ mod builder;
 pub use builder::*;
 
 mod cursor;
-pub use cursor::{Cursor, CursorIterator};
+pub use cursor::{Cursor, CursorIterator, VecRef};
 
 mod error;
 pub use error::*;

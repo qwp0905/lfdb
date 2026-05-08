@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::epoch;
 
-use super::{DataEntry, RecordData, VersionRecord};
+use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
   cache::{BlockCache, WritableSlot},
   debug,
@@ -304,7 +304,7 @@ const fn run_check(
         .read(pointer, table)?
         .for_read()
         .as_ref()
-        .deserialize::<DataEntry>()?
+        .deserialize::<DataEntryView>()?
         .is_empty(),
     )
   }

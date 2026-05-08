@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use super::{Key, KeyRef};
+use super::{StaticKey, StaticKeyRef};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
@@ -24,11 +24,11 @@ pub enum NodeFindResult {
  */
 #[derive(Debug)]
 pub struct LeafNode {
-  entries: Vec<(Key, Pointer)>,
+  entries: Vec<(StaticKey, Pointer)>,
   next: Option<Pointer>,
 }
 impl LeafNode {
-  pub const fn new(entries: Vec<(Key, Pointer)>, next: Option<Pointer>) -> Self {
+  pub const fn new(entries: Vec<(StaticKey, Pointer)>, next: Option<Pointer>) -> Self {
     Self { entries, next }
   }
 
@@ -60,11 +60,11 @@ impl LeafNode {
     self.entries.len()
   }
 
-  pub fn drain(&mut self) -> impl Iterator<Item = (Key, Pointer)> + '_ {
+  pub fn drain(&mut self) -> impl Iterator<Item = (StaticKey, Pointer)> + '_ {
     self.entries.drain(..)
   }
 
-  pub fn set_entries(&mut self, entries: Vec<(Key, Pointer)>) {
+  pub fn set_entries(&mut self, entries: Vec<(StaticKey, Pointer)>) {
     self.entries = entries;
   }
 
@@ -86,7 +86,7 @@ impl LeafNode {
   pub fn insert_and_split(
     &mut self,
     index: usize,
-    key: Key,
+    key: StaticKey,
     pointer: Pointer,
   ) -> Option<LeafNode> {
     self.entries.insert(index, (key, pointer));
@@ -106,7 +106,7 @@ impl LeafNode {
     Some(Self::new(self.entries.split_off(mid), self.next.take()))
   }
 
-  pub fn top(&self) -> &Key {
+  pub fn top(&self) -> &StaticKey {
     &self.entries[0].0
   }
 }
@@ -143,13 +143,14 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn writable(self) -> LeafNode {
-    LeafNode {
-      entries: self.get_entries().map(|(k, p)| (k.to_vec(), p)).collect(),
-      next: self.next,
+    let mut entries = Vec::with_capacity(self.entries.len() + 1);
+    for (s, e, p) in self.entries {
+      entries.push((self.page.copy_range(s..e), p))
     }
+    LeafNode::new(entries, self.next)
   }
 
-  pub fn find(&self, key: KeyRef) -> NodeFindResult {
+  pub fn find(&self, key: StaticKeyRef) -> NodeFindResult {
     match self.binary_search(key) {
       Ok(i) => NodeFindResult::Found(i, self.entries[i].2),
       Err(i) => {
@@ -165,7 +166,7 @@ impl<'a> LeafNodeView<'a> {
   }
 
   #[inline]
-  fn binary_search(&self, key: KeyRef) -> std::result::Result<usize, usize> {
+  fn binary_search(&self, key: StaticKeyRef) -> std::result::Result<usize, usize> {
     self
       .entries
       .binary_search_by(|(s, e, _)| (self.page.range(*s..*e)).cmp(key))
@@ -173,17 +174,18 @@ impl<'a> LeafNodeView<'a> {
 
   pub fn get_entries_while<'b: 'a>(
     &self,
-    end: &'b Bound<Key>,
-  ) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {
+    end: &'b Bound<StaticKey>,
+  ) -> impl Iterator<Item = (usize, usize, Pointer)> + '_ {
     let e = match end {
       Bound::Included(k) => self.binary_search(k).map(|i| i + 1).unwrap_or_else(|i| i),
       Bound::Excluded(k) => self.binary_search(k).unwrap_or_else(|i| i),
       Bound::Unbounded => self.len(),
     };
-    self.get_entries().take(e)
+    self.entries.iter().map(|(s, e, p)| (*s, *e, *p)).take(e)
   }
 
-  pub fn get_entries(&self) -> impl Iterator<Item = (KeyRef<'a>, Pointer)> + '_ {
+  #[allow(unused)]
+  pub fn get_entries(&self) -> impl Iterator<Item = (StaticKeyRef<'a>, Pointer)> + '_ {
     self
       .entries
       .iter()

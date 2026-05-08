@@ -10,7 +10,7 @@ use std::{
 };
 
 use crossbeam::channel::{unbounded, Sender};
-use lfdb::{Engine, EngineBuilder, Error};
+use lfdb::{Engine, EngineBuilder, Error, VecRef};
 use log::Log;
 use rand::rngs::StdRng;
 use rand::{rng, seq::IteratorRandom};
@@ -70,7 +70,7 @@ fn test_basic_crud() {
 
   // read within same tx
   let val = table.get(&b"key1".to_vec()).unwrap();
-  assert_eq!(val, Some(b"value1".to_vec()));
+  assert_eq!(val.as_deref(), Some(b"value1".as_slice()));
 
   // remove
   table.remove(&b"key1".to_vec()).unwrap();
@@ -102,7 +102,7 @@ fn test_commit_visibility() {
     .unwrap()
     .get(&b"hello".to_vec())
     .unwrap();
-  assert_eq!(val, Some(b"world".to_vec()));
+  assert_eq!(val.as_deref(), Some(b"world".as_slice()));
 }
 
 // ============================================================
@@ -263,8 +263,10 @@ fn test_scan_range() {
     results.push((k, v));
   }
   assert_eq!(results.len(), 4); // keys 3,4,5,6
-  assert_eq!(results[0], (vec![3], vec![30]));
-  assert_eq!(results[3], (vec![6], vec![60]));
+  assert_eq!(results[0].0, vec![3]);
+  assert_eq!(results[0].1, vec![30]);
+  assert_eq!(results[3].0, vec![6]);
+  assert_eq!(results[3].1, vec![60]);
 }
 
 #[test]
@@ -289,7 +291,8 @@ fn test_scan_all() {
   }
   assert_eq!(results.len(), 5);
   for i in 0u8..5 {
-    assert_eq!(results[i as usize], (vec![i], vec![i]));
+    assert_eq!(results[i as usize].0, vec![i]);
+    assert_eq!(results[i as usize].1, vec![i]);
   }
 }
 
@@ -315,7 +318,7 @@ fn test_overwrite() {
   let tx3 = engine.new_tx().unwrap();
   let t3 = tx3.table(TEST_TABLE).unwrap();
   let val = t3.get(&b"key".to_vec()).unwrap();
-  assert_eq!(val, Some(b"v2".to_vec()));
+  assert_eq!(val.as_deref(), Some(b"v2".as_slice()));
 }
 
 // ============================================================
@@ -428,7 +431,7 @@ fn test_snapshot_isolation() {
   let tx3 = engine.new_tx().unwrap();
   let t3 = tx3.table(TEST_TABLE).unwrap();
   let val = t3.get(&b"after".to_vec()).unwrap();
-  assert_eq!(val, Some(b"should-not-see".to_vec()));
+  assert_eq!(val.as_deref(), Some(b"should-not-see".as_slice()));
 }
 
 // ============================================================
@@ -516,7 +519,7 @@ fn test_btree_node_split_and_recovery() {
     let table = tx.table(TEST_TABLE).unwrap();
     let mut iter = table.scan::<[_]>(..).unwrap();
     let mut count = 0;
-    let mut prev_key: Option<Vec<u8>> = None;
+    let mut prev_key: Option<VecRef> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
       // keys should be in sorted order
       if let Some(ref pk) = prev_key {
@@ -563,7 +566,7 @@ fn test_btree_node_split_and_recovery() {
 
     let mut iter = table.scan::<[_]>(..).unwrap();
     let mut count = 0;
-    let mut prev_key: Option<Vec<u8>> = None;
+    let mut prev_key: Option<VecRef> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
       if let Some(ref pk) = prev_key {
         assert!(k > *pk, "keys not sorted after recovery");
@@ -725,8 +728,8 @@ fn test_process_crash_recovery() {
         let expected = format!("val-{:06}", key_idx).into_bytes();
         let val = table.get(&key).unwrap();
         assert_eq!(
-          val,
-          Some(expected),
+          val.as_deref(),
+          Some(expected.as_slice()),
           "committed key {} in {} missing after crash recovery",
           key_idx,
           table_name
@@ -804,7 +807,7 @@ fn test_hard_workload() {
   let tx = engine.new_tx().unwrap();
   for (table, key) in &keys {
     let table = tx.table(table).unwrap();
-    assert_eq!(table.get(key).unwrap(), Some(key.to_vec()))
+    assert_eq!(table.get(key).unwrap().as_deref(), Some(key.as_slice()))
   }
 
   // verify each table
@@ -893,7 +896,7 @@ fn test_heavy_gc_single_key() {
       let val = table.get(&key).unwrap();
       assert!(val.is_some(), "key should exist after heavy writes");
       let bytes = val.unwrap();
-      let stored = u32::from_le_bytes(bytes.try_into().unwrap());
+      let stored = u32::from_le_bytes(bytes.as_ref().try_into().unwrap());
       assert_eq!(stored, final_val, "final value mismatch");
     }
   }
@@ -911,7 +914,7 @@ fn test_heavy_gc_single_key() {
   let val = table.get(&key).unwrap();
   assert!(val.is_some(), "key should survive restart");
   let bytes = val.unwrap();
-  let stored = u32::from_le_bytes(bytes.try_into().unwrap());
+  let stored = u32::from_le_bytes(bytes.as_ref().try_into().unwrap());
   assert_eq!(stored, final_val, "value mismatch after restart");
 }
 
@@ -1164,7 +1167,10 @@ fn test_large_key_value_gc() {
     let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
     for i in (count / 2)..count {
-      assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
+      assert_eq!(
+        table.get(&keys[i]).unwrap().as_deref(),
+        Some(values[i].as_slice())
+      );
     }
     tx.commit().unwrap();
   }
@@ -1275,7 +1281,7 @@ fn test_drop_then_abort_keeps_table() {
   // data must remain intact
   let tx = engine.new_tx().unwrap();
   let t = tx.table(TEST_TABLE).unwrap();
-  assert_eq!(t.get(&b"k".to_vec()).unwrap(), Some(b"v".to_vec()));
+  assert_eq!(t.get(b"k").unwrap().as_deref(), Some(b"v".as_slice()));
 }
 
 // ============================================================
@@ -1335,8 +1341,8 @@ fn test_reopen_after_drop_starts_fresh() {
 
   let tx = engine.new_tx().unwrap();
   let t = tx.table(TEST_TABLE).unwrap();
-  assert_eq!(t.get(&b"k".to_vec()).unwrap(), None);
-  assert_eq!(t.get(&b"k2".to_vec()).unwrap(), Some(b"v2".to_vec()));
+  assert_eq!(t.get(b"k").unwrap(), None);
+  assert_eq!(t.get(b"k2").unwrap().as_deref(), Some(b"v2".as_slice()));
 }
 
 // ============================================================
@@ -1426,8 +1432,8 @@ fn test_drop_and_recreate_many_tables() {
     let t = tx.table(name).unwrap();
     for (k, v) in kvs.iter() {
       assert_eq!(
-        t.get(k).unwrap(),
-        Some(v.clone()),
+        t.get(k).unwrap().as_deref(),
+        Some(v.as_slice()),
         "table {} key {k:?} should hold the second-generation value",
         name,
       );
@@ -1548,10 +1554,16 @@ fn test_compaction() {
 
       let table = tx.table(TEST_TABLE).unwrap();
       for i in 0..remove_count {
-        assert_eq!(table.get(&keys[i]).unwrap(), Some(new_values[i].clone()));
+        assert_eq!(
+          table.get(&keys[i]).unwrap().as_deref(),
+          Some(new_values[i].as_slice())
+        );
       }
       for i in remove_count..count {
-        assert_eq!(table.get(&keys[i]).unwrap(), Some(values[i].clone()));
+        assert_eq!(
+          table.get(&keys[i]).unwrap().as_deref(),
+          Some(values[i].as_slice())
+        );
       }
     }
   }
@@ -1681,7 +1693,7 @@ fn test_auto_compaction() {
       let table = tx.table(name).unwrap();
 
       for (k, v) in data.iter() {
-        assert_eq!(table.get(k).unwrap(), Some(v.clone()))
+        assert_eq!(table.get(k).unwrap().as_deref(), Some(v.as_slice()))
       }
     }
   }
@@ -1697,7 +1709,11 @@ fn test_auto_compaction() {
       let mut iter = table.scan::<[_]>(..).unwrap();
 
       while let Some((k, v)) = iter.try_next().unwrap() {
-        assert_eq!(data.get(&k), Some(&v), "table {name} key {k:?} not matched");
+        assert_eq!(
+          data.get(&k as &[_]).map(|v| v as &[_]),
+          Some(&v as &[_]),
+          "table {name} key {k:?} not matched"
+        );
         c += 1
       }
 
