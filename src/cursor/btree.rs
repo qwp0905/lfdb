@@ -1,7 +1,8 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound, sync::Arc};
 
 use crate::{
-  cache::WritableSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
+  cache::WritableSlot, disk::Pointer, table::TableHandle, utils::InlineVec, wal::TxId,
+  Error, Result,
 };
 
 use crossbeam::epoch::{pin, Guard};
@@ -242,7 +243,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let entry = DataEntry::init(create_record());
     let entry_ptr = self.0.alloc_and_log(&entry, table)?;
 
-    let split = match node.insert_and_split(pos, key.to_vec(), entry_ptr) {
+    let split = match node.insert_and_split(pos, key.into(), entry_ptr) {
       Some(split) => split,
       None => {
         return self
@@ -317,7 +318,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       return Ok(RecordData::Data(data));
     }
 
-    let mut pointers = Vec::with_capacity(data.len().div_ceil(CHUNK_SIZE));
+    let mut pointers = InlineVec::with_capacity(data.len().div_ceil(CHUNK_SIZE));
     while data.len() > CHUNK_SIZE {
       let remain = data.split_off(CHUNK_SIZE);
       let chunk = DataChunk::new(data);

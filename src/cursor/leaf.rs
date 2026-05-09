@@ -4,6 +4,7 @@ use super::{StaticKey, StaticKeyRef};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
+  utils::InlineVec,
   Result,
 };
 
@@ -49,7 +50,7 @@ impl LeafNode {
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
-      let key = scanner.read_n(l)?.to_vec();
+      let key = scanner.read_n(l)?.into();
       let ptr = scanner.read_u64()?;
       entries.push((key, ptr));
     }
@@ -145,7 +146,7 @@ impl<'a> LeafNodeView<'a> {
   pub fn writable(self) -> LeafNode {
     let mut entries = Vec::with_capacity(self.entries.len() + 1);
     for (s, e, p) in self.entries {
-      entries.push((self.page.copy_range(s..e), p))
+      entries.push((InlineVec::from(self.page.range(s..e)), p))
     }
     LeafNode::new(entries, self.next)
   }

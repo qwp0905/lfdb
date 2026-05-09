@@ -10,9 +10,7 @@ pub enum BTreeNodeView<'a> {
   Leaf(LeafNodeView<'a>),
 }
 impl<'a> TypedObject for BTreeNodeView<'a> {
-  fn get_type() -> SerializeType {
-    SerializeType::BTreeNode
-  }
+  const TYPE: SerializeType = BTreeNode::TYPE;
 }
 
 impl<'a> Viewable<'a> for BTreeNodeView<'a> {
@@ -69,9 +67,7 @@ impl BTreeNode {
   }
 }
 impl TypedObject for BTreeNode {
-  fn get_type() -> SerializeType {
-    SerializeType::BTreeNode
-  }
+  const TYPE: SerializeType = SerializeType::BTreeNode;
 }
 impl Serializable for BTreeNode {
   fn write_at(&self, writer: &mut PageWriter) -> Result {

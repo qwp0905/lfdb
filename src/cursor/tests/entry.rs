@@ -1,4 +1,4 @@
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::{disk::Page, inline_vec, serialize::SerializeFrom};
 
 use super::*;
 
@@ -47,7 +47,7 @@ fn test_entry_with_tombstone_roundtrip() {
 #[test]
 fn test_entry_with_chunked_roundtrip() {
   let mut page = Page::new();
-  let pointers = vec![10, 20, 30, 500];
+  let pointers = inline_vec![10, 20, 30, 500];
   let owner = 2;
   let entry = DataEntry::init(VersionRecord::new(
     2,

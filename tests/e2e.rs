@@ -1710,8 +1710,8 @@ fn test_auto_compaction() {
 
       while let Some((k, v)) = iter.try_next().unwrap() {
         assert_eq!(
-          data.get(&k as &[_]).map(|v| v as &[_]),
-          Some(&v as &[_]),
+          data.get(&*k).map(|v| &**v),
+          Some(&*v),
           "table {name} key {k:?} not matched"
         );
         c += 1

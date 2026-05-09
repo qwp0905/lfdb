@@ -5,6 +5,7 @@ use crate::{
   serialize::{
     Deserializable, Serializable, SerializeType, TypedObject, SERIALIZABLE_BYTES,
   },
+  utils::InlineVec,
   wal::{TxId, TX_ID_BYTES},
   Error,
 };
@@ -27,7 +28,7 @@ pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 #[derive(Debug)]
 pub enum RecordData {
   Data(Vec<u8>),
-  Chunked(Vec<Pointer>),
+  Chunked(InlineVec<Pointer, 2>),
   Tombstone,
 }
 impl RecordData {
@@ -128,9 +129,7 @@ impl DataEntry {
   }
 }
 impl TypedObject for DataEntry {
-  fn get_type() -> SerializeType {
-    SerializeType::DataEntry
-  }
+  const TYPE: SerializeType = SerializeType::DataEntry;
 }
 impl Serializable for DataEntry {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
@@ -175,7 +174,7 @@ impl Deserializable for DataEntry {
         1 => RecordData::Tombstone,
         2 => {
           let l = reader.read()? as usize;
-          let mut pointers = Vec::with_capacity(l);
+          let mut pointers = InlineVec::with_capacity(l);
           for _ in 0..l {
             pointers.push(reader.read_u64()?);
           }
@@ -201,9 +200,7 @@ impl DataChunk {
   }
 }
 impl TypedObject for DataChunk {
-  fn get_type() -> SerializeType {
-    SerializeType::DataChunk
-  }
+  const TYPE: SerializeType = SerializeType::DataChunk;
 }
 impl Serializable for DataChunk {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {

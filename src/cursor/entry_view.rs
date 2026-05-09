@@ -1,13 +1,15 @@
+use super::{DataChunk, DataEntry};
 use crate::{
   disk::{Page, Pointer},
   serialize::{Deserializable, SerializeType, TypedObject, Viewable},
+  utils::InlineVec,
   wal::TxId,
   Error,
 };
 
 pub enum RecordDataView {
   Data(usize, usize),
-  Chunked(Vec<Pointer>),
+  Chunked(InlineVec<Pointer, 2>),
   Tombstone,
 }
 
@@ -27,8 +29,8 @@ impl VersionRecordView {
 }
 
 pub struct DataEntryView {
-  next: Option<Pointer>,
   versions: Vec<VersionRecordView>,
+  next: Option<Pointer>,
 }
 impl DataEntryView {
   pub fn find<P>(&self, predicate: P) -> Option<&VersionRecordView>
@@ -56,9 +58,7 @@ impl DataEntryView {
   }
 }
 impl TypedObject for DataEntryView {
-  fn get_type() -> SerializeType {
-    SerializeType::DataEntry
-  }
+  const TYPE: SerializeType = DataEntry::TYPE;
 }
 impl Deserializable for DataEntryView {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
@@ -77,7 +77,7 @@ impl Deserializable for DataEntryView {
         1 => RecordDataView::Tombstone,
         2 => {
           let l = reader.read()? as usize;
-          let mut pointers = Vec::with_capacity(l);
+          let mut pointers = InlineVec::with_capacity(l);
           for _ in 0..l {
             pointers.push(reader.read_u64()?);
           }
@@ -85,7 +85,7 @@ impl Deserializable for DataEntryView {
         }
         _ => return Err(Error::InvalidFormat("invalid type for data version record")),
       };
-      versions.push(VersionRecordView::new(owner, version, data))
+      versions.push(VersionRecordView::new(owner, version, data));
     }
     Ok(Self {
       versions,
@@ -105,9 +105,7 @@ impl<'a> DataChunkView<'a> {
   }
 }
 impl<'a> TypedObject for DataChunkView<'a> {
-  fn get_type() -> SerializeType {
-    SerializeType::DataChunk
-  }
+  const TYPE: SerializeType = DataChunk::TYPE;
 }
 impl<'a> Viewable<'a> for DataChunkView<'a> {
   fn read_from(

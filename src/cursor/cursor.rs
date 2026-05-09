@@ -83,7 +83,7 @@ impl<'a> Cursor<'a> {
     self
       .metrics
       .operation_insert
-      .measure(|| self.index.insert(key, value, table))
+      .measure(|| self.index.insert(key.into(), value, table))
       .map(|_| ())
   }
 
@@ -102,7 +102,7 @@ impl<'a> Cursor<'a> {
         .measure(|| {
           self
             .index
-            .insert_record(key.as_ref().to_vec(), RecordData::Tombstone, table)
+            .insert_record(key.as_ref().into(), RecordData::Tombstone, table)
         })
         .map(|_| ());
     }
@@ -131,8 +131,8 @@ impl<'a> Cursor<'a> {
       &self.table,
       self.compaction.as_ref(),
       &self.index,
-      range.start_bound().map(|k| k.as_ref().to_vec()),
-      range.end_bound().map(|k| k.as_ref().to_vec()),
+      range.start_bound().map(|k| k.as_ref().into()),
+      range.end_bound().map(|k| k.as_ref().into()),
     )
   }
 }

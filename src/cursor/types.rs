@@ -1,8 +1,8 @@
 use std::ops::Deref;
 
-use crate::cache::ReadonlySlot;
+use crate::{cache::ReadonlySlot, utils::InlineVec};
 
-pub type StaticKey = Vec<u8>;
+pub type StaticKey = InlineVec<u8, 16>;
 pub type StaticKeyRef<'a> = &'a [u8];
 
 enum Type {
