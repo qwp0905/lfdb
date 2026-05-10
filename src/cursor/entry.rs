@@ -128,9 +128,7 @@ impl DataEntry {
   }
 }
 impl TypedObject for DataEntry {
-  fn get_type() -> SerializeType {
-    SerializeType::DataEntry
-  }
+  const TYPE: SerializeType = SerializeType::DataEntry;
 }
 impl Serializable for DataEntry {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
@@ -201,9 +199,7 @@ impl DataChunk {
   }
 }
 impl TypedObject for DataChunk {
-  fn get_type() -> SerializeType {
-    SerializeType::DataChunk
-  }
+  const TYPE: SerializeType = SerializeType::DataChunk;
 }
 impl Serializable for DataChunk {
   fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
