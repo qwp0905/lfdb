@@ -2,13 +2,12 @@ use std::{
   cell::UnsafeCell,
   mem::MaybeUninit,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
   thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::{utils::ToArc, Error, Result};
+use crate::{utils::SArc, Error, Result};
 
 /**
  * Creates a single-use channel pair (Oneshot, OneshotFulfill).
@@ -16,7 +15,7 @@ use crate::{utils::ToArc, Error, Result};
  * The receiver parks until the sender fulfills the value or disconnects.
  */
 pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = OneshotInner::new().to_arc();
+  let inner = SArc::new(OneshotInner::new());
   (Oneshot(inner.clone()), OneshotFulfill(inner))
 }
 
@@ -54,7 +53,7 @@ impl<T> OneshotInner<T> {
   }
 }
 
-pub struct Oneshot<T>(Arc<OneshotInner<T>>);
+pub struct Oneshot<T>(SArc<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn wait(self) -> Result<T> {
     // Register the caller thread before checking state. If fulfill() runs
@@ -83,7 +82,7 @@ impl<T> Drop for Oneshot<T> {
   }
 }
 
-pub struct OneshotFulfill<T>(Arc<OneshotInner<T>>);
+pub struct OneshotFulfill<T>(SArc<OneshotInner<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
     let value = self.0.get_value_mut();

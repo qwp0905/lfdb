@@ -1,13 +1,12 @@
 use std::{
   mem::ManuallyDrop,
   ops::{Deref, DerefMut},
-  sync::Arc,
 };
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
 use super::Page;
-use crate::utils::ToArc;
+use crate::utils::SArc;
 
 /**
  * A handle to a pooled Page. The page is always present — ManuallyDrop
@@ -15,17 +14,17 @@ use crate::utils::ToArc;
  */
 pub struct PageRef<const N: usize> {
   page: ManuallyDrop<Page<N>>,
-  store: Arc<ArrayQueue<Page<N>>>,
+  store: SArc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PageRef<N> {
-  const fn from_exists(store: Arc<ArrayQueue<Page<N>>>, page: Page<N>) -> Self {
+  const fn from_exists(store: SArc<ArrayQueue<Page<N>>>, page: Page<N>) -> Self {
     Self {
       page: ManuallyDrop::new(page),
       store,
     }
   }
 
-  fn new(store: Arc<ArrayQueue<Page<N>>>) -> Self {
+  fn new(store: SArc<ArrayQueue<Page<N>>>) -> Self {
     Self::from_exists(store, Page::new())
   }
 }
@@ -57,12 +56,12 @@ impl<const N: usize> Drop for PageRef<N> {
  * Dropped pages are returned to the pool; excess pages beyond capacity are freed.
  */
 pub struct PagePool<const N: usize> {
-  store: Arc<ArrayQueue<Page<N>>>,
+  store: SArc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PagePool<N> {
   pub fn new(cap: usize) -> Self {
     Self {
-      store: ArrayQueue::new(cap).to_arc(),
+      store: SArc::new(ArrayQueue::new(cap)),
     }
   }
 

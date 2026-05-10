@@ -20,43 +20,43 @@ use crate::{
 };
 
 type ThreadArg<const N: usize> = (
-  Arc<File>,
-  Arc<WriteQueue<N>>,
-  Arc<AtomicBool>,
-  Arc<ExclusivePin>,
-  Arc<AtomicBool>,
+  SArc<File>,
+  SArc<WriteQueue<N>>,
+  SArc<AtomicBool>,
+  SArc<ExclusivePin>,
+  SArc<AtomicBool>,
 );
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
 type WriteTask<const N: usize> = (Pointer, SArc<PageRef<N>>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
-  queue: Arc<WriteQueue<N>>,
-  occupied: Arc<AtomicBool>,
+  queue: SArc<WriteQueue<N>>,
+  occupied: SArc<AtomicBool>,
   thread: Arc<WriteThread<N>>,
   /**
    * Pin to protect file I/O
    */
-  pin: Arc<ExclusivePin>,
+  pin: SArc<ExclusivePin>,
   /**
    * Flag to check for file existence a little faster.
    */
-  closed: Arc<AtomicBool>,
+  closed: SArc<AtomicBool>,
 }
 impl<const N: usize> WriteHandle<N> {
   fn new(thread: Arc<WriteThread<N>>) -> Self {
     Self {
-      queue: SegQueue::new().to_arc(),
-      occupied: AtomicBool::new(false).to_arc(),
+      queue: SArc::new(SegQueue::new()),
+      occupied: SArc::new(AtomicBool::new(false)),
       thread,
-      closed: AtomicBool::new(false).to_arc(),
-      pin: ExclusivePin::new().to_arc(),
+      closed: SArc::new(AtomicBool::new(false)),
+      pin: SArc::new(ExclusivePin::new()),
     }
   }
 
   fn execute(
     &self,
-    file: &Arc<File>,
+    file: &SArc<File>,
     pointer: Pointer,
     page: SArc<PageRef<N>>,
   ) -> TaskHandle<()> {
@@ -205,7 +205,7 @@ impl<const N: usize> IOPool<N> {
  * via a background thread for efficient sequential disk access.
  */
 pub struct DiskController<const N: usize> {
-  file: Arc<File>,
+  file: SArc<File>,
   write_handle: WriteHandle<N>,
   metrics: Arc<MetricsRegistry>,
 }
@@ -226,8 +226,8 @@ impl<const N: usize> DiskController<N> {
       .write(true)
       .create(true)
       .direct_io(path)
-      .map_err(Error::IO)?
-      .to_arc();
+      .map_err(Error::IO)
+      .map(SArc::new)?;
 
     Ok(Self {
       file,

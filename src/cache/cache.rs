@@ -18,11 +18,11 @@ pub struct BlockCacheConfig {
 
 pub struct BlockCache {
   table: LRUTable,
-  cached_blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
+  cached_blocks: Arc<[MaybeUninit<CachedBlock>]>,
   /**
    * pin to protect each block in cached blocks from eviction
    */
-  pins: Arc<Vec<ExclusivePin>>,
+  pins: Arc<[ExclusivePin]>,
   /**
    * each dirty bits are protected by each block's latch
    */
@@ -44,8 +44,9 @@ impl BlockCache {
     let mut pins = Vec::with_capacity(block_cap);
     pins.resize_with(block_cap, ExclusivePin::new);
 
-    let cached_blocks = blocks.to_arc();
-    let pins = pins.to_arc();
+    let cached_blocks: Arc<[MaybeUninit<CachedBlock>]> =
+      Arc::from(blocks.into_boxed_slice());
+    let pins: Arc<[ExclusivePin]> = Arc::from(pins.into_boxed_slice());
     let dirty = AtomicBitmap::new(block_cap).to_arc();
 
     let dirty_tables = DirtyTables::new().to_arc();
@@ -164,8 +165,8 @@ const PRE_FLUSH_THRESHOLD: usize = 100;
 const MAX_BATCHING: usize = 16;
 
 const fn handle_flush(
-  blocks: Arc<Vec<MaybeUninit<CachedBlock>>>,
-  pins: Arc<Vec<ExclusivePin>>,
+  blocks: Arc<[MaybeUninit<CachedBlock>]>,
+  pins: Arc<[ExclusivePin]>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(Option<()>) -> Result {

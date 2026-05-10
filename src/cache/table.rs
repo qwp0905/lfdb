@@ -115,8 +115,8 @@ pub enum Acquired<'a> {
 }
 
 pub struct LRUTable {
-  shards: Vec<Mutex<Shard>>,
-  offset: Vec<BlockId>,
+  shards: Box<[Mutex<Shard>]>,
+  offset: Box<[BlockId]>,
   hasher: RandomState,
 }
 impl LRUTable {
@@ -134,8 +134,8 @@ impl LRUTable {
     }
 
     Self {
-      shards,
-      offset,
+      shards: shards.into_boxed_slice(),
+      offset: offset.into_boxed_slice(),
       hasher: RandomState::new(),
     }
   }
