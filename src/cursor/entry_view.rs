@@ -1,3 +1,4 @@
+use super::{DataChunk, DataEntry};
 use crate::{
   disk::{Page, Pointer},
   serialize::{Deserializable, SerializeType, TypedObject, Viewable},
@@ -56,9 +57,7 @@ impl DataEntryView {
   }
 }
 impl TypedObject for DataEntryView {
-  fn get_type() -> SerializeType {
-    SerializeType::DataEntry
-  }
+  const TYPE: SerializeType = DataEntry::TYPE;
 }
 impl Deserializable for DataEntryView {
   fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
@@ -105,9 +104,7 @@ impl<'a> DataChunkView<'a> {
   }
 }
 impl<'a> TypedObject for DataChunkView<'a> {
-  fn get_type() -> SerializeType {
-    SerializeType::DataChunk
-  }
+  const TYPE: SerializeType = DataChunk::TYPE;
 }
 impl<'a> Viewable<'a> for DataChunkView<'a> {
   fn read_from(
