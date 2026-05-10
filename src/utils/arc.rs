@@ -2,7 +2,7 @@
 
 use std::{
   ops::Deref,
-  sync::atomic::{AtomicUsize, Ordering},
+  sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
 #[repr(C)]
@@ -50,7 +50,7 @@ impl<T: ?Sized> Drop for SArc<T> {
       return;
     }
 
-    std::sync::atomic::fence(Ordering::Acquire);
+    fence(Ordering::Acquire);
     let _ = unsafe { Box::from_raw(self.pointer) };
   }
 }
