@@ -15,7 +15,7 @@ use crate::{
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata, META_TABLE_ID},
   thread::{once, BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{ToArc, ToBox},
+  utils::{SArc, ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
   Result,
 };
@@ -38,7 +38,7 @@ impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<crate::cache::CacheSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -175,7 +175,10 @@ impl TreeManager {
     block_cache: &BlockCache,
     version_visibility: &VersionVisibility,
     tables: &TableMapper,
-  ) -> Result<(Vec<Arc<TableHandle>>, Vec<(MutationHandle, MutationHandle)>)> {
+  ) -> Result<(
+    Vec<SArc<TableHandle>>,
+    Vec<(MutationHandle, MutationHandle)>,
+  )> {
     let mut handles = vec![];
     let mut compactions = vec![];
     let meta_table = tables.meta_table();
@@ -265,7 +268,7 @@ impl TreeManager {
     self.after_compaction.close();
   }
 
-  pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+  pub fn compact(&self, old: SArc<TableHandle>, new: MutationHandle, version: TxId) {
     self
       .wait_compaction
       .dispatch(CompactTask::Wait(old, new, version));
@@ -418,7 +421,7 @@ fn run_merge_leaf(
 fn release_orphaned(
   block_cache: &BlockCache,
   gc: &GarbageCollector,
-  table: Arc<TableHandle>,
+  table: SArc<TableHandle>,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache

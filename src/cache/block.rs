@@ -1,18 +1,16 @@
-use std::sync::Arc;
-
 use super::{Latch, LatchGuard};
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandle,
   thread::TaskHandle,
-  utils::AtomicArc,
+  utils::{AtomicArc, SArc},
 };
 
 pub struct CachedBlock {
   page: AtomicArc<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
-  handle: Arc<TableHandle>,
+  handle: SArc<TableHandle>,
   latch: Latch,
 }
 impl CachedBlock {
@@ -20,7 +18,7 @@ impl CachedBlock {
   pub fn new(
     pointer: Pointer,
     page: PageRef<PAGE_SIZE>,
-    handle: Arc<TableHandle>,
+    handle: SArc<TableHandle>,
   ) -> Self {
     Self {
       page: AtomicArc::new(page),
@@ -36,7 +34,7 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub fn load_page(&self) -> Arc<PageRef<PAGE_SIZE>> {
+  pub fn load_page(&self) -> SArc<PageRef<PAGE_SIZE>> {
     self.page.load()
   }
   pub fn store(&self, page: PageRef<PAGE_SIZE>) {
@@ -61,7 +59,7 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub const fn handle(&self) -> &Arc<TableHandle> {
+  pub const fn handle(&self) -> &SArc<TableHandle> {
     &self.handle
   }
 }

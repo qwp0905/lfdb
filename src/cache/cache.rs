@@ -8,7 +8,7 @@ use crate::{
   metrics::MetricsRegistry,
   table::TableHandle,
   thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
-  utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
+  utils::{AtomicBitmap, ExclusivePin, SArc, SharedToken, ToArc, ToBox},
 };
 
 pub struct BlockCacheConfig {
@@ -87,7 +87,7 @@ impl BlockCache {
     )
   }
 
-  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CacheSlot<'_>> {
+  fn __read(&self, pointer: Pointer, handle: SArc<TableHandle>) -> Result<CacheSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
@@ -122,7 +122,7 @@ impl BlockCache {
   pub fn read(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: SArc<TableHandle>,
   ) -> Result<CacheSlot<'_>> {
     self
       .metrics

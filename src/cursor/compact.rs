@@ -14,13 +14,14 @@ use crate::{
   thread::BackgroundThread,
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
+  utils::SArc,
   wal::{TxId, RESERVED_TX, WAL},
   warn, Result,
 };
 
 pub enum CompactTask {
-  New(Arc<TableHandle>),
-  Wait(Arc<TableHandle>, MutationHandle, TxId),
+  New(SArc<TableHandle>),
+  Wait(SArc<TableHandle>, MutationHandle, TxId),
 }
 
 struct MiniTx<'a> {
@@ -101,7 +102,7 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<crate::cache::CacheSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -111,7 +112,7 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     &self,
     slot: &mut WritableSlot<'_>,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     self.recorder.serialize_and_log(
       self.state.get_id(),
@@ -123,7 +124,7 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     Ok(())
   }
 
-  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
+  fn when_update_entry(&self, entry: Pointer, table: &SArc<TableHandle>) {
     self.gc.mark(table.clone(), entry);
   }
 }
@@ -151,7 +152,7 @@ impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<crate::cache::CacheSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -171,7 +172,7 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<crate::cache::CacheSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -181,14 +182,14 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
     &self,
     slot: &mut WritableSlot<'_>,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     self
       .recorder
       .serialize_and_log(RESERVED_TX, table.metadata().get_id(), slot, data)
   }
 
-  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
+  fn when_update_entry(&self, entry: Pointer, table: &SArc<TableHandle>) {
     self.gc.mark(table.clone(), entry)
   }
 }
@@ -307,7 +308,7 @@ fn do_compaction(
   wal: &WAL,
   recorder: &PageRecorder,
   gc: &GarbageCollector,
-  meta_table: &Arc<TableHandle>,
+  meta_table: &SArc<TableHandle>,
   old_table: MutationHandle,
   new: MutationHandle,
   after_compaction: &Arc<

@@ -1,16 +1,13 @@
 use std::{
   mem::{forget, transmute},
   ops::Deref,
-  sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc,
-  },
+  sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use super::TableMetadata;
 use crate::{
   disk::{DiskController, FreeList, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, SArc},
   Result,
 };
 
@@ -39,23 +36,6 @@ impl TableHandle {
       redirection_count: AtomicU32::new(0),
       closed: AtomicBool::new(false),
     }
-  }
-
-  pub fn try_pin<'a>(self: &'a Arc<Self>) -> Option<PinnedHandle<'a>> {
-    let token = self.pin.try_shared()?;
-    Some(PinnedHandle {
-      handle: self,
-      _token: token,
-    })
-  }
-
-  pub fn try_mutation(self: &Arc<Self>) -> Option<MutationHandle> {
-    let token = self.pin.try_exclusive()?;
-    // transmute allowed since arc guarantees the lifespan
-    Some(MutationHandle {
-      handle: self.clone(),
-      _token: unsafe { transmute(token) },
-    })
   }
 
   #[inline]
@@ -109,14 +89,32 @@ impl TableHandle {
       / self.free_list.file_len() as f64
   }
 }
+impl SArc<TableHandle> {
+  pub fn try_pin<'a>(&'a self) -> Option<PinnedHandle<'a>> {
+    let token = self.pin.try_shared()?;
+    Some(PinnedHandle {
+      handle: self,
+      _token: token,
+    })
+  }
+
+  pub fn try_mutation(&self) -> Option<MutationHandle> {
+    let token = self.pin.try_exclusive()?;
+    // transmute allowed since arc guarantees the lifespan
+    Some(MutationHandle {
+      handle: self.clone(),
+      _token: unsafe { transmute(token) },
+    })
+  }
+}
 
 pub struct PinnedHandle<'a> {
-  handle: &'a Arc<TableHandle>,
+  handle: &'a SArc<TableHandle>,
   _token: SharedToken<'a>,
 }
 impl<'a> PinnedHandle<'a> {
   #[inline]
-  pub fn handle(&self) -> Arc<TableHandle> {
+  pub fn handle(&self) -> SArc<TableHandle> {
     self.handle.clone()
   }
 }
@@ -131,16 +129,16 @@ impl<'a> Deref for PinnedHandle<'a> {
 }
 
 pub struct MutationHandle {
-  handle: Arc<TableHandle>,
+  handle: SArc<TableHandle>,
   _token: ExclusiveToken<'static>,
 }
 impl MutationHandle {
   #[inline]
-  pub fn handle(&self) -> &Arc<TableHandle> {
+  pub fn handle(&self) -> &SArc<TableHandle> {
     &self.handle
   }
 
-  pub fn into_inner(self) -> Arc<TableHandle> {
+  pub fn into_inner(self) -> SArc<TableHandle> {
     self.handle
   }
 }

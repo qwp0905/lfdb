@@ -26,3 +26,6 @@ mod log;
 
 mod atomic;
 pub use atomic::*;
+
+mod arc;
+pub use arc::*;

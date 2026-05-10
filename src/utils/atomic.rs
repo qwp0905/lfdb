@@ -1,26 +1,25 @@
 use std::{
   cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
 };
 
 use crossbeam::utils::Backoff;
 
-use super::ExclusivePin;
+use super::{ExclusivePin, SArc};
 
 pub struct AtomicArc<T> {
-  value: UnsafeCell<Arc<T>>,
+  value: UnsafeCell<SArc<T>>,
   lock: ExclusivePin,
 }
 impl<T> AtomicArc<T> {
   pub fn new(value: T) -> Self {
     Self {
-      value: UnsafeCell::new(Arc::new(value)),
+      value: UnsafeCell::new(SArc::new(value)),
       lock: ExclusivePin::new(),
     }
   }
 
-  pub fn load(&self) -> Arc<T> {
+  pub fn load(&self) -> SArc<T> {
     let backoff = Backoff::new();
     loop {
       if let Some(_token) = self.lock.try_shared() {
@@ -30,8 +29,8 @@ impl<T> AtomicArc<T> {
     }
   }
 
-  pub fn swap(&self, value: T) -> Arc<T> {
-    let value = Arc::new(value);
+  pub fn swap(&self, value: T) -> SArc<T> {
+    let value = SArc::new(value);
     let backoff = Backoff::new();
     loop {
       if let Some(_token) = self.lock.try_exclusive() {

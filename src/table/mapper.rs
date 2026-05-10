@@ -9,7 +9,7 @@ use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{IOPool, PAGE_SIZE},
   metrics::MetricsRegistry,
-  utils::{ShortenedRwLock, ToArc},
+  utils::{ShortenedRwLock, SArc},
   Error, Result,
 };
 
@@ -28,9 +28,9 @@ pub struct TableConfig {
 }
 
 pub struct TableMapper {
-  open_handles: RwLock<HashMap<TableId, Arc<TableHandle>>>,
+  open_handles: RwLock<HashMap<TableId, SArc<TableHandle>>>,
   base_path: PathBuf,
-  metadata: Arc<TableHandle>,
+  metadata: SArc<TableHandle>,
   io_pool: IOPool<PAGE_SIZE>,
   last_table_id: AtomicTableId,
   is_new: bool,
@@ -46,25 +46,24 @@ impl TableMapper {
     let metadata = TableHandle::new(
       &TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
       disk,
-    )
-    .to_arc();
+    );
 
     Ok(Self {
       open_handles: Default::default(),
       base_path: config.base_path,
-      metadata,
+      metadata: SArc::new(metadata),
       io_pool,
       last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
       is_new,
     })
   }
 
-  pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<SArc<TableHandle>> {
     let disk = self.io_pool.open_controller(table_meta.get_path())?;
-    Ok(TableHandle::new(table_meta, disk).to_arc())
+    Ok(SArc::new(TableHandle::new(table_meta, disk)))
   }
 
-  pub fn replay<Iter: Iterator<Item = Arc<TableHandle>>>(&self, iter: Iter) -> Result {
+  pub fn replay<Iter: Iterator<Item = SArc<TableHandle>>>(&self, iter: Iter) -> Result {
     let dir = read_dir(&self.base_path).map_err(Error::IO)?;
     let mut exists = HashSet::new();
     for entry in dir {
@@ -98,11 +97,11 @@ impl TableMapper {
     self.is_new
   }
 
-  pub fn get(&self, id: TableId) -> Option<Arc<TableHandle>> {
+  pub fn get(&self, id: TableId) -> Option<SArc<TableHandle>> {
     self.open_handles.rl().get(&id).map(|handle| handle.clone())
   }
 
-  pub fn insert(&self, handle: Arc<TableHandle>) {
+  pub fn insert(&self, handle: SArc<TableHandle>) {
     self
       .open_handles
       .wl()
@@ -117,11 +116,11 @@ impl TableMapper {
     TableMetadata::new(id, str.to_string(), to_path(&self.base_path, id))
   }
 
-  pub fn meta_table(&self) -> Arc<TableHandle> {
+  pub fn meta_table(&self) -> SArc<TableHandle> {
     self.metadata.clone()
   }
 
-  pub fn get_all(&self) -> Vec<Arc<TableHandle>> {
+  pub fn get_all(&self) -> Vec<SArc<TableHandle>> {
     self
       .open_handles
       .rl()

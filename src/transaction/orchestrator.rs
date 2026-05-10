@@ -13,7 +13,7 @@ use crate::{
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
-  utils::ToArc,
+  utils::{SArc, ToArc},
   wal::{TxId, WALConfig, WALSegment, WAL},
 };
 
@@ -116,7 +116,7 @@ impl TxOrchestrator {
   pub fn fetch(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: SArc<TableHandle>,
   ) -> Result<CacheSlot<'_>> {
     self.block_cache.read(pointer, handle)
   }
@@ -136,7 +136,7 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
+  pub fn mark_gc(&self, handle: SArc<TableHandle>, pointer: Pointer) {
     self.gc.mark(handle, pointer);
   }
 
@@ -177,15 +177,15 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn get_table(&self, table_id: TableId) -> Option<Arc<TableHandle>> {
+  pub fn get_table(&self, table_id: TableId) -> Option<SArc<TableHandle>> {
     self.tables.get(table_id)
   }
   #[inline]
-  pub fn commit_table(&self, table: Arc<TableHandle>) {
+  pub fn commit_table(&self, table: SArc<TableHandle>) {
     self.tables.insert(table);
   }
   #[inline]
-  pub fn open_table(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn open_table(&self, table_meta: &TableMetadata) -> Result<SArc<TableHandle>> {
     self.tables.create_handle(table_meta)
   }
   #[inline]
@@ -194,15 +194,20 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn drop_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
+  pub fn drop_table(&self, table: SArc<TableHandle>, tx_id: TxId, version: TxId) {
     self.gc.release_table(table, tx_id, version);
   }
   #[inline]
-  pub fn get_metadata_table(&self) -> Arc<TableHandle> {
+  pub fn get_metadata_table(&self) -> SArc<TableHandle> {
     self.tables.meta_table()
   }
   #[inline]
-  pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+  pub fn compact_table(
+    &self,
+    old: SArc<TableHandle>,
+    new: MutationHandle,
+    version: TxId,
+  ) {
     self.tree_manager.compact(old, new, version);
   }
 

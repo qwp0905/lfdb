@@ -1,7 +1,4 @@
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   cache::WritableSlot,
@@ -9,6 +6,7 @@ use crate::{
   disk::Pointer,
   serialize::Serializable,
   table::TableHandle,
+  utils::SArc,
   wal::TxId,
   Result,
 };
@@ -63,7 +61,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<crate::cache::CacheSlot<'_>> {
     self.orchestrator.fetch(pointer, table.clone())
   }
@@ -73,7 +71,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     &self,
     slot: &mut WritableSlot<'_>,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     self.orchestrator.serialize_and_log(
       self.state.get_id(),
@@ -85,7 +83,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     Ok(())
   }
 
-  fn when_update_entry(&self, pointer: Pointer, table: &Arc<TableHandle>) {
+  fn when_update_entry(&self, pointer: Pointer, table: &SArc<TableHandle>) {
     self.orchestrator.mark_gc(table.clone(), pointer);
   }
 }

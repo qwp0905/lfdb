@@ -1,14 +1,14 @@
 use std::{
   cmp::Ordering,
   ops::{Bound, RangeBounds},
-  sync::Arc,
 };
 
 use super::{
   BTreeIndex, BTreeIterator, RecordData, StaticKey, VecRef, MAX_KEY, MAX_VALUE,
 };
 use crate::{
-  metrics::MetricsRegistry, table::TableHandle, transaction::TxContext, Error, Result,
+  metrics::MetricsRegistry, table::TableHandle, transaction::TxContext, utils::SArc,
+  Error, Result,
 };
 
 /**
@@ -17,13 +17,13 @@ use crate::{
 pub struct Cursor<'a> {
   context: &'a TxContext<'a>,
   index: BTreeIndex<&'a TxContext<'a>>,
-  table: Arc<TableHandle>,
-  compaction: Option<Arc<TableHandle>>,
+  table: SArc<TableHandle>,
+  compaction: Option<SArc<TableHandle>>,
   metrics: &'a MetricsRegistry,
 }
 impl<'a> Cursor<'a> {
   pub fn initialize(
-    table: Arc<TableHandle>,
+    table: SArc<TableHandle>,
     context: &'a TxContext<'a>,
     metrics: &'a MetricsRegistry,
   ) -> Result<Self> {
@@ -34,8 +34,8 @@ impl<'a> Cursor<'a> {
   }
 
   pub const fn new(
-    table: Arc<TableHandle>,
-    compaction: Option<Arc<TableHandle>>,
+    table: SArc<TableHandle>,
+    compaction: Option<SArc<TableHandle>>,
     context: &'a TxContext<'a>,
     metrics: &'a MetricsRegistry,
   ) -> Self {
@@ -149,8 +149,8 @@ pub struct CursorIterator<'a> {
 impl<'a> CursorIterator<'a> {
   pub fn new(
     context: &'a TxContext,
-    table: &'a Arc<TableHandle>,
-    compaction: Option<&'a Arc<TableHandle>>,
+    table: &'a SArc<TableHandle>,
+    compaction: Option<&'a SArc<TableHandle>>,
     index: &'a BTreeIndex<&'a TxContext<'a>>,
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,

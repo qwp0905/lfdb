@@ -16,7 +16,7 @@ use crate::{
   table::{TableHandle, TableId, TableMapper},
   thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, ToArc, ToBox},
+  utils::{DoubleBuffer, SArc, ToArc, ToBox},
   wal::{TxId, RESERVED_TX},
 };
 
@@ -35,8 +35,8 @@ const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
  * a dangling pointer if Release ran first.
  */
 enum GcPointer {
-  Trim(Arc<TableHandle>, Pointer),
-  Release(Arc<TableHandle>, Pointer),
+  Trim(SArc<TableHandle>, Pointer),
+  Release(SArc<TableHandle>, Pointer),
 }
 
 /**
@@ -49,10 +49,10 @@ enum GcPointer {
  */
 pub struct GarbageCollector {
   version_visibility: Arc<VersionVisibility>,
-  check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
-  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
+  check: Arc<dyn BackgroundThread<(SArc<TableHandle>, Pointer), Result<bool>>>,
+  entry: Arc<dyn BackgroundThread<(SArc<TableHandle>, Pointer), Result>>,
   queue: Arc<DoubleBuffer<GcPointer>>,
-  table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+  table: Box<dyn BackgroundThread<(SArc<TableHandle>, TxId, TxId)>>,
 }
 impl GarbageCollector {
   pub fn run(&self) -> Result {
@@ -61,7 +61,7 @@ impl GarbageCollector {
 
     debug!("{} data will check version in this scope.", queue.len());
     let mut waiting = Vec::new();
-    let mut release = BTreeMap::<TableId, (Arc<TableHandle>, BTreeSet<Pointer>)>::new();
+    let mut release = BTreeMap::<TableId, (SArc<TableHandle>, BTreeSet<Pointer>)>::new();
     let mut dedup = HashSet::new();
     while let Some(ptr) = queue.pop() {
       match ptr {
@@ -105,25 +105,25 @@ impl GarbageCollector {
     Ok(())
   }
 
-  pub fn mark(&self, table: Arc<TableHandle>, pointer: Pointer) {
+  pub fn mark(&self, table: SArc<TableHandle>, pointer: Pointer) {
     self.queue.push(GcPointer::Trim(table, pointer))
   }
-  pub fn lazy_release(&self, table: Arc<TableHandle>, pointer: Pointer) {
+  pub fn lazy_release(&self, table: SArc<TableHandle>, pointer: Pointer) {
     self.queue.push(GcPointer::Release(table, pointer))
   }
-  pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
+  pub fn release_table(&self, table: SArc<TableHandle>, tx_id: TxId, version: TxId) {
     self.table.dispatch((table, tx_id, version));
   }
 
   pub fn batch_check_empty(
     &self,
-    pointers: Vec<(Arc<TableHandle>, Pointer)>,
+    pointers: Vec<(SArc<TableHandle>, Pointer)>,
   ) -> BatchTaskHandle<Result<bool>> {
     self.check.execute_batch(pointers)
   }
   pub fn check_empty(
     &self,
-    table: Arc<TableHandle>,
+    table: SArc<TableHandle>,
     pointer: Pointer,
   ) -> TaskHandle<Result<bool>> {
     self.check.execute((table, pointer))
@@ -184,7 +184,7 @@ const fn run_entry(
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
   queue: Arc<DoubleBuffer<GcPointer>>,
-) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
+) -> impl Fn((SArc<TableHandle>, Pointer)) -> Result {
   move |(table, pointer)| {
     if table.is_closed() {
       return Ok(());
@@ -297,7 +297,7 @@ const fn run_entry(
 
 const fn run_check(
   block_cache: Arc<BlockCache>,
-) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result<bool> {
+) -> impl Fn((SArc<TableHandle>, Pointer)) -> Result<bool> {
   move |(table, pointer)| {
     Ok(
       block_cache
@@ -313,7 +313,7 @@ const fn run_check(
 const fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-) -> impl FnMut(Option<(Arc<TableHandle>, TxId, TxId)>) {
+) -> impl FnMut(Option<(SArc<TableHandle>, TxId, TxId)>) {
   let mut tables = Vec::new();
   let mut unpinned = Vec::new();
   let mut unreachable = Vec::new();

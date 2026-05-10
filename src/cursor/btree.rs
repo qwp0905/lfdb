@@ -1,7 +1,8 @@
-use std::{collections::VecDeque, mem::replace, ops::Bound, sync::Arc};
+use std::{collections::VecDeque, mem::replace, ops::Bound};
 
 use crate::{
-  cache::WritableSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
+  cache::WritableSlot, disk::Pointer, table::TableHandle, utils::SArc, wal::TxId, Error,
+  Result,
 };
 
 use crossbeam::epoch::{pin, Guard};
@@ -23,7 +24,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   fn get_entry(
     &self,
     key: StaticKeyRef,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<Option<(Guard, Pointer)>> {
     let mut ptr = self
       .0
@@ -52,7 +53,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   fn read_chunk(
     policy: &Policy,
     pointers: &[Pointer],
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<VecRef> {
     let mut data = Vec::new();
 
@@ -68,7 +69,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   pub fn get(
     &self,
     key: StaticKeyRef,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<Option<Option<VecRef>>> {
     let (mut _guard, ptr) = match self.get_entry(key, table)? {
       Some(v) => v,
@@ -100,7 +101,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     Ok(None)
   }
 
-  pub fn contains(&self, key: StaticKeyRef, table: &Arc<TableHandle>) -> Result<bool> {
+  pub fn contains(&self, key: StaticKeyRef, table: &SArc<TableHandle>) -> Result<bool> {
     let (mut _guard, ptr) = match self.get_entry(key, table)? {
       Some(v) => v,
       None => return Ok(false),
@@ -135,7 +136,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   fn find_leaf_stack(
     &self,
     key: StaticKeyRef,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<(Pointer, Vec<Pointer>)> {
     let (mut ptr, height) = {
       let header = self
@@ -167,7 +168,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
 
   pub fn scan(
     &self,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<BTreeIterator<'_, Policy>> {
@@ -176,7 +177,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
 }
 
 impl<Policy: WritablePolicy> BTreeIndex<Policy> {
-  pub fn initialize(&self, table: &Arc<TableHandle>) -> Result {
+  pub fn initialize(&self, table: &SArc<TableHandle>) -> Result {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
 
     {
@@ -194,7 +195,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     evicted_key: StaticKey,
     evicted_ptr: Pointer,
     current: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<Option<(StaticKey, Pointer)>> {
     let mut ptr = current;
 
@@ -233,7 +234,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     pos: usize,
     slot: &mut WritableSlot,
     mut node: LeafNode,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
     create_record: F,
   ) -> Result<Option<(StaticKey, Pointer)>>
   where
@@ -266,7 +267,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     mut split_key: StaticKey,
     mut split_pointer: Pointer,
     mut stack: Vec<Pointer>,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     // CAS loop: multiple concurrent splits may race to update the root.
     loop {
@@ -311,7 +312,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   fn create_record(
     &self,
     mut data: Vec<u8>,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<RecordData> {
     if data.len() < LARGE_VALUE {
       return Ok(RecordData::Data(data));
@@ -334,7 +335,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     entry_ptr: Pointer,
     record: VersionRecord,
     coupling: T,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
     drop(coupling);
@@ -363,7 +364,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     Ok(())
   }
 
-  pub fn apply_snapshot(&self, snapshot: KVSnapshot, table: &Arc<TableHandle>) -> Result {
+  pub fn apply_snapshot(
+    &self,
+    snapshot: KVSnapshot,
+    table: &SArc<TableHandle>,
+  ) -> Result {
     let key = snapshot.key;
     let record = VersionRecord::new(
       snapshot.owner,
@@ -402,7 +407,7 @@ where
     &self,
     key: StaticKey,
     record: RecordData,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
@@ -431,11 +436,11 @@ where
     &self,
     key: StaticKey,
     data: Vec<u8>,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     self.insert_record(key, self.create_record(data, table)?, table)
   }
-  pub fn remove(&self, key: StaticKeyRef, table: &Arc<TableHandle>) -> Result {
+  pub fn remove(&self, key: StaticKeyRef, table: &SArc<TableHandle>) -> Result {
     self.insert_record_if_matched(key, RecordData::Tombstone, table)
   }
 
@@ -447,7 +452,7 @@ where
     entry_ptr: Pointer,
     data: RecordData,
     coupling: WritableSlot,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
     drop(coupling);
@@ -483,7 +488,7 @@ where
     &self,
     key: StaticKeyRef,
     data: Vec<u8>,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     self.insert_record_if_matched(key, self.create_record(data, table)?, table)
   }
@@ -492,7 +497,7 @@ where
     &self,
     key: StaticKeyRef,
     record: RecordData,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result {
     let mut ptr = self
       .0
@@ -538,7 +543,7 @@ pub struct KVSnapshot {
 
 pub struct BTreeIterator<'a, Policy> {
   policy: &'a Policy,
-  table: Arc<TableHandle>,
+  table: SArc<TableHandle>,
   buffered: VecDeque<(VecRef, Option<(Buffered, TxId, TxId)>)>,
   next: Option<Pointer>,
   end: Bound<StaticKey>,
@@ -550,7 +555,7 @@ where
 {
   pub fn open(
     policy: &'a Policy,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<Self> {
@@ -623,7 +628,7 @@ where
   fn __find(
     policy: &'a Policy,
     ptr: Pointer,
-    table: &Arc<TableHandle>,
+    table: &SArc<TableHandle>,
   ) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
     let mut next = Some(ptr);
 

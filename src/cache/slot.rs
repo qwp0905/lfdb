@@ -1,9 +1,9 @@
-use std::{mem::ManuallyDrop, sync::Arc};
+use std::mem::ManuallyDrop;
 
 use super::{BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
-  utils::{AtomicBitmap, SharedToken},
+  utils::{AtomicBitmap, SharedToken, SArc},
 };
 
 /**
@@ -106,7 +106,7 @@ impl<'a> WritableSlot<'a> {
 }
 
 pub struct ReadonlySlot {
-  page: Arc<PageRef<PAGE_SIZE>>,
+  page: SArc<PageRef<PAGE_SIZE>>,
 }
 impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   #[inline]

@@ -1,10 +1,11 @@
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use super::{TxContext, TxOrchestrator, TxSnapshot, TxState};
 use crate::{
   cursor::Cursor,
   metrics::MetricsRegistry,
   table::{MutationHandle, TableHandle, TableMetadata, MAX_TABLE_NAME_LEN},
+  utils::SArc,
   Error, Result,
 };
 
@@ -17,9 +18,9 @@ pub struct Transaction<'a> {
   context: TxContext<'a>,
   metrics: &'a MetricsRegistry,
   tx_start: Option<Instant>,
-  created_tables: Vec<Arc<TableHandle>>,
-  dropped_tables: Vec<Arc<TableHandle>>,
-  compacted_tables: Vec<(Arc<TableHandle>, MutationHandle)>,
+  created_tables: Vec<SArc<TableHandle>>,
+  dropped_tables: Vec<SArc<TableHandle>>,
+  compacted_tables: Vec<(SArc<TableHandle>, MutationHandle)>,
 }
 impl<'a> Transaction<'a> {
   pub fn new(
@@ -44,8 +45,8 @@ impl<'a> Transaction<'a> {
   #[inline]
   fn open_cursor(
     &self,
-    table: Arc<TableHandle>,
-    compaction: Option<Arc<TableHandle>>,
+    table: SArc<TableHandle>,
+    compaction: Option<SArc<TableHandle>>,
   ) -> Cursor<'_> {
     Cursor::new(table, compaction, &self.context, &self.metrics)
   }
