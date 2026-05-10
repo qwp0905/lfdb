@@ -45,8 +45,9 @@ impl<const T: usize> Page<T> {
   #[inline]
   pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
     let len = range.end - range.start;
-    let mut data = vec![0; len];
+    let mut data = Vec::with_capacity(len);
     unsafe { copy_nonoverlapping(self.0.add(range.start), data.as_mut_ptr(), len) };
+    unsafe { data.set_len(len) };
     data
   }
   #[inline]
