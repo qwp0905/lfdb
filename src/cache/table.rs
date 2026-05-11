@@ -160,12 +160,9 @@ impl LRUTable {
       offset.push(i * cap_per_shard);
     }
 
-    let shards = shards.into_boxed_slice();
-    let offset = offset.into_boxed_slice();
-
     Self {
-      shards,
-      offset,
+      shards: shards.into_boxed_slice(),
+      offset: offset.into_boxed_slice(),
       hasher: RandomState::new(),
     }
   }
@@ -221,7 +218,7 @@ impl LRUTable {
 
       let block = TempBlock::new(pointer).to_arc();
       let block_ref = TempBlockRef::exclusive(&block).unwrap();
-      shard.temporary.insert(key, block_ref.get_block());
+      shard.temporary.insert(key, block);
       return Peeked::DiskRead(block_ref, TempGuard::new(s, key));
     }
   }
