@@ -171,13 +171,8 @@ impl LRUTable {
   }
   fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {
     let h = self.hasher.hash_one(key);
-    #[cfg(not(target_pointer_width = "64"))]
-    let i = h as usize & self.shards.len();
-
     // Lemire fast modulo
-    #[cfg(target_pointer_width = "64")]
     let i = (((h & U32_MASK) * self.shards.len() as u64) >> 32) as usize;
-
     let shard = &self.shards[i];
     let offset = self.offset[i];
     (h, shard, offset)
