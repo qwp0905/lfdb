@@ -79,6 +79,15 @@ where
     Some(bucket.get_value())
   }
 
+  pub fn peek<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<&V>
+  where
+    K: Borrow<Q>,
+    Q: Hash + Eq,
+  {
+    let ptr = self.entries.get(hash, equivalent(key))?;
+    Some(ptr.borrow_unsafe().get_value())
+  }
+
   /**
    * Must be called after every insertion into the new segment to maintain
    * the 5:3 (new:old) ratio. Demotes entries from the tail of the new
