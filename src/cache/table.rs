@@ -1,22 +1,24 @@
 use std::{
-  collections::BTreeSet,
+  collections::{BTreeMap, BTreeSet},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::Mutex,
+  sync::{Arc, Mutex},
 };
 
 use crossbeam::utils::Backoff;
 
-use super::LRUShard;
+use super::{LRUShard, TempBlock, TempBlockRef};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
 };
 
 type Key = (TableId, Pointer);
 
 pub type BlockId = usize;
+
+const U32_MASK: u64 = u32::MAX as u64;
 
 /**
  * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
@@ -26,7 +28,8 @@ pub type BlockId = usize;
  */
 struct Shard {
   lru: LRUShard<Key, BlockId>,
-  eviction: BTreeSet<Key>, // evicting pointers
+  eviction: BTreeSet<Key>,                  // evicting pointers
+  temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
 }
 
 /**
@@ -109,14 +112,37 @@ impl<'a> Drop for EvictionGuard<'a> {
   }
 }
 
+pub struct TempGuard<'a> {
+  shard: &'a Mutex<Shard>,
+  key: Key,
+}
+impl<'a> TempGuard<'a> {
+  #[inline]
+  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
+    Self { shard, key }
+  }
+}
+impl<'a> Drop for TempGuard<'a> {
+  #[inline]
+  fn drop(&mut self) {
+    self.shard.l().temporary.remove(&self.key);
+  }
+}
+
+pub enum Peeked<'a> {
+  Hit(BlockId, SharedToken<'a>),
+  Temp(TempBlockRef<SharedToken<'a>>),
+  DiskRead(TempBlockRef<ExclusiveToken<'a>>, TempGuard<'a>),
+}
 pub enum Acquired<'a> {
   Hit(BlockId, SharedToken<'a>),
+  Temp(TempBlockRef<SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 
 pub struct LRUTable {
-  shards: Vec<Mutex<Shard>>,
-  offset: Vec<BlockId>,
+  shards: Box<[Mutex<Shard>]>,
+  offset: Box<[BlockId]>,
   hasher: RandomState,
 }
 impl LRUTable {
@@ -128,23 +154,73 @@ impl LRUTable {
       let shard = Shard {
         lru: LRUShard::new(cap_per_shard),
         eviction: BTreeSet::new(),
+        temporary: BTreeMap::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
     }
 
     Self {
-      shards,
-      offset,
+      shards: shards.into_boxed_slice(),
+      offset: offset.into_boxed_slice(),
       hasher: RandomState::new(),
     }
   }
   fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {
     let h = self.hasher.hash_one(key);
-    let i = h as usize % self.shards.len();
+    // Lemire fast modulo
+    let i = (((h & U32_MASK) * self.shards.len() as u64) >> 32) as usize;
     let shard = &self.shards[i];
     let offset = self.offset[i];
     (h, shard, offset)
+  }
+
+  pub fn peek<'a, F>(
+    &'a self,
+    table_id: TableId,
+    pointer: Pointer,
+    get_pin: F,
+  ) -> Peeked<'a>
+  where
+    F: Fn(BlockId) -> &'a ExclusivePin,
+  {
+    let key = (table_id, pointer);
+    let (hash, s, _) = self.get_shard(key);
+    let backoff = Backoff::new();
+
+    loop {
+      let mut shard = s.l();
+      if shard.eviction.contains(&key) {
+        drop(shard);
+        backoff.snooze();
+        continue;
+      }
+
+      if let Some(&fid) = shard.lru.peek(&key, hash) {
+        if let Some(token) = get_pin(fid).try_shared() {
+          return Peeked::Hit(fid, token);
+        }
+
+        drop(shard);
+        backoff.snooze();
+        continue;
+      }
+
+      if let Some(block) = shard.temporary.get(&key) {
+        if let Some(block_ref) = TempBlockRef::shared(block) {
+          return Peeked::Temp(block_ref);
+        }
+
+        drop(shard);
+        backoff.snooze();
+        continue;
+      }
+
+      let block = TempBlock::new(pointer).to_arc();
+      let block_ref = TempBlockRef::exclusive(&block).unwrap();
+      shard.temporary.insert(key, block);
+      return Peeked::DiskRead(block_ref, TempGuard::new(s, key));
+    }
   }
 
   /**
@@ -187,6 +263,16 @@ impl LRUTable {
       if let Some(&fid) = shard.lru.get(&key, hash) {
         if let Some(token) = get_pin(fid).try_shared() {
           return Acquired::Hit(fid, token);
+        }
+
+        drop(shard);
+        backoff.snooze();
+        continue;
+      }
+
+      if let Some(block) = shard.temporary.get(&key) {
+        if let Some(block_ref) = TempBlockRef::shared(block) {
+          return Acquired::Temp(block_ref);
         }
 
         drop(shard);

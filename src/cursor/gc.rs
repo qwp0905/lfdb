@@ -218,7 +218,7 @@ const fn run_entry(
     while let Some(ptr) = next.take() {
       if max_found {
         let mut entry = block_cache
-          .read(ptr, table.handle())?
+          .peek(ptr, table.handle())?
           .for_read()
           .as_ref()
           .deserialize::<DataEntry>()?;
@@ -229,7 +229,7 @@ const fn run_entry(
         continue;
       }
 
-      let mut slot = block_cache.read(ptr, table.handle())?.for_lazy_write();
+      let mut slot = block_cache.peek(ptr, table.handle())?.for_lazy_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -280,7 +280,7 @@ const fn run_entry(
       };
 
       let next_entry = block_cache
-        .read(next_ptr, table.handle())?
+        .peek(next_ptr, table.handle())?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?;
@@ -301,7 +301,7 @@ const fn run_check(
   move |(table, pointer)| {
     Ok(
       block_cache
-        .read(pointer, table)?
+        .peek(pointer, table)?
         .for_read()
         .as_ref()
         .deserialize::<DataEntryView>()?
