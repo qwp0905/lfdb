@@ -1,19 +1,19 @@
-use std::ops::Deref;
+use std::{ops::Deref, sync::Arc};
 
-use crate::cache::ReadonlySlot;
+use crate::disk::{PageRef, PAGE_SIZE};
 
 pub type StaticKey = Vec<u8>;
 pub type StaticKeyRef<'a> = &'a [u8];
 
 enum Type {
-  Refed(ReadonlySlot, usize, usize),
+  Refed(Arc<PageRef<PAGE_SIZE>>, usize, usize),
   Copied(Vec<u8>),
 }
 
 pub struct VecRef(Type);
 impl VecRef {
-  pub fn refed(slot: &ReadonlySlot, start: usize, end: usize) -> Self {
-    Self(Type::Refed(slot.clone(), start, end))
+  pub fn refed(page: Arc<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
+    Self(Type::Refed(page, start, end))
   }
   pub fn copied(data: Vec<u8>) -> Self {
     Self(Type::Copied(data))
@@ -71,7 +71,7 @@ impl Ord for VecRef {
 impl Clone for VecRef {
   fn clone(&self) -> Self {
     match &self.0 {
-      Type::Refed(slot, s, e) => Self::refed(slot, *s, *e),
+      Type::Refed(page, s, e) => Self::refed(page.clone(), *s, *e),
       Type::Copied(data) => Self::copied(data.clone()),
     }
   }
