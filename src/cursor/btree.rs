@@ -85,7 +85,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
         entry.find(|&record| self.0.is_visible(record.owner, record.version))
       {
         return Ok(Some(match &record.data {
-          RecordDataView::Data(s, e) => Some(VecRef::refed(&slot, *s, *e)),
+          RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
           RecordDataView::Chunked(pointers) => {
             Some(Self::read_chunk(&self.0, pointers, table)?)
           }
@@ -598,7 +598,7 @@ where
             count += 1;
 
             if let Some(found) = Self::__find(policy, p, table)? {
-              buffered.push_back((VecRef::refed(&slot, s, e), found));
+              buffered.push_back((VecRef::refed(slot.page(), s, e), found));
             }
           }
 
@@ -636,7 +636,7 @@ where
       {
         return Ok(Some(match &record.data {
           RecordDataView::Data(s, e) => Some((
-            Buffered::Data(VecRef::refed(&slot, *s, *e)),
+            Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
             record.owner,
             record.version,
           )),
@@ -678,7 +678,9 @@ where
     for (s, e, p) in node.get_entries_while(&self.end) {
       count += 1;
       if let Some(found) = self.find_value(p)? {
-        self.buffered.push_back((VecRef::refed(&slot, s, e), found))
+        self
+          .buffered
+          .push_back((VecRef::refed(slot.page(), s, e), found))
       }
     }
 
