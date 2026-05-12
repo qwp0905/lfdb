@@ -14,17 +14,17 @@ use crate::{
 };
 
 /**
- * A handle to a block cache page, abstracting over LRU blocks and temp pages.
+ * A handle to a block cache page, abstracting over cached blocks and temp pages.
  *
  * Callers only need to call for_read() or for_write() — the distinction between
  * Page and Temp is an internal detail. Dirty tracking and disk writes are handled
  * by the block cache itself when the slot is dropped.
  */
-pub struct CacheSlot<'a> {
+pub struct CachedSlot<'a> {
   slot: SlotType<'a>,
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
-impl<'a> CacheSlot<'a> {
+impl<'a> CachedSlot<'a> {
   pub fn hit(
     block: &'a CachedBlock,
     dirty: &'a AtomicBitmap,

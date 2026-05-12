@@ -102,7 +102,7 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::cache::CacheSlot<'_>> {
+  ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
 }
@@ -152,7 +152,7 @@ impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::cache::CacheSlot<'_>> {
+  ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.peek(pointer, table.clone())
   }
 }
@@ -172,7 +172,7 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::cache::CacheSlot<'_>> {
+  ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.peek(pointer, table.clone())
   }
 }

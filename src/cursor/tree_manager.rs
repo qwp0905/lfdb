@@ -39,7 +39,7 @@ impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::cache::CacheSlot<'_>> {
+  ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.peek(pointer, table.clone())
   }
 }

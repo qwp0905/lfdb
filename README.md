@@ -138,7 +138,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
          │        │          │          │         │
 ┌────────▼──────┐ │ ┌────────▼───────┐  │ ┌───────▼───────┐
 │  Block Cache  │ │ │  TableMapper   │  │ │    Garbage    │
-│  2-tier LRU   │ │ │  ┌───────────┐ │  │ │   Collector   │
+│    S3-FIFO    │ │ │  ┌───────────┐ │  │ │   Collector   │
 │  sharded lock │ │ │  │TableHandle│ │  │ │   2-process   │
 └───────────────┘ │ │  │ FreeList  │ │  │ └───────────────┘
                   │ │  │ DiskCtrl  │ │  │

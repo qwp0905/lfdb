@@ -64,7 +64,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<crate::cache::CacheSlot<'_>> {
+  ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.fetch(pointer, table.clone())
   }
 }
