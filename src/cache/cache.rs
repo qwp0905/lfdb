@@ -2,7 +2,9 @@ use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
-use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable, Peeked, TempBlock};
+use super::{
+  Acquired, CachedBlock, CachedSlot, DirtyTables, MappingTable, Peeked, TempBlock,
+};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -19,7 +21,7 @@ pub struct BlockCacheConfig {
 }
 
 pub struct BlockCache {
-  table: LRUTable,
+  table: MappingTable,
   cached_blocks: Arc<[MaybeUninit<CachedBlock>]>,
   /**
    * pin to protect each block in cached blocks from eviction
@@ -72,7 +74,7 @@ impl BlockCache {
     Ok(Self {
       cached_blocks,
       pins,
-      table: LRUTable::new(config.shard_count, block_cap),
+      table: MappingTable::new(config.shard_count, block_cap),
       dirty_blocks: dirty,
       page_pool,
       pre_flush,
@@ -83,8 +85,8 @@ impl BlockCache {
   }
 
   #[inline]
-  fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
-    CacheSlot::hit(
+  fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
+    CachedSlot::hit(
       unsafe { self.cached_blocks[id].assume_init_ref() },
       &self.dirty_blocks,
       id,
@@ -97,13 +99,13 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>> {
+  ) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let (block_ref, guard) = match self.table.peek(table_id, pointer, |id| &self.pins[id])
     {
       Peeked::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
       Peeked::Temp(block_ref) => {
-        return Ok(CacheSlot::temp(
+        return Ok(CachedSlot::temp(
           block_ref,
           &self.temp_queue,
           &self.dirty_tables,
@@ -117,7 +119,7 @@ impl BlockCache {
     let mut page = self.page_pool.acquire();
     handle.disk().read(pointer, &mut page)?;
     block_ref.init(page, handle);
-    Ok(CacheSlot::temp(
+    Ok(CachedSlot::temp(
       block_ref.downgrade(),
       &self.temp_queue,
       &self.dirty_tables,
@@ -126,7 +128,7 @@ impl BlockCache {
     ))
   }
 
-  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CacheSlot<'_>> {
+  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
@@ -134,7 +136,7 @@ impl BlockCache {
         return Ok(self.cache_slot(block_id, token));
       }
       Acquired::Temp(block_ref) => {
-        return Ok(CacheSlot::temp(
+        return Ok(CachedSlot::temp(
           block_ref,
           &self.temp_queue,
           &self.dirty_tables,
@@ -171,7 +173,7 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>> {
+  ) -> Result<CachedSlot<'_>> {
     self
       .metrics
       .block_cache_read
