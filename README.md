@@ -34,7 +34,7 @@ let users = tx.table("users")?;
 
 users.insert(b"key1".to_vec(), b"value1".to_vec())?;
 
-let value = users.get(b"key1")?; // returns Option<Vec<u8>>
+let value = users.get(b"key1")?; // returns Option<VecRef> similar to a slice.
 
 users.remove(b"key1")?;
 
