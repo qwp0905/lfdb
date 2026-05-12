@@ -126,31 +126,13 @@ where
     }
   }
 
-  pub fn get<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<&V>
-  where
-    K: Borrow<Q>,
-    Q: Hash + Eq,
-  {
-    let entry = self
-      .table
-      .get_mut(hash, equivalent(key))?
-      .borrow_mut_unsafe();
-    match &mut entry.state {
-      State::Small { freq } | State::Main { freq } => {
-        *freq = (*freq + 1).min(MAX_FREQ);
-        Some(unsafe { entry.value.assume_init_ref() })
-      }
-      State::Ghost | State::Tombstone => None,
-    }
-  }
-
-  pub fn reserve_key<S, R, F>(
+  pub fn get_or_reserve<S, R, F>(
     &mut self,
-    key: K,
+    key: &K,
     hash: u64,
     hash_builder: &S,
     evict: F,
-  ) -> std::result::Result<Reserved<K, V, R>, ()>
+  ) -> std::result::Result<GetOrReserve<'_, K, V, R>, ()>
   where
     K: Clone,
     S: BuildHasher,
@@ -158,29 +140,30 @@ where
   {
     match self.table.find_or_find_insert_slot(
       hash,
-      equivalent(&key),
+      equivalent(key),
       make_hasher(hash_builder),
     ) {
       Ok(bucket) => {
         let entry = unsafe { bucket.as_ref() }.borrow_mut_unsafe();
         match entry.get_state_mut() {
-          State::Small { .. } | State::Main { .. } => {
-            unreachable!("must check before reserve")
+          State::Small { freq } | State::Main { freq } => {
+            *freq = (*freq + 1).min(MAX_FREQ);
+            Ok(GetOrReserve::Hit(unsafe { entry.value.assume_init_ref() }))
           }
           State::Ghost => {
             let evicted = self.evict_main(hash_builder, evict)?;
 
-            let new_entry = CacheEntry::new_main(key);
+            let new_entry = CacheEntry::new_main(key.clone());
             let ptr = Box::into_raw(Box::new(new_entry));
             let old = unsafe { bucket.as_ptr().replace(ptr) };
             old.borrow_mut_unsafe().state = State::Tombstone;
 
             self.main.push_back(ptr);
             self.main_count += 1;
-            Ok(Reserved::new(
+            Ok(GetOrReserve::Reserved(Reserved::new(
               evicted,
               ptr.borrow_mut_unsafe().value.as_mut_ptr(),
-            ))
+            )))
           }
           State::Tombstone => unreachable!(),
         }
@@ -188,16 +171,16 @@ where
       Err(slot) => {
         let evicted = self.evict_small(hash_builder, evict)?;
 
-        let entry = CacheEntry::new_small(key);
+        let entry = CacheEntry::new_small(key.clone());
         let ptr = Box::into_raw(Box::new(entry));
         unsafe { self.table.insert_in_slot(hash, slot, ptr) };
 
         self.small.push_back(ptr);
         self.small_count += 1;
-        Ok(Reserved::new(
+        Ok(GetOrReserve::Reserved(Reserved::new(
           evicted,
           ptr.borrow_mut_unsafe().value.as_mut_ptr(),
-        ))
+        )))
       }
     }
   }
@@ -390,6 +373,11 @@ impl<K, V> Drop for CacheShard<K, V> {
       let _ = unsafe { Box::from_raw(ptr) };
     }
   }
+}
+
+pub enum GetOrReserve<'a, K, V, R> {
+  Hit(&'a V),
+  Reserved(Reserved<K, V, R>),
 }
 
 pub struct Reserved<K, V, R> {

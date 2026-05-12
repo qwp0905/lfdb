@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheShard, TempBlock, TempBlockRef};
+use super::{CacheShard, GetOrReserve, TempBlock, TempBlockRef};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -199,9 +199,9 @@ impl MappingTable {
         continue;
       }
 
-      if let Some(&fid) = shard.inner.peek(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Peeked::Hit(fid, token);
+      if let Some(block) = shard.temporary.get(&key) {
+        if let Some(block_ref) = TempBlockRef::shared(block) {
+          return Peeked::Temp(block_ref);
         }
 
         drop(shard);
@@ -209,9 +209,9 @@ impl MappingTable {
         continue;
       }
 
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Peeked::Temp(block_ref);
+      if let Some(&fid) = shard.inner.peek(&key, hash) {
+        if let Some(token) = get_pin(fid).try_shared() {
+          return Peeked::Hit(fid, token);
         }
 
         drop(shard);
@@ -261,16 +261,6 @@ impl MappingTable {
         continue;
       }
 
-      if let Some(&fid) = shard.inner.get(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Acquired::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
       if let Some(block) = shard.temporary.get(&key) {
         if let Some(block_ref) = TempBlockRef::shared(block) {
           return Acquired::Temp(block_ref);
@@ -283,9 +273,17 @@ impl MappingTable {
 
       let mut reserved = match shard
         .inner
-        .reserve_key(key, hash, hasher, |&bid| get_pin(bid).try_exclusive())
+        .get_or_reserve(&key, hash, hasher, |&bid| get_pin(bid).try_exclusive())
       {
-        Ok(v) => v,
+        Ok(GetOrReserve::Hit(&bid)) => {
+          if let Some(token) = get_pin(bid).try_shared() {
+            return Acquired::Hit(bid, token);
+          }
+          drop(shard);
+          backoff.snooze();
+          continue;
+        }
+        Ok(GetOrReserve::Reserved(reserved)) => reserved,
         Err(_) => {
           drop(shard);
           backoff.snooze();
