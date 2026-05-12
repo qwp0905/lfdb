@@ -319,8 +319,7 @@ where
     while self.table.len() - self.len() >= self.ghost_cap {
       let ptr = self.ghost.pop_front().unwrap_or_else(|| unreachable!());
       match ptr.borrow_unsafe().get_state() {
-        State::Small { .. } => unreachable!(),
-        State::Main { .. } => {}
+        State::Main { .. } | State::Small { .. } => unreachable!(),
         State::Ghost => {
           let entry = unsafe { Box::from_raw(ptr) };
           let key = entry.get_key();
