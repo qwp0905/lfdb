@@ -111,7 +111,7 @@ where
       ghost_cap: main_cap,
     }
   }
-  pub fn peek<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<&V>
+  pub fn peek<Q: ?Sized>(&self, key: &Q, hash: u64) -> Option<&V>
   where
     K: Borrow<Q>,
     Q: Hash + Eq,
