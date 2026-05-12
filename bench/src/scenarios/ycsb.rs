@@ -65,19 +65,22 @@ fn spawn_workers(
       let e = engine.clone();
       let done = done.clone();
       let c = c.clone();
-      std::thread::spawn(move || {
-        while let Ok(op) = rx.recv() {
-          match op {
-            Op::Get(k) => e.get(TABLE, &k),
-            Op::Insert(k, v) => e.insert(TABLE, k, v),
-            Op::Scan(start, end) => e.scan(TABLE, &start, &end),
-            Op::ReadModifyWrite(k, v) => e.read_modify_write(TABLE, k, v),
+      std::thread::Builder::new()
+        .name(format!("worker"))
+        .spawn(move || {
+          while let Ok(op) = rx.recv() {
+            match op {
+              Op::Get(k) => e.get(TABLE, &k),
+              Op::Insert(k, v) => e.insert(TABLE, k, v),
+              Op::Scan(start, end) => e.scan(TABLE, &start, &end),
+              Op::ReadModifyWrite(k, v) => e.read_modify_write(TABLE, k, v),
+            }
+            if c.fetch_sub(1, Ordering::Release) == 1 {
+              done.send(()).unwrap();
+            }
           }
-          if c.fetch_sub(1, Ordering::Release) == 1 {
-            done.send(()).unwrap();
-          }
-        }
-      })
+        })
+        .unwrap()
     })
     .collect();
   (tx, c, threads)
