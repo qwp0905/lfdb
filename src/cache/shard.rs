@@ -257,21 +257,22 @@ where
         None => unreachable!(),
       };
 
-      match ptr.borrow_mut_unsafe().get_state_mut() {
+      let entry = ptr.borrow_mut_unsafe();
+      match entry.get_state_mut() {
         State::Main { freq } => {
           if *freq > 0 {
             *freq -= 1;
             self.main.push_back(ptr);
             continue;
           } else {
-            let reserved =
-              match evict(unsafe { ptr.borrow_unsafe().value.assume_init_ref() }) {
-                Some(v) => v,
-                None => {
-                  self.main.push_back(ptr);
-                  return Err(());
-                }
-              };
+            let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
+              Some(v) => v,
+              None => {
+                self.main.push_back(ptr);
+                return Err(());
+              }
+            };
+
             let entry = unsafe { Box::from_raw(ptr) };
             let key = entry.key;
             self
