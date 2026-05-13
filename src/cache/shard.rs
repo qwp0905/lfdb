@@ -62,6 +62,9 @@ impl<K, V> CacheEntry<K, V> {
   fn get_state_mut(&mut self) -> &mut State {
     &mut self.state
   }
+  fn set_state(&mut self, state: State) {
+    self.state = state;
+  }
 }
 
 const MAX_FREQ: u8 = 3;
@@ -151,7 +154,7 @@ where
           let new_entry = CacheEntry::new_main(key.clone());
           let ptr = Box::into_raw(Box::new(new_entry));
           let old = unsafe { bucket.as_ptr().replace(ptr) };
-          old.borrow_mut_unsafe().state = State::Tombstone;
+          old.borrow_mut_unsafe().set_state(State::Tombstone);
 
           self.main.push_back(ptr);
           self.main_count += 1;
@@ -202,7 +205,7 @@ where
               }
             };
 
-            entry.state = State::Main { freq: 0 };
+            entry.set_state(State::Main { freq: 0 });
             self.main.push_back(ptr);
             self.small_count -= 1;
             self.main_count += 1;
@@ -218,7 +221,7 @@ where
             };
 
             let value = unsafe { entry.value.assume_init_read() };
-            entry.state = State::Ghost;
+            entry.set_state(State::Ghost);
             self.evict_ghost(hasher);
             self.ghost.push_back(ptr);
             self.small_count -= 1;
@@ -323,18 +326,18 @@ where
     match entry.get_state_mut() {
       State::Main { .. } => {
         let value = unsafe { entry.value.assume_init_read() };
-        entry.state = State::Tombstone;
+        entry.set_state(State::Tombstone);
         self.main_count -= 1;
         Some(value)
       }
       State::Small { .. } => {
         let value = unsafe { entry.value.assume_init_read() };
-        entry.state = State::Tombstone;
+        entry.set_state(State::Tombstone);
         self.small_count -= 1;
         Some(value)
       }
       State::Ghost => {
-        entry.state = State::Tombstone;
+        entry.set_state(State::Tombstone);
         None
       }
       State::Tombstone => unreachable!(),
