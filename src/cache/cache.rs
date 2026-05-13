@@ -1,8 +1,6 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
-use crossbeam::queue::SegQueue;
-
-use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable, Peeked, TempBlock};
+use super::{Acquired, CacheSlot, CachedBlock, DirtyTables, LRUTable};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -33,7 +31,6 @@ pub struct BlockCache {
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
-  temp_queue: Arc<SegQueue<Arc<TempBlock>>>,
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
@@ -52,7 +49,6 @@ impl BlockCache {
     let dirty = AtomicBitmap::new(block_cap).to_arc();
 
     let dirty_tables = DirtyTables::new().to_arc();
-    let temp_queue = SegQueue::new().to_arc();
 
     let pre_flush = WorkBuilder::new()
       .name("block cache pre-flush")
@@ -64,7 +60,6 @@ impl BlockCache {
           pins.clone(),
           dirty.clone(),
           dirty_tables.clone(),
-          temp_queue.clone(),
         ),
       )
       .to_box();
@@ -78,13 +73,12 @@ impl BlockCache {
       pre_flush,
       metrics,
       dirty_tables,
-      temp_queue,
     })
   }
 
   #[inline]
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CacheSlot<'a> {
-    CacheSlot::hit(
+    CacheSlot::new(
       unsafe { self.cached_blocks[id].assume_init_ref() },
       &self.dirty_blocks,
       id,
@@ -93,54 +87,12 @@ impl BlockCache {
     )
   }
 
-  pub fn peek(
-    &self,
-    pointer: Pointer,
-    handle: Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>> {
-    let table_id = handle.metadata().get_id();
-    let (block_ref, guard) = match self.table.peek(table_id, pointer, |id| &self.pins[id])
-    {
-      Peeked::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
-      Peeked::Temp(block_ref) => {
-        return Ok(CacheSlot::temp(
-          block_ref,
-          &self.temp_queue,
-          &self.dirty_tables,
-          None,
-          &self.page_pool,
-        ))
-      }
-      Peeked::DiskRead(block_ref, guard) => (block_ref, guard),
-    };
-
-    let mut page = self.page_pool.acquire();
-    handle.disk().read(pointer, &mut page)?;
-    block_ref.init(page, handle);
-    Ok(CacheSlot::temp(
-      block_ref.downgrade(),
-      &self.temp_queue,
-      &self.dirty_tables,
-      Some(guard),
-      &self.page_pool,
-    ))
-  }
-
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CacheSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
         return Ok(self.cache_slot(block_id, token));
-      }
-      Acquired::Temp(block_ref) => {
-        return Ok(CacheSlot::temp(
-          block_ref,
-          &self.temp_queue,
-          &self.dirty_tables,
-          None,
-          &self.page_pool,
-        ))
       }
       Acquired::Evicted(guard) => guard,
     };
@@ -216,7 +168,6 @@ const fn handle_flush(
   pins: Arc<[ExclusivePin]>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
-  temp_queue: Arc<SegQueue<Arc<TempBlock>>>,
 ) -> impl Fn(Option<()>) -> Result {
   move |trigger| {
     let mut waits = Vec::with_capacity(MAX_BATCHING);
@@ -254,25 +205,6 @@ const fn handle_flush(
       }
       __flush(&mut waits)?;
     }
-
-    while let Some(block) = temp_queue.pop() {
-      {
-        let _latch = block.latch();
-        if !block.is_dirty() {
-          continue;
-        }
-
-        waits.push(block.flush_async());
-        block.mark_dirty(false);
-        dirty_tables.mark(block.table());
-      }
-
-      if waits.len() < MAX_BATCHING {
-        continue;
-      }
-      __flush(&mut waits)?;
-    }
-
     __flush(&mut waits)?;
 
     let mut threads = Vec::new();

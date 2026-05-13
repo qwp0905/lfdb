@@ -24,6 +24,3 @@ use dirty::*;
 
 mod latch;
 use latch::*;
-
-mod temp;
-use temp::*;

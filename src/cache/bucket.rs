@@ -47,10 +47,6 @@ impl<K, V> Bucket<K, V> {
     &self.value
   }
 
-  pub const fn set_value(&mut self, value: V) -> V {
-    replace(&mut self.value, value)
-  }
-
   pub const fn get_key(&self) -> &K {
     &self.key
   }

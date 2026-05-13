@@ -1,17 +1,17 @@
 use std::{
-  collections::{BTreeMap, BTreeSet, VecDeque},
+  collections::{BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::{Arc, Mutex},
+  sync::Mutex,
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{LRUShard, TempBlock, TempBlockRef};
+use super::LRUShard;
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -30,8 +30,7 @@ struct Shard {
   lru: LRUShard<Key, BlockId>,
   allocated: BlockId,
   aborted: VecDeque<(BlockId, Option<Key>)>,
-  eviction: BTreeSet<Key>,                  // evicting pointers
-  temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
+  eviction: BTreeSet<Key>, // evicting pointers
 }
 
 /**
@@ -113,31 +112,8 @@ impl<'a> Drop for EvictionGuard<'a> {
   }
 }
 
-pub struct TempGuard<'a> {
-  shard: &'a Mutex<Shard>,
-  key: Key,
-}
-impl<'a> TempGuard<'a> {
-  #[inline]
-  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
-    Self { shard, key }
-  }
-}
-impl<'a> Drop for TempGuard<'a> {
-  #[inline]
-  fn drop(&mut self) {
-    self.shard.l().temporary.remove(&self.key);
-  }
-}
-
-pub enum Peeked<'a> {
-  Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
-  DiskRead(TempBlockRef<ExclusiveToken<'a>>, TempGuard<'a>),
-}
 pub enum Acquired<'a> {
   Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 
@@ -157,7 +133,6 @@ impl LRUTable {
         allocated: 0,
         aborted: VecDeque::new(),
         eviction: BTreeSet::new(),
-        temporary: BTreeMap::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
@@ -178,63 +153,13 @@ impl LRUTable {
     (h, shard, offset)
   }
 
-  pub fn peek<'a, F>(
-    &'a self,
-    table_id: TableId,
-    pointer: Pointer,
-    get_pin: F,
-  ) -> Peeked<'a>
-  where
-    F: Fn(BlockId) -> &'a ExclusivePin,
-  {
-    let key = (table_id, pointer);
-    let (hash, s, _) = self.get_shard(key);
-    let backoff = Backoff::new();
-
-    loop {
-      let mut shard = s.l();
-      if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(&fid) = shard.lru.peek(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Peeked::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Peeked::Temp(block_ref);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      let block = TempBlock::new(pointer).to_arc();
-      let block_ref = TempBlockRef::exclusive(&block).unwrap();
-      shard.temporary.insert(key, block);
-      return Peeked::DiskRead(block_ref, TempGuard::new(s, key));
-    }
-  }
-
   /**
    * Acquires access to a page by index, following this order:
    *
    * 1. If the index is being evicted, wait — the block is temporarily inaccessible.
-   * 2. If GC has allocated a temp page for this index, return it — the temp page
-   *    takes precedence over the LRU since it reflects the latest state.
-   * 3. If the index is in the LRU cache, return a hit.
-   * 4. If the LRU has an empty slot, allocate a new block without eviction.
-   * 5. Otherwise, evict the LRU tail and return an EvictionGuard for the caller
+   * 2. If the index is in the LRU cache, return a hit.
+   * 3. If the LRU has an empty slot, allocate a new block without eviction.
+   * 4. Otherwise, evict the LRU tail and return an EvictionGuard for the caller
    *    to perform the necessary IO.
    *
    * The shard lock is dropped before retrying CAS operations (try_pin, try_evict)
@@ -266,16 +191,6 @@ impl LRUTable {
       if let Some(&fid) = shard.lru.get(&key, hash) {
         if let Some(token) = get_pin(fid).try_shared() {
           return Acquired::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Acquired::Temp(block_ref);
         }
 
         drop(shard);

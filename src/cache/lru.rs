@@ -79,15 +79,6 @@ where
     Some(bucket.get_value())
   }
 
-  pub fn peek<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<&V>
-  where
-    K: Borrow<Q>,
-    Q: Hash + Eq,
-  {
-    let ptr = self.entries.get(hash, equivalent(key))?;
-    Some(ptr.borrow_unsafe().get_value())
-  }
-
   /**
    * Must be called after every insertion into the new segment to maintain
    * the 5:3 (new:old) ratio. Demotes entries from the tail of the new
@@ -118,40 +109,13 @@ where
     Some((bucket.take(), h))
   }
 
-  pub fn insert<S>(&mut self, key: K, value: V, hash: u64, hash_builder: &S) -> Option<V>
+  pub fn insert<S>(&mut self, key: K, value: V, hash: u64, hash_builder: &S)
   where
     S: BuildHasher,
   {
-    let ptr = match self.entries.find_or_find_insert_slot(
-      hash,
-      equivalent(&key),
-      make_hasher(hash_builder),
-    ) {
-      Ok(raw) => raw.as_ptr().borrow_mut_unsafe(),
-      Err(slot) => {
-        let mut ptr = Bucket::new_ptr(key, value);
-        unsafe { self.entries.insert_in_slot(hash, slot, ptr) };
-        self.old_sub_list.push_head(&mut ptr);
-        return None;
-      }
-    };
-
-    let bucket = ptr.borrow_mut_unsafe();
-    if !bucket.promote() {
-      return Some(bucket.set_value(value));
-    }
-
-    if bucket.is_new() {
-      self.new_sub_list.move_to_head(ptr);
-      return Some(bucket.set_value(value));
-    };
-
-    self.old_sub_list.remove(ptr);
-    self.new_sub_list.push_head(ptr);
-    bucket.set_is_new(true);
-    self.rebalance();
-
-    Some(bucket.set_value(value))
+    let mut ptr = Bucket::new_ptr(key, value);
+    self.entries.insert(hash, ptr, make_hasher(hash_builder));
+    self.old_sub_list.push_head(&mut ptr);
   }
 
   pub fn remove<Q>(&mut self, key: &Q, hash: u64) -> Option<V>
