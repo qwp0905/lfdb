@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::{BTreeMap, BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::{Arc, Mutex},
@@ -28,6 +28,8 @@ const U32_MASK: u64 = u32::MAX as u64;
  */
 struct Shard {
   lru: LRUShard<Key, BlockId>,
+  allocated: BlockId,
+  aborted: VecDeque<(BlockId, Option<Key>)>,
   eviction: BTreeSet<Key>,                  // evicting pointers
   temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
 }
@@ -46,11 +48,10 @@ struct Shard {
  * restored and the block is returned to an evictable state.
  */
 pub struct EvictionGuard<'a> {
-  evicted: Option<(Key, u64)>,
+  evicted: Option<Key>,
   block_id: BlockId,
   token: ManuallyDrop<ExclusiveToken<'a>>,
   guard: &'a Mutex<Shard>,
-  hasher: &'a RandomState,
   new_pointer: Key,
   new_pointer_hash: u64,
   committed: bool,
@@ -58,11 +59,10 @@ pub struct EvictionGuard<'a> {
 
 impl<'a> EvictionGuard<'a> {
   const fn new(
-    evicted: Option<(Key, u64)>,
+    evicted: Option<Key>,
     block_id: usize,
     token: ExclusiveToken<'a>,
     guard: &'a Mutex<Shard>,
-    hasher: &'a RandomState,
     new_pointer: Key,
     new_pointer_hash: u64,
   ) -> Self {
@@ -71,7 +71,6 @@ impl<'a> EvictionGuard<'a> {
       block_id,
       token: ManuallyDrop::new(token),
       guard,
-      hasher,
       new_pointer,
       new_pointer_hash,
       committed: false,
@@ -92,7 +91,7 @@ impl<'a> EvictionGuard<'a> {
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
-      if let Some((i, _)) = self.evicted {
+      if let Some(i) = self.evicted {
         self.guard.l().eviction.remove(&i);
       }
       return;
@@ -101,9 +100,11 @@ impl<'a> Drop for EvictionGuard<'a> {
     // rollback
     {
       let mut shard = self.guard.l();
-      if let Some((i, h)) = self.evicted {
+      if let Some(i) = self.evicted {
         shard.eviction.remove(&i);
-        shard.lru.insert(i, self.block_id, h, self.hasher);
+        shard.aborted.push_back((self.block_id, Some(i)));
+      } else {
+        shard.aborted.push_back((self.block_id, None));
       }
       shard.lru.remove(&self.new_pointer, self.new_pointer_hash);
     }
@@ -153,6 +154,8 @@ impl LRUTable {
     for i in 0..shard_count {
       let shard = Shard {
         lru: LRUShard::new(cap_per_shard),
+        allocated: 0,
+        aborted: VecDeque::new(),
         eviction: BTreeSet::new(),
         temporary: BTreeMap::new(),
       };
@@ -284,19 +287,21 @@ impl LRUTable {
       // This ensures shards never access the same block, eliminating contention
       // between shards entirely.
       if !shard.lru.is_full() {
-        let fid = shard.lru.len() + offset;
-        let token = get_pin(fid).try_exclusive().unwrap();
-        shard.lru.insert(key, fid, hash, hasher);
-        return Acquired::Evicted(EvictionGuard::new(
-          None, fid, token, &s, hasher, key, hash,
-        ));
+        let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+          let id = shard.allocated;
+          shard.allocated += 1;
+          (id + offset, None)
+        });
+        let token = get_pin(bid).try_exclusive().unwrap();
+        shard.lru.insert(key, bid, hash, hasher);
+        return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
       }
 
-      let ((evicted, fid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      let token = match get_pin(fid).try_exclusive() {
+      let ((evicted, bid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
+      let token = match get_pin(bid).try_exclusive() {
         Some(t) => t,
         None => {
-          shard.lru.insert(evicted, fid, evicted_hash, hasher);
+          shard.lru.insert(evicted, bid, evicted_hash, hasher);
           drop(shard);
           backoff.snooze();
           continue;
@@ -304,13 +309,12 @@ impl LRUTable {
       };
 
       shard.eviction.insert(evicted);
-      shard.lru.insert(key, fid, hash, hasher);
+      shard.lru.insert(key, bid, hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
-        Some((evicted, evicted_hash)),
-        fid,
+        Some(evicted),
+        bid,
         token,
         &s,
-        hasher,
         key,
         hash,
       ));
