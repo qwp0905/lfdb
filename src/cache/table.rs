@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::{BTreeMap, BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::{Arc, Mutex},
@@ -28,6 +28,8 @@ const U32_MASK: u64 = u32::MAX as u64;
  */
 struct Shard {
   lru: LRUShard<Key, BlockId>,
+  allocated: BlockId,
+  aborted: VecDeque<BlockId>,
   eviction: BTreeSet<Key>,                  // evicting pointers
   temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
 }
@@ -104,6 +106,8 @@ impl<'a> Drop for EvictionGuard<'a> {
       if let Some((i, h)) = self.evicted {
         shard.eviction.remove(&i);
         shard.lru.insert(i, self.block_id, h, self.hasher);
+      } else {
+        shard.aborted.push_back(self.block_id);
       }
       shard.lru.remove(&self.new_pointer, self.new_pointer_hash);
     }
@@ -153,6 +157,8 @@ impl LRUTable {
     for i in 0..shard_count {
       let shard = Shard {
         lru: LRUShard::new(cap_per_shard),
+        allocated: 0,
+        aborted: VecDeque::new(),
         eviction: BTreeSet::new(),
         temporary: BTreeMap::new(),
       };
@@ -284,19 +290,23 @@ impl LRUTable {
       // This ensures shards never access the same block, eliminating contention
       // between shards entirely.
       if !shard.lru.is_full() {
-        let fid = shard.lru.len() + offset;
-        let token = get_pin(fid).try_exclusive().unwrap();
-        shard.lru.insert(key, fid, hash, hasher);
+        let bid = shard.aborted.pop_front().unwrap_or_else(|| {
+          let id = shard.allocated;
+          shard.allocated += 1;
+          id + offset
+        });
+        let token = get_pin(bid).try_exclusive().unwrap();
+        shard.lru.insert(key, bid, hash, hasher);
         return Acquired::Evicted(EvictionGuard::new(
-          None, fid, token, &s, hasher, key, hash,
+          None, bid, token, &s, hasher, key, hash,
         ));
       }
 
-      let ((evicted, fid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      let token = match get_pin(fid).try_exclusive() {
+      let ((evicted, bid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
+      let token = match get_pin(bid).try_exclusive() {
         Some(t) => t,
         None => {
-          shard.lru.insert(evicted, fid, evicted_hash, hasher);
+          shard.lru.insert(evicted, bid, evicted_hash, hasher);
           drop(shard);
           backoff.snooze();
           continue;
@@ -304,10 +314,10 @@ impl LRUTable {
       };
 
       shard.eviction.insert(evicted);
-      shard.lru.insert(key, fid, hash, hasher);
+      shard.lru.insert(key, bid, hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
-        fid,
+        bid,
         token,
         &s,
         hasher,
