@@ -30,8 +30,8 @@ struct Shard {
   inner: CacheShard<Key, BlockId>,
   eviction: BTreeSet<Key>,                  // evicting pointers
   temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without promotion
-  allocated: usize,
-  aborted: VecDeque<BlockId>,
+  allocated: BlockId,
+  aborted: VecDeque<(BlockId, Option<Key>)>,
 }
 
 /**
@@ -102,8 +102,10 @@ impl<'a> Drop for EvictionGuard<'a> {
       let mut shard = self.guard.l();
       if let Some(i) = self.evicted {
         shard.eviction.remove(&i);
+        shard.aborted.push_back((self.block_id, Some(i)));
+      } else {
+        shard.aborted.push_back((self.block_id, None));
       }
-      shard.aborted.push_back(self.block_id);
       shard.inner.remove(&self.new_pointer, self.new_pointer_hash);
     }
     // No ownership claimed — block is immediately available for eviction.
@@ -294,15 +296,17 @@ impl MappingTable {
       let (evicted, bid, token) = match reserved.take_evicted() {
         Some(evicted) => evicted,
         None => {
-          let bid = shard.aborted.pop_front().unwrap_or_else(|| {
+          let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
             let id = shard.allocated;
             shard.allocated += 1;
             debug_assert!(shard.allocated <= self.capacity, "capacity exceeded");
-            id + offset
+            (id + offset, None)
           });
           reserved.fulfill(bid);
           let token = get_pin(bid).try_exclusive().unwrap();
-          return Acquired::Evicted(EvictionGuard::new(None, bid, token, &s, key, hash));
+          return Acquired::Evicted(EvictionGuard::new(
+            evicted, bid, token, &s, key, hash,
+          ));
         }
       };
 
