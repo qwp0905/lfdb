@@ -142,7 +142,7 @@ where
     F: FnOnce(&V) -> Option<R>,
   {
     if let Some(bucket) = self.table.find(hash, equivalent(key)) {
-      let entry = unsafe { bucket.as_ref() }.borrow_mut_unsafe();
+      let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
       return match entry.get_state_mut() {
         State::Small { freq } | State::Main { freq } => {
           *freq = (*freq + 1).min(MAX_FREQ);
