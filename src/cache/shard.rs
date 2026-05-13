@@ -97,7 +97,7 @@ where
   K: Eq + Hash,
 {
   pub fn new(capacity: usize) -> Self {
-    let small_cap = capacity / 5;
+    let small_cap = capacity * 3 / 10;
     let main_cap = capacity - small_cap;
     Self {
       table: RawTable::new(),
