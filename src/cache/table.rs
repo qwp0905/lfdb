@@ -232,9 +232,9 @@ impl MappingTable {
    * Acquires access to a page by index, following this order:
    *
    * 1. If the index is being evicted, wait — the block is temporarily inaccessible.
-   * 2. If the index is in the cache shard, return a hit.
-   * 3. If GC has allocated a temp page for this index, return it — the temp page
+   * 2. If GC has allocated a temp page for this index, return it — the temp page
    *    takes precedence over the shard since it reflects the latest state.
+   * 3. If the index is in the cache shard, return a hit.
    * 4. If the shard has an empty slot, allocate a new block without eviction.
    *
    * The shard lock is dropped before retrying CAS operations (try_pin, try_evict)
