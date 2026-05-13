@@ -29,7 +29,7 @@ const U32_MASK: u64 = u32::MAX as u64;
 struct Shard {
   lru: LRUShard<Key, BlockId>,
   allocated: BlockId,
-  aborted: VecDeque<BlockId>,
+  aborted: VecDeque<(BlockId, Option<Key>)>,
   eviction: BTreeSet<Key>,                  // evicting pointers
   temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
 }
@@ -48,11 +48,10 @@ struct Shard {
  * restored and the block is returned to an evictable state.
  */
 pub struct EvictionGuard<'a> {
-  evicted: Option<(Key, u64)>,
+  evicted: Option<Key>,
   block_id: BlockId,
   token: ManuallyDrop<ExclusiveToken<'a>>,
   guard: &'a Mutex<Shard>,
-  hasher: &'a RandomState,
   new_pointer: Key,
   new_pointer_hash: u64,
   committed: bool,
@@ -60,11 +59,10 @@ pub struct EvictionGuard<'a> {
 
 impl<'a> EvictionGuard<'a> {
   const fn new(
-    evicted: Option<(Key, u64)>,
+    evicted: Option<Key>,
     block_id: usize,
     token: ExclusiveToken<'a>,
     guard: &'a Mutex<Shard>,
-    hasher: &'a RandomState,
     new_pointer: Key,
     new_pointer_hash: u64,
   ) -> Self {
@@ -73,7 +71,6 @@ impl<'a> EvictionGuard<'a> {
       block_id,
       token: ManuallyDrop::new(token),
       guard,
-      hasher,
       new_pointer,
       new_pointer_hash,
       committed: false,
@@ -94,7 +91,7 @@ impl<'a> EvictionGuard<'a> {
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
-      if let Some((i, _)) = self.evicted {
+      if let Some(i) = self.evicted {
         self.guard.l().eviction.remove(&i);
       }
       return;
@@ -103,11 +100,11 @@ impl<'a> Drop for EvictionGuard<'a> {
     // rollback
     {
       let mut shard = self.guard.l();
-      if let Some((i, h)) = self.evicted {
+      if let Some(i) = self.evicted {
         shard.eviction.remove(&i);
-        shard.lru.insert(i, self.block_id, h, self.hasher);
+        shard.aborted.push_back((self.block_id, Some(i)));
       } else {
-        shard.aborted.push_back(self.block_id);
+        shard.aborted.push_back((self.block_id, None));
       }
       shard.lru.remove(&self.new_pointer, self.new_pointer_hash);
     }
@@ -290,16 +287,14 @@ impl LRUTable {
       // This ensures shards never access the same block, eliminating contention
       // between shards entirely.
       if !shard.lru.is_full() {
-        let bid = shard.aborted.pop_front().unwrap_or_else(|| {
+        let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
           let id = shard.allocated;
           shard.allocated += 1;
-          id + offset
+          (id + offset, None)
         });
         let token = get_pin(bid).try_exclusive().unwrap();
         shard.lru.insert(key, bid, hash, hasher);
-        return Acquired::Evicted(EvictionGuard::new(
-          None, bid, token, &s, hasher, key, hash,
-        ));
+        return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
       }
 
       let ((evicted, bid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
@@ -316,11 +311,10 @@ impl LRUTable {
       shard.eviction.insert(evicted);
       shard.lru.insert(key, bid, hash, hasher);
       return Acquired::Evicted(EvictionGuard::new(
-        Some((evicted, evicted_hash)),
+        Some(evicted),
         bid,
         token,
         &s,
-        hasher,
         key,
         hash,
       ));
