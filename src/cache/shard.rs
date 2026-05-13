@@ -100,7 +100,7 @@ where
   K: Eq + Hash,
 {
   pub fn new(capacity: usize) -> Self {
-    let small_cap = capacity / 10;
+    let small_cap = capacity * 3 / 10;
     let main_cap = capacity - small_cap;
     Self {
       table: RawTable::new(),
@@ -184,7 +184,7 @@ where
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
         State::Small { freq } => {
-          if *freq > 1 {
+          if *freq > 0 {
             let evicted = match self.evict_main(hasher, evict) {
               Ok(v) => v,
               Err(_) => {
