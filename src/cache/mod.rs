@@ -16,8 +16,5 @@ use dirty::*;
 mod latch;
 use latch::*;
 
-mod temp;
-use temp::*;
-
 mod shard;
 use shard::*;

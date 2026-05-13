@@ -1,17 +1,17 @@
 use std::{
-  collections::{BTreeMap, BTreeSet, VecDeque},
+  collections::{BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::{Arc, Mutex},
+  sync::Mutex,
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheShard, GetOrReserve, TempBlock, TempBlockRef};
+use super::{CacheShard, GetOrReserve};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -28,8 +28,7 @@ const U32_MASK: u64 = u32::MAX as u64;
  */
 struct Shard {
   inner: CacheShard<Key, BlockId>,
-  eviction: BTreeSet<Key>,                  // evicting pointers
-  temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without promotion
+  eviction: BTreeSet<Key>, // evicting pointers
   allocated: BlockId,
   aborted: VecDeque<(BlockId, Option<Key>)>,
 }
@@ -113,31 +112,8 @@ impl<'a> Drop for EvictionGuard<'a> {
   }
 }
 
-pub struct TempGuard<'a> {
-  shard: &'a Mutex<Shard>,
-  key: Key,
-}
-impl<'a> TempGuard<'a> {
-  #[inline]
-  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
-    Self { shard, key }
-  }
-}
-impl<'a> Drop for TempGuard<'a> {
-  #[inline]
-  fn drop(&mut self) {
-    self.shard.l().temporary.remove(&self.key);
-  }
-}
-
-pub enum Peeked<'a> {
-  Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
-  DiskRead(TempBlockRef<ExclusiveToken<'a>>, TempGuard<'a>),
-}
 pub enum Acquired<'a> {
   Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 
@@ -156,7 +132,6 @@ impl MappingTable {
       let shard = Shard {
         inner: CacheShard::new(cap_per_shard),
         eviction: BTreeSet::new(),
-        temporary: BTreeMap::new(),
         allocated: 0,
         aborted: VecDeque::new(),
       };
@@ -178,54 +153,6 @@ impl MappingTable {
     let shard = &self.shards[i];
     let offset = self.offsets[i];
     (h, shard, offset)
-  }
-
-  pub fn peek<'a, F>(
-    &'a self,
-    table_id: TableId,
-    pointer: Pointer,
-    get_pin: F,
-  ) -> Peeked<'a>
-  where
-    F: Fn(BlockId) -> &'a ExclusivePin,
-  {
-    let key = (table_id, pointer);
-    let (hash, s, _) = self.get_shard(key);
-    let backoff = Backoff::new();
-
-    loop {
-      let mut shard = s.l();
-      if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Peeked::Temp(block_ref);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(&fid) = shard.inner.peek(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Peeked::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      let block = TempBlock::new(pointer).to_arc();
-      let block_ref = TempBlockRef::exclusive(&block).unwrap();
-      shard.temporary.insert(key, block);
-      return Peeked::DiskRead(block_ref, TempGuard::new(s, key));
-    }
   }
 
   /**
@@ -258,16 +185,6 @@ impl MappingTable {
     loop {
       let mut shard = s.l();
       if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Acquired::Temp(block_ref);
-        }
-
         drop(shard);
         backoff.snooze();
         continue;

@@ -100,7 +100,7 @@ where
   K: Eq + Hash,
 {
   pub fn new(capacity: usize) -> Self {
-    let small_cap = capacity * 4 / 10;
+    let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
       table: RawTable::new(),
@@ -112,20 +112,6 @@ where
       main_cap,
       main_count: 0,
       ghost_cap: main_cap,
-    }
-  }
-  pub fn peek<Q: ?Sized>(&self, key: &Q, hash: u64) -> Option<&V>
-  where
-    K: Borrow<Q>,
-    Q: Hash + Eq,
-  {
-    let entry = self.table.get(hash, equivalent(key))?.borrow_unsafe();
-    match entry.get_state() {
-      State::Main { .. } | State::Small { .. } => {
-        Some(unsafe { entry.value.assume_init_ref() })
-      }
-      State::Ghost => None,
-      State::Tombstone => unreachable!(),
     }
   }
 
@@ -191,8 +177,10 @@ where
     S: BuildHasher,
     F: FnOnce(&V) -> Option<R>,
   {
-    while self.small_count >= self.small_cap {
-      let ptr = self.small.pop_front().unwrap_or_else(|| unreachable!());
+    while let Some(ptr) = self
+      .small
+      .pop_front_if(|_| self.small_count >= self.small_cap)
+    {
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
         State::Small { freq } => {
@@ -247,12 +235,7 @@ where
     S: BuildHasher,
     F: FnOnce(&V) -> Option<R>,
   {
-    while self.main_count >= self.main_cap {
-      let ptr = match self.main.pop_front() {
-        Some(v) => v,
-        None => unreachable!(),
-      };
-
+    while let Some(ptr) = self.main.pop_front_if(|_| self.main_count >= self.main_cap) {
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state_mut() {
         State::Main { freq } => {
