@@ -109,10 +109,17 @@ where
     Some((bucket.take(), h))
   }
 
+  /**
+   * it does not check for duplicates or overflow,
+   * the caller must ensure the key is not already present and the shard is not full.
+   */
   pub fn insert<S>(&mut self, key: K, value: V, hash: u64, hash_builder: &S)
   where
     S: BuildHasher,
   {
+    debug_assert!(!self.is_full());
+    debug_assert!(self.entries.find(hash, equivalent(&key)).is_none());
+
     let mut ptr = Bucket::new_ptr(key, value);
     self.entries.insert(hash, ptr, make_hasher(hash_builder));
     self.old_sub_list.push_head(&mut ptr);
