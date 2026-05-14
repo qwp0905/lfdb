@@ -121,7 +121,6 @@ pub struct MappingTable {
   shards: Box<[Mutex<Shard>]>,
   offsets: Box<[BlockId]>,
   hasher: RandomState,
-  capacity: usize,
 }
 impl MappingTable {
   pub fn new(shard_count: usize, capacity: usize) -> Self {
@@ -143,7 +142,6 @@ impl MappingTable {
       shards: shards.into_boxed_slice(),
       offsets: offset.into_boxed_slice(),
       hasher: RandomState::new(),
-      capacity: cap_per_shard,
     }
   }
   fn get_shard(&self, key: Key) -> (u64, &Mutex<Shard>, usize) {
@@ -216,7 +214,11 @@ impl MappingTable {
           let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
             let id = shard.allocated;
             shard.allocated += 1;
-            debug_assert!(shard.allocated <= self.capacity, "capacity exceeded");
+            #[cfg(debug_assertions)]
+            debug_assert!(
+              shard.allocated <= shard.inner.capacity(),
+              "capacity exceeded"
+            );
             (id + offset, None)
           });
           reserved.fulfill(bid);

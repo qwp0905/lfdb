@@ -89,9 +89,9 @@ pub struct CacheShard<K, V> {
   small: VecDeque<*mut CacheEntry<K, V>>,
   main: VecDeque<*mut CacheEntry<K, V>>,
   ghost: VecDeque<*mut CacheEntry<K, V>>,
+  capacity: usize,
   small_cap: usize,
   small_count: usize,
-  main_cap: usize,
   main_count: usize,
   ghost_cap: usize,
 }
@@ -100,16 +100,16 @@ where
   K: Eq + Hash,
 {
   pub fn new(capacity: usize) -> Self {
-    let small_cap = capacity * 3 / 10;
+    let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
       table: RawTable::new(),
-      small: VecDeque::with_capacity(small_cap),
-      main: VecDeque::with_capacity(main_cap),
-      ghost: VecDeque::with_capacity(main_cap),
+      small: VecDeque::new(),
+      main: VecDeque::new(),
+      ghost: VecDeque::new(),
+      capacity,
       small_cap,
       small_count: 0,
-      main_cap,
       main_count: 0,
       ghost_cap: main_cap,
     }
@@ -125,7 +125,7 @@ where
   where
     K: Clone,
     S: BuildHasher,
-    F: FnOnce(&V) -> Option<R>,
+    F: Fn(&V) -> Option<R>,
   {
     if let Some(bucket) = self.table.find(hash, equivalent(key)) {
       let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
@@ -135,7 +135,7 @@ where
           Ok(GetOrReserve::Hit(unsafe { entry.value.assume_init_ref() }))
         }
         State::Ghost => {
-          let evicted = self.evict_main(hash_builder, evict)?;
+          let evicted = self.evict(hash_builder, &evict)?;
 
           let new_entry = CacheEntry::new_main(key.clone());
           let ptr = Box::into_raw(Box::new(new_entry));
@@ -153,7 +153,7 @@ where
       };
     }
 
-    let evicted = self.evict_small(hash_builder, evict)?;
+    let evicted = self.evict(hash_builder, &evict)?;
 
     let entry = CacheEntry::new_small(key.clone());
     let ptr = Box::into_raw(Box::new(entry));
@@ -167,54 +167,77 @@ where
     )))
   }
 
-  fn evict_small<S, R, F>(
+  fn evict<S, R, F>(
     &mut self,
     hasher: &S,
-    evict: F,
+    evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
     K: Clone,
+    K: Clone,
     S: BuildHasher,
-    F: FnOnce(&V) -> Option<R>,
+    F: Fn(&V) -> Option<R>,
   {
-    while let Some(ptr) = self
-      .small
-      .pop_front_if(|_| self.small_count >= self.small_cap)
-    {
+    while self.is_full() {
+      if self.small_count > self.small_cap {
+        return self.evict_small(hasher, evict).map(Some);
+      }
+
+      if let Some(v) = self.evict_main(hasher, evict)? {
+        return Ok(Some(v));
+      }
+    }
+
+    Ok(None)
+  }
+
+  fn evict_small<S, R, F>(
+    &mut self,
+    hasher: &S,
+    evict: &F,
+  ) -> std::result::Result<(K, V, R), ()>
+  where
+    K: Clone,
+    S: BuildHasher,
+    F: Fn(&V) -> Option<R>,
+  {
+    loop {
+      let ptr = self.small.pop_front().unwrap();
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
-        State::Small { freq } => {
-          if *freq > 0 {
-            let evicted = match self.evict_main(hasher, evict) {
-              Ok(v) => v,
-              Err(_) => {
-                self.small.push_back(ptr);
-                return Err(());
-              }
-            };
+        State::Small { freq } if *freq > 1 => {
+          let evicted = match self.evict_main(hasher, evict) {
+            Ok(v) => v,
+            Err(_) => {
+              self.small.push_back(ptr);
+              return Err(());
+            }
+          };
 
-            entry.set_state(State::Main { freq: 0 });
-            self.main.push_back(ptr);
-            self.small_count -= 1;
-            self.main_count += 1;
+          entry.set_state(State::Main { freq: 0 });
+          self.main.push_back(ptr);
+          self.small_count -= 1;
+          self.main_count += 1;
 
-            return Ok(evicted);
-          } else {
-            let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
-              Some(v) => v,
-              None => {
-                self.small.push_back(ptr);
-                return Err(());
-              }
-            };
-
-            let value = unsafe { entry.value.assume_init_read() };
-            entry.set_state(State::Ghost);
-            self.evict_ghost(hasher);
-            self.ghost.push_back(ptr);
-            self.small_count -= 1;
-            return Ok(Some((entry.get_key().clone(), value, reserved)));
+          if let Some(v) = evicted {
+            return Ok(v);
           }
+        }
+        State::Small { .. } => {
+          let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
+            Some(v) => v,
+            None => {
+              self.small.push_back(ptr);
+              return Err(());
+            }
+          };
+
+          let value = unsafe { entry.value.assume_init_read() };
+          entry.set_state(State::Ghost);
+          self.evict_ghost(hasher);
+          self.ghost.push_back(ptr);
+          self.small_count -= 1;
+          return Ok((entry.get_key().clone(), value, reserved));
         }
         State::Tombstone => {
           let _ = unsafe { Box::from_raw(ptr) };
@@ -223,47 +246,44 @@ where
         State::Ghost | State::Main { .. } => unreachable!(),
       }
     }
-
-    Ok(None)
   }
   fn evict_main<S, R, F>(
     &mut self,
     hasher: &S,
-    evict: F,
+    evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
     S: BuildHasher,
-    F: FnOnce(&V) -> Option<R>,
+    F: Fn(&V) -> Option<R>,
   {
-    while let Some(ptr) = self.main.pop_front_if(|_| self.main_count >= self.main_cap) {
+    while let Some(ptr) = self.main.pop_front() {
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state_mut() {
-        State::Main { freq } => {
-          if *freq > 0 {
-            *freq -= 1;
-            self.main.push_back(ptr);
-            continue;
-          } else {
-            let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
-              Some(v) => v,
-              None => {
-                self.main.push_back(ptr);
-                return Err(());
-              }
-            };
+        State::Main { freq } if *freq > 0 => {
+          *freq -= 1;
+          self.main.push_back(ptr);
+          continue;
+        }
+        State::Main { .. } => {
+          let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
+            Some(v) => v,
+            None => {
+              self.main.push_back(ptr);
+              return Err(());
+            }
+          };
 
-            let entry = unsafe { Box::from_raw(ptr) };
-            let key = entry.key;
-            self
-              .table
-              .remove_entry(hasher.hash_one(&key), equivalent(&key));
-            self.main_count -= 1;
-            return Ok(Some((
-              key,
-              unsafe { entry.value.assume_init_read() },
-              reserved,
-            )));
-          }
+          let entry = unsafe { Box::from_raw(ptr) };
+          let key = entry.key;
+          self
+            .table
+            .remove_entry(hasher.hash_one(&key), equivalent(&key));
+          self.main_count -= 1;
+          return Ok(Some((
+            key,
+            unsafe { entry.value.assume_init_read() },
+            reserved,
+          )));
         }
         State::Ghost | State::Small { .. } => unreachable!(),
         State::Tombstone => {
@@ -329,6 +349,14 @@ where
 
   pub const fn len(&self) -> usize {
     self.main_count + self.small_count
+  }
+
+  const fn is_full(&self) -> bool {
+    self.len() >= self.capacity
+  }
+
+  pub const fn capacity(&self) -> usize {
+    self.capacity
   }
 }
 
