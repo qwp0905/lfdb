@@ -214,7 +214,6 @@ impl MappingTable {
           let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
             let id = shard.allocated;
             shard.allocated += 1;
-            #[cfg(debug_assertions)]
             debug_assert!(
               shard.allocated <= shard.inner.capacity(),
               "capacity exceeded"

@@ -100,7 +100,7 @@ where
   K: Eq + Hash,
 {
   pub fn new(capacity: usize) -> Self {
-    let small_cap = capacity / 10;
+    let small_cap = capacity * 3 / 10;
     let main_cap = capacity - small_cap;
     Self {
       table: RawTable::new(),
@@ -173,7 +173,6 @@ where
     evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
-    K: Clone,
     K: Clone,
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
@@ -355,6 +354,7 @@ where
     self.len() >= self.capacity
   }
 
+  #[allow(unused)]
   pub const fn capacity(&self) -> usize {
     self.capacity
   }
