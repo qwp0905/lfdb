@@ -179,6 +179,7 @@ impl LRUTable {
     let (hash, s, offset) = self.get_shard(key);
     let hasher = &self.hasher;
     let backoff = Backoff::new();
+    let try_evict = |&bid: &BlockId| get_pin(bid).try_exclusive();
 
     loop {
       let mut shard = s.l();
@@ -207,16 +208,14 @@ impl LRUTable {
           shard.allocated += 1;
           (id + offset, None)
         });
-        let token = get_pin(bid).try_exclusive().unwrap();
+        let token = try_evict(&bid).unwrap();
         shard.lru.insert(key, bid, hash, hasher);
         return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
       }
 
-      let ((evicted, bid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      let token = match get_pin(bid).try_exclusive() {
-        Some(t) => t,
+      let (evicted, bid, token) = match shard.lru.evict_if(&self.hasher, &try_evict) {
+        Some(v) => v,
         None => {
-          shard.lru.insert(evicted, bid, evicted_hash, hasher);
           drop(shard);
           backoff.snooze();
           continue;

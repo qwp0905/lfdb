@@ -45,7 +45,7 @@ fn test_evict_order() {
 
   // evict all: oldest first (FIFO within old)
   let evicted: Vec<usize> = (0..cap)
-    .map(|_| shard.evict(&hasher).unwrap().0 .0)
+    .map(|_| shard.evict_if(&hasher, |_| Some(())).unwrap().0)
     .collect();
   assert_eq!(evicted, vec![0, 1, 2, 3, 4]);
   assert_eq!(shard.len(), 0);
@@ -72,12 +72,12 @@ fn test_get_promotes_and_evict_order() {
 
   // evict all and collect keys
   let mut evicted = Vec::new();
-  while let Some((k, _)) = shard.evict(&hasher) {
+  while let Some((k, _, _)) = shard.evict_if(&hasher, |_| Some(())) {
     evicted.push(k);
   }
 
   // non-accessed entries (2, 3, 4) should be evicted before accessed ones (0, 1)
-  let pos = |k: usize| evicted.iter().position(|(e, _)| *e == k).unwrap();
+  let pos = |k: usize| evicted.iter().position(|e| *e == k).unwrap();
   assert!(pos(2) < pos(0));
   assert!(pos(3) < pos(0));
   assert!(pos(4) < pos(0));
@@ -91,5 +91,5 @@ fn test_evict_empty() {
   let mut shard = LRUShard::<usize, usize>::new(10);
   let hasher = RandomState::new();
 
-  assert!(shard.evict(&hasher).is_none());
+  assert!(shard.evict_if(&hasher, |_| Some(())).is_none());
 }

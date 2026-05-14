@@ -60,7 +60,7 @@ where
     K: Borrow<Q>,
     Q: Hash + Eq,
   {
-    let ptr = self.entries.get_mut(hash, equivalent(key))?;
+    let ptr = *self.entries.get(hash, equivalent(key))?;
     let bucket = ptr.borrow_mut_unsafe();
     if !bucket.promote() {
       return Some(bucket.get_value());
@@ -90,23 +90,31 @@ where
         Some(ptr) => ptr,
         None => return,
       };
-      self.old_sub_list.push_head(&mut ptr);
+      self.old_sub_list.push_head(ptr);
       unsafe { ptr.as_mut() }.set_is_new(false);
     }
   }
 
-  pub fn evict<S>(&mut self, hasher: &S) -> Option<((K, V), u64)>
+  pub fn evict_if<S, R, F>(&mut self, hasher: &S, try_evict: F) -> Option<(K, V, R)>
   where
     S: BuildHasher,
+    F: Fn(&V) -> Option<R>,
   {
-    let key = self.old_sub_list.pop_tail()?.borrow_unsafe().get_key();
-    let h = hasher.hash_one(key);
-    let bucket = self
+    let ptr = self.old_sub_list.pop_tail()?;
+    let entry = ptr.borrow_unsafe();
+    let key = entry.get_key();
+    let result = match try_evict(entry.get_value()) {
+      Some(v) => v,
+      None => {
+        self.old_sub_list.push_head(ptr);
+        return None;
+      }
+    };
+    self
       .entries
-      .remove_entry(h, equivalent(key))
-      .map(|ptr| ptr.take_unsafe())?;
-    self.rebalance();
-    Some((bucket.take(), h))
+      .remove_entry(hasher.hash_one(key), equivalent(key));
+    let (k, v) = ptr.take_unsafe().take();
+    Some((k, v, result))
   }
 
   /**
@@ -120,9 +128,9 @@ where
     debug_assert!(!self.is_full());
     debug_assert!(self.entries.find(hash, equivalent(&key)).is_none());
 
-    let mut ptr = Bucket::new_ptr(key, value);
+    let ptr = Bucket::new_ptr(key, value);
     self.entries.insert(hash, ptr, make_hasher(hash_builder));
-    self.old_sub_list.push_head(&mut ptr);
+    self.old_sub_list.push_head(ptr);
   }
 
   pub fn remove<Q>(&mut self, key: &Q, hash: u64) -> Option<V>
@@ -130,13 +138,13 @@ where
     K: Borrow<Q>,
     Q: Hash + Eq,
   {
-    let mut ptr = self.entries.remove_entry(hash, equivalent(key))?;
+    let ptr = self.entries.remove_entry(hash, equivalent(key))?;
     ptr
       .borrow_unsafe()
       .is_new()
       .then_some(&mut self.new_sub_list)
       .unwrap_or(&mut self.old_sub_list)
-      .remove(&mut ptr);
+      .remove(ptr);
     self.rebalance();
     let (_, value) = ptr.take_unsafe().take();
     Some(value)
