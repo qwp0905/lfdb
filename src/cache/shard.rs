@@ -204,7 +204,7 @@ where
       let ptr = self.small.pop_front().unwrap();
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
-        State::Small { freq } if *freq > 1 => {
+        State::Small { freq } if *freq > 0 => {
           let evicted = match self.evict_main(hasher, evict) {
             Ok(v) => v,
             Err(_) => {
