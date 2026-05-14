@@ -1,6 +1,6 @@
 use std::{
   borrow::Borrow,
-  collections::VecDeque,
+  collections::{HashSet, VecDeque},
   hash::{BuildHasher, Hash},
   mem::MaybeUninit,
 };
@@ -120,7 +120,7 @@ where
     key: &K,
     hash: u64,
     hash_builder: &S,
-    evict: F,
+    try_evict: F,
   ) -> std::result::Result<GetOrReserve<'_, K, V, R>, ()>
   where
     K: Clone,
@@ -135,13 +135,14 @@ where
           Ok(GetOrReserve::Hit(unsafe { entry.value.assume_init_ref() }))
         }
         State::Ghost => {
-          let evicted = self.evict(hash_builder, &evict)?;
+          let (old, _) = unsafe { self.table.remove(bucket) };
+          old.borrow_mut_unsafe().set_state(State::Tombstone);
+
+          let evicted = self.evict(hash_builder, &try_evict)?;
 
           let new_entry = CacheEntry::new_main(key.clone());
           let ptr = Box::into_raw(Box::new(new_entry));
-          let old = unsafe { bucket.as_ptr().replace(ptr) };
-          old.borrow_mut_unsafe().set_state(State::Tombstone);
-
+          self.table.insert(hash, ptr, make_hasher(hash_builder));
           self.main.push_back(ptr);
           self.main_count += 1;
           Ok(GetOrReserve::Reserved(Reserved::new(
@@ -153,7 +154,7 @@ where
       };
     }
 
-    let evicted = self.evict(hash_builder, &evict)?;
+    let evicted = self.evict(hash_builder, &try_evict)?;
 
     let entry = CacheEntry::new_small(key.clone());
     let ptr = Box::into_raw(Box::new(entry));
@@ -170,7 +171,7 @@ where
   fn evict<S, R, F>(
     &mut self,
     hasher: &S,
-    evict: &F,
+    try_evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
     K: Clone,
@@ -179,10 +180,10 @@ where
   {
     while self.is_full() {
       if self.small_count > self.small_cap {
-        return self.evict_small(hasher, evict).map(Some);
+        return self.evict_small(hasher, try_evict).map(Some);
       }
 
-      if let Some(v) = self.evict_main(hasher, evict)? {
+      if let Some(v) = self.evict_main(hasher, try_evict)? {
         return Ok(Some(v));
       }
     }
@@ -193,7 +194,7 @@ where
   fn evict_small<S, R, F>(
     &mut self,
     hasher: &S,
-    evict: &F,
+    try_evict: &F,
   ) -> std::result::Result<(K, V, R), ()>
   where
     K: Clone,
@@ -205,7 +206,7 @@ where
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
         State::Small { freq } if *freq > 1 => {
-          let evicted = match self.evict_main(hasher, evict) {
+          let evicted = match self.evict_main(hasher, try_evict) {
             Ok(v) => v,
             Err(_) => {
               self.small.push_back(ptr);
@@ -223,7 +224,7 @@ where
           }
         }
         State::Small { .. } => {
-          let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
+          let reserved = match try_evict(unsafe { entry.value.assume_init_ref() }) {
             Some(v) => v,
             None => {
               self.small.push_back(ptr);
@@ -249,7 +250,7 @@ where
   fn evict_main<S, R, F>(
     &mut self,
     hasher: &S,
-    evict: &F,
+    try_evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
     S: BuildHasher,
@@ -264,7 +265,7 @@ where
           continue;
         }
         State::Main { .. } => {
-          let reserved = match evict(unsafe { entry.value.assume_init_ref() }) {
+          let reserved = match try_evict(unsafe { entry.value.assume_init_ref() }) {
             Some(v) => v,
             None => {
               self.main.push_back(ptr);
@@ -272,14 +273,16 @@ where
             }
           };
 
-          let entry = unsafe { Box::from_raw(ptr) };
-          let key = entry.key;
+          let key = entry.get_key();
           self
             .table
-            .remove_entry(hasher.hash_one(&key), equivalent(&key));
+            .remove_entry(hasher.hash_one(key), equivalent(key))
+            .unwrap_or_else(|| unreachable!());
+
+          let entry = unsafe { Box::from_raw(ptr) };
           self.main_count -= 1;
           return Ok(Some((
-            key,
+            entry.key,
             unsafe { entry.value.assume_init_read() },
             reserved,
           )));
@@ -300,14 +303,16 @@ where
   {
     while self.table.len() - self.len() >= self.ghost_cap {
       let ptr = self.ghost.pop_front().unwrap_or_else(|| unreachable!());
-      match ptr.borrow_unsafe().get_state() {
+      let entry = ptr.borrow_unsafe();
+      match entry.get_state() {
         State::Main { .. } | State::Small { .. } => unreachable!(),
         State::Ghost => {
-          let entry = unsafe { Box::from_raw(ptr) };
           let key = entry.get_key();
           self
             .table
-            .remove_entry(hasher.hash_one(key), equivalent(key));
+            .remove_entry(hasher.hash_one(key), equivalent(key))
+            .unwrap_or_else(|| unreachable!());
+          let _ = unsafe { Box::from_raw(ptr) };
         }
         State::Tombstone => {
           let _ = unsafe { Box::from_raw(ptr) };
@@ -368,6 +373,7 @@ impl<K, V> Drop for CacheShard<K, V> {
       .chain(self.small.drain(..))
       .chain(self.ghost.drain(..))
       .filter(|ptr| matches!(ptr.borrow_unsafe().get_state(), State::Tombstone))
+      .collect::<HashSet<_>>()
     {
       let _ = unsafe { Box::from_raw(ptr) };
     }
