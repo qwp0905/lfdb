@@ -1,12 +1,3 @@
-mod bucket;
-use bucket::*;
-
-mod list;
-use list::*;
-
-mod lru;
-use lru::*;
-
 mod table;
 use table::*;
 
@@ -25,5 +16,5 @@ use dirty::*;
 mod latch;
 use latch::*;
 
-mod temp;
-use temp::*;
+mod shard;
+use shard::*;

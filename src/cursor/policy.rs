@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::{CacheSlot, WritableSlot},
+  cache::{CachedSlot, WritableSlot},
   disk::Pointer,
   serialize::Serializable,
   table::TableHandle,
@@ -15,7 +15,7 @@ pub trait ReadonlyPolicy {
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>>;
+  ) -> Result<CachedSlot<'_>>;
 }
 
 pub trait WritablePolicy: ReadonlyPolicy {

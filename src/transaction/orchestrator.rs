@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
-  cache::{BlockCache, CacheSlot, WritableSlot},
+  cache::{BlockCache, CachedSlot, WritableSlot},
   cursor::{GarbageCollector, TreeManager},
   debug,
   disk::Pointer,
@@ -117,7 +117,7 @@ impl TxOrchestrator {
     &self,
     pointer: Pointer,
     handle: Arc<TableHandle>,
-  ) -> Result<CacheSlot<'_>> {
+  ) -> Result<CachedSlot<'_>> {
     self.block_cache.read(pointer, handle)
   }
 

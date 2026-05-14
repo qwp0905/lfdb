@@ -1,17 +1,17 @@
 use std::{
-  collections::{BTreeMap, BTreeSet, VecDeque},
+  collections::{BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::{Arc, Mutex},
+  sync::Mutex,
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{LRUShard, TempBlock, TempBlockRef};
+use super::{CacheShard, GetOrReserve};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -27,11 +27,10 @@ const U32_MASK: u64 = u32::MAX as u64;
  * at any given time, the performance difference is negligible.
  */
 struct Shard {
-  lru: LRUShard<Key, BlockId>,
+  inner: CacheShard<Key, BlockId>,
+  eviction: BTreeSet<Key>, // evicting pointers
   allocated: BlockId,
   aborted: VecDeque<(BlockId, Option<Key>)>,
-  eviction: BTreeSet<Key>,                  // evicting pointers
-  temporary: BTreeMap<Key, Arc<TempBlock>>, // temporary pages without lru promotion
 }
 
 /**
@@ -106,58 +105,34 @@ impl<'a> Drop for EvictionGuard<'a> {
       } else {
         shard.aborted.push_back((self.block_id, None));
       }
-      shard.lru.remove(&self.new_pointer, self.new_pointer_hash);
+      shard.inner.remove(&self.new_pointer, self.new_pointer_hash);
     }
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }
 }
 
-pub struct TempGuard<'a> {
-  shard: &'a Mutex<Shard>,
-  key: Key,
-}
-impl<'a> TempGuard<'a> {
-  #[inline]
-  const fn new(shard: &'a Mutex<Shard>, key: Key) -> Self {
-    Self { shard, key }
-  }
-}
-impl<'a> Drop for TempGuard<'a> {
-  #[inline]
-  fn drop(&mut self) {
-    self.shard.l().temporary.remove(&self.key);
-  }
-}
-
-pub enum Peeked<'a> {
-  Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
-  DiskRead(TempBlockRef<ExclusiveToken<'a>>, TempGuard<'a>),
-}
 pub enum Acquired<'a> {
   Hit(BlockId, SharedToken<'a>),
-  Temp(TempBlockRef<SharedToken<'a>>),
   Evicted(EvictionGuard<'a>),
 }
 
-pub struct LRUTable {
+pub struct MappingTable {
   shards: Box<[Mutex<Shard>]>,
-  offset: Box<[BlockId]>,
+  offsets: Box<[BlockId]>,
   hasher: RandomState,
 }
-impl LRUTable {
+impl MappingTable {
   pub fn new(shard_count: usize, capacity: usize) -> Self {
     let cap_per_shard = capacity / shard_count;
     let mut shards = Vec::with_capacity(shard_count);
     let mut offset = Vec::with_capacity(shard_count);
     for i in 0..shard_count {
       let shard = Shard {
-        lru: LRUShard::new(cap_per_shard),
+        inner: CacheShard::new(cap_per_shard),
+        eviction: BTreeSet::new(),
         allocated: 0,
         aborted: VecDeque::new(),
-        eviction: BTreeSet::new(),
-        temporary: BTreeMap::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
@@ -165,7 +140,7 @@ impl LRUTable {
 
     Self {
       shards: shards.into_boxed_slice(),
-      offset: offset.into_boxed_slice(),
+      offsets: offset.into_boxed_slice(),
       hasher: RandomState::new(),
     }
   }
@@ -174,56 +149,8 @@ impl LRUTable {
     // Lemire fast modulo
     let i = (((h & U32_MASK) * self.shards.len() as u64) >> 32) as usize;
     let shard = &self.shards[i];
-    let offset = self.offset[i];
+    let offset = self.offsets[i];
     (h, shard, offset)
-  }
-
-  pub fn peek<'a, F>(
-    &'a self,
-    table_id: TableId,
-    pointer: Pointer,
-    get_pin: F,
-  ) -> Peeked<'a>
-  where
-    F: Fn(BlockId) -> &'a ExclusivePin,
-  {
-    let key = (table_id, pointer);
-    let (hash, s, _) = self.get_shard(key);
-    let backoff = Backoff::new();
-
-    loop {
-      let mut shard = s.l();
-      if shard.eviction.contains(&key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(&fid) = shard.lru.peek(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Peeked::Hit(fid, token);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Peeked::Temp(block_ref);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      let block = TempBlock::new(pointer).to_arc();
-      let block_ref = TempBlockRef::exclusive(&block).unwrap();
-      shard.temporary.insert(key, block);
-      return Peeked::DiskRead(block_ref, TempGuard::new(s, key));
-    }
   }
 
   /**
@@ -231,11 +158,9 @@ impl LRUTable {
    *
    * 1. If the index is being evicted, wait — the block is temporarily inaccessible.
    * 2. If GC has allocated a temp page for this index, return it — the temp page
-   *    takes precedence over the LRU since it reflects the latest state.
-   * 3. If the index is in the LRU cache, return a hit.
-   * 4. If the LRU has an empty slot, allocate a new block without eviction.
-   * 5. Otherwise, evict the LRU tail and return an EvictionGuard for the caller
-   *    to perform the necessary IO.
+   *    takes precedence over the shard since it reflects the latest state.
+   * 3. If the index is in the cache shard, return a hit.
+   * 4. If the shard has an empty slot, allocate a new block without eviction.
    *
    * The shard lock is dropped before retrying CAS operations (try_pin, try_evict)
    * to minimize lock contention — holding the lock during CAS would block all
@@ -263,53 +188,48 @@ impl LRUTable {
         continue;
       }
 
-      if let Some(&fid) = shard.lru.get(&key, hash) {
-        if let Some(token) = get_pin(fid).try_shared() {
-          return Acquired::Hit(fid, token);
+      let mut reserved = match shard
+        .inner
+        .get_or_reserve(&key, hash, hasher, |&bid| get_pin(bid).try_exclusive())
+      {
+        Ok(GetOrReserve::Hit(&bid)) => {
+          if let Some(token) = get_pin(bid).try_shared() {
+            return Acquired::Hit(bid, token);
+          }
+          drop(shard);
+          backoff.snooze();
+          continue;
         }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      if let Some(block) = shard.temporary.get(&key) {
-        if let Some(block_ref) = TempBlockRef::shared(block) {
-          return Acquired::Temp(block_ref);
-        }
-
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
-      // Each shard owns a dedicated range of block IDs [offset, offset + cap_per_shard).
-      // This ensures shards never access the same block, eliminating contention
-      // between shards entirely.
-      if !shard.lru.is_full() {
-        let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
-          let id = shard.allocated;
-          shard.allocated += 1;
-          (id + offset, None)
-        });
-        let token = get_pin(bid).try_exclusive().unwrap();
-        shard.lru.insert(key, bid, hash, hasher);
-        return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
-      }
-
-      let ((evicted, bid), evicted_hash) = shard.lru.evict(&self.hasher).unwrap();
-      let token = match get_pin(bid).try_exclusive() {
-        Some(t) => t,
-        None => {
-          shard.lru.insert(evicted, bid, evicted_hash, hasher);
+        Ok(GetOrReserve::Reserved(reserved)) => reserved,
+        Err(_) => {
           drop(shard);
           backoff.snooze();
           continue;
         }
       };
 
+      let (evicted, bid, token) = match reserved.take_evicted() {
+        Some(evicted) => evicted,
+        None => {
+          let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+            let id = shard.allocated;
+            shard.allocated += 1;
+            debug_assert!(
+              shard.allocated <= shard.inner.capacity(),
+              "capacity exceeded"
+            );
+            (id + offset, None)
+          });
+          reserved.fulfill(bid);
+          let token = get_pin(bid).try_exclusive().unwrap();
+          return Acquired::Evicted(EvictionGuard::new(
+            evicted, bid, token, &s, key, hash,
+          ));
+        }
+      };
+
       shard.eviction.insert(evicted);
-      shard.lru.insert(key, bid, hash, hasher);
+      reserved.fulfill(bid);
       return Acquired::Evicted(EvictionGuard::new(
         Some(evicted),
         bid,
@@ -326,11 +246,11 @@ impl LRUTable {
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.l().lru.len(), self.offset[i]))
+      .map(|(i, s)| (s.l().allocated, self.offsets[i]))
   }
 }
 
-// Safe because all mutable access to LRUShard (which contains raw pointers)
+// Safe because all mutable access to MappingTable (which contains raw pointers)
 // is guarded by a Mutex, and all public methods take &self.
-unsafe impl Sync for LRUTable {}
-unsafe impl Send for LRUTable {}
+unsafe impl Sync for MappingTable {}
+unsafe impl Send for MappingTable {}
