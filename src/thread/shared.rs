@@ -81,9 +81,10 @@ where
   {
     let (tx, rx) = unbounded();
     let mut threads = Vec::with_capacity(count);
+    let name = name.to_string();
     for i in 0..count {
       let thread = Builder::new()
-        .name(format!("{}-{}", name.to_string(), i))
+        .name(name.clone())
         .stack_size(size)
         .spawn(worker_loop(rx.clone(), SharedFn::new(build(i)?)))
         .unwrap();
