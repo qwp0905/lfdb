@@ -231,11 +231,11 @@ where
             }
           };
 
+          self.small_count -= 1;
           let value = unsafe { entry.value.assume_init_read() };
           entry.set_state(State::Ghost);
           self.evict_ghost(hasher);
           self.ghost.push_back(ptr);
-          self.small_count -= 1;
           return Ok((entry.get_key().clone(), value, reserved));
         }
         State::Tombstone => {
