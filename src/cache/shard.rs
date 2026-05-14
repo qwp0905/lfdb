@@ -15,6 +15,12 @@ const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   move |ptr| key.equivalent(ptr.borrow_unsafe().get_key())
 }
 
+const fn ptr_eq<K, V>(
+  ptr: *mut CacheEntry<K, V>,
+) -> impl Fn(&*mut CacheEntry<K, V>) -> bool {
+  move |p| ptr == *p
+}
+
 const fn make_hasher<'a, K, V, S>(
   hash_builder: &'a S,
 ) -> impl Fn(&*mut CacheEntry<K, V>) -> u64 + 'a
@@ -273,10 +279,9 @@ where
             }
           };
 
-          let key = entry.get_key();
           self
             .table
-            .remove_entry(hasher.hash_one(key), equivalent(key))
+            .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
             .unwrap_or_else(|| unreachable!());
 
           let entry = unsafe { Box::from_raw(ptr) };
@@ -307,10 +312,9 @@ where
       match entry.get_state() {
         State::Main { .. } | State::Small { .. } => unreachable!(),
         State::Ghost => {
-          let key = entry.get_key();
           self
             .table
-            .remove_entry(hasher.hash_one(key), equivalent(key))
+            .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
             .unwrap_or_else(|| unreachable!());
           let _ = unsafe { Box::from_raw(ptr) };
         }
