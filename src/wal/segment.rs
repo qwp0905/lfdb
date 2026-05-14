@@ -111,13 +111,13 @@ impl WALSegment {
 
   fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
     let io = WorkBuilder::new()
-      .name(format!("{:?} buffered write", path.as_path().as_os_str()))
+      .name(format!("wal buffered write"))
       .single()
       .eager_buffering(max_iov(), handle_write(file.clone()))
       .to_box();
 
     let flush = WorkBuilder::new()
-      .name(format!("{} flush", path.as_path().to_string_lossy()))
+      .name(format!("wal flush"))
       .single()
       .eager_buffering(flush_count, handle_flush(file.clone()))
       .to_box();
