@@ -61,20 +61,19 @@ fn test_get_promotes_and_evict_order() {
 
   for i in 0..cap {
     shard.insert(i, i * 10, h(&hasher, i), &hasher);
-    std::thread::sleep(T);
   }
 
   // access 0 and 1 to promote them
+  std::thread::sleep(T);
   shard.get(&0, h(&hasher, 0));
-  std::thread::sleep(T);
   shard.get(&1, h(&hasher, 1));
-  std::thread::sleep(T);
 
   // evict all and collect keys
   let mut evicted = Vec::new();
   while let Some((k, _, _)) = shard.evict_if(&hasher, |_| Some(())) {
     evicted.push(k);
   }
+  println!("{evicted:?}");
 
   // non-accessed entries (2, 3, 4) should be evicted before accessed ones (0, 1)
   let pos = |k: usize| evicted.iter().position(|e| *e == k).unwrap();

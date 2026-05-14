@@ -102,7 +102,6 @@ where
   {
     let ptr = self.old_sub_list.pop_tail()?;
     let entry = ptr.borrow_unsafe();
-    let key = entry.get_key();
     let result = match try_evict(entry.get_value()) {
       Some(v) => v,
       None => {
@@ -110,9 +109,12 @@ where
         return None;
       }
     };
+
+    let key = entry.get_key();
     self
       .entries
       .remove_entry(hasher.hash_one(key), equivalent(key));
+    self.rebalance();
     let (k, v) = ptr.take_unsafe().take();
     Some((k, v, result))
   }
