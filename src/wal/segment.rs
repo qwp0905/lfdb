@@ -77,8 +77,7 @@ impl WALSegment {
   pub fn read(&self, pointer: Pointer, page: &mut Page<WAL_BLOCK_SIZE>) -> Result {
     self
       .file
-      .pread(page.as_mut(), pointer * SIZE)
-      .map(|_| ())
+      .pread_exact(page.as_mut(), pointer * SIZE)
       .map_err(Error::IO)
   }
   pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> Result {
@@ -165,7 +164,10 @@ const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> R
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];
-      return file.pwrite(slice, i * SIZE).map_err(Error::IO).map(drop);
+      return file
+        .pwrite_all(slice, i * SIZE)
+        .map_err(Error::IO)
+        .map(drop);
     }
 
     // Duplicate offsets all point to the same underlying page memory (same PageRef),
@@ -178,7 +180,7 @@ const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> R
       .map(|g| g.into_iter())
       .map(|g| g.map(|(i, s)| (*i, IoSlice::new(*s))).unzip())
       .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| (ptrs[0] * SIZE, bufs))
-      .map(|(offset, bufs)| file.pwritev(&bufs, offset))
+      .map(|(offset, mut bufs)| file.pwritev_all(&mut bufs, offset))
       .fold(Ok(()), |a, c| a.and_then(|_| c.map(drop)))
       .map_err(Error::IO)
   }

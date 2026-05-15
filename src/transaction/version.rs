@@ -249,13 +249,13 @@ impl VersionVisibility {
       .map_err(Error::IO)?;
     let mut offset = 0;
     let mut buf = vec![0; 4];
-    file.pread(&mut buf, offset).map_err(Error::IO)?;
+    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
     let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
     offset += 4;
 
     for _ in 0..len {
       let mut buf = vec![0; TX_ID_BYTES];
-      file.pread(&mut buf, offset).map_err(Error::IO)?;
+      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
       offset += TX_ID_BYTES as u64;
 
       let id =
@@ -263,13 +263,13 @@ impl VersionVisibility {
       active.insert(id);
     }
 
-    file.pread(&mut buf, offset).map_err(Error::IO)?;
+    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
     let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
     offset += 4;
 
     for _ in 0..len {
       let mut buf = vec![0; TX_ID_BYTES];
-      file.pread(&mut buf, offset).map_err(Error::IO)?;
+      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
       offset += TX_ID_BYTES as u64;
 
       let id =
