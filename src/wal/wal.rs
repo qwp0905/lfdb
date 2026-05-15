@@ -1,4 +1,5 @@
 use std::{
+  mem::forget,
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -216,13 +217,18 @@ impl WAL {
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
 
-      buffer.pin_segment();
+      let token = match buffer.pin_segment() {
+        Some(v) => v,
+        None => {
+          backoff.snooze();
+          continue;
+        }
+      };
       let (offset, ready) = buffer.pin_entry(len);
       if offset + len < WAL_BLOCK_SIZE {
         buffer.write_at(&record, offset);
         if !flush {
           buffer.commit_entry();
-          buffer.unpin_segment();
           return Ok(());
         }
 
@@ -238,7 +244,7 @@ impl WAL {
         }
 
         let f = buffer.flush();
-        buffer.unpin_segment();
+        drop(token);
 
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           match self.fsync_queue.pop() {
@@ -253,7 +259,7 @@ impl WAL {
       }
 
       if offset >= WAL_BLOCK_SIZE {
-        buffer.unpin_segment();
+        drop(token);
         backoff.snooze();
         continue;
       }
@@ -276,7 +282,7 @@ impl WAL {
         &guard,
       ) {
         if failed.new.get_pointer() > 0 {
-          failed.current.as_raw().borrow_unsafe().unpin_segment();
+          drop(token);
           backoff.snooze();
           continue;
         }
@@ -298,13 +304,12 @@ impl WAL {
       buffer.increase_written_count();
 
       if buffer.get_pointer() + 1 < self.max_len {
-        buffer.unpin_segment();
+        drop(token);
         backoff.snooze();
         continue;
       }
-      while buffer.load_segment_pinned() > 1 {
-        backoff.snooze();
-      }
+
+      forget(token.upgrade());
 
       let segment = buffer.take_segment();
       self.fsync_queue.push(segment.fsync());
@@ -397,7 +402,8 @@ impl WAL {
         backoff.snooze();
         continue;
       }
-      if buffer.load_segment_pinned() > 0 {
+
+      if buffer.pin_segment_exclusive().map(forget).is_none() {
         backoff.snooze();
         continue;
       }
