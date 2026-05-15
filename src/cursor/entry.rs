@@ -208,13 +208,6 @@ impl Serializable for DataChunk {
     Ok(())
   }
 }
-impl Deserializable for DataChunk {
-  fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
-    let len = reader.read_u16()? as usize;
-    let chunk = reader.read_n(len)?.to_vec();
-    Ok(Self { chunk })
-  }
-}
 
 #[cfg(test)]
 #[path = "tests/entry.rs"]

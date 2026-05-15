@@ -1,13 +1,13 @@
 use std::{
   borrow::Borrow,
-  collections::{HashSet, VecDeque},
+  collections::VecDeque,
   hash::{BuildHasher, Hash},
   mem::MaybeUninit,
 };
 
 use hashbrown::{raw::RawTable, Equivalent};
 
-use crate::utils::{UnsafeBorrow, UnsafeBorrowMut};
+use crate::utils::{ToRawPointer, UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
@@ -146,8 +146,7 @@ where
 
           let evicted = self.evict(hash_builder, &try_evict)?;
 
-          let new_entry = CacheEntry::new_main(key.clone());
-          let ptr = Box::into_raw(Box::new(new_entry));
+          let ptr = CacheEntry::new_main(key.clone()).to_raw_ptr();
           self.table.insert(hash, ptr, make_hasher(hash_builder));
           self.main.push_back(ptr);
           self.main_count += 1;
@@ -162,8 +161,7 @@ where
 
     let evicted = self.evict(hash_builder, &try_evict)?;
 
-    let entry = CacheEntry::new_small(key.clone());
-    let ptr = Box::into_raw(Box::new(entry));
+    let ptr = CacheEntry::new_small(key.clone()).to_raw_ptr();
     self.table.insert(hash, ptr, make_hasher(hash_builder));
 
     self.small.push_back(ptr);
@@ -246,7 +244,7 @@ where
           return Ok((entry.get_key().clone(), value, reserved));
         }
         State::Tombstone => {
-          let _ = unsafe { Box::from_raw(ptr) };
+          ptr.drop_unsafe();
           continue;
         }
         State::Ghost | State::Main { .. } => unreachable!(),
@@ -284,7 +282,7 @@ where
             .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
             .unwrap_or_else(|| unreachable!());
 
-          let entry = unsafe { Box::from_raw(ptr) };
+          let entry = ptr.take_unsafe();
           self.main_count -= 1;
           return Ok(Some((
             entry.key,
@@ -294,7 +292,7 @@ where
         }
         State::Ghost | State::Small { .. } => unreachable!(),
         State::Tombstone => {
-          let _ = unsafe { Box::from_raw(ptr) };
+          ptr.drop_unsafe();
           continue;
         }
       }
@@ -316,15 +314,16 @@ where
             .table
             .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
             .unwrap_or_else(|| unreachable!());
-          let _ = unsafe { Box::from_raw(ptr) };
+          ptr.drop_unsafe();
         }
         State::Tombstone => {
-          let _ = unsafe { Box::from_raw(ptr) };
+          ptr.drop_unsafe();
         }
       }
     }
   }
 
+  #[cold]
   pub fn remove<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<V>
   where
     K: Borrow<Q>,
@@ -364,6 +363,7 @@ where
   }
 
   #[allow(unused)]
+  #[cold]
   pub const fn capacity(&self) -> usize {
     self.capacity
   }
@@ -377,9 +377,8 @@ impl<K, V> Drop for CacheShard<K, V> {
       .chain(self.small.drain(..))
       .chain(self.ghost.drain(..))
       .filter(|ptr| matches!(ptr.borrow_unsafe().get_state(), State::Tombstone))
-      .collect::<HashSet<_>>()
     {
-      let _ = unsafe { Box::from_raw(ptr) };
+      ptr.drop_unsafe();
     }
     for ptr in self.table.drain() {
       if matches!(
@@ -388,7 +387,7 @@ impl<K, V> Drop for CacheShard<K, V> {
       ) {
         unsafe { ptr.borrow_mut_unsafe().value.assume_init_drop() };
       }
-      let _ = unsafe { Box::from_raw(ptr) };
+      ptr.drop_unsafe();
     }
   }
 }

@@ -1,4 +1,4 @@
-use std::{ptr::NonNull, sync::Arc};
+use std::sync::Arc;
 
 pub trait ToArc {
   fn to_arc(self) -> Arc<Self>;
@@ -21,11 +21,11 @@ impl<T> ToBox for T {
 }
 
 pub trait ToRawPointer {
-  fn to_raw_ptr(self) -> *const Self;
+  fn to_raw_ptr(self) -> *mut Self;
 }
 impl<T> ToRawPointer for T {
   #[inline(always)]
-  fn to_raw_ptr(self) -> *const Self {
+  fn to_raw_ptr(self) -> *mut Self {
     Box::into_raw(Box::new(self))
   }
 }
@@ -45,21 +45,9 @@ impl<'a, T: 'a> UnsafeBorrow<'a, T> for *mut T {
     unsafe { &*self }
   }
 }
-impl<'a, T: 'a> UnsafeBorrow<'a, T> for NonNull<T> {
-  #[inline(always)]
-  fn borrow_unsafe(self) -> &'a T {
-    unsafe { self.as_ref() }
-  }
-}
 
 pub trait UnsafeBorrowMut<'a, T: 'a> {
   fn borrow_mut_unsafe(self) -> &'a mut T;
-}
-impl<'a, T: 'a> UnsafeBorrowMut<'a, T> for NonNull<T> {
-  #[inline(always)]
-  fn borrow_mut_unsafe(mut self) -> &'a mut T {
-    unsafe { self.as_mut() }
-  }
 }
 impl<'a, T: 'a> UnsafeBorrowMut<'a, T> for *mut T {
   #[inline(always)]
@@ -77,10 +65,10 @@ impl<T> UnsafeTake<T> for *const T {
     unsafe { *Box::from_raw(self as *mut T) }
   }
 }
-impl<T> UnsafeTake<T> for NonNull<T> {
+impl<T> UnsafeTake<T> for *mut T {
   #[inline(always)]
   fn take_unsafe(self) -> T {
-    unsafe { *Box::from_raw(self.as_ptr()) }
+    unsafe { *Box::from_raw(self) }
   }
 }
 
@@ -93,9 +81,9 @@ impl<T> UnsafeDrop<T> for *const T {
     let _ = self.take_unsafe();
   }
 }
-impl<T> UnsafeDrop<T> for NonNull<T> {
+impl<T> UnsafeDrop<T> for *mut T {
   #[inline(always)]
   fn drop_unsafe(self) {
-    let _ = self.as_ptr().take_unsafe();
+    let _ = self.take_unsafe();
   }
 }

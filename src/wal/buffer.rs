@@ -7,10 +7,20 @@ use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
   disk::{PageRef, Pointer},
   error::Result,
-  utils::{ToRawPointer, UnsafeBorrow, UnsafeDrop, UnsafeTake},
+  utils::{
+    ExclusivePin, ExclusiveToken, SharedToken, ToRawPointer, UnsafeBorrow, UnsafeDrop,
+    UnsafeTake,
+  },
 };
 
 const U16_MASK: u32 = 0xFFFF;
+
+const BITS: u64 = 40;
+const MASK: u64 = (1 << BITS) - 1;
+/**
+ * default offset for entry to write records len
+ */
+const OFFSET_BYTE: u64 = 2;
 
 /**
  * A single WAL block (16KB page) being filled concurrently by multiple writers.
@@ -43,7 +53,7 @@ pub struct LogBuffer {
    * pin for using segment
    * it must taken with segment pointer.
    */
-  segment_pin: *const AtomicU32,
+  segment_pin: *const ExclusivePin,
   /**
    * Shared across all buffers within the same segment. Raw pointer allows exclusive
    * ownership transfer via take_segment() when the last buffer finishes — required
@@ -60,13 +70,6 @@ pub struct LogBuffer {
   generation: SegmentGeneration,
 }
 impl LogBuffer {
-  const BIT: u64 = 40;
-  const MASK: u64 = (1 << Self::BIT) - 1;
-  /**
-   * default offset for entry to write records len
-   */
-  const OFFSET_BYTE: u64 = 2;
-
   pub fn init_new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment: WALSegment,
@@ -75,7 +78,7 @@ impl LogBuffer {
     Self::new(
       entry,
       0,
-      AtomicU32::new(0).to_raw_ptr(),
+      ExclusivePin::new().to_raw_ptr(),
       segment.to_raw_ptr(),
       AtomicU64::new(0).to_raw_ptr(),
       generation,
@@ -98,13 +101,13 @@ impl LogBuffer {
   const fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment_ptr: Pointer,
-    segment_pin: *const AtomicU32,
+    segment_pin: *const ExclusivePin,
     segment: *const WALSegment,
     written_count: *const AtomicU64,
     generation: SegmentGeneration,
   ) -> Self {
     Self {
-      offset: AtomicU64::new(Self::OFFSET_BYTE),
+      offset: AtomicU64::new(OFFSET_BYTE),
       entry,
       commit_count: AtomicU32::new(0),
       segment_ptr,
@@ -115,12 +118,13 @@ impl LogBuffer {
     }
   }
 
-  pub fn pin_segment(&self) {
-    self
-      .segment_pin
-      .borrow_unsafe()
-      .fetch_add(1, Ordering::Release);
+  pub fn pin_segment(&self) -> Option<SharedToken<'_>> {
+    self.segment_pin.borrow_unsafe().try_shared()
   }
+  pub fn pin_segment_exclusive(&self) -> Option<ExclusiveToken<'_>> {
+    self.segment_pin.borrow_unsafe().try_exclusive()
+  }
+
   /**
    * Atomically reserves a write slot and returns (offset, ready).
    * ready is the number of writers that claimed a slot before this call.
@@ -129,11 +133,10 @@ impl LogBuffer {
    * record count header and to wait for all prior writers to finish.
    */
   pub fn pin_entry(&self, len: usize) -> (usize, u32) {
-    let prev = self.offset.fetch_add(
-      ((len as u64) & Self::MASK) | (1 << Self::BIT),
-      Ordering::Release,
-    );
-    ((prev & Self::MASK) as usize, (prev >> Self::BIT) as u32)
+    let prev = self
+      .offset
+      .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
+    ((prev & MASK) as usize, (prev >> BITS) as u32)
   }
   pub fn apply_record_count(&self, count: u32) {
     self.write_at(&((count & U16_MASK) as u16).to_le_bytes(), 0)
@@ -161,13 +164,8 @@ impl LogBuffer {
   pub fn commit_entry(&self) {
     self.commit_count.fetch_add(1, Ordering::Release);
   }
-  pub fn unpin_segment(&self) {
-    self
-      .segment_pin
-      .borrow_unsafe()
-      .fetch_sub(1, Ordering::Release);
-  }
-  pub fn get_pointer(&self) -> Pointer {
+
+  pub const fn get_pointer(&self) -> Pointer {
     self.segment_ptr
   }
 
@@ -181,10 +179,7 @@ impl LogBuffer {
     self.segment.take_unsafe()
   }
   pub fn load_offset(&self) -> usize {
-    (self.offset.load(Ordering::Acquire) & Self::MASK) as usize
-  }
-  pub fn load_segment_pinned(&self) -> u32 {
-    self.segment_pin.borrow_unsafe().load(Ordering::Acquire)
+    (self.offset.load(Ordering::Acquire) & MASK) as usize
   }
   pub fn increase_written_count(&self) {
     self
