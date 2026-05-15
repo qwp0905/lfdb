@@ -1,18 +1,18 @@
 use std::{
   mem::forget,
-  sync::atomic::{AtomicUsize, Ordering},
+  sync::atomic::{AtomicU32, Ordering},
 };
 
 use crossbeam::utils::Backoff;
 
-const EXCLUSIVE: usize = 1 << (usize::BITS - 1);
+const EXCLUSIVE: u32 = 1 << (u32::BITS - 1);
 
 #[derive(Debug)]
-pub struct ExclusivePin(AtomicUsize);
+pub struct ExclusivePin(AtomicU32);
 impl ExclusivePin {
   #[inline]
   pub const fn new() -> Self {
-    Self(AtomicUsize::new(0))
+    Self(AtomicU32::new(0))
   }
 
   pub fn try_shared(&self) -> Option<SharedToken<'_>> {
@@ -50,7 +50,7 @@ impl ExclusivePin {
   }
 }
 
-pub struct SharedToken<'a>(&'a AtomicUsize);
+pub struct SharedToken<'a>(&'a AtomicU32);
 impl<'a> SharedToken<'a> {
   pub fn upgrade(self) -> ExclusiveToken<'a> {
     let backoff = Backoff::new();
@@ -73,7 +73,7 @@ impl<'a> Drop for SharedToken<'a> {
   }
 }
 
-pub struct ExclusiveToken<'a>(&'a AtomicUsize);
+pub struct ExclusiveToken<'a>(&'a AtomicU32);
 impl<'a> ExclusiveToken<'a> {
   #[inline]
   pub fn downgrade(self) -> SharedToken<'a> {
