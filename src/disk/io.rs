@@ -1,6 +1,6 @@
 use std::{
   fs::{File, OpenOptions},
-  io::{IoSlice, Result},
+  io::{ErrorKind, IoSlice, Result},
   path::Path,
 };
 
@@ -20,8 +20,8 @@ use winapi;
 
 #[cfg(windows)]
 use std::{
-  intrinsics::copy_nonoverlapping,
   os::windows::fs::{FileExt, OpenOptionsExt},
+  ptr::copy_nonoverlapping,
 };
 
 #[cfg(any(
@@ -66,6 +66,22 @@ pub const fn max_iov() -> usize {
 
 pub trait Pread {
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
+  fn pread_exact(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
+    while !buf.is_empty() {
+      match self.pread(buf, offset) {
+        Ok(0) => break,
+        Ok(n) => {
+          let tmp = buf;
+          buf = &mut tmp[n..];
+          offset += n as u64;
+        }
+        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+        Err(e) => return Err(e),
+      }
+    }
+
+    Ok(())
+  }
 }
 impl Pread for File {
   #[cfg(unix)]
@@ -80,6 +96,20 @@ impl Pread for File {
 }
 pub trait Pwrite {
   fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
+  fn pwrite_all(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
+    while !buf.is_empty() {
+      match self.pwrite(buf, offset) {
+        Ok(0) => return Err(Error::from(ErrorKind::WriteZero)),
+        Ok(n) => {
+          buf = &buf[n..];
+          offset += n as u64;
+        }
+        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+        Err(e) => return Err(e),
+      }
+    }
+    Ok(())
+  }
 }
 impl Pwrite for File {
   #[cfg(unix)]
@@ -95,6 +125,25 @@ impl Pwrite for File {
 
 pub trait Pwritev {
   fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
+  fn pwritev_all(&self, bufs: &mut [IoSlice<'_>], mut offset: u64) -> Result<()> {
+    let mut bufs = bufs;
+
+    while !bufs.is_empty() {
+      match self.pwritev(bufs, offset) {
+        Ok(0) => {
+          return Err(Error::new(ErrorKind::WriteZero, "pwritev wrote zero bytes"))
+        }
+        Ok(n) => {
+          IoSlice::advance_slices(&mut bufs, n);
+          offset += n as u64;
+        }
+        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+        Err(e) => return Err(e),
+      }
+    }
+
+    Ok(())
+  }
 }
 impl Pwritev for File {
   #[cfg(unix)]

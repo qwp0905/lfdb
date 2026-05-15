@@ -44,32 +44,47 @@ struct CacheEntry<K, V> {
   state: State,
 }
 impl<K, V> CacheEntry<K, V> {
-  fn get_key(&self) -> &K {
+  const fn get_key(&self) -> &K {
     &self.key
   }
 
-  fn new_small(key: K) -> Self {
+  const fn new_small(key: K) -> Self {
     Self {
       key,
       value: MaybeUninit::uninit(),
       state: State::Small { freq: 0 },
     }
   }
-  fn new_main(key: K) -> Self {
+  const fn new_main(key: K) -> Self {
     Self {
       key,
       value: MaybeUninit::uninit(),
       state: State::Main { freq: 0 },
     }
   }
-  fn get_state(&self) -> &State {
+  const fn get_state(&self) -> &State {
     &self.state
   }
-  fn get_state_mut(&mut self) -> &mut State {
+  const fn get_state_mut(&mut self) -> &mut State {
     &mut self.state
   }
-  fn set_state(&mut self, state: State) {
+  const fn set_state(&mut self, state: State) {
     self.state = state;
+  }
+  const fn get_value(&self) -> &'_ V {
+    unsafe { self.value.assume_init_ref() }
+  }
+  const fn take_value(&self) -> V {
+    unsafe { self.value.assume_init_read() }
+  }
+  const fn value_ptr(&mut self) -> *mut V {
+    self.value.as_mut_ptr()
+  }
+  fn drop_value(&mut self) {
+    unsafe { self.value.assume_init_drop() };
+  }
+  fn take_key(self) -> K {
+    self.key
   }
 }
 
@@ -105,7 +120,7 @@ impl<K, V> CacheShard<K, V>
 where
   K: Eq + Hash,
 {
-  pub fn new(capacity: usize) -> Self {
+  pub const fn new(capacity: usize) -> Self {
     let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
@@ -138,7 +153,7 @@ where
       return match entry.get_state_mut() {
         State::Small { freq } | State::Main { freq } => {
           *freq = (*freq + 1).min(MAX_FREQ);
-          Ok(GetOrReserve::Hit(unsafe { entry.value.assume_init_ref() }))
+          Ok(GetOrReserve::Hit(entry.get_value()))
         }
         State::Ghost => {
           let (old, _) = unsafe { self.table.remove(bucket) };
@@ -152,7 +167,7 @@ where
           self.main_count += 1;
           Ok(GetOrReserve::Reserved(Reserved::new(
             evicted,
-            ptr.borrow_mut_unsafe().value.as_mut_ptr(),
+            ptr.borrow_mut_unsafe().value_ptr(),
           )))
         }
         State::Tombstone => unreachable!(),
@@ -168,7 +183,7 @@ where
     self.small_count += 1;
     Ok(GetOrReserve::Reserved(Reserved::new(
       evicted,
-      ptr.borrow_mut_unsafe().value.as_mut_ptr(),
+      ptr.borrow_mut_unsafe().value_ptr(),
     )))
   }
 
@@ -228,7 +243,7 @@ where
           }
         }
         State::Small { .. } => {
-          let reserved = match try_evict(unsafe { entry.value.assume_init_ref() }) {
+          let reserved = match try_evict(entry.get_value()) {
             Some(v) => v,
             None => {
               self.small.push_back(ptr);
@@ -237,11 +252,10 @@ where
           };
 
           self.small_count -= 1;
-          let value = unsafe { entry.value.assume_init_read() };
           entry.set_state(State::Ghost);
           self.evict_ghost(hasher);
           self.ghost.push_back(ptr);
-          return Ok((entry.get_key().clone(), value, reserved));
+          return Ok((entry.get_key().clone(), entry.take_value(), reserved));
         }
         State::Tombstone => {
           ptr.drop_unsafe();
@@ -269,7 +283,7 @@ where
           continue;
         }
         State::Main { .. } => {
-          let reserved = match try_evict(unsafe { entry.value.assume_init_ref() }) {
+          let reserved = match try_evict(entry.get_value()) {
             Some(v) => v,
             None => {
               self.main.push_back(ptr);
@@ -283,12 +297,9 @@ where
             .unwrap_or_else(|| unreachable!());
 
           let entry = ptr.take_unsafe();
+          let value = entry.take_value();
           self.main_count -= 1;
-          return Ok(Some((
-            entry.key,
-            unsafe { entry.value.assume_init_read() },
-            reserved,
-          )));
+          return Ok(Some((entry.take_key(), value, reserved)));
         }
         State::Ghost | State::Small { .. } => unreachable!(),
         State::Tombstone => {
@@ -335,16 +346,14 @@ where
       .borrow_mut_unsafe();
     match entry.get_state_mut() {
       State::Main { .. } => {
-        let value = unsafe { entry.value.assume_init_read() };
         entry.set_state(State::Tombstone);
         self.main_count -= 1;
-        Some(value)
+        Some(entry.take_value())
       }
       State::Small { .. } => {
-        let value = unsafe { entry.value.assume_init_read() };
         entry.set_state(State::Tombstone);
         self.small_count -= 1;
-        Some(value)
+        Some(entry.take_value())
       }
       State::Ghost => {
         entry.set_state(State::Tombstone);
@@ -385,7 +394,7 @@ impl<K, V> Drop for CacheShard<K, V> {
         ptr.borrow_unsafe().get_state(),
         State::Small { .. } | State::Main { .. }
       ) {
-        unsafe { ptr.borrow_mut_unsafe().value.assume_init_drop() };
+        ptr.borrow_mut_unsafe().drop_value();
       }
       ptr.drop_unsafe();
     }

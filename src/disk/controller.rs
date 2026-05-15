@@ -117,7 +117,7 @@ impl<const N: usize> IOPool<N> {
       let (p, slice) = &buffered[0];
       return metrics
         .disk_write
-        .measure(|| file.pwrite(slice.as_ref().as_ref(), p * Self::SIZE))
+        .measure(|| file.pwrite_all(slice.as_ref().as_ref(), p * Self::SIZE))
         .map(|_| ())
         .map_err(Error::IO);
     }
@@ -134,8 +134,12 @@ impl<const N: usize> IOPool<N> {
       .map(|g| g.map(|(p, s)| (*p, IoSlice::new(s.as_ref().as_ref()))))
       .map(|g| g.unzip())
       .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| ((ptrs[0] * Self::SIZE), bufs))
-      .map(|(offset, bufs)| metrics.disk_write.measure(|| file.pwritev(&bufs, offset)))
-      .map(|r| r.map(|_| ()).map_err(Error::IO))
+      .map(|(offset, mut bufs)| {
+        metrics
+          .disk_write
+          .measure(|| file.pwritev_all(&mut bufs, offset))
+      })
+      .map(|r| r.map_err(Error::IO))
       .collect()
   }
 
@@ -240,8 +244,7 @@ impl<const N: usize> DiskController<N> {
     self
       .metrics
       .disk_read
-      .measure(|| self.file.pread(page.as_mut(), pointer * Self::SIZE))
-      .map(|_| ())
+      .measure(|| self.file.pread_exact(page.as_mut(), pointer * Self::SIZE))
       .map_err(Error::IO)
   }
 
