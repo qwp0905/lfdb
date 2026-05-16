@@ -65,14 +65,20 @@ jobs:
 
       - name: Run flamegraph
         env:
-          YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
-          YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
+          RECORD_COUNT: ${{ github.event.inputs.record_count }}
+          OP_COUNT: ${{ github.event.inputs.op_count }}
         run: |
           FILTER="${{ github.event.inputs.filter }}"
           SAMPLE="${{ github.event.inputs.sample_size }}"
           ARGS="--sample-size $SAMPLE"
           if [ -n "$FILTER" ]; then
             ARGS="$ARGS --bench $FILTER"
+          fi
+          if [ -n "$RECORD_COUNT" ]; then
+            ARGS="$ARGS --config env.YCSB_RECORD_COUNT=\"$RECORD_COUNT\""
+          fi
+          if [ -n "$OP_COUNT" ]; then
+            ARGS="$ARGS --config env.YCSB_OP_COUNT=\"$OP_COUNT\""
           fi
           cargo flamegraph --root --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
