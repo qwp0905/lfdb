@@ -96,6 +96,7 @@ pub fn workload_a<F, E>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
     pre_load(engine, record_count);
@@ -142,6 +143,7 @@ pub fn workload_b<E, F>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
     pre_load(engine, record_count);
@@ -188,6 +190,7 @@ pub fn workload_d<E, F>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
     pre_load(engine, record_count);
@@ -235,6 +238,7 @@ pub fn workload_e<E, F>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
     pre_load(engine, record_count);
@@ -285,6 +289,7 @@ pub fn workload_f<E, F>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
     pre_load(engine, record_count);
