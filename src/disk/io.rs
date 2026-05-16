@@ -125,9 +125,7 @@ impl Pwrite for File {
 
 pub trait Pwritev {
   fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
-  fn pwritev_all(&self, bufs: &mut [IoSlice<'_>], mut offset: u64) -> Result<()> {
-    let mut bufs = bufs;
-
+  fn pwritev_all(&self, mut bufs: &mut [IoSlice<'_>], mut offset: u64) -> Result<()> {
     while !bufs.is_empty() {
       match self.pwritev(bufs, offset) {
         Ok(0) => {
