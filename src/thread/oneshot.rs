@@ -1,14 +1,41 @@
 use std::{
   cell::UnsafeCell,
   mem::MaybeUninit,
+  ops::Deref,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
+  sync::atomic::{fence, AtomicBool, Ordering},
   thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::{utils::ToArc, Error, Result};
+use crate::{Error, Result};
+
+struct Pair<T: ?Sized>(*mut (AtomicBool, T));
+impl<T> Pair<T> {
+  pub fn new(value: T) -> (Self, Self) {
+    let ptr = Box::into_raw(Box::new((AtomicBool::new(false), value)));
+    (Self(ptr), Self(ptr))
+  }
+}
+impl<T: ?Sized> Drop for Pair<T> {
+  fn drop(&mut self) {
+    if !unsafe { &*self.0 }.0.fetch_or(true, Ordering::Release) {
+      return;
+    }
+    fence(Ordering::Acquire);
+    let _ = unsafe { Box::from_raw(self.0) };
+  }
+}
+impl<T: ?Sized> Deref for Pair<T> {
+  type Target = T;
+
+  fn deref(&self) -> &Self::Target {
+    unsafe { &(*self.0).1 }
+  }
+}
+unsafe impl<T: Send + Sync + ?Sized> Send for Pair<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Sync for Pair<T> {}
 
 /**
  * Creates a single-use channel pair (Oneshot, OneshotFulfill).
@@ -16,8 +43,8 @@ use crate::{utils::ToArc, Error, Result};
  * The receiver parks until the sender fulfills the value or disconnects.
  */
 pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = OneshotInner::new().to_arc();
-  (Oneshot(inner.clone()), OneshotFulfill(inner))
+  let inner = Pair::new(OneshotInner::new());
+  (Oneshot(inner.0), OneshotFulfill(inner.1))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,7 +81,7 @@ impl<T> OneshotInner<T> {
   }
 }
 
-pub struct Oneshot<T>(Arc<OneshotInner<T>>);
+pub struct Oneshot<T>(Pair<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn wait(self) -> Result<T> {
     // Register the caller thread before checking state. If fulfill() runs
@@ -83,7 +110,7 @@ impl<T> Drop for Oneshot<T> {
   }
 }
 
-pub struct OneshotFulfill<T>(Arc<OneshotInner<T>>);
+pub struct OneshotFulfill<T>(Pair<OneshotInner<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
     let value = self.0.get_value_mut();
@@ -115,8 +142,6 @@ impl<T> Drop for OneshotFulfill<T> {
   }
 }
 
-// OneshotFulfill is sent to worker threads, so Send+Sync are required.
-// Oneshot stays on the requesting thread and never crosses thread boundaries.
 unsafe impl<T: Send> Sync for OneshotInner<T> {}
 unsafe impl<T: Send> Send for OneshotInner<T> {}
 impl<T> UnwindSafe for OneshotInner<T> {}
