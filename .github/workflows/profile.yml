@@ -32,52 +32,52 @@ jobs:
   flamegraph:
     runs-on: ubuntu-latest
     steps:
-    - name: Free disk space
-      run: |
-        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-        sudo apt-get clean
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
 
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-    - name: Install perf and flamegraph
-      run: |
-        sudo apt-get update
-        sudo apt install -y linux-tools-common linux-tools-generic linux-tools-`uname -r` || true
-        if [ ! -f /usr/lib/linux-tools/`uname -r`/perf ]; then
-          FROM_KERNEL=$(ls -d /usr/lib/linux-tools/*/perf 2>/dev/null | head -1 | xargs dirname | xargs basename)
-          sudo mkdir -p /usr/lib/linux-tools/`uname -r`
-          sudo ln -s /usr/lib/linux-tools/$FROM_KERNEL/perf /usr/lib/linux-tools/`uname -r`/perf
-        fi
-        command -v flamegraph || cargo install flamegraph
+      - name: Install perf and flamegraph
+        run: |
+          sudo apt-get update
+          sudo apt install -y linux-tools-common linux-tools-generic linux-tools-`uname -r` || true
+          if [ ! -f /usr/lib/linux-tools/`uname -r`/perf ]; then
+            FROM_KERNEL=$(ls -d /usr/lib/linux-tools/*/perf 2>/dev/null | head -1 | xargs dirname | xargs basename)
+            sudo mkdir -p /usr/lib/linux-tools/`uname -r`
+            sudo ln -s /usr/lib/linux-tools/$FROM_KERNEL/perf /usr/lib/linux-tools/`uname -r`/perf
+          fi
+          command -v flamegraph || cargo install flamegraph
 
-    - name: Allow perf for unprivileged users
-      run: echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+      - name: Allow perf for unprivileged users
+        run: echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
-    - name: Run flamegraph
-      env:
-        YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
-        YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
-      run: |
-        FILTER="${{ github.event.inputs.filter }}"
-        SAMPLE="${{ github.event.inputs.sample_size }}"
-        ARGS="--sample-size $SAMPLE"
-        if [ -n "$FILTER" ]; then
-          ARGS="$ARGS --bench $FILTER"
-        fi
-        cargo flamegraph --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
+      - name: Run flamegraph
+        env:
+          YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
+          YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
+        run: |
+          FILTER="${{ github.event.inputs.filter }}"
+          SAMPLE="${{ github.event.inputs.sample_size }}"
+          ARGS="--sample-size $SAMPLE"
+          if [ -n "$FILTER" ]; then
+            ARGS="$ARGS --bench $FILTER"
+          fi
+          cargo flamegraph --root --profile bench --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
-    - name: Upload flamegraph
-      uses: actions/upload-artifact@v4
-      with:
-        name: flamegraph
-        path: flamegraph.svg
+      - name: Upload flamegraph
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamegraph
+          path: flamegraph.svg
