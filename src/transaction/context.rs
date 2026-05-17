@@ -88,6 +88,14 @@ impl<'a> WritablePolicy for &TxContext<'a> {
   fn when_update_entry(&self, pointer: Pointer, table: &Arc<TableHandle>) {
     self.orchestrator.mark_gc(table.clone(), pointer);
   }
+
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<crate::cache::CachedSlot<'_>> {
+    self.orchestrator.alloc(pointer, table.clone())
+  }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {
   fn is_conflict(&self, owner: crate::wal::TxId) -> bool {

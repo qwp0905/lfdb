@@ -180,7 +180,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
 
     {
-      let mut slot = self.0.fetch_slot(HEADER_POINTER, table)?.for_write();
+      let mut slot = self.0.alloc_slot(HEADER_POINTER, table)?.for_write();
       self
         .0
         .serialize_and_log(&mut slot, &TreeHeader::new(root), table)?;

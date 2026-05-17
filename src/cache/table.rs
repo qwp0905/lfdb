@@ -153,6 +153,62 @@ impl MappingTable {
     (h, shard, offset)
   }
 
+  pub fn alloc<'a, F>(
+    &'a self,
+    table_id: TableId,
+    pointer: Pointer,
+    get_pin: F,
+  ) -> EvictionGuard<'a>
+  where
+    F: Fn(BlockId) -> &'a ExclusivePin,
+  {
+    let key = (table_id, pointer);
+    let (hash, s, offset) = self.get_shard(key);
+    let hasher = &self.hasher;
+    let backoff = Backoff::new();
+    let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
+
+    loop {
+      let mut shard = s.l();
+      if shard.eviction.contains(&key) {
+        drop(shard);
+        backoff.snooze();
+        continue;
+      }
+
+      let mut reserved = match shard.inner.reserve(&key, hash, hasher, &try_evict) {
+        Ok(reserved) => reserved,
+        Err(_) => {
+          drop(shard);
+          backoff.snooze();
+          continue;
+        }
+      };
+
+      let (evicted, bid, token) = match reserved.take_evicted() {
+        Some(evicted) => evicted,
+        None => {
+          let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+            let id = shard.allocated;
+            shard.allocated += 1;
+            debug_assert!(
+              shard.allocated <= shard.inner.capacity(),
+              "capacity exceeded"
+            );
+            (id + offset, None)
+          });
+          reserved.fulfill(bid);
+          let token = try_evict(&bid).unwrap();
+          return EvictionGuard::new(evicted, bid, token, &s, key, hash);
+        }
+      };
+
+      shard.eviction.insert(evicted);
+      reserved.fulfill(bid);
+      return EvictionGuard::new(Some(evicted), bid, token, &s, key, hash);
+    }
+  }
+
   /**
    * Acquires access to a page by index, following this order:
    *
@@ -179,6 +235,7 @@ impl MappingTable {
     let (hash, s, offset) = self.get_shard(key);
     let hasher = &self.hasher;
     let backoff = Backoff::new();
+    let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
 
     loop {
       let mut shard = s.l();
@@ -188,9 +245,7 @@ impl MappingTable {
         continue;
       }
 
-      let mut reserved = match shard
-        .inner
-        .get_or_reserve(&key, hash, hasher, |&bid| get_pin(bid).try_exclusive())
+      let mut reserved = match shard.inner.get_or_reserve(&key, hash, hasher, &try_evict)
       {
         Ok(GetOrReserve::Hit(&bid)) => {
           if let Some(token) = get_pin(bid).try_shared() {

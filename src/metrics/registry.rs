@@ -207,7 +207,7 @@ pub struct MetricsRegistry {
 impl MetricsRegistry {
   pub fn new() -> Self {
     Self {
-      block_cache_read: Histogram::new(1000, Duration::from_nanos(100)),
+      block_cache_read: Histogram::new(10_000, Duration::from_nanos(100)),
       block_cache_hit: Counter::new(),
       block_cache_flush: Histogram::new(10, Duration::from_millis(1)),
       transaction_start: Histogram::new(1000, Duration::from_micros(10)),

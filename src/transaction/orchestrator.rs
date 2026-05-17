@@ -120,6 +120,14 @@ impl TxOrchestrator {
   ) -> Result<CachedSlot<'_>> {
     self.block_cache.read(pointer, handle)
   }
+  #[inline]
+  pub fn alloc(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CachedSlot<'_>> {
+    self.block_cache.alloc(pointer, handle)
+  }
 
   #[inline]
   pub fn serialize_and_log<T>(

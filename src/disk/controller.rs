@@ -1,6 +1,6 @@
 use std::{
   fs::{remove_file, File, OpenOptions},
-  io::IoSlice,
+  io::{Error as IoError, ErrorKind, IoSlice},
   mem::forget,
   path::Path,
   sync::{
@@ -246,6 +246,25 @@ impl<const N: usize> DiskController<N> {
       .disk_read
       .measure(|| self.file.pread_exact(page.as_mut(), pointer * Self::SIZE))
       .map_err(Error::IO)
+  }
+
+  pub fn read_unchecked<'a>(&self, pointer: Pointer, page: &'a mut PageRef<N>) -> Result {
+    let mut offset = pointer * Self::SIZE;
+    let mut buf = page.as_mut();
+    while !buf.is_empty() {
+      match self.file.pread(buf, offset) {
+        Ok(0) if buf.len() == N => break, // allow only empty, not partial.
+        Ok(0) => return Err(Error::IO(IoError::from(ErrorKind::UnexpectedEof))),
+        Ok(n) => {
+          let tmp = buf;
+          buf = &mut tmp[n..];
+          offset += n as u64;
+        }
+        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+        Err(e) => return Err(Error::IO(e)),
+      }
+    }
+    Ok(())
   }
 
   #[inline]
