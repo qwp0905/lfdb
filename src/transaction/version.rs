@@ -1,7 +1,7 @@
 use std::{
   collections::BTreeSet,
   fs,
-  io::{IoSlice, Write},
+  io::IoSlice,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
   sync::atomic::{AtomicU8, Ordering},
@@ -10,7 +10,7 @@ use std::{
 use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
 
 use crate::{
-  disk::{max_iov, Pread},
+  disk::{max_iov, Pread, Pwrite, Pwritev},
   utils::OffsetBitmap,
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
   Error, Result,
@@ -289,12 +289,13 @@ impl VersionVisibility {
       ))
       .with_extension(FILE_EXT);
 
-    let mut file = fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
       .create(true)
       .write(true)
-      .append(true)
       .open(&current)
       .map_err(Error::IO)?;
+
+    let mut offset = 0;
 
     let active = self
       .active
@@ -302,14 +303,16 @@ impl VersionVisibility {
       .map(|v| v.key().to_le_bytes())
       .collect::<Vec<_>>();
     file
-      .write(&(active.len() as u32).to_le_bytes())
+      .pwrite_all(&(active.len() as u32).to_le_bytes(), offset)
       .map_err(Error::IO)?;
+    offset += 4;
     for chuck in active.chunks(max_iov()) {
-      let v = chuck
+      let mut v = chuck
         .into_iter()
         .map(|v| IoSlice::new(v))
         .collect::<Vec<_>>();
-      file.write_vectored(&v).map_err(Error::IO)?;
+      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
+      offset += (TX_ID_BYTES * v.len()) as u64;
     }
 
     let aborted = self
@@ -318,15 +321,17 @@ impl VersionVisibility {
       .map(|v| v.value().to_le_bytes())
       .collect::<Vec<_>>();
     file
-      .write(&(aborted.len() as u32).to_le_bytes())
+      .pwrite_all(&(aborted.len() as u32).to_le_bytes(), offset)
       .map_err(Error::IO)?;
+    offset += 4;
 
     for chuck in aborted.chunks(max_iov()) {
-      let v = chuck
+      let mut v = chuck
         .into_iter()
         .map(|v| IoSlice::new(v))
         .collect::<Vec<_>>();
-      file.write_vectored(&v).map_err(Error::IO)?;
+      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
+      offset += (TX_ID_BYTES * v.len()) as u64;
     }
 
     file.sync_data().map_err(Error::IO)?;
