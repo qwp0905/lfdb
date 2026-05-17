@@ -143,7 +143,7 @@ impl TreeManager {
     let table_id = table.metadata().get_id();
     {
       let root_ptr = table.free().alloc();
-      let mut root = block_cache.read(root_ptr, table.clone())?.for_write();
+      let mut root = block_cache.alloc(root_ptr, table.clone())?.for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,
@@ -151,7 +151,9 @@ impl TreeManager {
         &BTreeNode::initial_state(),
       )?;
 
-      let mut header = block_cache.read(HEADER_POINTER, table.clone())?.for_write();
+      let mut header = block_cache
+        .alloc(HEADER_POINTER, table.clone())?
+        .for_write();
       recorder.serialize_and_log(
         RESERVED_TX,
         table_id,

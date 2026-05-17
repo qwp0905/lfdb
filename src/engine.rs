@@ -167,7 +167,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
       block_cache
-        .read(*ptr, meta_table.clone())?
+        .read_unchecked(*ptr, meta_table.clone())?
         .for_write()
         .as_mut()
         .writer()
@@ -195,7 +195,7 @@ impl Engine {
         None => continue,
       };
       block_cache
-        .read(*ptr, handle)?
+        .read_unchecked(*ptr, handle)?
         .for_write()
         .as_mut()
         .writer()

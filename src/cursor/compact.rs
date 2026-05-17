@@ -126,6 +126,14 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
   fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
     self.gc.mark(table.clone(), entry);
   }
+
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<crate::cache::CachedSlot<'_>> {
+    self.block_cache.alloc(pointer, table.clone())
+  }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
   fn is_conflict(&self, owner: TxId) -> bool {
@@ -190,6 +198,14 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
 
   fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
     self.gc.mark(table.clone(), entry)
+  }
+
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<crate::cache::CachedSlot<'_>> {
+    self.block_cache.alloc(pointer, table.clone())
   }
 }
 

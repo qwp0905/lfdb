@@ -136,6 +136,29 @@ where
     }
   }
 
+  pub fn reserve<S, R, F>(
+    &mut self,
+    key: &K,
+    hash: u64,
+    hash_builder: &S,
+    try_evict: F,
+  ) -> std::result::Result<Reserved<K, V, R>, ()>
+  where
+    K: Clone,
+    S: BuildHasher,
+    F: Fn(&V) -> Option<R>,
+  {
+    debug_assert!(self.table.find(hash, equivalent(key)).is_none());
+    let evicted = self.evict(hash_builder, &try_evict)?;
+
+    let ptr = CacheEntry::new_small(key.clone()).to_raw_ptr();
+    self.table.insert(hash, ptr, make_hasher(hash_builder));
+
+    self.small.push_back(ptr);
+    self.small_count += 1;
+    Ok(Reserved::new(evicted, ptr.borrow_mut_unsafe().value_ptr()))
+  }
+
   pub fn get_or_reserve<S, R, F>(
     &mut self,
     key: &K,
@@ -174,17 +197,9 @@ where
       };
     }
 
-    let evicted = self.evict(hash_builder, &try_evict)?;
-
-    let ptr = CacheEntry::new_small(key.clone()).to_raw_ptr();
-    self.table.insert(hash, ptr, make_hasher(hash_builder));
-
-    self.small.push_back(ptr);
-    self.small_count += 1;
-    Ok(GetOrReserve::Reserved(Reserved::new(
-      evicted,
-      ptr.borrow_mut_unsafe().value_ptr(),
-    )))
+    self
+      .reserve(key, hash, hash_builder, try_evict)
+      .map(GetOrReserve::Reserved)
   }
 
   fn evict<S, R, F>(
