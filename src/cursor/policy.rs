@@ -25,6 +25,11 @@ pub trait WritablePolicy: ReadonlyPolicy {
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result;
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &Arc<TableHandle>,
+  ) -> Result<CachedSlot<'_>>;
 
   fn alloc_and_log<T: Serializable>(
     &self,
@@ -32,7 +37,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
     table: &Arc<TableHandle>,
   ) -> Result<Pointer> {
     let ptr = table.free().alloc();
-    let mut slot = self.fetch_slot(ptr, table)?.for_write();
+    let mut slot = self.alloc_slot(ptr, table)?.for_write();
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(ptr)
   }
