@@ -75,7 +75,7 @@ jobs:
             ARGS="$ARGS --bench $FILTER"
           fi
           ROOT_ENVS="--preserve-env=YCSB_RECORD_COUNT,YCSB_OP_COUNT"
-          cargo flamegraph --root $ROOT_ENVS --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
+          cargo flamegraph --root="$ROOT_ENVS" --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
       - name: Upload flamegraph
         uses: actions/upload-artifact@v4
