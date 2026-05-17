@@ -81,7 +81,7 @@ jobs:
           if [ -n "$OP_COUNT" ]; then
             ROOT_ARGS="$ROOT_ARGS YCSB_OP_COUNT=$OP_COUNT"
           fi
-          cargo flamegraph --root $ROOT_ARGS --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
+          cargo flamegraph --root "$ROOT_ARGS" --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
       - name: Upload flamegraph
         uses: actions/upload-artifact@v4
