@@ -69,7 +69,7 @@ pub trait Pread {
   fn pread_exact(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
     while !buf.is_empty() {
       match self.pread(buf, offset) {
-        Ok(0) => break,
+        Ok(0) => return Err(Error::from(ErrorKind::UnexpectedEof)),
         Ok(n) => {
           let tmp = buf;
           buf = &mut tmp[n..];
