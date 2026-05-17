@@ -1,6 +1,8 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
-use super::{Acquired, CachedBlock, CachedSlot, DirtyTables, MappingTable};
+use super::{
+  Acquired, CachedBlock, CachedSlot, DirtyTables, EvictionGuard, MappingTable,
+};
 use crate::{
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
@@ -87,6 +89,60 @@ impl BlockCache {
     )
   }
 
+  fn handle_eviction<'a>(
+    &'a self,
+    guard: EvictionGuard<'a>,
+    new: CachedBlock,
+  ) -> Result<CachedSlot<'a>> {
+    let block_id = guard.get_block_id();
+    let ptr = self.cached_blocks[block_id].as_ptr() as *mut CachedBlock;
+    if !guard.is_evicted() {
+      unsafe { ptr.write(new) };
+      return Ok(self.cache_slot(block_id, guard.commit()));
+    }
+
+    let old = unsafe { ptr.replace(new) };
+    if self.dirty_blocks.contains(block_id) {
+      old.flush_async().wait()?;
+      self.dirty_blocks.remove(block_id);
+      self.dirty_tables.mark(old.handle());
+    }
+
+    Ok(self.cache_slot(block_id, guard.commit()))
+  }
+
+  /**
+   * Alloc new block without read from disk for allocate new block at disk.
+   */
+  pub fn alloc(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CachedSlot<'_>> {
+    let table_id = handle.metadata().get_id();
+    let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
+
+    let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle);
+    self.handle_eviction(guard, new_block)
+  }
+
+  pub fn read_unchecked(
+    &self,
+    pointer: Pointer,
+    handle: Arc<TableHandle>,
+  ) -> Result<CachedSlot<'_>> {
+    let table_id = handle.metadata().get_id();
+    let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
+      Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
+      Acquired::Evicted(guard) => guard,
+    };
+
+    let mut new = self.page_pool.acquire();
+    handle.disk().read_unchecked(pointer, &mut new)?;
+    let new_block = CachedBlock::new(pointer, new, handle);
+    self.handle_eviction(guard, new_block)
+  }
+
   fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
@@ -97,25 +153,10 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
-    let block_id = guard.get_block_id();
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
-
     let new_block = CachedBlock::new(pointer, new, handle);
-    let ptr = self.cached_blocks[block_id].as_ptr() as *mut CachedBlock;
-    if !guard.is_evicted() {
-      unsafe { ptr.write(new_block) };
-      return Ok(self.cache_slot(block_id, guard.commit()));
-    }
-
-    let old = unsafe { ptr.replace(new_block) };
-    if self.dirty_blocks.contains(block_id) {
-      old.flush_async().wait()?;
-      self.dirty_blocks.remove(block_id);
-      self.dirty_tables.mark(old.handle());
-    }
-
-    Ok(self.cache_slot(block_id, guard.commit()))
+    self.handle_eviction(guard, new_block)
   }
 
   #[inline]
