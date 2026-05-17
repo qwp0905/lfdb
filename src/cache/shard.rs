@@ -148,6 +148,7 @@ where
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
+    debug_assert!(self.table.find(hash, equivalent(key)).is_none());
     let evicted = self.evict(hash_builder, &try_evict)?;
 
     let ptr = CacheEntry::new_small(key.clone()).to_raw_ptr();
