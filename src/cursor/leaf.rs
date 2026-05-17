@@ -7,6 +7,8 @@ use crate::{
   Result,
 };
 
+const MAX_NODE: usize = 64;
+
 /**
  * Result of a leaf node key lookup.
  * Move is the B-link tree right-move: the key falls beyond this node's range,
@@ -92,7 +94,7 @@ impl LeafNode {
     self.entries.insert(index, (key, pointer));
 
     let bytes_len = self.bytes_len();
-    if bytes_len <= SERIALIZABLE_BYTES {
+    if self.entries.len() <= MAX_NODE && bytes_len <= SERIALIZABLE_BYTES {
       return None;
     }
 
