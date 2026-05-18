@@ -2,12 +2,18 @@ use std::{
   collections::BTreeSet,
   fs,
   io::IoSlice,
+  ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::atomic::{AtomicU8, Ordering},
+  sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+  },
 };
 
-use crossbeam_skiplist::{map::Entry, SkipMap, SkipSet};
+use crossbeam_skiplist::SkipSet;
+
+use super::{ActiveSet, ActiveState};
 
 use crate::{
   disk::{max_iov, Pread, Pwrite, Pwritev},
@@ -18,75 +24,24 @@ use crate::{
 
 const FILE_EXT: &str = "snap";
 
-const STATUS_AVAILABLE: u8 = 0;
-const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
-const STATUS_ABORTED: u8 = 2;
-const STATUS_TIMEOUT: u8 = 3;
-
-pub struct TxState<'a>(Entry<'a, TxId, AtomicU8>);
+pub struct TxState<'a> {
+  state: Arc<ActiveState>,
+  set: &'a ActiveSet,
+}
 impl<'a> TxState<'a> {
-  #[inline(always)]
-  pub fn get_id(&self) -> TxId {
-    *self.0.key()
-  }
-  #[inline]
-  pub fn is_available(&self) -> bool {
-    self.0.value().load(Ordering::Acquire) == STATUS_AVAILABLE
+  const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
+    Self { state, set }
   }
 
-  pub fn try_abort(&self) -> bool {
-    let status = self.0.value();
-    let current = status.load(Ordering::Acquire);
-    if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
-      return false;
-    }
-
-    status
-      .compare_exchange(
-        current,
-        STATUS_ABORTED,
-        Ordering::Release,
-        Ordering::Acquire,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn try_timeout(&self) -> bool {
-    self
-      .0
-      .value()
-      .compare_exchange(
-        STATUS_AVAILABLE,
-        STATUS_TIMEOUT,
-        Ordering::Release,
-        Ordering::Acquire,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn try_commit(&self) -> bool {
-    self
-      .0
-      .value()
-      .compare_exchange(
-        STATUS_AVAILABLE,
-        STATUS_ON_COMMIT,
-        Ordering::Release,
-        Ordering::Acquire,
-      )
-      .is_ok()
-  }
-
-  #[inline(always)]
   pub fn deactive(&self) {
-    self.0.remove();
+    self.set.remove(&self.state.get_id());
   }
+}
+impl<'a> Deref for TxState<'a> {
+  type Target = ActiveState;
 
-  #[inline]
-  pub fn make_available(&self) {
-    self.0.value().store(STATUS_AVAILABLE, Ordering::Release)
+  fn deref(&self) -> &Self::Target {
+    &self.state
   }
 }
 
@@ -98,36 +53,8 @@ pub struct TxSnapshot<'a> {
   aborted: &'a SkipSet<TxId>,
 }
 impl<'a> TxSnapshot<'a> {
-  fn new(
-    active: &SkipMap<TxId, AtomicU8>,
-    aborted: &'a SkipSet<TxId>,
-    max: TxId,
-  ) -> Self {
-    let front = match active.front() {
-      Some(front) => front,
-      _ => {
-        return TxSnapshot {
-          active: OffsetBitmap::new(0, 0),
-          aborted,
-        }
-      }
-    };
-
-    let offset = *front.key();
-    let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
-
-    let mut entry = Some(front);
-    while let Some(e) = entry.take_if(|e| *e.key() < max) {
-      if !e.is_removed() {
-        snapshot.insert(*e.key());
-      }
-      entry = e.next();
-    }
-
-    Self {
-      active: snapshot,
-      aborted,
-    }
+  fn new(active: OffsetBitmap, aborted: &'a SkipSet<TxId>) -> Self {
+    Self { active, aborted }
   }
 
   #[inline]
@@ -149,7 +76,7 @@ impl<'a> TxSnapshot<'a> {
  */
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
-  active: SkipMap<TxId, AtomicU8>,
+  active: ActiveSet,
   last_tx_id: AtomicTxId,
   base_path: PathBuf,
   snapshot_id: AtomicU8,
@@ -175,7 +102,7 @@ impl VersionVisibility {
         .chain(aborted)
         .filter(|c| !closed.contains(c))
         .collect(),
-      active: SkipMap::new(),
+      active: ActiveSet::new(),
       last_tx_id: AtomicTxId::new(last_tx_id),
       base_path,
       snapshot_id: AtomicU8::new(snap_id),
@@ -209,8 +136,7 @@ impl VersionVisibility {
   pub fn min_version(&self) -> TxId {
     self
       .active
-      .front()
-      .map(|v| *v.key())
+      .min_version()
       .unwrap_or_else(|| self.current_version())
   }
   #[inline]
@@ -219,9 +145,11 @@ impl VersionVisibility {
   }
   pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
+    let state = Arc::new(ActiveState::new(tx_id));
+    self.active.insert(state.clone());
     (
-      TxState(self.active.insert(tx_id, AtomicU8::new(STATUS_AVAILABLE))),
-      TxSnapshot::new(&self.active, &self.aborted, tx_id),
+      TxState::new(state, &self.active),
+      TxSnapshot::new(self.active.snapshot_until(tx_id), &self.aborted),
     )
   }
   #[inline]
@@ -230,7 +158,10 @@ impl VersionVisibility {
   }
   #[inline]
   pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
-    self.active.get(&tx_id).map(TxState)
+    self
+      .active
+      .get(&tx_id)
+      .map(|state| TxState::new(state, &self.active))
   }
 
   fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>, u8)> {
@@ -299,8 +230,9 @@ impl VersionVisibility {
 
     let active = self
       .active
-      .range(..tx_id)
-      .map(|v| v.key().to_le_bytes())
+      .until(tx_id)
+      .iter()
+      .map(|v| v.to_le_bytes())
       .collect::<Vec<_>>();
     file
       .pwrite_all(&(active.len() as u32).to_le_bytes(), offset)
