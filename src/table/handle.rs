@@ -19,7 +19,7 @@ pub struct TableHandle {
   disk: DiskController<PAGE_SIZE>,
   free_list: FreeList,
   /**
-   * pin for mutation (eg. compaction / merge nodes / gc)
+   * pin for mutation (eg. compaction / gc)
    */
   pin: ExclusivePin,
   closed: AtomicBool,

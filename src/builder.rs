@@ -112,7 +112,7 @@ where
     self
   }
   /**
-   * Interval at which leaf merge runs. Run more frequently when removes are
+   * Interval at which garbage collection runs. Run more frequently when removes are
    * heavy, less frequently when removes are rare, to maintain scan performance.
    */
   pub const fn gc_trigger_interval(mut self, interval: Duration) -> Self {
