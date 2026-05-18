@@ -168,12 +168,41 @@ const fn run_entry(
         continue;
       }
 
+      let min_version = version_visibility.min_version();
+      {
+        let mut found = false;
+        let mut need_trim = false;
+        for record in block_cache
+          .read(ptr, table.clone())?
+          .for_read()
+          .as_ref()
+          .deserialize::<DataEntryView>()?
+          .get_versions()
+        {
+          if version_visibility.is_aborted(&record.owner) {
+            need_trim = true;
+            break;
+          }
+          if record.version > min_version {
+            continue;
+          }
+          if !found {
+            found = true;
+            continue;
+          }
+          need_trim = true;
+          break;
+        }
+        if !need_trim {
+          continue;
+        }
+      }
+
       let mut slot = block_cache.read(ptr, table.clone())?.for_lazy_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
       let mut expired_max: Option<VersionRecord> = None;
-      let min_version = version_visibility.min_version();
       let mut new_versions = VecDeque::new();
 
       for record in entry.take_versions() {

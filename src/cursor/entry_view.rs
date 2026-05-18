@@ -39,6 +39,10 @@ impl DataEntryView {
     self.versions.iter().find(predicate)
   }
 
+  pub fn get_versions(&self) -> impl Iterator<Item = &'_ VersionRecordView> + '_ {
+    self.versions.iter()
+  }
+
   pub fn is_empty(&self) -> bool {
     if self.versions.is_empty() {
       return true;
