@@ -87,7 +87,7 @@ LFDB manages disk space through the following design points:
 > MVCC / Background GC
 
 In LFDB, data is written by version into disk space separate from the B-tree index. Each transaction reads data based on the snapshot created when it started and searches for the version that is visible to it.
-Version chains that can no longer be observed due to transaction lifecycle progression are reclaimed by a periodically running background GC. In addition, keys in leaf nodes whose visible version records have disappeared are periodically reclaimed to improve scan performance.
+Version chains that can no longer be observed due to transaction lifecycle progression are reclaimed by a periodically running background GC.
 
 > Page allocation
 
