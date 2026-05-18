@@ -38,7 +38,6 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
-    // gc: &'a GarbageCollector,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -49,7 +48,6 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
-      // gc,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -163,7 +161,6 @@ struct CompactionWritePolicy<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  // gc: &'a GarbageCollector,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn is_visible(&self, owner: TxId, _: TxId) -> bool {

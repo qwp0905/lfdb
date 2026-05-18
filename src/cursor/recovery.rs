@@ -161,12 +161,6 @@ fn release_orphaned(block_cache: &BlockCache, table: Arc<TableHandle>) -> Result
     };
   }
 
-  // push to queue for initial checkpoint
-  // entry_stack
-  //   .iter()
-  //   .for_each(|&ptr| gc.mark(table.clone(), ptr));
-  debug!("{} entry queued for initial gc.", entry_stack.len());
-
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
     let entry: DataEntry = block_cache
