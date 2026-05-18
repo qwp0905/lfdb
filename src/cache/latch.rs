@@ -1,6 +1,6 @@
-use std::sync::{Condvar, Mutex};
+use std::panic::RefUnwindSafe;
 
-use crate::utils::ShortenedMutex;
+use parking_lot::{Condvar, Mutex};
 
 struct State {
   locked: bool,
@@ -30,10 +30,10 @@ impl Latch {
   where
     'a: 'b,
   {
-    let mut state = self.state.l();
+    let mut state = self.state.lock();
     while state.locked {
       state.high_waiters += 1;
-      state = self.high_cv.wait(state).unwrap();
+      self.high_cv.wait(&mut state);
       state.high_waiters -= 1;
     }
     state.locked = true;
@@ -45,10 +45,10 @@ impl Latch {
   where
     'a: 'b,
   {
-    let mut state = self.state.l();
+    let mut state = self.state.lock();
     while state.locked || state.high_waiters > 0 {
       state.low_waiters += 1;
-      state = self.low_cv.wait(state).unwrap();
+      self.low_cv.wait(&mut state);
       state.low_waiters -= 1;
     }
     state.locked = true;
@@ -57,10 +57,11 @@ impl Latch {
   }
 
   fn unlock(&self) {
-    let mut state = self.state.l();
+    let mut state = self.state.lock();
     state.locked = false;
     if state.high_waiters > 0 {
-      return self.high_cv.notify_one();
+      self.high_cv.notify_one();
+      return;
     }
     if state.low_waiters == 0 {
       return;
@@ -68,6 +69,7 @@ impl Latch {
     self.low_cv.notify_one();
   }
 }
+impl RefUnwindSafe for Latch {}
 
 pub struct LatchGuard<'a>(&'a Latch);
 impl<'a> Drop for LatchGuard<'a> {

@@ -2,16 +2,17 @@ use std::{
   collections::{BTreeSet, VecDeque},
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::Mutex,
+  panic::RefUnwindSafe,
 };
 
 use crossbeam::utils::Backoff;
+use parking_lot::Mutex;
 
 use super::{CacheShard, GetOrReserve};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ExclusivePin, ExclusiveToken, SharedToken},
 };
 
 type Key = (TableId, Pointer);
@@ -91,14 +92,14 @@ impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
       if let Some(i) = self.evicted {
-        self.guard.l().eviction.remove(&i);
+        self.guard.lock().eviction.remove(&i);
       }
       return;
     }
 
     // rollback
     {
-      let mut shard = self.guard.l();
+      let mut shard = self.guard.lock();
       if let Some(i) = self.evicted {
         shard.eviction.remove(&i);
         shard.aborted.push_back((self.block_id, Some(i)));
@@ -169,7 +170,7 @@ impl MappingTable {
     let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
 
     loop {
-      let mut shard = s.l();
+      let mut shard = s.lock();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -238,7 +239,7 @@ impl MappingTable {
     let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
 
     loop {
-      let mut shard = s.l();
+      let mut shard = s.lock();
       if shard.eviction.contains(&key) {
         drop(shard);
         backoff.snooze();
@@ -301,7 +302,7 @@ impl MappingTable {
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.l().allocated, self.offsets[i]))
+      .map(|(i, s)| (s.lock().allocated, self.offsets[i]))
   }
 }
 
@@ -309,3 +310,4 @@ impl MappingTable {
 // is guarded by a Mutex, and all public methods take &self.
 unsafe impl Sync for MappingTable {}
 unsafe impl Send for MappingTable {}
+impl RefUnwindSafe for MappingTable {}
