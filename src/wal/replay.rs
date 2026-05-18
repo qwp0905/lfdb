@@ -77,7 +77,7 @@ pub fn replay(
 
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
-  let mut redo = BTreeMap::<LogId, Vec<(TableId, Pointer, Vec<u8>)>>::new();
+  let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
   let mut aborted = BTreeMap::<LogId, TxId>::new();
   let mut started = BTreeMap::<LogId, TxId>::new();
   let mut closed = BTreeMap::<LogId, TxId>::new();
@@ -112,15 +112,7 @@ pub fn replay(
 
       match record.operation {
         Operation::Insert(table_id, ptr, page) => {
-          redo
-            .entry(record.log_id)
-            .or_default()
-            .push((table_id, ptr, page));
-        }
-        Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
-          let e = redo.entry(record.log_id).or_default();
-          e.push((table_id, ptr1, data1));
-          e.push((table_id, ptr2, data2));
+          redo.insert(record.log_id, (table_id, ptr, page));
         }
         Operation::Start => {
           started.insert(record.log_id, record.tx_id);
@@ -154,7 +146,7 @@ pub fn replay(
     aborted: aborted.into_values().collect(),
     started: started.into_values().collect(),
     closed: closed.into_values().collect(),
-    redo: redo.into_values().flatten().collect::<Vec<_>>(),
+    redo: redo.into_values().collect::<Vec<_>>(),
     segments,
     generation,
     last_snapshot,

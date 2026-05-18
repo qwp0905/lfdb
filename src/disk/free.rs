@@ -37,9 +37,4 @@ impl FreeList {
   pub fn file_len(&self) -> Pointer {
     self.file_end.load(Ordering::Acquire)
   }
-
-  #[inline]
-  pub fn dead_count(&self) -> usize {
-    self.released.len()
-  }
 }

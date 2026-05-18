@@ -2,7 +2,7 @@ use std::{
   mem::{forget, transmute},
   ops::Deref,
   sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
   },
 };
@@ -23,7 +23,6 @@ pub struct TableHandle {
    */
   pin: ExclusivePin,
   closed: AtomicBool,
-  redirection_count: AtomicU32,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
@@ -36,7 +35,6 @@ impl TableHandle {
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
-      redirection_count: AtomicU32::new(0),
       closed: AtomicBool::new(false),
     }
   }
@@ -97,16 +95,6 @@ impl TableHandle {
   #[inline]
   pub fn truncate(&self) -> Result {
     self.disk.truncate(self.metadata.get_path())
-  }
-
-  pub fn mark_redirection(&self) {
-    self.redirection_count.fetch_add(1, Ordering::Relaxed);
-  }
-
-  pub fn dead_ratio(&self) -> f64 {
-    (self.free_list.dead_count()
-      + self.redirection_count.load(Ordering::Relaxed) as usize) as f64
-      / self.free_list.file_len() as f64
   }
 }
 

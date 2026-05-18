@@ -2,18 +2,17 @@ use std::{
   cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
 };
 
-use super::{
-  BTreeIndex, CreatablePolicy, GarbageCollector, ReadonlyPolicy, WritablePolicy,
-};
+use super::{BTreeIndex, CreatablePolicy, ReadonlyPolicy, WritablePolicy};
 use crate::{
   cache::{BlockCache, WritableSlot},
   disk::Pointer,
   info,
   serialize::Serializable,
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
-  thread::BackgroundThread,
+  thread::{BackgroundThread, WorkBuilder},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
+  utils::{ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
   warn, Result,
 };
@@ -30,7 +29,6 @@ struct MiniTx<'a> {
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
-  gc: &'a GarbageCollector,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -40,7 +38,7 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
-    gc: &'a GarbageCollector,
+    // gc: &'a GarbageCollector,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -51,7 +49,7 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
-      gc,
+      // gc,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -123,10 +121,6 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     Ok(())
   }
 
-  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
-    self.gc.mark(table.clone(), entry);
-  }
-
   fn alloc_slot(
     &self,
     pointer: Pointer,
@@ -169,7 +163,7 @@ struct CompactionWritePolicy<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  gc: &'a GarbageCollector,
+  // gc: &'a GarbageCollector,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn is_visible(&self, owner: TxId, _: TxId) -> bool {
@@ -196,10 +190,6 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
       .serialize_and_log(RESERVED_TX, table.metadata().get_id(), slot, data)
   }
 
-  fn when_update_entry(&self, entry: Pointer, table: &Arc<TableHandle>) {
-    self.gc.mark(table.clone(), entry)
-  }
-
   fn alloc_slot(
     &self,
     pointer: Pointer,
@@ -217,7 +207,6 @@ pub fn wait_compaction(
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
-  gc: Arc<GarbageCollector>,
   compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
 ) -> impl FnMut(Option<CompactTask>) -> Result {
   let meta_table = tables.meta_table();
@@ -231,7 +220,7 @@ pub fn wait_compaction(
         CompactTask::New(old) => {
           let table_name = old.metadata().get_name();
           let (new_table, wait_until) = {
-            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc)?;
+            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder)?;
 
             let index = BTreeIndex::new(&tx);
 
@@ -296,7 +285,6 @@ pub fn handle_compaction(
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
-  gc: Arc<GarbageCollector>,
   after_compaction: Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
@@ -308,7 +296,6 @@ pub fn handle_compaction(
       &versions,
       &wal,
       &recorder,
-      &gc,
       &meta_table,
       old,
       new,
@@ -322,7 +309,6 @@ fn do_compaction(
   version_visibility: &VersionVisibility,
   wal: &WAL,
   recorder: &PageRecorder,
-  gc: &GarbageCollector,
   meta_table: &Arc<TableHandle>,
   old_table: MutationHandle,
   new: MutationHandle,
@@ -347,7 +333,6 @@ fn do_compaction(
       block_cache,
       version_visibility,
       recorder,
-      gc,
     });
 
     'compaction: loop {
@@ -361,7 +346,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         warn!("table {table_name} already dropped.");
         return Ok(());
@@ -372,7 +357,7 @@ fn do_compaction(
   info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
-    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
+    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
@@ -397,7 +382,7 @@ fn do_compaction(
 }
 
 pub const fn after_compaction(
-  gc: Arc<GarbageCollector>,
+  release_table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {
   let mut buffered = Vec::new();
@@ -410,7 +395,86 @@ pub const fn after_compaction(
     for (old, _new, tx_id, version) in
       buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
     {
-      gc.release_table(old.into_inner(), tx_id, version);
+      release_table.dispatch((old.into_inner(), tx_id, version));
     }
+  }
+}
+
+pub struct Compactor {
+  wait_compaction: Box<dyn BackgroundThread<CompactTask, Result>>,
+  do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+  after_compaction:
+    Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
+}
+impl Compactor {
+  pub fn new(
+    block_cache: Arc<BlockCache>,
+    tables: Arc<TableMapper>,
+    recorder: Arc<PageRecorder>,
+    version_visibility: Arc<VersionVisibility>,
+    wal: Arc<WAL>,
+    release_table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+  ) -> Self {
+    let after_compaction = WorkBuilder::new()
+      .name("tree after compaction")
+      .single()
+      .interval(
+        COMPACTION_INTERVAL,
+        after_compaction(release_table, version_visibility.clone()),
+      )
+      .to_arc();
+
+    let do_compaction = WorkBuilder::new()
+      .name("tree compaction")
+      .multi(1)
+      .shared(handle_compaction(
+        tables.clone(),
+        block_cache.clone(),
+        version_visibility.clone(),
+        wal.clone(),
+        recorder.clone(),
+        after_compaction.clone(),
+      ))
+      .to_arc();
+
+    let wait_compaction = WorkBuilder::new()
+      .name("tree waiting compaction")
+      .single()
+      .interval(
+        COMPACTION_INTERVAL,
+        wait_compaction(
+          tables.clone(),
+          block_cache.clone(),
+          version_visibility.clone(),
+          wal.clone(),
+          recorder.clone(),
+          do_compaction.clone(),
+        ),
+      )
+      .to_box();
+
+    Self {
+      wait_compaction,
+      do_compaction,
+      after_compaction,
+    }
+  }
+
+  pub fn resume(&self, old: MutationHandle, new: MutationHandle) {
+    self.do_compaction.dispatch((old, new));
+  }
+  pub fn register_wait(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+    self
+      .wait_compaction
+      .dispatch(CompactTask::Wait(old, new, version));
+  }
+  pub fn register_new(&self, table: Arc<TableHandle>) {
+    self.wait_compaction.dispatch(CompactTask::New(table));
+  }
+
+  pub fn close(&self) {
+    self.wait_compaction.close();
+    self.do_compaction.close();
+    self.after_compaction.close();
   }
 }

@@ -85,9 +85,9 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     Ok(())
   }
 
-  fn when_update_entry(&self, pointer: Pointer, table: &Arc<TableHandle>) {
-    self.orchestrator.mark_gc(table.clone(), pointer);
-  }
+  // fn when_update_entry(&self, pointer: Pointer, table: &Arc<TableHandle>) {
+  //   self.orchestrator.mark_gc(table.clone(), pointer);
+  // }
 
   fn alloc_slot(
     &self,

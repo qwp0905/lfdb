@@ -1,43 +1,31 @@
-use std::{
-  collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
-  mem::replace,
-  sync::Arc,
-  time::Duration,
-};
+use std::{collections::VecDeque, mem::replace, sync::Arc, time::Duration};
 
 use crossbeam::epoch;
 
-use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
+use super::{
+  BTreeNodeView, Compactor, DataEntry, DataEntryView, RecordData, TreeHeader,
+  VersionRecord, HEADER_POINTER,
+};
 use crate::{
   cache::{BlockCache, WritableSlot},
   debug,
   disk::Pointer,
   error::Result,
-  table::{TableHandle, TableId, TableMapper},
-  thread::{BackgroundThread, BatchTaskHandle, TaskHandle, WorkBuilder},
+  table::{MutationHandle, TableHandle, TableMapper, META_TABLE_ID},
+  thread::{BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, ToArc, ToBox},
-  wal::{TxId, RESERVED_TX},
+  utils::{ToArc, ToBox},
+  wal::{TxId, RESERVED_TX, WAL},
 };
 
 pub struct GarbageCollectionConfig {
   pub thread_count: usize,
+  pub interval: Duration,
+  pub compaction_threshold: f64,
+  pub compaction_min_size: Pointer,
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-
-/**
- * Trim: walk the version chain and discard expired or aborted versions.
- * Release: free an orphaned DataEntry header page. This happens when the tree
- * manager removes a key (e.g. after a tombstone) and the leaf entry is gone,
- * leaving the DataEntry page unreachable. Release is always deferred until all
- * Trim work is complete — a concurrent Trim on the same page would dereference
- * a dangling pointer if Release ran first.
- */
-enum GcPointer {
-  Trim(Arc<TableHandle>, Pointer),
-  Release(Arc<TableHandle>, Pointer),
-}
 
 /**
  * Runs at each checkpoint to clean expired and aborted versions from DataEntry
@@ -48,96 +36,31 @@ enum GcPointer {
  * emptiness queries, entry does version reclamation.
  */
 pub struct GarbageCollector {
-  version_visibility: Arc<VersionVisibility>,
+  main: Box<dyn BackgroundThread<(), Result>>,
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
-  queue: Arc<DoubleBuffer<GcPointer>>,
-  table: Box<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+  compactor: Arc<Compactor>,
+  table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
 }
 impl GarbageCollector {
-  pub fn run(&self) -> Result {
-    let min_version = self.version_visibility.min_version();
-    let queue = self.queue.switch();
-
-    debug!("{} data will check version in this scope.", queue.len());
-    let mut waiting = Vec::new();
-    let mut release = BTreeMap::<TableId, (Arc<TableHandle>, BTreeSet<Pointer>)>::new();
-    let mut dedup = HashSet::new();
-    while let Some(ptr) = queue.pop() {
-      match ptr {
-        GcPointer::Trim(table, ptr) => {
-          if !dedup.insert((table.metadata().get_id(), ptr)) {
-            continue;
-          }
-          waiting.push(self.entry.execute((table, ptr)));
-        }
-        GcPointer::Release(table, ptr) => {
-          release
-            .entry(table.metadata().get_id())
-            .or_insert_with(|| (table, Default::default()))
-            .1
-            .insert(ptr);
-        }
-      }
-    }
-    debug!("all entry cleaning triggered.");
-
-    waiting
-      .into_iter()
-      .map(|v| v.wait().flatten())
-      .collect::<Result>()?;
-    debug!("unreachable versions all collected.");
-
-    self.version_visibility.remove_aborted(&min_version);
-
-    // must release after trimming because of trim type can contain release type.
-    // it could occur dangling pointer reference.
-
-    for (table, pointers) in release.into_values().filter(|(t, _)| !t.is_closed()) {
-      defer(move || {
-        if table.is_closed() {
-          return;
-        }
-        pointers.into_iter().for_each(|p| table.free().dealloc(p));
-      });
-    }
-
-    Ok(())
-  }
-
-  pub fn mark(&self, table: Arc<TableHandle>, pointer: Pointer) {
-    self.queue.push(GcPointer::Trim(table, pointer))
-  }
-  pub fn lazy_release(&self, table: Arc<TableHandle>, pointer: Pointer) {
-    self.queue.push(GcPointer::Release(table, pointer))
-  }
   pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
     self.table.dispatch((table, tx_id, version));
   }
 
-  pub fn batch_check_empty(
-    &self,
-    pointers: Vec<(Arc<TableHandle>, Pointer)>,
-  ) -> BatchTaskHandle<Result<bool>> {
-    self.check.execute_batch(pointers)
+  pub fn compact(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
+    self.compactor.register_wait(old, new, version);
   }
-  pub fn check_empty(
-    &self,
-    table: Arc<TableHandle>,
-    pointer: Pointer,
-  ) -> TaskHandle<Result<bool>> {
-    self.check.execute((table, pointer))
+  pub fn resume_compact(&self, old: MutationHandle, new: MutationHandle) {
+    self.compactor.resume(old, new);
   }
-
   pub fn start(
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
+    wal: Arc<WAL>,
     config: GarbageCollectionConfig,
   ) -> Self {
-    let queue = DoubleBuffer::new().to_arc();
-
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -145,7 +68,6 @@ impl GarbageCollector {
         block_cache.clone(),
         version_visibility.clone(),
         recorder.clone(),
-        queue.clone(),
       ))
       .to_arc();
     let check = WorkBuilder::new()
@@ -159,20 +81,49 @@ impl GarbageCollector {
       .single()
       .interval(
         RELEASE_CHECK_INTERVAL,
-        run_release_table(mapper, version_visibility.clone()),
+        run_release_table(mapper.clone(), version_visibility.clone()),
+      )
+      .to_arc();
+    let compactor = Compactor::new(
+      block_cache.clone(),
+      mapper.clone(),
+      recorder.clone(),
+      version_visibility.clone(),
+      wal.clone(),
+      table.clone(),
+    )
+    .to_arc();
+
+    let main = WorkBuilder::new()
+      .name("gc main")
+      .single()
+      .interval(
+        config.interval,
+        run_main(
+          version_visibility,
+          block_cache,
+          mapper,
+          entry.clone(),
+          check.clone(),
+          config.compaction_threshold,
+          config.compaction_min_size,
+          compactor.clone(),
+        ),
       )
       .to_box();
 
     Self {
+      main,
       check,
       entry,
-      queue,
       table,
-      version_visibility,
+      compactor,
     }
   }
 
   pub fn close(&self) {
+    self.main.close();
+    self.compactor.close();
     self.table.close();
     self.check.close();
     self.entry.close();
@@ -183,20 +134,8 @@ const fn run_entry(
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
-  queue: Arc<DoubleBuffer<GcPointer>>,
 ) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
   move |(table, pointer)| {
-    if table.is_closed() {
-      return Ok(());
-    }
-    let table = match table.try_pin() {
-      Some(table) => table,
-      None => {
-        queue.push(GcPointer::Trim(table.clone(), pointer));
-        return Ok(());
-      }
-    };
-
     let table_id = table.metadata().get_id();
     let mut next = Some(pointer);
     let mut max_found = false;
@@ -207,7 +146,7 @@ const fn run_entry(
         _ => return,
       };
 
-      let handle = table.handle();
+      let handle = table.clone();
       defer(move || pointers.into_iter().for_each(|p| handle.free().dealloc(p)));
     };
 
@@ -218,18 +157,18 @@ const fn run_entry(
     while let Some(ptr) = next.take() {
       if max_found {
         let mut entry = block_cache
-          .read(ptr, table.handle())?
+          .read(ptr, table.clone())?
           .for_read()
           .as_ref()
           .deserialize::<DataEntry>()?;
         entry.take_versions().for_each(release);
         next = entry.get_next();
-        let handle = table.handle();
+        let handle = table.clone();
         defer(move || handle.free().dealloc(ptr));
         continue;
       }
 
-      let mut slot = block_cache.read(ptr, table.handle())?.for_lazy_write();
+      let mut slot = block_cache.read(ptr, table.clone())?.for_lazy_write();
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
       let prev_len = entry.len();
@@ -280,14 +219,14 @@ const fn run_entry(
       };
 
       let next_entry = block_cache
-        .read(next_ptr, table.handle())?
+        .read(next_ptr, table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?;
       serialize_and_log(&mut slot, &next_entry)?;
       next = Some(ptr);
 
-      let handle = table.handle();
+      let handle = table.clone();
       defer(move || handle.free().dealloc(next_ptr))
     }
 
@@ -344,4 +283,92 @@ where
   F: FnOnce() -> R + Send + 'static,
 {
   epoch::pin().defer(f)
+}
+
+const fn run_main(
+  version_visibility: Arc<VersionVisibility>,
+  block_cache: Arc<BlockCache>,
+  tables: Arc<TableMapper>,
+  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
+  check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
+  compaction_threshold: f64,
+  compaction_min_size: Pointer,
+  compactor: Arc<Compactor>,
+) -> impl Fn(Option<()>) -> Result {
+  move |_| {
+    let min_version = version_visibility.min_version();
+    for table in tables.get_all() {
+      let table = match table.try_pin() {
+        Some(table) => table,
+        None => continue,
+      };
+
+      let name = table.metadata().get_name();
+      debug!("gc table {name} start.");
+
+      let mut total = 0;
+      let mut dead = 0;
+
+      let mut ptr = block_cache
+        .read(HEADER_POINTER, table.handle())?
+        .for_read()
+        .as_ref()
+        .deserialize::<TreeHeader>()?
+        .get_root();
+
+      while let BTreeNodeView::Internal(node) = block_cache
+        .read(ptr, table.handle())?
+        .for_read()
+        .as_ref()
+        .view::<BTreeNodeView>()?
+      {
+        ptr = node.first_child()
+      }
+
+      let mut next_ptr = Some(ptr);
+      while let Some(ptr) = next_ptr.take() {
+        let slot = block_cache.read(ptr, table.handle())?.for_read();
+        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        next_ptr = leaf.get_next();
+        total += leaf.len();
+
+        let mut waiting = Vec::with_capacity(leaf.len());
+        for i in leaf.get_entry_pointers() {
+          waiting.push(entry.execute((table.handle(), i)))
+        }
+
+        waiting
+          .into_iter()
+          .map(|v| v.wait().flatten())
+          .collect::<Result>()?;
+
+        let mut waiting = Vec::with_capacity(leaf.len());
+        for i in leaf.get_entry_pointers() {
+          waiting.push(check.execute((table.handle(), i)));
+        }
+
+        for v in waiting {
+          if v.wait().flatten()? {
+            dead += 1;
+          }
+        }
+      }
+      debug!("gc table {name} unreachable versions all collected.");
+      if table.free().file_len() < compaction_min_size {
+        continue;
+      }
+      let ratio = dead as f64 / total as f64;
+      if ratio <= compaction_threshold {
+        continue;
+      }
+      if table.metadata().get_id() == META_TABLE_ID {
+        continue;
+      }
+      debug!("clean leaf table {name} collect end. dead ratio {ratio}");
+      compactor.register_new(table.handle());
+    }
+
+    version_visibility.remove_aborted(&min_version);
+    Ok(())
+  }
 }

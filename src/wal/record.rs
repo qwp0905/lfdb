@@ -18,20 +18,6 @@ pub enum Operation {
     Pointer, // disk pointer of the page
     Vec<u8>, // data
   ),
-  /**
-   * Records two page writes as a single atomic operation.
-   * Used during B-tree node merge to prevent duplicate keys from becoming
-   * visible between the two page updates.
-   * Limited to two pages because acquiring three or more page locks
-   * simultaneously is avoided by design to prevent deadlocks.
-   */
-  Multi(
-    TableId,
-    Pointer, // disk pointer of the first page
-    Vec<u8>, // data of the first page
-    Pointer, // disk pointer of the second page
-    Vec<u8>, // data of the second page
-  ),
   Start,
   Commit,
   Abort,
@@ -55,7 +41,6 @@ impl Operation {
       Self::Commit => 3,
       Self::Abort => 4,
       Self::Checkpoint(..) => 5,
-      Self::Multi(..) => 6,
     }
   }
 
@@ -63,13 +48,6 @@ impl Operation {
     1 + match self {
       Self::Insert(_, _, data) => {
         POINTER_BYTES as u16 + TABLE_ID_BYTES as u16 + data.len() as u16
-      }
-      Self::Multi(_, _, d1, _, d2) => {
-        ((POINTER_BYTES as u16) << 1)
-          + TABLE_ID_BYTES as u16
-          + 2
-          + d1.len() as u16
-          + d2.len() as u16
       }
       Self::Checkpoint(_, _, path) => {
         TX_ID_BYTES as u16 + LOG_ID_BYTES as u16 + path.as_os_str().len() as u16
@@ -132,21 +110,6 @@ impl LogRecord {
       Operation::Checkpoint(last_log_id, current_version, snapshot_path),
     )
   }
-  pub const fn new_multi(
-    log_id: LogId,
-    tx_id: TxId,
-    table_id: TableId,
-    ptr1: Pointer,
-    data1: Vec<u8>,
-    ptr2: Pointer,
-    data2: Vec<u8>,
-  ) -> Self {
-    Self::new(
-      log_id,
-      tx_id,
-      Operation::Multi(table_id, ptr1, data1, ptr2, data2),
-    )
-  }
 
   unsafe fn write_at(&self, ptr: *mut u8) {
     let mut offset = 4;
@@ -205,29 +168,6 @@ impl LogRecord {
       Operation::Start => {}
       Operation::Commit => {}
       Operation::Abort => {}
-      Operation::Multi(table_id, ptr1, data1, ptr2, data2) => {
-        copy_nonoverlapping(
-          table_id.to_le_bytes().as_ptr(),
-          ptr.add(offset),
-          TABLE_ID_BYTES,
-        );
-        offset += TABLE_ID_BYTES;
-
-        copy_nonoverlapping(ptr1.to_le_bytes().as_ptr(), ptr.add(offset), POINTER_BYTES);
-        offset += POINTER_BYTES;
-        let data_len = data1.len();
-        copy_nonoverlapping((data_len as u16).to_le_bytes().as_ptr(), ptr.add(offset), 2);
-        offset += 2;
-
-        copy_nonoverlapping(data1.as_ptr(), ptr.add(offset), data_len);
-        offset += data_len;
-
-        copy_nonoverlapping(ptr2.to_le_bytes().as_ptr(), ptr.add(offset), POINTER_BYTES);
-        offset += POINTER_BYTES;
-        let data_len = data2.len();
-        copy_nonoverlapping(data2.as_ptr(), ptr.add(offset), data_len);
-        offset += data_len;
-      }
     };
 
     let mut hasher = crc32fast::Hasher::new();
@@ -327,32 +267,6 @@ impl TryFrom<&[u8]> for LogRecord {
           len - offset,
         ));
         Operation::Checkpoint(log_id, current_version, path.into())
-      },
-      6 => unsafe {
-        let table_id =
-          TableId::from_le_bytes((ptr.add(offset) as *const [u8; TABLE_ID_BYTES]).read());
-        offset += TABLE_ID_BYTES;
-
-        let ptr1 =
-          Pointer::from_le_bytes((ptr.add(offset) as *const [u8; POINTER_BYTES]).read());
-        offset += POINTER_BYTES;
-
-        let data_len =
-          u16::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read()) as usize;
-        offset += 2;
-
-        let mut data1 = vec![0; data_len];
-        copy_nonoverlapping(ptr.add(offset), data1.as_mut_ptr(), data_len);
-        offset += data_len;
-
-        let ptr2 =
-          Pointer::from_le_bytes((ptr.add(offset) as *const [u8; POINTER_BYTES]).read());
-        offset += POINTER_BYTES;
-
-        let mut data2 = vec![0; len - offset];
-        copy_nonoverlapping(ptr.add(offset), data2.as_mut_ptr(), data2.len());
-
-        Operation::Multi(table_id, ptr1, data1, ptr2, data2)
       },
       _ => return Err(Error::InvalidFormat("invalid type log record.")),
     };

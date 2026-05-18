@@ -4,7 +4,7 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 
 use crate::{
   cache::{BlockCache, CachedSlot, WritableSlot},
-  cursor::{GarbageCollector, TreeManager},
+  cursor::GarbageCollector,
   debug,
   disk::Pointer,
   error::Result,
@@ -37,7 +37,6 @@ pub struct TxOrchestrator {
   recorder: Arc<PageRecorder>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
-  tree_manager: TreeManager,
   metrics: Arc<MetricsRegistry>,
 }
 impl TxOrchestrator {
@@ -50,7 +49,6 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = WorkBuilder::new()
@@ -74,7 +72,6 @@ impl TxOrchestrator {
       recorder,
       timeout_thread,
       tx_timeout: config.timeout,
-      tree_manager,
       metrics,
     }
   }
@@ -88,7 +85,6 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    tree_manager: TreeManager,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
@@ -107,7 +103,6 @@ impl TxOrchestrator {
       version_visibility,
       gc,
       recorder,
-      tree_manager,
       metrics,
     ))
   }
@@ -143,10 +138,10 @@ impl TxOrchestrator {
     self.recorder.serialize_and_log(tx_id, table_id, slot, data)
   }
 
-  #[inline]
-  pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
-    self.gc.mark(handle, pointer);
-  }
+  // #[inline]
+  // pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
+  //   self.gc.mark(handle, pointer);
+  // }
 
   #[inline]
   pub fn start_tx(
@@ -211,7 +206,8 @@ impl TxOrchestrator {
   }
   #[inline]
   pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
-    self.tree_manager.compact(old, new, version);
+    self.gc.compact(old, new, version);
+    // self.tree_manager.compact(old, new, version);
   }
 
   /**
@@ -220,7 +216,6 @@ impl TxOrchestrator {
    * performs the final checkpoint; step 2 wal.close() finalizes the WAL.
    */
   pub fn close(&self) -> Result {
-    self.tree_manager.close();
     self.timeout_thread.close();
     self.wal.half_close();
     self.checkpoint.close();

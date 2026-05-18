@@ -43,31 +43,31 @@ impl PageRecorder {
       .append_insert(tx_id, table_id, ptr, page.copy_range(0..byte_len))
   }
 
-  pub fn log_multi<T, R>(
-    &self,
-    tx_id: TxId,
-    table_id: TableId,
-    slot1: &mut WritableSlot<'_>,
-    data1: &T,
-    slot2: &mut WritableSlot<'_>,
-    data2: &R,
-  ) -> Result
-  where
-    T: Serializable,
-    R: Serializable,
-  {
-    let ptr1 = slot1.get_pointer();
-    let page = slot1.as_mut();
-    let byte_len = page.serialize_from(data1)?;
-    let data1 = page.copy_range(0..byte_len);
+  // pub fn log_multi<T, R>(
+  //   &self,
+  //   tx_id: TxId,
+  //   table_id: TableId,
+  //   slot1: &mut WritableSlot<'_>,
+  //   data1: &T,
+  //   slot2: &mut WritableSlot<'_>,
+  //   data2: &R,
+  // ) -> Result
+  // where
+  //   T: Serializable,
+  //   R: Serializable,
+  // {
+  //   let ptr1 = slot1.get_pointer();
+  //   let page = slot1.as_mut();
+  //   let byte_len = page.serialize_from(data1)?;
+  //   let data1 = page.copy_range(0..byte_len);
 
-    let ptr2 = slot2.get_pointer();
-    let page = slot2.as_mut();
-    let byte_len = page.serialize_from(data2)?;
-    let data2 = page.copy_range(0..byte_len);
+  //   let ptr2 = slot2.get_pointer();
+  //   let page = slot2.as_mut();
+  //   let byte_len = page.serialize_from(data2)?;
+  //   let data2 = page.copy_range(0..byte_len);
 
-    self
-      .wal
-      .append_multi(tx_id, table_id, ptr1, data1, ptr2, data2)
-  }
+  //   self
+  //     .wal
+  //     .append_multi(tx_id, table_id, ptr1, data1, ptr2, data2)
+  // }
 }

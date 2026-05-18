@@ -4,7 +4,7 @@ use crate::{
   cache::WritableSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
 };
 
-use crossbeam::epoch::{pin, Guard};
+use crossbeam::epoch::pin;
 
 use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
@@ -24,7 +24,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     &self,
     key: StaticKeyRef,
     table: &Arc<TableHandle>,
-  ) -> Result<Option<(Guard, Pointer)>> {
+  ) -> Result<Option<Pointer>> {
     let mut ptr = self
       .0
       .fetch_slot(HEADER_POINTER, table)?
@@ -36,12 +36,11 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     loop {
       // This guard protects the next node or data entry from the GC or tree manager.
       // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
-      let guard = pin();
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
-          NodeFindResult::Found(_, i) => return Ok(Some((guard, i))),
+          NodeFindResult::Found(_, i) => return Ok(Some(i)),
           NodeFindResult::NotFound(_) => return Ok(None),
           NodeFindResult::Move(i) => ptr = i,
         },
@@ -70,11 +69,12 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     key: StaticKeyRef,
     table: &Arc<TableHandle>,
   ) -> Result<Option<Option<VecRef>>> {
-    let (mut _guard, ptr) = match self.get_entry(key, table)? {
+    let ptr = match self.get_entry(key, table)? {
       Some(v) => v,
       None => return Ok(None),
     };
 
+    let mut _guard = None;
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
       let new_guard = pin();
@@ -94,18 +94,19 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       }
 
       next = entry.get_next();
-      _guard = new_guard;
+      _guard = Some(new_guard);
     }
 
     Ok(None)
   }
 
   pub fn contains(&self, key: StaticKeyRef, table: &Arc<TableHandle>) -> Result<bool> {
-    let (mut _guard, ptr) = match self.get_entry(key, table)? {
+    let ptr = match self.get_entry(key, table)? {
       Some(v) => v,
       None => return Ok(false),
     };
 
+    let mut _guard = None;
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
       let new_guard = pin();
@@ -126,7 +127,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       };
 
       next = entry.get_next();
-      _guard = new_guard;
+      _guard = Some(new_guard);
     }
 
     Ok(false)
@@ -329,16 +330,13 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     Ok(RecordData::Chunked(pointers))
   }
 
-  fn apply_version_chain<T>(
+  fn apply_version_chain(
     &self,
     entry_ptr: Pointer,
     record: VersionRecord,
-    coupling: T,
     table: &Arc<TableHandle>,
   ) -> Result {
     let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
-    drop(coupling);
-
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
     let mut new_versions = entry.take_versions().chain([record]).collect::<Vec<_>>();
@@ -359,7 +357,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       entry.set_next(new_ptr);
     }
 
-    self.0.when_update_entry(entry_ptr, table);
     Ok(())
   }
 
@@ -378,7 +375,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(&key) {
         NodeFindResult::Found(_, i) => {
-          return self.apply_version_chain(i, record, slot, table)
+          drop(slot);
+          return self.apply_version_chain(i, record, table);
         }
         NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(i) => {
@@ -411,7 +409,10 @@ where
 
       let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
       match node.find(&key) {
-        NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot, table),
+        NodeFindResult::Found(_, i) => {
+          drop(slot);
+          return self.insert_at(i, record, table);
+        }
         NodeFindResult::Move(i) => ptr = i,
         NodeFindResult::NotFound(i) => {
           let node = node.writable();
@@ -446,11 +447,9 @@ where
     &self,
     entry_ptr: Pointer,
     data: RecordData,
-    coupling: WritableSlot,
     table: &Arc<TableHandle>,
   ) -> Result {
     let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
-    drop(coupling);
 
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     if let Some(owner) = entry.get_last_owner() {
@@ -465,7 +464,6 @@ where
     if entry.is_available(&record) {
       entry.append(record);
       self.0.serialize_and_log(&mut slot, &entry, table)?;
-      self.0.when_update_entry(entry_ptr, table);
       return Ok(());
     }
 
@@ -475,7 +473,6 @@ where
     new_entry.set_next(new_entry_index);
     self.0.serialize_and_log(&mut slot, &new_entry, table)?;
 
-    self.0.when_update_entry(entry_ptr, table);
     Ok(())
   }
 
@@ -494,32 +491,9 @@ where
     record: RecordData,
     table: &Arc<TableHandle>,
   ) -> Result {
-    let mut ptr = self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
-    while let BTreeNodeView::Internal(node) = self
-      .0
-      .fetch_slot(ptr, table)?
-      .for_read()
-      .as_ref()
-      .view::<BTreeNodeView>()?
-    {
-      ptr = node.find(key).unwrap_or_else(|i| i);
-    }
-
-    loop {
-      let slot = self.0.fetch_slot(ptr, table)?.for_write();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-      match node.find(key) {
-        NodeFindResult::Found(_, i) => return self.insert_at(i, record, slot, table),
-        NodeFindResult::NotFound(_) => return Ok(()),
-        NodeFindResult::Move(i) => ptr = i,
-      }
+    match self.get_entry(&key, table)? {
+      Some(ptr) => self.insert_at(ptr, record, table),
+      None => return Ok(()),
     }
   }
 }
@@ -539,7 +513,7 @@ pub struct KVSnapshot {
 pub struct BTreeIterator<'a, Policy> {
   policy: &'a Policy,
   table: Arc<TableHandle>,
-  buffered: VecDeque<(VecRef, Option<(Buffered, TxId, TxId)>)>,
+  buffered: VecDeque<(VecRef, Pointer)>,
   next: Option<Pointer>,
   end: Bound<StaticKey>,
   closed: bool,
@@ -593,17 +567,12 @@ where
             Bound::Unbounded => 0,
           };
 
-          let mut count = 0;
           for (s, e, p) in node.get_entries_while(end).skip(pos) {
-            count += 1;
-
-            if let Some(found) = Self::__find(policy, p, table)? {
-              buffered.push_back((VecRef::refed(slot.page(), s, e), found));
-            }
+            buffered.push_back((VecRef::refed(slot.page(), s, e), p));
           }
 
           let mut next = None;
-          if count == node.len() - pos {
+          if buffered.len() == node.len() - pos {
             next = node.get_next();
           }
 
@@ -620,19 +589,17 @@ where
     }
   }
 
-  fn __find(
-    policy: &'a Policy,
-    ptr: Pointer,
-    table: &Arc<TableHandle>,
-  ) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
+  fn find_value(&self, ptr: Pointer) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
     let mut next = Some(ptr);
 
+    let mut _guard = None;
     while let Some(ptr) = next.take() {
-      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let new_guard = pin();
+      let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
       let entry: DataEntryView = slot.as_ref().deserialize()?;
 
       if let Some(record) =
-        entry.find(|record| policy.is_visible(record.owner, record.version))
+        entry.find(|record| self.policy.is_visible(record.owner, record.version))
       {
         return Ok(Some(match &record.data {
           RecordDataView::Data(s, e) => Some((
@@ -650,13 +617,10 @@ where
       }
 
       next = entry.get_next();
+      _guard = Some(new_guard);
     }
 
     Ok(None)
-  }
-
-  fn find_value(&self, ptr: Pointer) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
-    Self::__find(self.policy, ptr, &self.table)
   }
 
   fn fill_up(&mut self) -> Result {
@@ -674,17 +638,13 @@ where
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
 
-    let mut count = 0;
     for (s, e, p) in node.get_entries_while(&self.end) {
-      count += 1;
-      if let Some(found) = self.find_value(p)? {
-        self
-          .buffered
-          .push_back((VecRef::refed(slot.page(), s, e), found))
-      }
+      self
+        .buffered
+        .push_back((VecRef::refed(slot.page(), s, e), p));
     }
 
-    if count == node.len() {
+    if self.buffered.len() == node.len() {
       self.next = node.get_next();
     }
     Ok(())
@@ -696,19 +656,21 @@ where
         return Ok(None);
       }
 
-      if let Some((key, found)) = self.buffered.pop_front() {
-        return Ok(Some(match found {
-          Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
-          Some((Buffered::Chunked(pointers), o, v)) => (
-            key,
-            Some((
-              BTreeIndex::read_chunk(self.policy, &pointers, &self.table)?,
-              o,
-              v,
-            )),
-          ),
-          None => (key, None),
-        }));
+      if let Some((key, ptr)) = self.buffered.pop_front() {
+        if let Some(found) = self.find_value(ptr)? {
+          return Ok(Some(match found {
+            Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
+            Some((Buffered::Chunked(pointers), o, v)) => (
+              key,
+              Some((
+                BTreeIndex::read_chunk(self.policy, &pointers, &self.table)?,
+                o,
+                v,
+              )),
+            ),
+            None => (key, None),
+          }));
+        }
       }
 
       self.fill_up()?;
