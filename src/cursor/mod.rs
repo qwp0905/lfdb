@@ -19,9 +19,6 @@ pub use gc::*;
 mod types;
 pub use types::*;
 
-mod tree_manager;
-pub use tree_manager::*;
-
 mod leaf;
 use leaf::*;
 
@@ -36,3 +33,6 @@ use btree::*;
 
 mod policy;
 pub use policy::*;
+
+mod recovery;
+pub use recovery::*;
