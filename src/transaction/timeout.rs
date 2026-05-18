@@ -12,9 +12,10 @@ use crossbeam::{
 };
 
 use crate::{
-  debug, trace,
+  debug,
   utils::{UnsafeBorrowMut, UnwrappedSender},
   wal::TxId,
+  warn,
 };
 
 use super::VersionVisibility;
@@ -227,7 +228,7 @@ impl TimeoutThread {
           if !state.try_timeout() {
             return;
           }
-          trace!("tx {} timeout reached", state.get_id());
+          warn!("tx {} timeout reached", state.get_id());
 
           version_visibility.set_abort(state.get_id());
           state.deactive();
