@@ -138,11 +138,6 @@ impl TxOrchestrator {
     self.recorder.serialize_and_log(tx_id, table_id, slot, data)
   }
 
-  // #[inline]
-  // pub fn mark_gc(&self, handle: Arc<TableHandle>, pointer: Pointer) {
-  //   self.gc.mark(handle, pointer);
-  // }
-
   #[inline]
   pub fn start_tx(
     &self,
@@ -207,7 +202,6 @@ impl TxOrchestrator {
   #[inline]
   pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
     self.gc.compact(old, new, version);
-    // self.tree_manager.compact(old, new, version);
   }
 
   /**
