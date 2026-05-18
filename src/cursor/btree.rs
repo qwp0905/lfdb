@@ -538,7 +538,6 @@ where
     let mut buffered = VecDeque::new();
 
     loop {
-      let _guard = pin();
       let slot = policy.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => match &start {
@@ -634,7 +633,6 @@ where
       }
     };
 
-    let _guard = pin();
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
 
