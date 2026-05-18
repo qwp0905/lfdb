@@ -1,18 +1,15 @@
 use std::{
   collections::{HashMap, HashSet},
   fs::{exists, read_dir, remove_file},
-  panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::{atomic::Ordering, Arc},
+  sync::{atomic::Ordering, Arc, RwLock},
 };
-
-use parking_lot::RwLock;
 
 use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
 use crate::{
   disk::{IOPool, PAGE_SIZE},
   metrics::MetricsRegistry,
-  utils::ToArc,
+  utils::{ShortenedRwLock, ToArc},
   Error, Result,
 };
 
@@ -88,7 +85,7 @@ impl TableMapper {
       table.replay()?;
       let id = table.metadata().get_id();
       self.last_table_id.fetch_max(id + 1, Ordering::Relaxed);
-      self.open_handles.write().insert(id, table);
+      self.open_handles.wl().insert(id, table);
     }
 
     for path in exists {
@@ -102,21 +99,17 @@ impl TableMapper {
   }
 
   pub fn get(&self, id: TableId) -> Option<Arc<TableHandle>> {
-    self
-      .open_handles
-      .read()
-      .get(&id)
-      .map(|handle| handle.clone())
+    self.open_handles.rl().get(&id).map(|handle| handle.clone())
   }
 
   pub fn insert(&self, handle: Arc<TableHandle>) {
     self
       .open_handles
-      .write()
+      .wl()
       .insert(handle.metadata().get_id(), handle);
   }
   pub fn remove(&self, id: TableId) {
-    self.open_handles.write().remove(&id);
+    self.open_handles.wl().remove(&id);
   }
 
   pub fn create_metadata(&self, str: &str) -> TableMetadata {
@@ -131,7 +124,7 @@ impl TableMapper {
   pub fn get_all(&self) -> Vec<Arc<TableHandle>> {
     self
       .open_handles
-      .read()
+      .rl()
       .values()
       .map(|v| v.clone())
       .chain([self.metadata.clone()])
@@ -142,4 +135,3 @@ impl TableMapper {
     self.io_pool.close();
   }
 }
-impl RefUnwindSafe for TableMapper {}

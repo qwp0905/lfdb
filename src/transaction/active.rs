@@ -1,15 +1,15 @@
 use std::{
   collections::BTreeMap,
-  panic::RefUnwindSafe,
   sync::{
     atomic::{AtomicU8, Ordering},
-    Arc,
+    Arc, RwLock,
   },
 };
 
-use parking_lot::RwLock;
-
-use crate::{utils::OffsetBitmap, wal::TxId};
+use crate::{
+  utils::{OffsetBitmap, ShortenedRwLock},
+  wal::TxId,
+};
 
 const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
@@ -93,10 +93,10 @@ impl ActiveSet {
     }
   }
   pub fn insert(&self, state: Arc<ActiveState>) {
-    self.inner.write().insert(state.tx_id, state);
+    self.inner.wl().insert(state.tx_id, state);
   }
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
-    let inner = self.inner.read();
+    let inner = self.inner.rl();
     let offset = match inner.first_key_value() {
       Some((k, _)) => *k,
       None => return OffsetBitmap::new(0, 0),
@@ -108,16 +108,15 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    self.inner.write().remove(tx_id);
+    self.inner.wl().remove(tx_id);
   }
   pub fn min_version(&self) -> Option<TxId> {
-    self.inner.read().first_key_value().map(|(k, _)| *k)
+    self.inner.rl().first_key_value().map(|(k, _)| *k)
   }
   pub fn get(&self, tx_id: &TxId) -> Option<Arc<ActiveState>> {
-    self.inner.read().get(tx_id).map(Arc::clone)
+    self.inner.rl().get(tx_id).map(Arc::clone)
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
-    self.inner.read().range(..max).map(|(k, _)| *k).collect()
+    self.inner.rl().range(..max).map(|(k, _)| *k).collect()
   }
 }
-impl RefUnwindSafe for ActiveSet {}

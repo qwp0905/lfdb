@@ -2,19 +2,16 @@ use std::{
   fs::{remove_file, rename, File, OpenOptions},
   io::IoSlice,
   mem::transmute,
-  panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex},
 };
-
-use parking_lot::Mutex;
 
 use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
   thread::{BackgroundThread, TaskHandle, WorkBuilder},
-  utils::{ToArc, ToBox},
+  utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
 
@@ -105,7 +102,7 @@ impl WALSegment {
    */
   pub fn reuse(&self, prefix: &Path, generation: SegmentGeneration) -> Result {
     let new_path = prefix.join(pad_start(generation)).with_extension(FILE_EXT);
-    let mut path = self.path.lock();
+    let mut path = self.path.l();
     rename(path.as_path(), &new_path).map_err(Error::IO)?;
     *path = new_path;
     Ok(())
@@ -139,7 +136,7 @@ impl WALSegment {
   #[inline]
   pub fn truncate(self) -> Result {
     self.close();
-    remove_file(self.path.lock().as_path()).map_err(Error::IO)?;
+    remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
   }
 
@@ -188,4 +185,3 @@ const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> R
       .map_err(Error::IO)
   }
 }
-impl RefUnwindSafe for WALSegment {}
