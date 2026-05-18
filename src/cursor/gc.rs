@@ -139,6 +139,7 @@ const fn run_entry(
     let table_id = table.metadata().get_id();
     let mut next = Some(pointer);
     let mut max_found = false;
+    let min_version = version_visibility.min_version();
 
     let release = |record: VersionRecord| {
       let pointers = match record.data {
@@ -168,17 +169,16 @@ const fn run_entry(
         continue;
       }
 
-      let min_version = version_visibility.min_version();
       {
         let mut found = false;
         let mut need_trim = false;
-        for record in block_cache
+        let entry = block_cache
           .read(ptr, table.clone())?
           .for_read()
           .as_ref()
-          .deserialize::<DataEntryView>()?
-          .get_versions()
-        {
+          .deserialize::<DataEntryView>()?;
+
+        for record in entry.get_versions() {
           if version_visibility.is_aborted(&record.owner) {
             need_trim = true;
             break;
@@ -194,6 +194,7 @@ const fn run_entry(
           break;
         }
         if !need_trim {
+          next = entry.get_next();
           continue;
         }
       }
