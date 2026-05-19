@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound, sync::Arc};
 
 use crate::{
-  cache::WritableSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
+  cache::RefedSlot, disk::Pointer, table::TableHandle, wal::TxId, Error, Result,
 };
 
 use crossbeam::epoch::pin;
@@ -179,7 +179,6 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
 impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   pub fn initialize(&self, table: &Arc<TableHandle>) -> Result {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
-
     {
       let mut slot = self.0.alloc_slot(HEADER_POINTER, table)?.for_write();
       self
@@ -199,40 +198,40 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   ) -> Result<Option<(StaticKey, Pointer)>> {
     let mut ptr = current;
 
-    let (mut slot, mut internal) = loop {
-      let slot = self.0.fetch_slot(ptr, table)?.for_write();
-      let mut internal = slot.as_ref().deserialize::<BTreeNode>()?.as_internal()?;
-      match internal.insert_or_next(&evicted_key, evicted_ptr) {
-        Ok(_) => break (slot, internal),
-        Err(i) => ptr = i,
-      }
-    };
+    let mut result = None;
+    let mut stop = false;
+    while !stop {
+      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
+        let mut internal = slot.as_ref().deserialize::<BTreeNode>()?.as_internal()?;
+        if let Err(i) = internal.insert_or_next(&evicted_key, evicted_ptr) {
+          return Ok(ptr = i);
+        };
 
-    let (split_node, split_key) = match internal.split_if_needed() {
-      Some(split) => split,
-      None => {
-        return self
-          .0
-          .serialize_and_log(&mut slot, &internal.to_node(), table)
-          .map(|_| None);
-      }
-    };
+        stop = true;
+        let (split_node, split_key) = match internal.split_if_needed() {
+          Some(v) => v,
+          None => {
+            self.0.serialize_and_log(slot, &internal.to_node(), table)?;
+            return Ok(());
+          }
+        };
 
-    let split_index = self.0.alloc_and_log(&split_node.to_node(), table)?;
+        let split_index = self.0.alloc_and_log(&split_node.to_node(), table)?;
+        internal.set_right(&split_key, split_index);
+        self.0.serialize_and_log(slot, &internal.to_node(), table)?;
+        result = Some((split_key, split_index));
 
-    internal.set_right(&split_key, split_index);
-    self
-      .0
-      .serialize_and_log(&mut slot, &internal.to_node(), table)?;
-
-    Ok(Some((split_key, split_index)))
+        Ok(())
+      })?;
+    }
+    Ok(result)
   }
 
   fn create_entry<F>(
     &self,
     key: StaticKeyRef,
     pos: usize,
-    slot: &mut WritableSlot,
+    slot: &mut RefedSlot,
     mut node: LeafNode,
     table: &Arc<TableHandle>,
     create_record: F,
@@ -273,7 +272,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let old_height = stack.len() as u16;
       while let Some(ptr) = stack.pop() {
-        match self.apply_split(split_key, split_pointer, ptr, table)? {
+        match self.apply_split(split_key.clone(), split_pointer, ptr, table)? {
           Some((k, p)) => {
             split_key = k;
             split_pointer = p;
@@ -282,21 +281,34 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         };
       }
 
-      let mut header_slot = self.0.fetch_slot(HEADER_POINTER, table)?.for_write();
-      let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
-      let current_height = header.get_height();
-      let mut ptr = header.get_root();
-      if old_height == current_height {
-        let new_root = InternalNode::initialize(split_key, ptr, split_pointer);
-        let new_root_index = self.0.alloc_and_log(&new_root.to_node(), table)?;
+      let mut changed = None;
+      let cloned = split_key.clone();
+      self
+        .0
+        .fetch_slot(HEADER_POINTER, table)?
+        .for_batch()
+        .mutate(|header_slot| {
+          let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
+          let current_height = header.get_height();
+          let ptr = header.get_root();
+          if old_height == current_height {
+            let new_root = InternalNode::initialize(cloned, ptr, split_pointer);
+            let new_root_index = self.0.alloc_and_log(&new_root.to_node(), table)?;
 
-        header.set_root(new_root_index);
-        header.increase_height();
-        return self.0.serialize_and_log(&mut header_slot, &header, table);
-      }
+            header.set_root(new_root_index);
+            header.increase_height();
+            return self.0.serialize_and_log(header_slot, &header, table);
+          }
 
-      let diff = (current_height - old_height) as usize;
-      drop(header_slot);
+          changed = Some((ptr, (current_height - old_height) as usize));
+
+          Ok(())
+        })?;
+
+      let (mut ptr, diff) = match changed {
+        Some(v) => v,
+        None => return Ok(()),
+      };
 
       while stack.len() < diff {
         let slot = self.0.fetch_slot(ptr, table)?.for_read();
@@ -373,27 +385,31 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     );
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
-    let (mid_key, right_ptr) = loop {
-      let mut slot = self.0.fetch_slot(ptr, table)?.for_write();
+    let mut record = Some(record);
+    loop {
+      let mut result = None;
+      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
+        let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        match node.find(&key) {
+          NodeFindResult::Found(_, i) => result = Some(Ok(i)),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::NotFound(i) => {
+            let node = node.writable();
+            let split =
+              self.create_entry(&key, i, slot, node, table, || record.take().unwrap())?;
+            result = Some(Err(split))
+          }
+        }
+        Ok(())
+      })?;
 
-      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-      match node.find(&key) {
-        NodeFindResult::Found(_, i) => {
-          drop(slot);
-          return self.apply_version_chain(i, record, table);
-        }
-        NodeFindResult::Move(i) => ptr = i,
-        NodeFindResult::NotFound(i) => {
-          let node = node.writable();
-          match self.create_entry(&key, i, &mut slot, node, table, || record)? {
-            Some(v) => break v,
-            None => return Ok(()),
-          };
-        }
+      match result {
+        Some(Ok(i)) => return self.apply_version_chain(i, record.take().unwrap(), table),
+        Some(Err(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
+        Some(Err(None)) => return Ok(()),
+        None => continue,
       }
-    };
-    self.propagate_split(mid_key, right_ptr, stack, table)?;
-    Ok(())
+    }
   }
 }
 impl<Policy> BTreeIndex<Policy>
@@ -408,29 +424,36 @@ where
   ) -> Result {
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
-    let (mid_key, right_ptr) = loop {
-      let mut slot = self.0.fetch_slot(ptr, table)?.for_write();
+    let mut record = Some(record);
+    loop {
+      let mut result = None;
+      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
+        let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        match node.find(&key) {
+          NodeFindResult::Found(_, i) => result = Some(Ok(i)),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::NotFound(i) => {
+            let node = node.writable();
+            let split = self.create_entry(&key, i, slot, node, table, || {
+              VersionRecord::new(
+                self.0.current_owner(),
+                self.0.current_version(),
+                record.take().unwrap(),
+              )
+            })?;
+            result = Some(Err(split))
+          }
+        }
+        Ok(())
+      })?;
 
-      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-      match node.find(&key) {
-        NodeFindResult::Found(_, i) => {
-          drop(slot);
-          return self.insert_at(i, record, table);
-        }
-        NodeFindResult::Move(i) => ptr = i,
-        NodeFindResult::NotFound(i) => {
-          let node = node.writable();
-          match self.create_entry(&key, i, &mut slot, node, table, || {
-            VersionRecord::new(self.0.current_owner(), self.0.current_version(), record)
-          })? {
-            Some(v) => break v,
-            None => return Ok(()),
-          };
-        }
+      match result {
+        Some(Ok(i)) => return self.insert_at(i, record.take().unwrap(), table),
+        Some(Err(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
+        Some(Err(None)) => return Ok(()),
+        None => continue,
       }
-    };
-    self.propagate_split(mid_key, right_ptr, stack, table)?;
-    Ok(())
+    }
   }
   pub fn insert(
     &self,
