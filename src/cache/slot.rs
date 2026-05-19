@@ -1,10 +1,10 @@
 use std::{
   mem::ManuallyDrop,
   ops::{Deref, DerefMut},
-  sync::{Arc, MutexGuard},
+  sync::Arc,
 };
 
-use super::{BatchHandle, BlockId, CachedBlock};
+use super::{BatchHandle, BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SharedToken},
@@ -127,7 +127,7 @@ pub struct WritableSlot<'a> {
   dirty: &'a AtomicBitmap,
   block_id: BlockId,
   _token: SharedToken<'a>,
-  _latch: MutexGuard<'a, ()>,
+  _latch: LatchGuard<'a>,
 }
 
 impl<'a> Deref for WritableSlot<'a> {

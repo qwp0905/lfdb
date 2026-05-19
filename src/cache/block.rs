@@ -7,6 +7,8 @@ use crate::{
   utils::{AtomicArc, ShortenedMutex},
 };
 
+pub type LatchGuard<'a> = MutexGuard<'a, ()>;
+
 pub struct CachedBlock {
   page: AtomicArc<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
@@ -42,7 +44,7 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub fn latch(&self) -> MutexGuard<'_, ()> {
+  pub fn latch(&self) -> LatchGuard<'_> {
     self.latch.l()
   }
 
