@@ -4,7 +4,7 @@ use std::{
 
 use super::{BTreeIndex, CreatablePolicy, ReadonlyPolicy, WritablePolicy};
 use crate::{
-  cache::{BlockCache, WritableSlot},
+  cache::{BlockCache, RefedSlot},
   disk::Pointer,
   info,
   serialize::Serializable,
@@ -105,7 +105,7 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
 impl<'a> WritablePolicy for &MiniTx<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result {
@@ -178,7 +178,7 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
 impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result {

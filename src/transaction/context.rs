@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crate::{
-  cache::WritableSlot,
+  cache::RefedSlot,
   cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   serialize::Serializable,
@@ -71,7 +71,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
 impl<'a> WritablePolicy for &TxContext<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result {

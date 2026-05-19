@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::{CachedSlot, WritableSlot},
+  cache::{CachedSlot, RefedSlot},
   disk::Pointer,
   serialize::Serializable,
   table::TableHandle,
@@ -21,7 +21,7 @@ pub trait ReadonlyPolicy {
 pub trait WritablePolicy: ReadonlyPolicy {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result;

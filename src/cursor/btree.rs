@@ -336,28 +336,32 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     record: VersionRecord,
     table: &Arc<TableHandle>,
   ) -> Result {
-    let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
-    let mut entry: DataEntry = slot.as_ref().deserialize()?;
+    self
+      .0
+      .fetch_slot(entry_ptr, table)?
+      .for_batch()
+      .mutate(|slot| {
+        let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
-    let mut new_versions = entry.take_versions().chain([record]).collect::<Vec<_>>();
-    new_versions.sort_by(|a, b| b.version.cmp(&a.version));
+        let mut new_versions = entry.take_versions().chain([record]).collect::<Vec<_>>();
+        new_versions.sort_by(|a, b| b.version.cmp(&a.version));
 
-    loop {
-      while let Some(r) = new_versions.pop_if(|r| entry.is_available(r)) {
-        entry.append(r);
-      }
+        loop {
+          while let Some(r) = new_versions.pop_if(|r| entry.is_available(r)) {
+            entry.append(r);
+          }
 
-      if new_versions.is_empty() {
-        self.0.serialize_and_log(&mut slot, &entry, table)?;
-        break;
-      }
+          if new_versions.is_empty() {
+            self.0.serialize_and_log(slot, &entry, table)?;
+            break;
+          }
 
-      let new_ptr = self.0.alloc_and_log(&entry, table)?;
-      entry = DataEntry::empty();
-      entry.set_next(new_ptr);
-    }
-
-    Ok(())
+          let new_ptr = self.0.alloc_and_log(&entry, table)?;
+          entry = DataEntry::empty();
+          entry.set_next(new_ptr);
+        }
+        Ok(())
+      })
   }
 
   pub fn apply_snapshot(&self, snapshot: KVSnapshot, table: &Arc<TableHandle>) -> Result {
@@ -449,31 +453,34 @@ where
     data: RecordData,
     table: &Arc<TableHandle>,
   ) -> Result {
-    let mut slot = self.0.fetch_slot(entry_ptr, table)?.for_write();
+    self
+      .0
+      .fetch_slot(entry_ptr, table)?
+      .for_batch()
+      .mutate(|slot| {
+        let mut entry: DataEntry = slot.as_ref().deserialize()?;
+        if let Some(owner) = entry.get_last_owner() {
+          if self.0.is_conflict(owner) {
+            return Err(Error::WriteConflict);
+          }
+        }
 
-    let mut entry: DataEntry = slot.as_ref().deserialize()?;
-    if let Some(owner) = entry.get_last_owner() {
-      if self.0.is_conflict(owner) {
-        return Err(Error::WriteConflict);
-      }
-    }
+        let record =
+          VersionRecord::new(self.0.current_owner(), self.0.current_version(), data);
 
-    let record =
-      VersionRecord::new(self.0.current_owner(), self.0.current_version(), data);
+        if entry.is_available(&record) {
+          entry.append(record);
+          self.0.serialize_and_log(slot, &entry, table)?;
+          return Ok(());
+        }
 
-    if entry.is_available(&record) {
-      entry.append(record);
-      self.0.serialize_and_log(&mut slot, &entry, table)?;
-      return Ok(());
-    }
+        let new_entry_index = self.0.alloc_and_log(&entry, table)?;
+        let mut new_entry = DataEntry::init(record);
+        new_entry.set_next(new_entry_index);
+        self.0.serialize_and_log(slot, &new_entry, table)?;
 
-    let new_entry_index = self.0.alloc_and_log(&entry, table)?;
-
-    let mut new_entry = DataEntry::init(record);
-    new_entry.set_next(new_entry_index);
-    self.0.serialize_and_log(&mut slot, &new_entry, table)?;
-
-    Ok(())
+        Ok(())
+      })
   }
 
   pub fn insert_if_matched(

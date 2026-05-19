@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::WritableSlot,
+  cache::RefedSlot,
   error::Result,
   serialize::{Serializable, SerializeFrom},
   table::TableId,
@@ -29,7 +29,7 @@ impl PageRecorder {
     &self,
     tx_id: TxId,
     table_id: TableId,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
   ) -> Result
   where

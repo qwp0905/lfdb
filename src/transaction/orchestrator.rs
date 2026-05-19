@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
-  cache::{BlockCache, CachedSlot, WritableSlot},
+  cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::GarbageCollector,
   debug,
   disk::Pointer,
@@ -129,7 +129,7 @@ impl TxOrchestrator {
     &self,
     tx_id: TxId,
     table_id: TableId,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
   ) -> Result
   where
