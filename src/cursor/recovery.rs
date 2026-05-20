@@ -56,6 +56,8 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
   }
+
+  fn when_update_entry(&self, _entry_pointer: Pointer, _table: &Arc<TableHandle>) {}
 }
 
 pub fn initialize(

@@ -372,8 +372,12 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           entry = DataEntry::empty();
           entry.set_next(new_ptr);
         }
+
         Ok(())
-      })
+      })?;
+
+    self.0.when_update_entry(entry_ptr, table);
+    Ok(())
   }
 
   pub fn apply_snapshot(&self, snapshot: KVSnapshot, table: &Arc<TableHandle>) -> Result {
@@ -503,7 +507,10 @@ where
         self.0.serialize_and_log(slot, &new_entry, table)?;
 
         Ok(())
-      })
+      })?;
+
+    self.0.when_update_entry(entry_ptr, table);
+    Ok(())
   }
 
   pub fn insert_if_matched(

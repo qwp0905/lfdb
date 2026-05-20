@@ -139,6 +139,17 @@ impl TxOrchestrator {
   }
 
   #[inline]
+  pub fn mark_gc(
+    &self,
+    handle: Arc<TableHandle>,
+    pointer: Pointer,
+    owner: TxId,
+    version: TxId,
+  ) {
+    self.gc.mark(handle, pointer, owner, version);
+  }
+
+  #[inline]
   pub fn start_tx(
     &self,
     timeout: Option<Duration>,

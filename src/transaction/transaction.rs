@@ -208,6 +208,9 @@ impl<'a> Transaction<'a> {
     for (old, new) in self.compacted_tables.drain(..) {
       self.orchestrator.compact_table(old, new, version);
     }
+    for (table, ptr) in self.context.get_modified_entries() {
+      self.orchestrator.mark_gc(table, ptr, id, version);
+    }
 
     Ok(())
   }
@@ -239,6 +242,9 @@ impl<'a> Transaction<'a> {
     }
     for (_, new) in self.compacted_tables.drain(..) {
       self.orchestrator.drop_table(new.into_inner(), id, version);
+    }
+    for (table, ptr) in self.context.get_modified_entries() {
+      self.orchestrator.mark_gc(table, ptr, id, version);
     }
   }
 }

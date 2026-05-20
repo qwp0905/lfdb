@@ -41,6 +41,8 @@ pub trait WritablePolicy: ReadonlyPolicy {
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(ptr)
   }
+
+  fn when_update_entry(&self, entry_pointer: Pointer, table: &Arc<TableHandle>);
 }
 
 pub trait CreatablePolicy: WritablePolicy {

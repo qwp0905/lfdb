@@ -2,7 +2,9 @@ use std::{
   cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
 };
 
-use super::{BTreeIndex, CreatablePolicy, ReadonlyPolicy, WritablePolicy};
+use crossbeam::queue::SegQueue;
+
+use super::{BTreeIndex, CreatablePolicy, GCMarking, ReadonlyPolicy, WritablePolicy};
 use crate::{
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
@@ -12,7 +14,7 @@ use crate::{
   thread::{BackgroundThread, WorkBuilder},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
-  utils::{ToArc, ToBox},
+  utils::{DoubleBuffer, ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
   warn, Result,
 };
@@ -31,6 +33,8 @@ struct MiniTx<'a> {
   wal: &'a WAL,
   committed: Cell<bool>,
   modified: Cell<bool>,
+  modified_entries: SegQueue<(Arc<TableHandle>, Pointer)>,
+  gc_queue: &'a DoubleBuffer<GCMarking>,
 }
 impl<'a> MiniTx<'a> {
   fn start(
@@ -38,6 +42,7 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
+    gc_queue: &'a DoubleBuffer<GCMarking>,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -50,6 +55,8 @@ impl<'a> MiniTx<'a> {
       wal,
       committed: Cell::new(false),
       modified: Cell::new(false),
+      modified_entries: SegQueue::new(),
+      gc_queue,
     })
   }
 
@@ -64,6 +71,12 @@ impl<'a> MiniTx<'a> {
     }
     self.committed.set(true);
     self.state.deactive();
+    let version = self.version_visibility.current_version();
+    while let Some((table, ptr)) = self.modified_entries.pop() {
+      self
+        .gc_queue
+        .push(GCMarking::new(table, ptr, self.state.get_id(), version))
+    }
     Ok(())
   }
 
@@ -76,6 +89,12 @@ impl<'a> MiniTx<'a> {
     }
     self.committed.set(true);
     self.state.deactive();
+    let version = self.version_visibility.current_version();
+    while let Some((table, ptr)) = self.modified_entries.pop() {
+      self
+        .gc_queue
+        .push(GCMarking::new(table, ptr, self.state.get_id(), version))
+    }
     Ok(())
   }
 }
@@ -125,6 +144,10 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     table: &Arc<TableHandle>,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
+  }
+
+  fn when_update_entry(&self, entry_pointer: Pointer, table: &Arc<TableHandle>) {
+    self.modified_entries.push((table.clone(), entry_pointer));
   }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
@@ -194,6 +217,8 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
   }
+
+  fn when_update_entry(&self, _entry_pointer: Pointer, _table: &Arc<TableHandle>) {}
 }
 
 pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
@@ -205,6 +230,7 @@ pub fn wait_compaction(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+  gc_queue: Arc<DoubleBuffer<GCMarking>>,
 ) -> impl FnMut(Option<CompactTask>) -> Result {
   let meta_table = tables.meta_table();
   let mut triggered = Vec::new();
@@ -217,7 +243,8 @@ pub fn wait_compaction(
         CompactTask::New(old) => {
           let table_name = old.metadata().get_name();
           let (new_table, wait_until) = {
-            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder)?;
+            let mut tx =
+              MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc_queue)?;
 
             let index = BTreeIndex::new(&tx);
 
@@ -285,6 +312,7 @@ pub fn handle_compaction(
   after_compaction: Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
+  gc_queue: Arc<DoubleBuffer<GCMarking>>,
 ) -> impl Fn((MutationHandle, MutationHandle)) -> Result {
   let meta_table = tables.meta_table();
   move |(old, new)| {
@@ -297,6 +325,7 @@ pub fn handle_compaction(
       old,
       new,
       &after_compaction,
+      &gc_queue,
     )
   }
 }
@@ -312,6 +341,7 @@ fn do_compaction(
   after_compaction: &Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
+  gc_queue: &DoubleBuffer<GCMarking>,
 ) -> Result {
   let table_name = old_table.metadata().get_name();
   info!("table {table_name} compacting begin.");
@@ -343,7 +373,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc_queue)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         warn!("table {table_name} already dropped.");
         return Ok(());
@@ -354,7 +384,7 @@ fn do_compaction(
   info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
-    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc_queue)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
@@ -411,6 +441,7 @@ impl Compactor {
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
     release_table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+    gc_queue: Arc<DoubleBuffer<GCMarking>>,
   ) -> Self {
     let after_compaction = WorkBuilder::new()
       .name("tree after compaction")
@@ -431,6 +462,7 @@ impl Compactor {
         wal.clone(),
         recorder.clone(),
         after_compaction.clone(),
+        gc_queue.clone(),
       ))
       .to_arc();
 
@@ -446,6 +478,7 @@ impl Compactor {
           wal.clone(),
           recorder.clone(),
           do_compaction.clone(),
+          gc_queue.clone(),
         ),
       )
       .to_box();
