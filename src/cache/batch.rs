@@ -11,9 +11,9 @@ use crate::{
   Result,
 };
 
-pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) -> Result + 'a;
+pub type BatchHandler<'a> = dyn FnMut(&mut RefedSlot) -> Result + 'a;
 pub struct BatchHandle {
-  queue: SegQueue<(Box<BatchHandler<'static>>, OneshotFulfill<Result>)>,
+  queue: SegQueue<(&'static mut BatchHandler<'static>, OneshotFulfill<Result>)>,
   occupied: AtomicBool,
 }
 impl BatchHandle {
@@ -24,7 +24,7 @@ impl BatchHandle {
     }
   }
 
-  pub fn register(&self, handler: Box<BatchHandler<'_>>) -> (bool, Oneshot<Result>) {
+  pub fn register(&self, handler: &mut BatchHandler<'_>) -> (bool, Oneshot<Result>) {
     let (o, f) = oneshot();
     self.queue.push((unsafe { transmute(handler) }, f));
     (!self.occupied.fetch_or(true, Ordering::Release), o)

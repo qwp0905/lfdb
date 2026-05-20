@@ -282,7 +282,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       }
 
       let mut changed = None;
-      let cloned = split_key.clone();
       self
         .0
         .fetch_slot(HEADER_POINTER, table)?
@@ -292,7 +291,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           let current_height = header.get_height();
           let ptr = header.get_root();
           if old_height == current_height {
-            let new_root = InternalNode::initialize(cloned, ptr, split_pointer);
+            let new_root =
+              InternalNode::initialize(split_key.clone(), ptr, split_pointer);
             let new_root_index = self.0.alloc_and_log(&new_root.to_node(), table)?;
 
             header.set_root(new_root_index);
@@ -348,6 +348,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     record: VersionRecord,
     table: &Arc<TableHandle>,
   ) -> Result {
+    let mut record = Some(record);
     self
       .0
       .fetch_slot(entry_ptr, table)?
@@ -355,7 +356,10 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       .mutate(|slot| {
         let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
-        let mut new_versions = entry.take_versions().chain([record]).collect::<Vec<_>>();
+        let mut new_versions = entry
+          .take_versions()
+          .chain([record.take().unwrap()])
+          .collect::<Vec<_>>();
         new_versions.sort_by(|a, b| b.version.cmp(&a.version));
 
         loop {
@@ -480,6 +484,7 @@ where
     data: RecordData,
     table: &Arc<TableHandle>,
   ) -> Result {
+    let mut data = Some(data);
     self
       .0
       .fetch_slot(entry_ptr, table)?
@@ -492,8 +497,11 @@ where
           }
         }
 
-        let record =
-          VersionRecord::new(self.0.current_owner(), self.0.current_version(), data);
+        let record = VersionRecord::new(
+          self.0.current_owner(),
+          self.0.current_version(),
+          data.take().unwrap(),
+        );
 
         if entry.is_available(&record) {
           entry.append(record);
