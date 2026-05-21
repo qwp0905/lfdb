@@ -1357,6 +1357,7 @@ fn test_concurrent_drop_returns_conflict() {
   let mut tx2 = engine.new_tx().unwrap();
 
   tx1.drop_table(TEST_TABLE).unwrap();
+  tx1.commit().unwrap();
   match tx2.drop_table(TEST_TABLE) {
     Err(Error::WriteConflict) => {}
     Err(e) => panic!("expected WriteConflict, got {:?}", e),
