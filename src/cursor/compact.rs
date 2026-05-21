@@ -145,6 +145,7 @@ impl<'a> CreatablePolicy for &MiniTx<'a> {
   fn current_version(&self) -> TxId {
     self.version_visibility.current_version()
   }
+  fn wait_close(&self, _owner: TxId) {}
 }
 
 struct CompactionReadPolicy<'a> {

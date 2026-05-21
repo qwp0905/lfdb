@@ -107,4 +107,7 @@ impl<'a> CreatablePolicy for &TxContext<'a> {
   fn current_version(&self) -> TxId {
     self.orchestrator.current_version()
   }
+  fn wait_close(&self, owner: TxId) {
+    self.orchestrator.wait_commit(owner);
+  }
 }

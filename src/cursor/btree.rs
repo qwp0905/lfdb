@@ -455,6 +455,8 @@ where
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     if let Some(owner) = entry.get_last_owner() {
       if self.0.is_conflict(owner) {
+        drop(slot);
+        self.0.wait_close(owner);
         return Err(Error::WriteConflict);
       }
     }

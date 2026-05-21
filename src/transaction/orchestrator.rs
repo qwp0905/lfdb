@@ -214,6 +214,10 @@ impl TxOrchestrator {
     self.tree_manager.compact(old, new, version);
   }
 
+  pub fn wait_commit(&self, owner: TxId) {
+    self.version_visibility.wait_commit(owner);
+  }
+
   /**
    * Closes components in dependency order — higher-level components first.
    * wal.half_close() step 1 stops new checkpoint triggers; checkpoint.close()

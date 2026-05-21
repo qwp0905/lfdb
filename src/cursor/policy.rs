@@ -46,6 +46,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
 
 pub trait CreatablePolicy: WritablePolicy {
   fn is_conflict(&self, owner: TxId) -> bool;
+  fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
 }
