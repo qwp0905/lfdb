@@ -247,63 +247,68 @@ fn release_entry(
       }
     }
 
-    let mut slot = block_cache.read(ptr, table.handle())?.for_write();
-    let mut entry: DataEntry = slot.as_ref().deserialize()?;
+    block_cache
+      .read(ptr, table.handle())?
+      .for_batch()
+      .mutate(|slot| {
+        let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
-    let prev_len = entry.len();
-    let mut expired_max: Option<VersionRecord> = None;
-    let mut new_versions = VecDeque::new();
+        let prev_len = entry.len();
+        let mut expired_max: Option<VersionRecord> = None;
+        let mut new_versions = VecDeque::new();
 
-    for record in entry.take_versions() {
-      if version_visibility.is_aborted(&record.owner) {
-        release(record);
-        continue;
-      }
-      if record.version > min_version {
-        new_versions.push_back(record);
-        continue;
-      }
+        for record in entry.take_versions() {
+          if version_visibility.is_aborted(&record.owner) {
+            release(record);
+            continue;
+          }
+          if record.version > min_version {
+            new_versions.push_back(record);
+            continue;
+          }
 
-      // Keep only the newest version at or below min_version. All active
-      // transactions started after min_version, so older versions can never
-      // be reached again.
-      match expired_max.as_mut() {
-        Some(max) if max.version < record.version => release(replace(max, record)),
-        None => expired_max = Some(record),
-        _ => release(record),
-      };
-    }
+          // Keep only the newest version at or below min_version. All active
+          // transactions started after min_version, so older versions can never
+          // be reached again.
+          match expired_max.as_mut() {
+            Some(max) if max.version < record.version => release(replace(max, record)),
+            None => expired_max = Some(record),
+            _ => release(record),
+          };
+        }
 
-    if let Some(record) = expired_max.take() {
-      new_versions.push_back(record);
-      max_found = true;
-    }
+        if let Some(record) = expired_max.take() {
+          new_versions.push_back(record);
+          max_found = true;
+        }
 
-    if new_versions.len() == prev_len {
-      continue;
-    }
+        if new_versions.len() == prev_len {
+          return Ok(());
+        }
 
-    if new_versions.len() > 0 {
-      entry.set_versions(new_versions);
-      serialize_and_log(&mut slot, &entry)?;
-      continue;
-    }
+        if new_versions.len() > 0 {
+          entry.set_versions(new_versions);
+          serialize_and_log(slot, &entry)?;
+          return Ok(());
+        }
 
-    let next_ptr = match entry.get_next() {
-      Some(ptr) => ptr,
-      None => return serialize_and_log(&mut slot, &entry),
-    };
+        let next_ptr = match entry.get_next() {
+          Some(ptr) => ptr,
+          None => return serialize_and_log(slot, &entry),
+        };
 
-    let next_entry = block_cache
-      .read(next_ptr, table.handle())?
-      .for_read()
-      .as_ref()
-      .deserialize::<DataEntry>()?;
-    serialize_and_log(&mut slot, &next_entry)?;
-    next = Some(ptr);
+        let next_entry = block_cache
+          .read(next_ptr, table.handle())?
+          .for_read()
+          .as_ref()
+          .deserialize::<DataEntry>()?;
+        serialize_and_log(slot, &next_entry)?;
+        next = Some(ptr);
 
-    let handle = table.handle();
-    defer(move || handle.free().dealloc(next_ptr));
+        let handle = table.handle();
+        defer(move || handle.free().dealloc(next_ptr));
+        Ok(())
+      })?;
   }
 
   Ok(())
