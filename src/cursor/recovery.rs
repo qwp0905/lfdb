@@ -3,8 +3,8 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntry, ReadonlyPolicy, RecordData, TreeHeader,
-  WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntry, GarbageCollector, ReadonlyPolicy, RecordData,
+  TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -106,7 +106,11 @@ pub fn open_tables(
   Ok((handles, compactions))
 }
 
-pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
+pub fn recovery(
+  block_cache: Arc<BlockCache>,
+  gc: Arc<GarbageCollector>,
+  tables: &TableMapper,
+) -> Result {
   let open_handles = Arc::new(SegQueue::new());
   tables
     .get_all()
@@ -116,6 +120,7 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   let threads = (0..5)
     .map(|_| {
       let block_cache = block_cache.clone();
+      let gc = gc.clone();
       let open_handles = open_handles.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
@@ -123,7 +128,7 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
             "table {} start to collect orphaned blocks.",
             table.metadata().get_name(),
           );
-          release_orphaned(&block_cache, table)?;
+          release_orphaned(&block_cache, &gc, table)?;
         }
         Ok(())
       })
@@ -139,7 +144,11 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   Ok(())
 }
 
-fn release_orphaned(block_cache: &BlockCache, table: Arc<TableHandle>) -> Result {
+fn release_orphaned(
+  block_cache: &BlockCache,
+  gc: &GarbageCollector,
+  table: Arc<TableHandle>,
+) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
     .read(HEADER_POINTER, table.clone())?
@@ -161,6 +170,10 @@ fn release_orphaned(block_cache: &BlockCache, table: Arc<TableHandle>) -> Result
       BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
       BTreeNodeView::Leaf(node) => entry_stack.extend(node.get_entry_pointers()),
     };
+  }
+
+  for &ptr in entry_stack.iter() {
+    gc.mark(table.clone(), ptr, RESERVED_TX, 0);
   }
 
   while let Some(ptr) = entry_stack.pop() {

@@ -34,7 +34,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       .get_root();
 
     loop {
-      // This guard protects the next node or data entry from the GC or tree manager.
+      // This guard protects the next node or data entry from the GC.
       // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
@@ -464,9 +464,6 @@ where
     self.insert_record_if_matched(key, RecordData::Tombstone, table)
   }
 
-  /**
-   * coupling required because of gc can collect entry header before write lock.
-   */
   fn insert_at(
     &self,
     entry_ptr: Pointer,
