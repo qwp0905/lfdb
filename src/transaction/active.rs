@@ -4,7 +4,10 @@ use std::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
   },
+  thread::{current, park, Thread},
 };
+
+use crossbeam::queue::SegQueue;
 
 use crate::{
   utils::{OffsetBitmap, ShortenedRwLock},
@@ -15,16 +18,19 @@ const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
+const STATUS_CLOSED: u8 = 4;
 
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
+  waiting: SegQueue<Thread>,
 }
 impl ActiveState {
   pub fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
+      waiting: SegQueue::new(),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -32,6 +38,9 @@ impl ActiveState {
   }
   pub fn get_id(&self) -> TxId {
     self.tx_id
+  }
+  pub fn close(&self) {
+    self.status.store(STATUS_CLOSED, Ordering::Release);
   }
 
   pub fn try_abort(&self) -> bool {
@@ -108,7 +117,11 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    self.inner.wl().remove(tx_id);
+    if let Some(state) = self.inner.wl().remove(tx_id) {
+      while let Some(thread) = state.waiting.pop() {
+        thread.unpark();
+      }
+    };
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
@@ -118,5 +131,14 @@ impl ActiveSet {
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
+  }
+  pub fn wait(&self, tx_id: &TxId) {
+    if let Some(state) = self.get(tx_id) {
+      state.waiting.push(current());
+      if state.status.load(Ordering::Acquire) == STATUS_CLOSED {
+        return;
+      }
+      park();
+    }
   }
 }

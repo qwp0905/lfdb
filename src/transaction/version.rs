@@ -34,6 +34,7 @@ impl<'a> TxState<'a> {
   }
 
   pub fn deactive(&self) {
+    self.state.close();
     self.set.remove(&self.state.get_id());
   }
 }
@@ -126,6 +127,10 @@ impl VersionVisibility {
   #[inline]
   pub fn is_aborted(&self, tx_id: &TxId) -> bool {
     self.aborted.contains(tx_id)
+  }
+
+  pub fn wait_commit(&self, owner: TxId) {
+    self.active.wait(&owner)
   }
 
   /**
