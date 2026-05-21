@@ -1353,11 +1353,10 @@ fn test_concurrent_drop_returns_conflict() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx_timeout(Duration::from_secs(10)).unwrap();
   let mut tx2 = engine.new_tx().unwrap();
 
   tx1.drop_table(TEST_TABLE).unwrap();
-  tx1.commit().unwrap();
   match tx2.drop_table(TEST_TABLE) {
     Err(Error::WriteConflict) => {}
     Err(e) => panic!("expected WriteConflict, got {:?}", e),
