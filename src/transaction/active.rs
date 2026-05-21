@@ -4,7 +4,7 @@ use std::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
   },
-  thread::{current, park, Thread},
+  thread::{current, park, yield_now, Thread},
 };
 
 use crossbeam::queue::SegQueue;
@@ -133,12 +133,25 @@ impl ActiveSet {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
   }
   pub fn wait(&self, tx_id: &TxId) {
-    if let Some(state) = self.get(tx_id) {
-      state.waiting.push(current());
+    let state = match self.get(tx_id) {
+      Some(state) => state,
+      None => return,
+    };
+
+    let mut backoff = 0;
+    state.waiting.push(current());
+    loop {
       if state.status.load(Ordering::Acquire) == STATUS_CLOSED {
         return;
       }
-      park();
+      if backoff < MAX_BACKOFF {
+        yield_now();
+        backoff += 1;
+        continue;
+      }
+      break park();
     }
   }
 }
+
+const MAX_BACKOFF: usize = 10;
