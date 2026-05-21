@@ -4,7 +4,7 @@ use std::{
   ops::Deref,
   panic::{RefUnwindSafe, UnwindSafe},
   sync::atomic::{fence, AtomicBool, Ordering},
-  thread::{current, park, yield_now, Thread},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -81,36 +81,24 @@ impl<T> OneshotInner<T> {
   }
 }
 
-const MAX_YIELD: u8 = 10;
 pub struct Oneshot<T>(Pair<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn wait(self) -> Result<T> {
-    let mut backoff = 0;
     // Register the caller thread before checking state. If fulfill() runs
     // first and finds caller as None, it won't call unpark() — causing park()
     // to block forever.
     self.0.caller.store(Some(current()));
     loop {
-      while backoff < MAX_YIELD {
-        match self
-          .0
-          .state
-          .compare_exchange(State::Fulfilled, State::Disconnected)
-          .unwrap_or_else(|s| s)
-        {
-          State::Fulfilled => {
-            return Ok(unsafe { self.0.get_value().assume_init_read() })
-          }
-          State::Waiting => {
-            backoff += 1;
-            yield_now();
-          }
-          State::Disconnected => return Err(Error::ChannelDisconnected),
-        }
+      match self
+        .0
+        .state
+        .compare_exchange(State::Fulfilled, State::Disconnected)
+        .unwrap_or_else(|s| s)
+      {
+        State::Fulfilled => return Ok(unsafe { self.0.get_value().assume_init_read() }),
+        State::Waiting => park(),
+        State::Disconnected => return Err(Error::ChannelDisconnected),
       }
-
-      park();
-      backoff = 0;
     }
   }
 }

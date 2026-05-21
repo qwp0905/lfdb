@@ -159,8 +159,8 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  pub fn mutate(self, mut handler: impl FnMut(&mut RefedSlot) -> Result) -> Result {
-    let (occupied, o) = self.batch.register(&mut handler);
+  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
+    let (occupied, o) = self.batch.register(Box::new(handler));
     if !occupied {
       return o.wait().flatten();
     }
