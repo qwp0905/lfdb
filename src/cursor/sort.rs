@@ -17,17 +17,26 @@ pub trait MergeSortable {
   }
 }
 
-pub struct MergeSorted<T, R = T> {
-  default: T,
-  default_buffered: Option<(VecRef, Option<VecRef>)>,
-  optional: Option<(R, Option<(VecRef, Option<VecRef>)>)>,
+pub enum MergeSorted<T, R = T> {
+  Single(T),
+  MergeSorted {
+    primary: T,
+    primary_buffered: Option<(VecRef, Option<VecRef>)>,
+    secondary: R,
+    secondary_buffered: Option<(VecRef, Option<VecRef>)>,
+  },
 }
+
 impl<T, R> MergeSorted<T, R> {
-  pub fn new(default: T, optional: Option<R>) -> Self {
-    Self {
-      default,
-      default_buffered: None,
-      optional: optional.map(|v| (v, None)),
+  pub fn single(sorted: T) -> Self {
+    Self::Single(sorted)
+  }
+  pub fn merge(primary: T, secondary: R) -> Self {
+    Self::MergeSorted {
+      primary,
+      primary_buffered: None,
+      secondary,
+      secondary_buffered: None,
     }
   }
 }
@@ -37,36 +46,41 @@ where
   R: MergeSortable,
 {
   fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
-    let (optional, optional_buffered) = match self.optional.as_mut() {
-      Some(v) => v,
-      None => return self.default.try_next(),
+    let (primary, primary_buffered, secondary, secondary_buffered) = match self {
+      MergeSorted::Single(sorted) => return sorted.try_next(),
+      MergeSorted::MergeSorted {
+        primary,
+        primary_buffered,
+        secondary,
+        secondary_buffered,
+      } => (primary, primary_buffered, secondary, secondary_buffered),
     };
 
-    let default_kv = match self.default_buffered.take() {
+    let primary_kv = match primary_buffered.take() {
       Some(kv) => Some(kv),
-      None => self.default.try_next()?,
+      None => primary.try_next()?,
     };
-    let optional_kv = match optional_buffered.take() {
+    let secondary_kv = match secondary_buffered.take() {
       Some(kv) => Some(kv),
-      None => optional.try_next()?,
+      None => secondary.try_next()?,
     };
 
-    let (k_d, v_d, k_o, v_o) = match (default_kv, optional_kv) {
+    let (k_p, v_p, k_s, v_s) = match (primary_kv, secondary_kv) {
       (None, None) => return Ok(None),
       (Some(kv), None) | (None, Some(kv)) => return Ok(Some(kv)),
-      (Some((k_d, v_d)), Some((k_o, v_o))) => (k_d, v_d, k_o, v_o),
+      (Some((k_p, v_p)), Some((k_s, v_s))) => (k_p, v_p, k_s, v_s),
     };
 
-    match k_d.cmp(&k_o) {
+    match k_p.cmp(&k_s) {
       Ordering::Less => {
-        *optional_buffered = Some((k_o, v_o));
-        Ok(Some((k_d, v_d)))
+        *secondary_buffered = Some((k_s, v_s));
+        Ok(Some((k_p, v_p)))
       }
       Ordering::Greater => {
-        self.default_buffered = Some((k_d, v_d));
-        Ok(Some((k_o, v_o)))
+        *primary_buffered = Some((k_p, v_p));
+        Ok(Some((k_s, v_s)))
       }
-      Ordering::Equal => Ok(Some((k_o, v_o))),
+      Ordering::Equal => Ok(Some((k_p, v_p))),
     }
   }
 }

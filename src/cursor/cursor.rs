@@ -150,11 +150,13 @@ impl<'a> CursorIterator<'a> {
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,
   ) -> Result<Self> {
-    let compaction = match compaction {
-      Some(table) => Some(index.scan(table, &start, &end)?),
-      None => None,
+    let iter = match compaction {
+      Some(c) => MergeSorted::merge(
+        index.scan(c, &start, &end)?,
+        index.scan(table, &start, &end)?,
+      ),
+      None => MergeSorted::single(index.scan(table, &start, &end)?),
     };
-    let iter = MergeSorted::new(index.scan(table, &start, &end)?, compaction);
 
     Ok(Self { context, iter })
   }
