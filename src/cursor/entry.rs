@@ -106,8 +106,8 @@ impl DataEntry {
     self.versions.iter()
   }
 
-  pub fn get_last_owner(&self) -> Option<TxId> {
-    self.versions.front().map(|v| v.owner)
+  pub fn get_last(&self) -> Option<&VersionRecord> {
+    self.versions.front()
   }
 
   pub const fn get_next(&self) -> Option<Pointer> {

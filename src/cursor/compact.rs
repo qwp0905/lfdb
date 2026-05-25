@@ -90,20 +90,24 @@ impl<'a> Drop for MiniTx<'a> {
 }
 
 impl<'a> ReadonlyPolicy for &MiniTx<'a> {
-  fn is_visible(&self, owner: TxId, version: TxId) -> bool {
-    let current = self.state.get_id();
-    if owner == current {
-      return true;
-    }
-    version <= current && self.snapshot.is_visible(&owner)
-  }
-
   fn fetch_slot(
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
+  }
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.snapshot.is_aborted(&owner)
+  }
+  fn is_owned(&self, owner: TxId) -> bool {
+    self.state.get_id() == owner
+  }
+  fn is_readable(&self, version: TxId) -> bool {
+    version <= self.state.get_id()
+  }
+  fn is_active(&self, owner: TxId) -> bool {
+    self.snapshot.is_active(&owner)
   }
 }
 impl<'a> WritablePolicy for &MiniTx<'a> {
@@ -136,9 +140,6 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
   }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
-  fn is_conflict(&self, owner: TxId) -> bool {
-    owner != self.state.get_id() && self.snapshot.is_active(&owner)
-  }
   fn current_owner(&self) -> TxId {
     self.state.get_id()
   }
@@ -153,10 +154,18 @@ struct CompactionReadPolicy<'a> {
   version_visibility: &'a VersionVisibility,
 }
 impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
-  fn is_visible(&self, owner: TxId, _: TxId) -> bool {
-    !self.version_visibility.is_aborted(&owner)
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.version_visibility.is_aborted(&owner)
   }
-
+  fn is_owned(&self, _: TxId) -> bool {
+    false
+  }
+  fn is_readable(&self, _: TxId) -> bool {
+    true
+  }
+  fn is_active(&self, _: TxId) -> bool {
+    false
+  }
   fn fetch_slot(
     &self,
     pointer: Pointer,
@@ -173,16 +182,24 @@ struct CompactionWritePolicy<'a> {
   gc: &'a GarbageCollector,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
-  fn is_visible(&self, owner: TxId, _: TxId) -> bool {
-    !self.version_visibility.is_aborted(&owner)
-  }
-
   fn fetch_slot(
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
+  }
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.version_visibility.is_aborted(&owner)
+  }
+  fn is_owned(&self, _: TxId) -> bool {
+    false
+  }
+  fn is_readable(&self, _: TxId) -> bool {
+    true
+  }
+  fn is_active(&self, _: TxId) -> bool {
+    false
   }
 }
 impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
