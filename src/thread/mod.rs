@@ -10,6 +10,9 @@ pub use oneshot::*;
 mod shared;
 use shared::*;
 
+mod eager;
+use eager::*;
+
 mod thread;
 pub use thread::*;
 

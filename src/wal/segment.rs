@@ -10,14 +10,14 @@ use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
-  thread::{BatchExecution, Oneshot},
+  thread::{BackgroundThread, BatchExecution, TaskHandle, WorkBuilder},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
 
 pub const FILE_EXT: &str = "log";
 
-pub type FsyncResult = Oneshot<Result>;
+pub type FsyncResult = TaskHandle<Result>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
@@ -25,7 +25,7 @@ pub struct WALSegment {
   file: Arc<File>,
   path: Mutex<PathBuf>,
   io: Box<BatchExecution<(Pointer, &'static [u8]), Result>>,
-  flush: Box<BatchExecution<(), Result>>,
+  flush: Box<dyn BackgroundThread<(), Result>>,
 }
 impl WALSegment {
   pub fn parse_generation(path: &Path) -> Result<SegmentGeneration> {
@@ -110,7 +110,11 @@ impl WALSegment {
 
   fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
     let io = BatchExecution::new(handle_write(file.clone()), max_iov()).to_box();
-    let flush = BatchExecution::new(handle_flush(file.clone()), flush_count).to_box();
+    let flush = WorkBuilder::new()
+      .name("wal flush")
+      .single()
+      .eager_buffering(flush_count, handle_flush(file.clone()))
+      .to_box();
     Self {
       file,
       io,
@@ -126,8 +130,14 @@ impl WALSegment {
 
   #[inline]
   pub fn truncate(self) -> Result {
+    self.close();
     remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
+  }
+
+  #[inline]
+  pub fn close(&self) {
+    self.flush.close();
   }
 }
 

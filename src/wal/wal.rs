@@ -406,9 +406,9 @@ impl WAL {
       }
 
       let taken = unsafe { ptr.into_owned() };
-      taken.take_segment();
+      let segment = taken.take_segment();
       let _ = self.preloader.close();
-      return;
+      return segment.close();
     }
   }
 }
@@ -423,7 +423,7 @@ const fn waiting_checkpoint(
   move |segments| {
     let checkpoint = match checkpoint.upgrade() {
       Some(c) => c,
-      None => return,
+      None => return segments.into_iter().for_each(|seg| seg.close()),
     };
 
     match checkpoint.execute(()).wait().flatten() {
