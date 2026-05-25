@@ -10,10 +10,10 @@ impl OnceParker {
   }
 
   pub fn park(&self) {
-    self.once.wait();
+    self.once.wait_force();
   }
 
   pub fn wake_all(&self) {
-    self.once.call_once(|| {});
+    self.once.call_once_force(|_| {});
   }
 }
