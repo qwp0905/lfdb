@@ -1184,18 +1184,34 @@ fn test_isolation() {
   let dir = tempdir_in(".").unwrap();
   let e = build_engine(&dir);
   create_table(&e, TEST_TABLE);
+  {
+    let mut t1 = e.new_tx().unwrap();
+    let tab1 = t1.table(TEST_TABLE).unwrap();
+    tab1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
 
-  let mut t1 = e.new_tx().unwrap();
-  let tab1 = t1.table(TEST_TABLE).unwrap();
-  tab1.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
+    let t2 = e.new_tx().unwrap();
+    let tab2 = t2.table(TEST_TABLE).unwrap();
+    assert_eq!(tab2.get(b"111").unwrap(), None);
 
-  let t2 = e.new_tx().unwrap();
-  let tab2 = t2.table(TEST_TABLE).unwrap();
-  assert_eq!(tab2.get(b"111").unwrap(), None);
+    t1.commit().unwrap();
 
-  t1.commit().unwrap();
+    assert_eq!(tab2.get(b"111").unwrap(), None);
+  }
 
-  assert_eq!(tab2.get(b"111").unwrap(), None);
+  {
+    let t1 = e.new_tx().unwrap();
+    let tab1 = t1.table(TEST_TABLE).unwrap();
+
+    let mut t2 = e.new_tx().unwrap();
+    let tab2 = t2.table(TEST_TABLE).unwrap();
+    tab2.insert(b"111".to_vec(), b"111".to_vec()).unwrap();
+    t2.commit().unwrap();
+
+    assert!(matches!(
+      tab1.insert(b"111".to_vec(), b"111".to_vec()),
+      Err(Error::WriteConflict)
+    ));
+  }
 }
 
 // ============================================================

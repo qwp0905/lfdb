@@ -1,11 +1,11 @@
 use std::{
-  cmp::Ordering,
   ops::{Bound, RangeBounds},
   sync::Arc,
 };
 
 use super::{
-  BTreeIndex, BTreeIterator, RecordData, StaticKey, VecRef, MAX_KEY, MAX_VALUE,
+  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, RecordData, StaticKey, VecRef,
+  MAX_KEY, MAX_VALUE,
 };
 use crate::{
   metrics::MetricsRegistry, table::TableHandle, transaction::TxContext, Error, Result,
@@ -139,12 +139,7 @@ impl<'a> Cursor<'a> {
 
 pub struct CursorIterator<'a> {
   context: &'a TxContext<'a>,
-  table: BTreeIterator<'a, &'a TxContext<'a>>,
-  compaction: Option<(
-    BTreeIterator<'a, &'a TxContext<'a>>,
-    Option<(VecRef, Option<VecRef>)>,
-  )>,
-  buffered: Option<(VecRef, Option<VecRef>)>,
+  iter: MergeSorted<BTreeIterator<'a, &'a TxContext<'a>>>,
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(
@@ -155,61 +150,21 @@ impl<'a> CursorIterator<'a> {
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,
   ) -> Result<Self> {
-    let compaction = match compaction {
-      Some(table) => Some((index.scan(table, &start, &end)?, None)),
-      None => None,
+    let iter = match compaction {
+      Some(c) => MergeSorted::merge(
+        index.scan(c, &start, &end)?,
+        index.scan(table, &start, &end)?,
+      ),
+      None => MergeSorted::single(index.scan(table, &start, &end)?),
     };
 
-    Ok(Self {
-      context,
-      table: index.scan(table, &start, &end)?,
-      compaction,
-      buffered: None,
-    })
+    Ok(Self { context, iter })
   }
   pub fn try_next(&mut self) -> Result<Option<(VecRef, VecRef)>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
 
-    let (compaction, c_buffered) = match self.compaction.as_mut() {
-      Some(v) => v,
-      None => return self.table.next_kv_skip_tombstone(),
-    };
-
-    loop {
-      let kv_old = match self.buffered.take() {
-        Some(kv) => Some(kv),
-        None => self.table.next_kv()?,
-      };
-      let kv_new = match c_buffered.take() {
-        Some(kv) => Some(kv),
-        None => compaction.next_kv()?,
-      };
-
-      let (k_old, v_old, k_new, v_new) = match (kv_old, kv_new) {
-        (None, None) => return Ok(None),
-        (None, Some((k, Some(v)))) | (Some((k, Some(v))), None) => {
-          return Ok(Some((k, v)))
-        }
-        (None, Some((_, None))) | (Some((_, None)), None) => continue,
-        (Some((k1, v1)), Some((k2, v2))) => (k1, v1, k2, v2),
-      };
-
-      let (k, v) = match k_old.cmp(&k_new) {
-        Ordering::Less => {
-          *c_buffered = Some((k_new, v_new));
-          (k_old, v_old)
-        }
-        Ordering::Greater => {
-          self.buffered = Some((k_old, v_old));
-          (k_new, v_new)
-        }
-        Ordering::Equal => (k_new, v_new),
-      };
-      if let Some(v) = v {
-        return Ok(Some((k, v)));
-      }
-    }
+    self.iter.get_next_pair()
   }
 }

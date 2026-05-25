@@ -4,8 +4,8 @@ use crossbeam::queue::SegQueue;
 
 use super::{
   after_compaction, handle_compaction, wait_compaction, BTreeIndex, BTreeNode,
-  BTreeNodeView, CompactTask, DataEntry, GarbageCollector, ReadonlyPolicy, RecordData,
-  TreeHeader, COMPACTION_INTERVAL, HEADER_POINTER,
+  BTreeNodeView, CompactTask, DataEntry, GarbageCollector, MergeSortable, ReadonlyPolicy,
+  RecordData, TreeHeader, COMPACTION_INTERVAL, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -31,16 +31,24 @@ struct TableOpenPolicy<'a> {
   version_visibility: &'a VersionVisibility,
 }
 impl<'a> ReadonlyPolicy for TableOpenPolicy<'a> {
-  fn is_visible(&self, owner: crate::wal::TxId, _: crate::wal::TxId) -> bool {
-    !self.version_visibility.is_aborted(&owner)
-  }
-
   fn fetch_slot(
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
+  }
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.version_visibility.is_aborted(&owner)
+  }
+  fn is_owned(&self, _: TxId) -> bool {
+    false
+  }
+  fn is_readable(&self, _: TxId) -> bool {
+    true
+  }
+  fn is_active(&self, _: TxId) -> bool {
+    false
   }
 }
 
@@ -189,7 +197,7 @@ impl TreeManager {
 
     let mut iter = index.scan(&meta_table, &Bound::Unbounded, &Bound::Unbounded)?;
 
-    while let Some((_, bytes)) = iter.next_kv_skip_tombstone()? {
+    while let Some((_, bytes)) = iter.get_next_pair()? {
       let metadata = TableMetadata::from_bytes(&bytes)?;
       match metadata.get_compaction_metadata() {
         Some(c_meta) => compactions.push((

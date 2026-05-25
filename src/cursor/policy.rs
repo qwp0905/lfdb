@@ -10,12 +10,23 @@ use crate::{
 };
 
 pub trait ReadonlyPolicy {
-  fn is_visible(&self, owner: TxId, version: TxId) -> bool;
+  fn is_aborted(&self, owner: TxId) -> bool;
+  fn is_owned(&self, owner: TxId) -> bool;
+  fn is_readable(&self, version: TxId) -> bool;
+  fn is_active(&self, owner: TxId) -> bool;
+
   fn fetch_slot(
     &self,
     pointer: Pointer,
     table: &Arc<TableHandle>,
   ) -> Result<CachedSlot<'_>>;
+
+  fn is_visible(&self, owner: TxId, version: TxId) -> bool {
+    if self.is_owned(owner) {
+      return true;
+    }
+    self.is_readable(version) && !self.is_active(owner) && !self.is_aborted(owner)
+  }
 }
 
 pub trait WritablePolicy: ReadonlyPolicy {
@@ -45,7 +56,9 @@ pub trait WritablePolicy: ReadonlyPolicy {
 }
 
 pub trait CreatablePolicy: WritablePolicy {
-  fn is_conflict(&self, owner: TxId) -> bool;
+  fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
+    !self.is_owned(owner) && (!self.is_readable(version) || self.is_active(owner))
+  }
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
 }

@@ -52,14 +52,18 @@ impl<'a> TxContext<'a> {
   }
 }
 impl<'a> ReadonlyPolicy for &TxContext<'a> {
-  fn is_visible(&self, owner: crate::wal::TxId, version: crate::wal::TxId) -> bool {
-    let current = self.state.get_id();
-    if owner == current {
-      return true;
-    }
-    version <= current && self.snapshot.is_visible(&owner)
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.snapshot.is_aborted(&owner)
   }
-
+  fn is_owned(&self, owner: TxId) -> bool {
+    self.state.get_id() == owner
+  }
+  fn is_readable(&self, version: TxId) -> bool {
+    version <= self.state.get_id()
+  }
+  fn is_active(&self, owner: TxId) -> bool {
+    self.snapshot.is_active(&owner)
+  }
   fn fetch_slot(
     &self,
     pointer: Pointer,
@@ -98,9 +102,6 @@ impl<'a> WritablePolicy for &TxContext<'a> {
   }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {
-  fn is_conflict(&self, owner: crate::wal::TxId) -> bool {
-    owner != self.state.get_id() && self.snapshot.is_active(&owner)
-  }
   fn current_owner(&self) -> TxId {
     self.state.get_id()
   }
