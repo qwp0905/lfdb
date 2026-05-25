@@ -10,9 +10,6 @@ pub use oneshot::*;
 mod shared;
 use shared::*;
 
-mod eager;
-use eager::*;
-
 mod thread;
 pub use thread::*;
 
@@ -21,3 +18,6 @@ use interval::*;
 
 mod lazy;
 use lazy::*;
+
+mod batch;
+pub use batch::*;
