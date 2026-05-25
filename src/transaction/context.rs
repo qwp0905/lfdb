@@ -3,8 +3,6 @@ use std::sync::{
   Arc,
 };
 
-use crossbeam::queue::SegQueue;
-
 use crate::{
   cache::RefedSlot,
   cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
@@ -22,7 +20,6 @@ pub struct TxContext<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
   modified: AtomicBool,
-  modified_entries: SegQueue<(Arc<TableHandle>, Pointer)>,
 }
 impl<'a> TxContext<'a> {
   #[inline]
@@ -36,7 +33,6 @@ impl<'a> TxContext<'a> {
       state,
       snapshot,
       modified: AtomicBool::new(false),
-      modified_entries: SegQueue::new(),
     }
   }
 
@@ -53,25 +49,6 @@ impl<'a> TxContext<'a> {
   #[inline]
   pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
-  }
-
-  pub fn get_modified_entries(
-    &self,
-  ) -> impl Iterator<Item = (Arc<TableHandle>, Pointer)> + '_ {
-    Iter {
-      queue: &self.modified_entries,
-    }
-  }
-}
-
-struct Iter<'a, T> {
-  queue: &'a SegQueue<T>,
-}
-impl<'a, T> Iterator for Iter<'a, T> {
-  type Item = T;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    self.queue.pop()
   }
 }
 
@@ -119,10 +96,6 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     table: &Arc<TableHandle>,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.alloc(pointer, table.clone())
-  }
-
-  fn when_update_entry(&self, entry_pointer: Pointer, table: &Arc<TableHandle>) {
-    self.modified_entries.push((table.clone(), entry_pointer))
   }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {

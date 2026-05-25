@@ -1,9 +1,4 @@
-use std::{
-  collections::{HashSet, VecDeque},
-  mem::replace,
-  sync::Arc,
-  time::Duration,
-};
+use std::{collections::VecDeque, mem::replace, sync::Arc, time::Duration};
 
 use crossbeam::epoch;
 
@@ -16,10 +11,10 @@ use crate::{
   debug,
   disk::Pointer,
   error::Result,
-  table::{MutationHandle, PinnedHandle, TableHandle, TableMapper, META_TABLE_ID},
+  table::{MutationHandle, TableHandle, TableMapper, META_TABLE_ID},
   thread::{BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{DoubleBuffer, ToArc, ToBox},
+  utils::{ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
 };
 
@@ -32,27 +27,27 @@ pub struct GarbageCollectionConfig {
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-pub struct GCMarking {
-  table: Arc<TableHandle>,
-  pointer: Pointer,
-  owner: TxId,
-  commit_version: TxId,
-}
-impl GCMarking {
-  pub const fn new(
-    table: Arc<TableHandle>,
-    pointer: Pointer,
-    owner: TxId,
-    commit_version: TxId,
-  ) -> Self {
-    Self {
-      table,
-      pointer,
-      owner,
-      commit_version,
-    }
-  }
-}
+// pub struct GCMarking {
+//   table: Arc<TableHandle>,
+//   pointer: Pointer,
+//   owner: TxId,
+//   commit_version: TxId,
+// }
+// impl GCMarking {
+//   pub const fn new(
+//     table: Arc<TableHandle>,
+//     pointer: Pointer,
+//     owner: TxId,
+//     commit_version: TxId,
+//   ) -> Self {
+//     Self {
+//       table,
+//       pointer,
+//       owner,
+//       commit_version,
+//     }
+//   }
+// }
 
 /**
  * Runs at each checkpoint to clean expired and aborted versions from DataEntry
@@ -64,27 +59,27 @@ impl GCMarking {
  */
 pub struct GarbageCollector {
   main: Box<dyn BackgroundThread<(), Result>>,
-  queue: Arc<DoubleBuffer<GCMarking>>,
+  // queue: Arc<DoubleBuffer<GCMarking>>,
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
-  entry: Arc<dyn BackgroundThread<GCMarking, Result>>,
+  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   compactor: Arc<Compactor>,
   table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
 }
 impl GarbageCollector {
-  pub fn mark(
-    &self,
-    table: Arc<TableHandle>,
-    pointer: Pointer,
-    owner: TxId,
-    version: TxId,
-  ) {
-    self.queue.push(GCMarking {
-      table,
-      pointer,
-      owner,
-      commit_version: version,
-    })
-  }
+  // pub fn mark(
+  //   &self,
+  //   table: Arc<TableHandle>,
+  //   pointer: Pointer,
+  //   owner: TxId,
+  //   version: TxId,
+  // ) {
+  //   self.queue.push(GCMarking {
+  //     table,
+  //     pointer,
+  //     owner,
+  //     commit_version: version,
+  //   })
+  // }
   pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
     self.table.dispatch((table, tx_id, version));
   }
@@ -103,7 +98,7 @@ impl GarbageCollector {
     wal: Arc<WAL>,
     config: GarbageCollectionConfig,
   ) -> Self {
-    let queue = DoubleBuffer::new().to_arc();
+    // let queue = DoubleBuffer::new().to_arc();
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -111,7 +106,7 @@ impl GarbageCollector {
         block_cache.clone(),
         version_visibility.clone(),
         recorder.clone(),
-        queue.clone(),
+        // queue.clone(),
       ))
       .to_arc();
     let check = WorkBuilder::new()
@@ -135,7 +130,7 @@ impl GarbageCollector {
       version_visibility.clone(),
       wal.clone(),
       table.clone(),
-      queue.clone(),
+      // queue.clone(),
     )
     .to_arc();
 
@@ -153,14 +148,14 @@ impl GarbageCollector {
           config.compaction_threshold,
           config.compaction_min_size,
           compactor.clone(),
-          queue.clone(),
+          // queue.clone(),
         ),
       )
       .to_box();
 
     Self {
       main,
-      queue,
+      // queue,
       check,
       entry,
       table,
@@ -181,7 +176,7 @@ fn release_entry(
   block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
   recorder: &PageRecorder,
-  table: &PinnedHandle,
+  table: &Arc<TableHandle>,
   pointer: Pointer,
 ) -> Result {
   let table_id = table.metadata().get_id();
@@ -195,7 +190,7 @@ fn release_entry(
       _ => return,
     };
 
-    let handle = table.handle();
+    let handle = table.clone();
     defer(move || pointers.into_iter().for_each(|p| handle.free().dealloc(p)));
   };
 
@@ -206,13 +201,13 @@ fn release_entry(
   while let Some(ptr) = next.take() {
     if max_found {
       let mut entry = block_cache
-        .read(ptr, table.handle())?
+        .read(ptr, table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?;
       entry.take_versions().for_each(release);
       next = entry.get_next();
-      let handle = table.handle();
+      let handle = table.clone();
       defer(move || handle.free().dealloc(ptr));
       continue;
     }
@@ -221,7 +216,7 @@ fn release_entry(
       let mut found = false;
       let mut need_trim = false;
       let entry = block_cache
-        .read(ptr, table.handle())?
+        .read(ptr, table.clone())?
         .for_read()
         .as_ref()
         .deserialize::<DataEntryView>()?;
@@ -248,7 +243,7 @@ fn release_entry(
     }
 
     block_cache
-      .read(ptr, table.handle())?
+      .read(ptr, table.clone())?
       .for_batch()
       .mutate(|slot| {
         let mut entry: DataEntry = slot.as_ref().deserialize()?;
@@ -298,14 +293,14 @@ fn release_entry(
         };
 
         let next_entry = block_cache
-          .read(next_ptr, table.handle())?
+          .read(next_ptr, table.clone())?
           .for_read()
           .as_ref()
           .deserialize::<DataEntry>()?;
         serialize_and_log(slot, &next_entry)?;
         next = Some(ptr);
 
-        let handle = table.handle();
+        let handle = table.clone();
         defer(move || handle.free().dealloc(next_ptr));
         Ok(())
       })?;
@@ -318,25 +313,16 @@ const fn run_entry(
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
-  queue: Arc<DoubleBuffer<GCMarking>>,
-) -> impl Fn(GCMarking) -> Result {
-  move |marking: GCMarking| {
-    if marking.table.is_closed() {
-      return Ok(());
-    }
-
-    if let Some(table) = marking.table.try_pin() {
-      return release_entry(
-        &block_cache,
-        &version_visibility,
-        &recorder,
-        &table,
-        marking.pointer,
-      );
-    }
-
-    queue.push(marking);
-    Ok(())
+  // queue: Arc<DoubleBuffer<GCMarking>>,
+) -> impl Fn((Arc<TableHandle>, Pointer)) -> Result {
+  move |(table, pointer)| {
+    release_entry(
+      &block_cache,
+      &version_visibility,
+      &recorder,
+      &table,
+      pointer,
+    )
   }
 }
 
@@ -395,15 +381,15 @@ const fn run_main(
   version_visibility: Arc<VersionVisibility>,
   block_cache: Arc<BlockCache>,
   tables: Arc<TableMapper>,
-  entry: Arc<dyn BackgroundThread<GCMarking, Result>>,
+  entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   compaction_threshold: f64,
   compaction_min_size: Pointer,
   compactor: Arc<Compactor>,
-  queue: Arc<DoubleBuffer<GCMarking>>,
+  // queue: Arc<DoubleBuffer<GCMarking>>,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
-    release_versions(&queue, &version_visibility, &*entry)?;
+    let min_version = version_visibility.min_version();
 
     for table in tables.get_all() {
       let table = match table.try_pin() {
@@ -442,6 +428,16 @@ const fn run_main(
 
         let mut waiting = Vec::with_capacity(leaf.len());
         for i in leaf.get_entry_pointers() {
+          waiting.push(entry.execute((table.handle(), i)));
+        }
+
+        waiting
+          .into_iter()
+          .map(|v| v.wait().flatten())
+          .collect::<Result>()?;
+
+        let mut waiting = Vec::with_capacity(leaf.len());
+        for i in leaf.get_entry_pointers() {
           waiting.push(check.execute((table.handle(), i)));
         }
 
@@ -451,6 +447,7 @@ const fn run_main(
           }
         }
       }
+
       debug!("gc table {name} unreachable versions all collected.");
       if table.free().file_len() < compaction_min_size {
         continue;
@@ -466,38 +463,39 @@ const fn run_main(
       compactor.register_new(table.handle());
     }
 
+    version_visibility.remove_aborted(&min_version);
     Ok(())
   }
 }
 
-fn release_versions(
-  queue: &DoubleBuffer<GCMarking>,
-  version_visibility: &VersionVisibility,
-  entry: &dyn BackgroundThread<GCMarking, Result>,
-) -> Result {
-  let min_version = version_visibility.min_version();
-  let current = queue.switch();
+// fn release_versions(
+//   queue: &DoubleBuffer<GCMarking>,
+//   version_visibility: &VersionVisibility,
+//   entry: &dyn BackgroundThread<GCMarking, Result>,
+// ) -> Result {
+//   let min_version = version_visibility.min_version();
+//   let current = queue.switch();
 
-  let mut waiting = Vec::new();
-  let mut dedup = HashSet::new();
-  while let Some(marking) = current.pop() {
-    if !version_visibility.is_aborted(&marking.owner)
-      && marking.commit_version > min_version
-    {
-      queue.push(marking);
-      continue;
-    }
-    if !dedup.insert((marking.table.metadata().get_id(), marking.pointer)) {
-      continue;
-    }
-    waiting.push(entry.execute(marking));
-  }
+//   let mut waiting = Vec::new();
+//   let mut dedup = HashSet::new();
+//   while let Some(marking) = current.pop() {
+//     if !version_visibility.is_aborted(&marking.owner)
+//       && marking.commit_version > min_version
+//     {
+//       queue.push(marking);
+//       continue;
+//     }
+//     if !dedup.insert((marking.table.metadata().get_id(), marking.pointer)) {
+//       continue;
+//     }
+//     waiting.push(entry.execute(marking));
+//   }
 
-  waiting
-    .into_iter()
-    .map(|o| o.wait().flatten())
-    .collect::<Result>()?;
+//   waiting
+//     .into_iter()
+//     .map(|o| o.wait().flatten())
+//     .collect::<Result>()?;
 
-  version_visibility.remove_aborted(&min_version);
-  Ok(())
-}
+//   version_visibility.remove_aborted(&min_version);
+//   Ok(())
+// }

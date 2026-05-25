@@ -23,6 +23,3 @@ mod log;
 
 mod atomic;
 pub use atomic::*;
-
-mod buffer;
-pub use buffer::*;

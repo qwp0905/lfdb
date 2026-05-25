@@ -199,7 +199,7 @@ impl Engine {
     // (allocated but unreferenced pages) and reclaim them into the free list.
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), gc.clone(), &tables)?;
+    recovery(block_cache.clone(), &tables)?;
 
     for (table, c_table) in compactions {
       gc.resume_compact(table, c_table);

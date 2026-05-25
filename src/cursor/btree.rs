@@ -373,7 +373,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           entry.set_next(new_ptr);
         }
 
-        self.0.when_update_entry(entry_ptr, table);
         Ok(())
       })
   }
@@ -510,7 +509,6 @@ where
       return Err(Error::WriteConflict);
     }
 
-    self.0.when_update_entry(entry_ptr, table);
     Ok(())
   }
 
