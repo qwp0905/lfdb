@@ -4,12 +4,10 @@ use std::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
   },
-  thread::{current, park, Thread},
 };
 
-use crossbeam::queue::SegQueue;
-
 use crate::{
+  thread::OnceParker,
   utils::{OffsetBitmap, ShortenedRwLock},
   wal::TxId,
 };
@@ -23,14 +21,14 @@ const STATUS_CLOSED: u8 = 4;
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
-  waiting: SegQueue<Thread>,
+  parker: OnceParker,
 }
 impl ActiveState {
   pub fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
-      waiting: SegQueue::new(),
+      parker: OnceParker::new(),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -118,9 +116,7 @@ impl ActiveSet {
   }
   pub fn remove(&self, tx_id: &TxId) {
     if let Some(state) = self.inner.wl().remove(tx_id) {
-      while let Some(thread) = state.waiting.pop() {
-        thread.unpark();
-      }
+      state.parker.wake_all();
     };
   }
   pub fn min_version(&self) -> Option<TxId> {
@@ -134,11 +130,7 @@ impl ActiveSet {
   }
   pub fn wait(&self, tx_id: &TxId) {
     if let Some(state) = self.get(tx_id) {
-      state.waiting.push(current());
-      if state.status.load(Ordering::Acquire) == STATUS_CLOSED {
-        return;
-      }
-      park();
+      state.parker.park();
     }
   }
 }
