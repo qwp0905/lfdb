@@ -86,8 +86,9 @@ mod futex {
     }
 
     pub fn wake_all(&self) {
-      self.state.store(WAKEN, Ordering::Release);
-
+      if self.state.swap(WAKEN, Ordering::Release) == WAKEN {
+        return;
+      };
       if !self.waiters.load(Ordering::Acquire) {
         return;
       }
