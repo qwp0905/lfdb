@@ -3,8 +3,8 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntry, GarbageCollector, ReadonlyPolicy, RecordData,
-  TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntry, GarbageCollector, MergeSortable, ReadonlyPolicy,
+  RecordData, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -14,7 +14,7 @@ use crate::{
   table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
   thread::once,
   transaction::{PageRecorder, VersionVisibility},
-  wal::RESERVED_TX,
+  wal::{TxId, RESERVED_TX},
   Result,
 };
 
@@ -24,8 +24,17 @@ struct TableOpenPolicy<'a, R> {
   recorder: R,
 }
 impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
-  fn is_visible(&self, owner: crate::wal::TxId, _: crate::wal::TxId) -> bool {
-    !self.version_visibility.is_aborted(&owner)
+  fn is_aborted(&self, owner: TxId) -> bool {
+    self.version_visibility.is_aborted(&owner)
+  }
+  fn is_owned(&self, _: TxId) -> bool {
+    false
+  }
+  fn is_readable(&self, _: TxId) -> bool {
+    true
+  }
+  fn is_active(&self, _: TxId) -> bool {
+    false
   }
 
   fn fetch_slot(
@@ -92,7 +101,7 @@ pub fn open_tables(
 
   let mut iter = index.scan(&meta_table, &Bound::Unbounded, &Bound::Unbounded)?;
 
-  while let Some((_, bytes)) = iter.next_kv_skip_tombstone()? {
+  while let Some((_, bytes)) = iter.get_next_pair()? {
     let metadata = TableMetadata::from_bytes(&bytes)?;
     match metadata.get_compaction_metadata() {
       Some(c_meta) => compactions.push((

@@ -59,12 +59,11 @@ impl<'a> TxSnapshot<'a> {
   }
 
   #[inline]
-  pub fn is_visible(&self, tx_id: &TxId) -> bool {
-    !self.is_active(tx_id) && !self.aborted.contains(tx_id)
-  }
-  #[inline]
   pub fn is_active(&self, &tx_id: &TxId) -> bool {
     self.active.contains(tx_id)
+  }
+  pub fn is_aborted(&self, tx_id: &TxId) -> bool {
+    self.aborted.contains(tx_id)
   }
 }
 

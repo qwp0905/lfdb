@@ -8,8 +8,8 @@ use crossbeam::epoch::pin;
 
 use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
-  DataEntryView, InternalNode, LeafNode, NodeFindResult, ReadonlyPolicy, RecordData,
-  RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
+  DataEntryView, InternalNode, LeafNode, MergeSortable, NodeFindResult, ReadonlyPolicy,
+  RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
   WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
 };
 
@@ -482,9 +482,9 @@ where
       .for_batch()
       .mutate(|slot| {
         let mut entry: DataEntry = slot.as_ref().deserialize()?;
-        if let Some(owner) = entry.get_last_owner() {
-          if self.0.is_conflict(owner) {
-            conflict = Some(owner);
+        if let Some(record) = entry.get_last() {
+          if self.0.is_conflict(record.owner, record.version) {
+            conflict = Some(record.owner);
             return Ok(());
           }
         }
@@ -729,18 +729,9 @@ where
       }
     }
   }
-
-  pub fn next_kv_skip_tombstone(&mut self) -> Result<Option<(VecRef, VecRef)>> {
-    loop {
-      match self.next_record()? {
-        Some((key, Some((value, _, _)))) => return Ok(Some((key, value))),
-        Some((_, None)) => continue,
-        None => return Ok(None),
-      }
-    }
-  }
-
-  pub fn next_kv(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+}
+impl<'a, Policy: ReadonlyPolicy> MergeSortable for BTreeIterator<'a, Policy> {
+  fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
     match self.next_record()? {
       Some((k, v)) => Ok(Some((k, v.map(|v| v.0)))),
       None => Ok(None),
