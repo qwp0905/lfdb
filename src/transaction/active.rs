@@ -4,12 +4,10 @@ use std::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock,
   },
-  thread::{current, park, yield_now, Thread},
 };
 
-use crossbeam::queue::SegQueue;
-
 use crate::{
+  thread::OnceParker,
   utils::{OffsetBitmap, ShortenedRwLock},
   wal::TxId,
 };
@@ -18,19 +16,18 @@ const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
-const STATUS_CLOSED: u8 = 4;
 
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
-  waiting: SegQueue<Thread>,
+  parker: OnceParker,
 }
 impl ActiveState {
   pub fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
-      waiting: SegQueue::new(),
+      parker: OnceParker::new(),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -38,9 +35,6 @@ impl ActiveState {
   }
   pub fn get_id(&self) -> TxId {
     self.tx_id
-  }
-  pub fn close(&self) {
-    self.status.store(STATUS_CLOSED, Ordering::Release);
   }
 
   pub fn try_abort(&self) -> bool {
@@ -118,9 +112,7 @@ impl ActiveSet {
   }
   pub fn remove(&self, tx_id: &TxId) {
     if let Some(state) = self.inner.wl().remove(tx_id) {
-      while let Some(thread) = state.waiting.pop() {
-        thread.unpark();
-      }
+      state.parker.wake_all();
     };
   }
   pub fn min_version(&self) -> Option<TxId> {
@@ -133,25 +125,8 @@ impl ActiveSet {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
   }
   pub fn wait(&self, tx_id: &TxId) {
-    let state = match self.get(tx_id) {
-      Some(state) => state,
-      None => return,
-    };
-
-    let mut backoff = 0;
-    state.waiting.push(current());
-    loop {
-      if state.status.load(Ordering::Acquire) == STATUS_CLOSED {
-        return;
-      }
-      if backoff < MAX_BACKOFF {
-        yield_now();
-        backoff += 1;
-        continue;
-      }
-      break park();
+    if let Some(state) = self.get(tx_id) {
+      state.parker.park();
     }
   }
 }
-
-const MAX_BACKOFF: usize = 10;

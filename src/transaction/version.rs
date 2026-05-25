@@ -32,9 +32,7 @@ impl<'a> TxState<'a> {
   const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
     Self { state, set }
   }
-
   pub fn deactive(&self) {
-    self.state.close();
     self.set.remove(&self.state.get_id());
   }
 }
