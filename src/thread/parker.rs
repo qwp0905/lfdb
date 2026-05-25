@@ -1,19 +1,17 @@
 use std::sync::Once;
 
-pub struct OnceParker {
-  once: Once,
-}
+pub struct OnceParker(Once);
 
 impl OnceParker {
   pub const fn new() -> Self {
-    Self { once: Once::new() }
+    Self(Once::new())
   }
 
   pub fn park(&self) {
-    self.once.wait_force();
+    self.0.wait_force();
   }
 
   pub fn wake_all(&self) {
-    self.once.call_once_force(|_| {});
+    self.0.call_once_force(|_| {});
   }
 }
