@@ -10,22 +10,22 @@ use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
-  thread::{BackgroundThread, TaskHandle, WorkBuilder},
+  thread::{BatchExecution, Oneshot},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
 
 pub const FILE_EXT: &str = "log";
 
-pub type FsyncResult = TaskHandle<Result>;
+pub type FsyncResult = Oneshot<Result>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
 pub struct WALSegment {
   file: Arc<File>,
   path: Mutex<PathBuf>,
-  io: Box<dyn BackgroundThread<(Pointer, &'static [u8]), Result>>,
-  flush: Box<dyn BackgroundThread<(), Result>>,
+  io: Box<BatchExecution<(Pointer, &'static [u8]), Result>>,
+  flush: Box<BatchExecution<(), Result>>,
 }
 impl WALSegment {
   pub fn parse_generation(path: &Path) -> Result<SegmentGeneration> {
@@ -109,17 +109,8 @@ impl WALSegment {
   }
 
   fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
-    let io = WorkBuilder::new()
-      .name("wal buffered write")
-      .single()
-      .eager_buffering(max_iov(), handle_write(file.clone()))
-      .to_box();
-
-    let flush = WorkBuilder::new()
-      .name("wal flush")
-      .single()
-      .eager_buffering(flush_count, handle_flush(file.clone()))
-      .to_box();
+    let io = BatchExecution::new(handle_write(file.clone()), max_iov()).to_box();
+    let flush = BatchExecution::new(handle_flush(file.clone()), flush_count).to_box();
     Self {
       file,
       io,
@@ -135,15 +126,8 @@ impl WALSegment {
 
   #[inline]
   pub fn truncate(self) -> Result {
-    self.close();
     remove_file(self.path.l().as_path()).map_err(Error::IO)?;
     Ok(())
-  }
-
-  #[inline]
-  pub fn close(&self) {
-    self.io.close();
-    self.flush.close();
   }
 }
 
@@ -160,7 +144,7 @@ fn pad_start(n: SegmentGeneration) -> String {
   format!("{:0>20}", n)
 }
 
-const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
+const fn handle_write(file: Arc<File>) -> impl Fn(Vec<(Pointer, &[u8])>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];

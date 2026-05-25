@@ -387,9 +387,6 @@ impl WAL {
       let _ = f.wait();
       self.synced_count.fetch_add(1, Ordering::Release);
     }
-    while let Some(seg) = self.checkpoint_failed.pop() {
-      seg.close();
-    }
   }
 
   pub fn close(&self) {
@@ -409,9 +406,9 @@ impl WAL {
       }
 
       let taken = unsafe { ptr.into_owned() };
-      let segment = taken.take_segment();
+      taken.take_segment();
       let _ = self.preloader.close();
-      return segment.close();
+      return;
     }
   }
 }
@@ -426,7 +423,7 @@ const fn waiting_checkpoint(
   move |segments| {
     let checkpoint = match checkpoint.upgrade() {
       Some(c) => c,
-      None => return segments.into_iter().for_each(|seg| seg.close()),
+      None => return,
     };
 
     match checkpoint.execute(()).wait().flatten() {
