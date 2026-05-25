@@ -16,7 +16,6 @@ const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
-const STATUS_CLOSED: u8 = 4;
 
 pub struct ActiveState {
   tx_id: TxId,
@@ -36,9 +35,6 @@ impl ActiveState {
   }
   pub fn get_id(&self) -> TxId {
     self.tx_id
-  }
-  pub fn close(&self) {
-    self.status.store(STATUS_CLOSED, Ordering::Release);
   }
 
   pub fn try_abort(&self) -> bool {
