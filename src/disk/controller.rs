@@ -177,11 +177,8 @@ impl<const N: usize> IOPool<N> {
       let mut buffered = Vec::with_capacity(count);
 
       loop {
-        'inner: while buffered.len() < count {
-          match queue.pop() {
-            Some(task) => buffered.push(task),
-            None => break 'inner,
-          }
+        for task in (0..count).map_while(|_| queue.pop()) {
+          buffered.push(task);
         }
 
         Self::flush(&metrics, &file, &pin, &closed, &mut buffered);

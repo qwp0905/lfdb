@@ -1,7 +1,4 @@
-use std::{
-  mem::transmute,
-  sync::atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam::queue::SegQueue;
 
@@ -10,6 +7,8 @@ use crate::{
   thread::{oneshot, Oneshot, OneshotFulfill},
   Result,
 };
+
+const MAX_BATCH_SIZE: usize = 32;
 
 pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) -> Result + 'a;
 pub struct BatchHandle {
@@ -24,14 +23,14 @@ impl BatchHandle {
     }
   }
 
-  pub fn register(&self, handler: Box<BatchHandler<'_>>) -> (bool, Oneshot<Result>) {
+  pub fn register(&self, handler: Box<BatchHandler<'static>>) -> (bool, Oneshot<Result>) {
     let (o, f) = oneshot();
-    self.queue.push((unsafe { transmute(handler) }, f));
+    self.queue.push((handler, f));
     (!self.occupied.fetch_or(true, Ordering::Release), o)
   }
 
   pub fn flush_with(&self, slot: &mut RefedSlot) {
-    while let Some((handle, f)) = self.queue.pop() {
+    for (handle, f) in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
       f.fulfill(handle(slot));
     }
   }

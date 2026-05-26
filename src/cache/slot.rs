@@ -1,10 +1,10 @@
 use std::{
-  mem::ManuallyDrop,
+  mem::{transmute, ManuallyDrop},
   ops::{Deref, DerefMut},
   sync::Arc,
 };
 
-use super::{BatchHandle, BlockId, CachedBlock, LatchGuard};
+use super::{BatchHandle, BatchHandler, BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SharedToken},
@@ -159,8 +159,8 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
-    let (occupied, o) = self.batch.register(Box::new(handler));
+  pub fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
+    let (occupied, o) = self.batch.register(unsafe { transmute(handler) });
     if !occupied {
       return o.wait().flatten();
     }
@@ -182,5 +182,8 @@ impl<'a> BatchSlot<'a> {
     }
 
     o.wait().flatten()
+  }
+  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
+    self.__mutate(Box::new(handler))
   }
 }
