@@ -111,9 +111,11 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    if let Some(state) = self.inner.wl().remove(tx_id) {
-      state.parker.wake_all();
+    let state = match self.inner.wl().remove(tx_id) {
+      Some(state) => state,
+      None => return,
     };
+    state.parker.wake_all();
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
