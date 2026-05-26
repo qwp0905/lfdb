@@ -27,28 +27,6 @@ pub struct GarbageCollectionConfig {
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-// pub struct GCMarking {
-//   table: Arc<TableHandle>,
-//   pointer: Pointer,
-//   owner: TxId,
-//   commit_version: TxId,
-// }
-// impl GCMarking {
-//   pub const fn new(
-//     table: Arc<TableHandle>,
-//     pointer: Pointer,
-//     owner: TxId,
-//     commit_version: TxId,
-//   ) -> Self {
-//     Self {
-//       table,
-//       pointer,
-//       owner,
-//       commit_version,
-//     }
-//   }
-// }
-
 /**
  * Runs at each checkpoint to clean expired and aborted versions from DataEntry
  * pages, then confirms min_active in the checkpoint log. DataEntry pages are
@@ -59,27 +37,12 @@ const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
  */
 pub struct GarbageCollector {
   main: Box<dyn BackgroundThread<(), Result>>,
-  // queue: Arc<DoubleBuffer<GCMarking>>,
   check: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result<bool>>>,
   entry: Arc<dyn BackgroundThread<(Arc<TableHandle>, Pointer), Result>>,
   compactor: Arc<Compactor>,
   table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
 }
 impl GarbageCollector {
-  // pub fn mark(
-  //   &self,
-  //   table: Arc<TableHandle>,
-  //   pointer: Pointer,
-  //   owner: TxId,
-  //   version: TxId,
-  // ) {
-  //   self.queue.push(GCMarking {
-  //     table,
-  //     pointer,
-  //     owner,
-  //     commit_version: version,
-  //   })
-  // }
   pub fn release_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
     self.table.dispatch((table, tx_id, version));
   }
@@ -98,7 +61,6 @@ impl GarbageCollector {
     wal: Arc<WAL>,
     config: GarbageCollectionConfig,
   ) -> Self {
-    // let queue = DoubleBuffer::new().to_arc();
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -130,7 +92,6 @@ impl GarbageCollector {
       version_visibility.clone(),
       wal.clone(),
       table.clone(),
-      // queue.clone(),
     )
     .to_arc();
 
@@ -148,14 +109,12 @@ impl GarbageCollector {
           config.compaction_threshold,
           config.compaction_min_size,
           compactor.clone(),
-          // queue.clone(),
         ),
       )
       .to_box();
 
     Self {
       main,
-      // queue,
       check,
       entry,
       table,
@@ -386,7 +345,6 @@ const fn run_main(
   compaction_threshold: f64,
   compaction_min_size: Pointer,
   compactor: Arc<Compactor>,
-  // queue: Arc<DoubleBuffer<GCMarking>>,
 ) -> impl Fn(Option<()>) -> Result {
   move |_| {
     let min_version = version_visibility.min_version();
@@ -467,35 +425,3 @@ const fn run_main(
     Ok(())
   }
 }
-
-// fn release_versions(
-//   queue: &DoubleBuffer<GCMarking>,
-//   version_visibility: &VersionVisibility,
-//   entry: &dyn BackgroundThread<GCMarking, Result>,
-// ) -> Result {
-//   let min_version = version_visibility.min_version();
-//   let current = queue.switch();
-
-//   let mut waiting = Vec::new();
-//   let mut dedup = HashSet::new();
-//   while let Some(marking) = current.pop() {
-//     if !version_visibility.is_aborted(&marking.owner)
-//       && marking.commit_version > min_version
-//     {
-//       queue.push(marking);
-//       continue;
-//     }
-//     if !dedup.insert((marking.table.metadata().get_id(), marking.pointer)) {
-//       continue;
-//     }
-//     waiting.push(entry.execute(marking));
-//   }
-
-//   waiting
-//     .into_iter()
-//     .map(|o| o.wait().flatten())
-//     .collect::<Result>()?;
-
-//   version_visibility.remove_aborted(&min_version);
-//   Ok(())
-// }
