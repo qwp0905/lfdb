@@ -166,11 +166,11 @@ impl<'a> BatchSlot<'a> {
     }
 
     loop {
-      let _guard = self.block.latch();
       let mut page = self.page_pool.acquire();
+      let _guard = self.block.latch();
       page.copy_from(&**self.block.load_page());
-      let mut slot = RefedSlot::new(self.block.get_pointer(), page);
 
+      let mut slot = RefedSlot::new(self.block.get_pointer(), page);
       self.batch.flush_with(&mut slot);
 
       self.dirty.insert(self.block_id);
