@@ -23,7 +23,7 @@ pub struct TransactionConfig {
 }
 
 /**
- * Composes WAL, block cache, GC, version visibility, and tree manager into a
+ * Composes WAL, block cache, GC, version visibility into a
  * unified interface for the cursor layer. Does not contain business logic —
  * it wires subsystems together and exposes transaction lifecycle operations.
  */
