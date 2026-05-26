@@ -49,11 +49,8 @@ impl<T, R: Clone> BatchExecution<T, R> {
 
     let mut buffered = Vec::with_capacity(self.max_count);
     loop {
-      while buffered.len() < self.max_count {
-        match self.queue.pop() {
-          Some(task) => buffered.push(task),
-          None => break,
-        }
+      for task in (0..self.max_count).map_while(|_| self.queue.pop()) {
+        buffered.push(task);
       }
 
       self.flush(&mut buffered);
