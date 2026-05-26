@@ -46,7 +46,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run flamegraph
+      - name: Run benchmark
         env:
           YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
           YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
