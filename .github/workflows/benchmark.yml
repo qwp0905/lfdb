@@ -1,0 +1,61 @@
+name: Benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: "Benchmark to profile (e.g. ycsb, throughput)"
+        required: true
+        default: "ycsb"
+      filter:
+        description: "Benchmark filter (e.g. ycsb-a)"
+        required: false
+        default: ""
+      sample_size:
+        description: "Criterion sample size"
+        required: false
+        default: "10"
+      record_count:
+        description: "YCSB record count for pre-loading"
+        required: false
+        default: ""
+      op_count:
+        description: "YCSB operation count per iteration"
+        required: false
+        default: ""
+      args:
+        description: "Benchmark command arguments"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  criterion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run flamegraph
+        env:
+          YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
+          YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
+        run: |
+          FILTER="${{ github.event.inputs.filter }}"
+          SAMPLE="${{ github.event.inputs.sample_size }}"
+          ARGS="--sample-size $SAMPLE"
+          if [ -n "$FILTER" ]; then
+            ARGS="$ARGS $FILTER" 
+          fi
+
+          cargo benchmark --bench ${{ github.event.inputs.bench }} ${{ github.event.inputs.args }} -- $ARGS
