@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::WritableSlot,
+  cache::RefedSlot,
   error::Result,
   serialize::{Serializable, SerializeFrom},
   table::TableId,
@@ -29,7 +29,7 @@ impl PageRecorder {
     &self,
     tx_id: TxId,
     table_id: TableId,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
   ) -> Result
   where
@@ -41,33 +41,5 @@ impl PageRecorder {
     self
       .wal
       .append_insert(tx_id, table_id, ptr, page.copy_range(0..byte_len))
-  }
-
-  pub fn log_multi<T, R>(
-    &self,
-    tx_id: TxId,
-    table_id: TableId,
-    slot1: &mut WritableSlot<'_>,
-    data1: &T,
-    slot2: &mut WritableSlot<'_>,
-    data2: &R,
-  ) -> Result
-  where
-    T: Serializable,
-    R: Serializable,
-  {
-    let ptr1 = slot1.get_pointer();
-    let page = slot1.as_mut();
-    let byte_len = page.serialize_from(data1)?;
-    let data1 = page.copy_range(0..byte_len);
-
-    let ptr2 = slot2.get_pointer();
-    let page = slot2.as_mut();
-    let byte_len = page.serialize_from(data2)?;
-    let data2 = page.copy_range(0..byte_len);
-
-    self
-      .wal
-      .append_multi(tx_id, table_id, ptr1, data1, ptr2, data2)
   }
 }

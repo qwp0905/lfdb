@@ -2,7 +2,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 
 use crate::Error;
 
-use super::{oneshot, BatchTaskHandle, Context, TaskHandle};
+use super::{oneshot, Context, TaskHandle};
 
 /**
  * A trait for background threads that accept work items and return results.
@@ -31,19 +31,5 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe 
 
   fn dispatch(&self, v: T) {
     self.register(Context::Dispatch(v));
-  }
-
-  fn execute_batch(&self, v: Vec<T>) -> BatchTaskHandle<R> {
-    BatchTaskHandle::from(v.into_iter().map(|i| {
-      let (done_r, done_t) = oneshot();
-      if self.register(Context::Work(i, done_t)) {
-        return done_r;
-      }
-      drop(done_r);
-
-      let (done_r, done_t) = oneshot();
-      done_t.fulfill(Err(Error::WorkerClosed));
-      done_r
-    }))
   }
 }

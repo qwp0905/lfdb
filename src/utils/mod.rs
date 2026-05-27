@@ -16,9 +16,6 @@ pub use pointer::*;
 mod bit;
 pub use bit::*;
 
-mod buffer;
-pub use buffer::*;
-
 mod pin;
 pub use pin::*;
 

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crate::{
-  cache::WritableSlot,
+  cache::RefedSlot,
   cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   serialize::Serializable,
@@ -51,6 +51,7 @@ impl<'a> TxContext<'a> {
     &self.state
   }
 }
+
 impl<'a> ReadonlyPolicy for &TxContext<'a> {
   fn is_aborted(&self, owner: TxId) -> bool {
     self.snapshot.is_aborted(&owner)
@@ -75,7 +76,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
 impl<'a> WritablePolicy for &TxContext<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result {
@@ -87,10 +88,6 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     )?;
     self.modified.fetch_or(true, Ordering::Release);
     Ok(())
-  }
-
-  fn when_update_entry(&self, pointer: Pointer, table: &Arc<TableHandle>) {
-    self.orchestrator.mark_gc(table.clone(), pointer);
   }
 
   fn alloc_slot(
@@ -107,5 +104,8 @@ impl<'a> CreatablePolicy for &TxContext<'a> {
   }
   fn current_version(&self) -> TxId {
     self.orchestrator.current_version()
+  }
+  fn wait_close(&self, owner: TxId) {
+    self.orchestrator.wait_commit(owner);
   }
 }

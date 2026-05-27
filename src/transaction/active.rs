@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+  thread::OnceParker,
   utils::{OffsetBitmap, ShortenedRwLock},
   wal::TxId,
 };
@@ -19,12 +20,14 @@ const STATUS_TIMEOUT: u8 = 3;
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
+  parker: OnceParker,
 }
 impl ActiveState {
   pub fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
+      parker: OnceParker::new(),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -108,7 +111,11 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    self.inner.wl().remove(tx_id);
+    let state = match self.inner.wl().remove(tx_id) {
+      Some(state) => state,
+      None => return,
+    };
+    state.parker.wake_all();
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
@@ -118,5 +125,10 @@ impl ActiveSet {
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
+  }
+  pub fn wait(&self, tx_id: &TxId) {
+    if let Some(state) = self.get(tx_id) {
+      state.parker.park();
+    }
   }
 }

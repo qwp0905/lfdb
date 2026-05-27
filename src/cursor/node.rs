@@ -53,12 +53,6 @@ impl BTreeNode {
   pub const fn initial_state() -> Self {
     Self::Leaf(LeafNode::new(Vec::new(), None))
   }
-  pub fn as_leaf(self) -> Result<LeafNode> {
-    match self {
-      Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
-      Self::Leaf(node) => Ok(node),
-    }
-  }
   pub fn as_internal(self) -> Result<InternalNode> {
     match self {
       Self::Internal(node) => Ok(node),
