@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::{CachedSlot, WritableSlot},
+  cache::{CachedSlot, RefedSlot},
   disk::Pointer,
   serialize::Serializable,
   table::TableHandle,
@@ -32,7 +32,7 @@ pub trait ReadonlyPolicy {
 pub trait WritablePolicy: ReadonlyPolicy {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot<'_>,
+    slot: &mut RefedSlot,
     data: &T,
     table: &Arc<TableHandle>,
   ) -> Result;
@@ -52,13 +52,13 @@ pub trait WritablePolicy: ReadonlyPolicy {
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(ptr)
   }
-  fn when_update_entry(&self, entry_pointer: Pointer, table: &Arc<TableHandle>);
 }
 
 pub trait CreatablePolicy: WritablePolicy {
   fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
     !self.is_owned(owner) && (!self.is_readable(version) || self.is_active(owner))
   }
+  fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
 }

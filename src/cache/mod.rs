@@ -13,8 +13,8 @@ use block::*;
 mod dirty;
 use dirty::*;
 
-mod latch;
-use latch::*;
-
 mod shard;
 use shard::*;
+
+mod batch;
+pub use batch::*;

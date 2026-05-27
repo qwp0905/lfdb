@@ -10,7 +10,7 @@ LFDB is a high-performance storage engine designed for high-concurrency workload
 - Strict ACID compliance with Snapshot Isolation
 - Transaction support across multiple tables
 - Transactional DDL
-- Fully zero-copy reads
+- Fully zero-copy reads in small values
 - Writes never block reads, and all writes are serialized at row granularity
 - Latch-coupling-free tree mutation based on a B-link tree
 - Fast performance and durability through a fully lock-free WAL
@@ -73,7 +73,7 @@ LFDB uses a timing-wheel-based timer to manage a very large number of transactio
 
 > Zero copy read
 
-LFDB reads do not copy any data blocks. Through copy-on-write, LFDB does not modify blocks registered in the block cache directly; instead, it only replaces blocks, enabling safe reads without copying data blocks. See the `VecRef` struct for details. However, because VecRef holds a reference to the underlying data block, keeping it alive for a long time may increase memory pressure.
+LFDB reads do not copy any data blocks when the size is small. Through copy-on-write, LFDB does not modify blocks registered in the block cache directly; instead, it only replaces blocks, enabling safe reads without copying data blocks. See the `VecRef` struct for details. However, because VecRef holds a reference to the underlying data block, keeping it alive for a long time may increase memory pressure.
 
 > Buffered io
 
@@ -87,7 +87,7 @@ LFDB manages disk space through the following design points:
 > MVCC / Background GC
 
 In LFDB, data is written by version into disk space separate from the B-tree index. Each transaction reads data based on the snapshot created when it started and searches for the version that is visible to it.
-Version chains that can no longer be observed due to transaction lifecycle progression are reclaimed by a periodically running background GC. In addition, keys in leaf nodes whose visible version records have disappeared are periodically reclaimed to improve scan performance.
+Version chains that can no longer be observed due to transaction lifecycle progression are reclaimed by a periodically running background GC.
 
 > Page allocation
 

@@ -1,10 +1,41 @@
-use std::{mem::ManuallyDrop, sync::Arc};
+use std::{
+  mem::{transmute, ManuallyDrop},
+  ops::{Deref, DerefMut},
+  sync::Arc,
+};
 
-use super::{BlockId, CachedBlock, LatchGuard};
+use super::{BatchHandle, BatchHandler, BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SharedToken},
+  Result,
 };
+
+pub struct RefedSlot {
+  pointer: Pointer,
+  page: PageRef<PAGE_SIZE>,
+}
+impl RefedSlot {
+  pub const fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>) -> Self {
+    Self { pointer, page }
+  }
+  pub const fn get_pointer(&self) -> Pointer {
+    self.pointer
+  }
+  pub fn into_inner(self) -> PageRef<PAGE_SIZE> {
+    self.page
+  }
+}
+impl AsRef<Page> for RefedSlot {
+  fn as_ref(&self) -> &Page {
+    &self.page
+  }
+}
+impl AsMut<Page> for RefedSlot {
+  fn as_mut(&mut self) -> &mut Page {
+    &mut self.page
+  }
+}
 
 /**
  * A handle to a block cache page, abstracting over cached blocks and temp pages.
@@ -16,6 +47,7 @@ use crate::{
 pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
   dirty: &'a AtomicBitmap,
+  batch_handle: &'a BatchHandle,
   block_id: BlockId,
   token: SharedToken<'a>,
   page_pool: &'a PagePool<PAGE_SIZE>,
@@ -24,6 +56,7 @@ impl<'a> CachedSlot<'a> {
   pub fn new(
     block: &'a CachedBlock,
     dirty: &'a AtomicBitmap,
+    batch_handle: &'a BatchHandle,
     block_id: BlockId,
     token: SharedToken<'a>,
     page_pool: &'a PagePool<PAGE_SIZE>,
@@ -31,6 +64,7 @@ impl<'a> CachedSlot<'a> {
     Self {
       block,
       dirty,
+      batch_handle,
       block_id,
       token,
       page_pool,
@@ -42,6 +76,19 @@ impl<'a> CachedSlot<'a> {
       page: self.block.load_page(),
     }
   }
+  pub fn for_batch<'b>(self) -> BatchSlot<'b>
+  where
+    'a: 'b,
+  {
+    BatchSlot {
+      block: self.block,
+      batch: self.batch_handle,
+      page_pool: self.page_pool,
+      dirty: self.dirty,
+      block_id: self.block_id,
+      _token: self.token,
+    }
+  }
   pub fn for_write<'b>(self) -> WritableSlot<'b>
   where
     'a: 'b,
@@ -50,24 +97,7 @@ impl<'a> CachedSlot<'a> {
     let _latch = self.block.latch();
     shadow.copy_from(&**self.block.load_page());
     WritableSlot {
-      shadow: ManuallyDrop::new(shadow),
-
-      block: self.block,
-      dirty: self.dirty,
-      block_id: self.block_id,
-      _token: self.token,
-      _latch,
-    }
-  }
-  pub fn for_lazy_write<'b>(self) -> WritableSlot<'b>
-  where
-    'a: 'b,
-  {
-    let mut shadow = self.page_pool.acquire();
-    let _latch = self.block.lazy_latch();
-    shadow.copy_from(&**self.block.load_page());
-    WritableSlot {
-      shadow: ManuallyDrop::new(shadow),
+      shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
 
       block: self.block,
       dirty: self.dirty,
@@ -92,32 +122,68 @@ impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   }
 }
 pub struct WritableSlot<'a> {
-  shadow: ManuallyDrop<PageRef<PAGE_SIZE>>,
+  shadow: ManuallyDrop<RefedSlot>,
   block: &'a CachedBlock,
   dirty: &'a AtomicBitmap,
   block_id: BlockId,
   _token: SharedToken<'a>,
   _latch: LatchGuard<'a>,
 }
-impl<'a> WritableSlot<'a> {
-  pub fn get_pointer(&self) -> Pointer {
-    self.block.get_pointer()
+
+impl<'a> Deref for WritableSlot<'a> {
+  type Target = RefedSlot;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shadow
   }
 }
-impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
-  fn as_ref(&self) -> &Page<PAGE_SIZE> {
-    &*self.shadow
-  }
-}
-impl<'a> AsMut<Page<PAGE_SIZE>> for WritableSlot<'a> {
-  fn as_mut(&mut self) -> &mut Page<PAGE_SIZE> {
-    &mut *self.shadow
+impl<'a> DerefMut for WritableSlot<'a> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.shadow
   }
 }
 impl<'a> Drop for WritableSlot<'a> {
   fn drop(&mut self) {
     let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
     self.dirty.insert(self.block_id);
-    self.block.store(shadow);
+    self.block.store(shadow.into_inner());
+  }
+}
+
+pub struct BatchSlot<'a> {
+  block: &'a CachedBlock,
+  batch: &'a BatchHandle,
+  page_pool: &'a PagePool<PAGE_SIZE>,
+  dirty: &'a AtomicBitmap,
+  block_id: BlockId,
+  _token: SharedToken<'a>,
+}
+impl<'a> BatchSlot<'a> {
+  pub fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
+    let (occupied, o) = self.batch.register(unsafe { transmute(handler) });
+    if !occupied {
+      return o.wait().flatten();
+    }
+
+    loop {
+      let mut page = self.page_pool.acquire();
+      let _guard = self.block.latch();
+      page.copy_from(&**self.block.load_page());
+
+      let mut slot = RefedSlot::new(self.block.get_pointer(), page);
+      self.batch.flush_with(&mut slot);
+
+      self.dirty.insert(self.block_id);
+      self.block.store(slot.into_inner());
+
+      if self.batch.try_release() {
+        break;
+      }
+    }
+
+    o.wait().flatten()
+  }
+  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
+    self.__mutate(Box::new(handler))
   }
 }

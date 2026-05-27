@@ -334,21 +334,6 @@ impl WAL {
     )
   }
 
-  pub fn append_multi(
-    &self,
-    tx_id: TxId,
-    table_id: TableId,
-    ptr1: Pointer,
-    data1: Vec<u8>,
-    ptr2: Pointer,
-    data2: Vec<u8>,
-  ) -> Result {
-    self.append(
-      |log_id| LogRecord::new_multi(log_id, tx_id, table_id, ptr1, data1, ptr2, data2),
-      false,
-    )
-  }
-
   pub fn checkpoint_and_flush(
     &self,
     last_log_id: LogId,

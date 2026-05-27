@@ -32,7 +32,6 @@ impl<'a> TxState<'a> {
   const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
     Self { state, set }
   }
-
   pub fn deactive(&self) {
     self.set.remove(&self.state.get_id());
   }
@@ -125,6 +124,10 @@ impl VersionVisibility {
   #[inline]
   pub fn is_aborted(&self, tx_id: &TxId) -> bool {
     self.aborted.contains(tx_id)
+  }
+
+  pub fn wait_commit(&self, owner: TxId) {
+    self.active.wait(&owner)
   }
 
   /**

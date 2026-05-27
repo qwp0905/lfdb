@@ -12,7 +12,9 @@ use std::{
 
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
-  cursor::{GarbageCollectionConfig, GarbageCollector, TreeManager, TreeManagerConfig},
+  cursor::{
+    initialize, open_tables, recovery, GarbageCollectionConfig, GarbageCollector,
+  },
   disk::{Pointer, PAGE_SIZE},
   error,
   error::{Error, Result},
@@ -83,9 +85,7 @@ impl Engine {
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
-    };
-    let tree_config = TreeManagerConfig {
-      merge_interval: config.gc_trigger_interval,
+      interval: config.gc_trigger_interval,
       compaction_threshold: config.compaction_threshold,
       compaction_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
@@ -121,21 +121,14 @@ impl Engine {
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
+      wal.clone(),
       gc_config,
     )
     .to_arc();
 
     if tables.is_new() {
       info!("engine initial state.");
-      let tree_manager = TreeManager::initialize(
-        block_cache.clone(),
-        tables.clone(),
-        recorder.clone(),
-        gc.clone(),
-        wal.clone(),
-        version_visibility.clone(),
-        tree_config,
-      )?;
+      initialize(&block_cache, &tables, &recorder, &version_visibility)?;
       let orchestrator = TxOrchestrator::new(
         tx_config,
         &wal_config,
@@ -145,7 +138,6 @@ impl Engine {
         version_visibility,
         gc,
         recorder,
-        tree_manager,
         metrics_registry.clone(),
       );
 
@@ -176,7 +168,7 @@ impl Engine {
 
     let mut handles = HashMap::new();
     let (open_handles, compactions) =
-      TreeManager::open_handles(&block_cache, &version_visibility, &tables)?;
+      open_tables(&block_cache, &tables, &version_visibility)?;
     for table in open_handles {
       handles.insert(table.metadata().get_id(), table);
     }
@@ -207,19 +199,10 @@ impl Engine {
     // (allocated but unreferenced pages) and reclaim them into the free list.
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-
-    let tree_manager = TreeManager::clean_and_start(
-      block_cache.clone(),
-      tables.clone(),
-      recorder.clone(),
-      gc.clone(),
-      wal.clone(),
-      version_visibility.clone(),
-      tree_config,
-    )?;
+    recovery(block_cache.clone(), &tables)?;
 
     for (table, c_table) in compactions {
-      tree_manager.resume_compact(table, c_table);
+      gc.resume_compact(table, c_table);
     }
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
@@ -231,7 +214,6 @@ impl Engine {
       version_visibility,
       gc,
       recorder,
-      tree_manager,
       metrics_registry.clone(),
       replay.segments,
     )?;

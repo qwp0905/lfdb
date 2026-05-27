@@ -56,21 +56,6 @@ impl LeafNode {
     Ok(Self::new(entries, (next != 0).then(|| next)))
   }
 
-  pub const fn len(&self) -> usize {
-    self.entries.len()
-  }
-
-  pub fn drain(&mut self) -> impl Iterator<Item = (StaticKey, Pointer)> + '_ {
-    self.entries.drain(..)
-  }
-
-  pub fn set_entries(&mut self, entries: Vec<(StaticKey, Pointer)>) {
-    self.entries = entries;
-  }
-
-  pub const fn get_next(&self) -> Option<Pointer> {
-    self.next
-  }
   pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
     self.next.replace(pointer)
   }

@@ -163,6 +163,7 @@ fn test_write_conflict() {
 
     let tx2 = engine.new_tx().unwrap();
     let t2 = tx2.table(TEST_TABLE).unwrap();
+    tx1.commit().unwrap();
     let result = t2.insert(b"contested".to_vec(), b"v2".to_vec());
     assert!(result.is_err());
     if let Err(Error::WriteConflict) = result {
@@ -170,8 +171,6 @@ fn test_write_conflict() {
     } else {
       panic!("expected WriteConflict");
     }
-
-    tx1.commit().unwrap();
   }
 
   {
@@ -1370,7 +1369,7 @@ fn test_concurrent_drop_returns_conflict() {
   let engine = build_engine(&dir);
   create_table(&engine, TEST_TABLE);
 
-  let mut tx1 = engine.new_tx().unwrap();
+  let mut tx1 = engine.new_tx_timeout(Duration::from_secs(10)).unwrap();
   let mut tx2 = engine.new_tx().unwrap();
 
   tx1.drop_table(TEST_TABLE).unwrap();

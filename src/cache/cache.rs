@@ -1,7 +1,8 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
 use super::{
-  Acquired, CachedBlock, CachedSlot, DirtyTables, EvictionGuard, MappingTable,
+  Acquired, BatchHandle, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
+  MappingTable,
 };
 use crate::{
   debug,
@@ -28,6 +29,7 @@ pub struct BlockCache {
   /**
    * each dirty bits are protected by each block's latch
    */
+  batch_handles: Box<[BatchHandle]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
@@ -45,9 +47,12 @@ impl BlockCache {
     blocks.resize_with(block_cap, MaybeUninit::uninit);
     let mut pins = Vec::with_capacity(block_cap);
     pins.resize_with(block_cap, ExclusivePin::new);
+    let mut batch_handles = Vec::with_capacity(block_cap);
+    batch_handles.resize_with(block_cap, BatchHandle::new);
 
     let cached_blocks = Arc::<[_]>::from(blocks.into_boxed_slice());
     let pins = Arc::<[_]>::from(pins.into_boxed_slice());
+    let batch_handles = batch_handles.into_boxed_slice();
     let dirty = AtomicBitmap::new(block_cap).to_arc();
 
     let dirty_tables = DirtyTables::new().to_arc();
@@ -69,6 +74,7 @@ impl BlockCache {
     Ok(Self {
       cached_blocks,
       pins,
+      batch_handles,
       table: MappingTable::new(config.shard_count, block_cap),
       dirty_blocks: dirty,
       page_pool,
@@ -83,6 +89,7 @@ impl BlockCache {
     CachedSlot::new(
       unsafe { self.cached_blocks[id].assume_init_ref() },
       &self.dirty_blocks,
+      &self.batch_handles[id],
       id,
       token,
       &self.page_pool,

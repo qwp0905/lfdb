@@ -69,20 +69,6 @@ impl<R> TaskHandle<R> {
   }
 }
 
-pub struct BatchTaskHandle<R>(Vec<Oneshot<Result<R>>>);
-impl<R> BatchTaskHandle<R> {
-  pub fn from(v: impl Iterator<Item = Oneshot<Result<R>>>) -> Self {
-    Self(v.collect())
-  }
-  pub fn wait(self) -> Result<Vec<R>> {
-    let mut results = Vec::with_capacity(self.0.len());
-    for o in self.0 {
-      results.push(o.wait()??);
-    }
-    Ok(results)
-  }
-}
-
 pub struct OnceHandle<T>(JoinHandle<T>);
 impl<T> OnceHandle<T> {
   pub fn wait(self) -> Result<T> {
