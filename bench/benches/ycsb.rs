@@ -34,7 +34,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   #[cfg(feature = "lfdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -46,7 +46,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   #[cfg(feature = "redb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -58,7 +58,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   #[cfg(feature = "rocksdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -77,7 +77,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   #[cfg(feature = "lfdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -89,7 +89,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   #[cfg(feature = "redb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -101,7 +101,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   #[cfg(feature = "rocksdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -120,7 +120,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   #[cfg(feature = "lfdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -132,7 +132,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   #[cfg(feature = "redb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -144,7 +144,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   #[cfg(feature = "rocksdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -163,7 +163,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   #[cfg(feature = "lfdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -175,7 +175,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   #[cfg(feature = "redb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -187,7 +187,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   #[cfg(feature = "rocksdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -206,7 +206,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   #[cfg(feature = "lfdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -218,7 +218,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   #[cfg(feature = "redb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
@@ -230,7 +230,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   #[cfg(feature = "rocksdb")]
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
-    let mut group = c.benchmark_group(group_name);
+    let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(20));
