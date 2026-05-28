@@ -13,7 +13,8 @@ use std::{
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, GarbageCollectionConfig, GarbageCollector,
+    initialize, open_tables, recovery, CompactionConfig, Compactor,
+    GarbageCollectionConfig, GarbageCollector,
   },
   disk::{Pointer, PAGE_SIZE},
   error,
@@ -24,7 +25,7 @@ use crate::{
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
-  utils::ToArc,
+  utils::{ToArc, ToBox},
   wal::{WALConfig, WAL},
 };
 
@@ -40,7 +41,6 @@ where
   pub wal_segment_flush_count: usize,
   pub checkpoint_interval: Duration,
   pub group_commit_count: usize,
-  pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
@@ -85,9 +85,10 @@ impl Engine {
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
-      interval: config.gc_trigger_interval,
-      compaction_threshold: config.compaction_threshold,
-      compaction_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
+    };
+    let compaction_config = CompactionConfig {
+      threshold: config.compaction_threshold,
+      min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
@@ -116,19 +117,30 @@ impl Engine {
     )?
     .to_arc();
 
-    let gc = GarbageCollector::start(
+    let gc = GarbageCollector::new(
       block_cache.clone(),
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
-      wal.clone(),
       gc_config,
     )
     .to_arc();
 
+    let compactor = Compactor::new(
+      block_cache.clone(),
+      tables.clone(),
+      recorder.clone(),
+      version_visibility.clone(),
+      wal.clone(),
+      gc.clone(),
+      compaction_config,
+    )
+    .to_box();
+
     if tables.is_new() {
       info!("engine initial state.");
       initialize(&block_cache, &tables, &recorder, &version_visibility)?;
+      gc.start();
       let orchestrator = TxOrchestrator::new(
         tx_config,
         &wal_config,
@@ -138,6 +150,7 @@ impl Engine {
         version_visibility,
         gc,
         recorder,
+        compactor,
         metrics_registry.clone(),
       );
 
@@ -199,10 +212,11 @@ impl Engine {
     // (allocated but unreferenced pages) and reclaim them into the free list.
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), &tables)?;
+    recovery(block_cache.clone(), gc.clone(), &tables)?;
+    gc.start();
 
     for (table, c_table) in compactions {
-      gc.resume_compact(table, c_table);
+      compactor.resume(table, c_table);
     }
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
@@ -214,6 +228,7 @@ impl Engine {
       version_visibility,
       gc,
       recorder,
+      compactor,
       metrics_registry.clone(),
       replay.segments,
     )?;

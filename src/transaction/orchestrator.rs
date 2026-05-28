@@ -4,14 +4,14 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::GarbageCollector,
+  cursor::{Compactor, GCMark, GarbageCollector},
   debug,
   disk::Pointer,
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{MutationHandle, TableHandle, TableId, TableMapper, TableMetadata},
+  table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
   utils::ToArc,
   wal::{TxId, WALConfig, WALSegment, WAL},
@@ -35,6 +35,7 @@ pub struct TxOrchestrator {
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
+  compactor: Box<Compactor>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
@@ -49,6 +50,7 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
+    compactor: Box<Compactor>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = WorkBuilder::new()
@@ -70,6 +72,7 @@ impl TxOrchestrator {
       version_visibility,
       gc,
       recorder,
+      compactor,
       timeout_thread,
       tx_timeout: config.timeout,
       metrics,
@@ -85,6 +88,7 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
+    compactor: Box<Compactor>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
@@ -103,6 +107,7 @@ impl TxOrchestrator {
       version_visibility,
       gc,
       recorder,
+      compactor,
       metrics,
     ))
   }
@@ -111,7 +116,7 @@ impl TxOrchestrator {
   pub fn fetch(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     self.block_cache.read(pointer, handle)
   }
@@ -119,7 +124,7 @@ impl TxOrchestrator {
   pub fn alloc(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     self.block_cache.alloc(pointer, handle)
   }
@@ -169,21 +174,25 @@ impl TxOrchestrator {
     Ok(())
   }
 
+  pub fn mark_gc(&self, mark: GCMark) {
+    self.gc.mark(mark);
+  }
+
   #[inline]
   pub fn current_version(&self) -> TxId {
     self.version_visibility.current_version()
   }
 
   #[inline]
-  pub fn get_table(&self, table_id: TableId) -> Option<Arc<TableHandle>> {
+  pub fn get_table(&self, table_id: TableId) -> Option<TableHandleRef> {
     self.tables.get(table_id)
   }
   #[inline]
-  pub fn commit_table(&self, table: Arc<TableHandle>) {
+  pub fn commit_table(&self, table: TableHandleRef) {
     self.tables.insert(table);
   }
   #[inline]
-  pub fn open_table(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn open_table(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
     self.tables.create_handle(table_meta)
   }
   #[inline]
@@ -192,16 +201,16 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn drop_table(&self, table: Arc<TableHandle>, tx_id: TxId, version: TxId) {
+  pub fn drop_table(&self, table: TableHandleRef, tx_id: TxId, version: TxId) {
     self.gc.release_table(table, tx_id, version);
   }
   #[inline]
-  pub fn get_metadata_table(&self) -> Arc<TableHandle> {
+  pub fn get_metadata_table(&self) -> TableHandleRef {
     self.tables.meta_table()
   }
   #[inline]
-  pub fn compact_table(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
-    self.gc.compact(old, new, version);
+  pub fn compact_table(&self, old: TableHandleRef, new: MutationHandle, version: TxId) {
+    self.compactor.register(old, new, version);
   }
 
   pub fn wait_commit(&self, owner: TxId) {
@@ -214,6 +223,7 @@ impl TxOrchestrator {
    * performs the final checkpoint; step 2 wal.close() finalizes the WAL.
    */
   pub fn close(&self) -> Result {
+    self.compactor.close();
     self.timeout_thread.close();
     self.wal.half_close();
     self.checkpoint.close();
