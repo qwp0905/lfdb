@@ -21,11 +21,11 @@ use crate::{
 };
 
 pub struct GarbageCollectionConfig {
+  pub interval: Duration,
   pub thread_count: usize,
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const GC_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 pub type GCQueue = Arc<SegQueue<GCMark>>;
 pub struct GarbageCollector {
@@ -73,7 +73,7 @@ impl GarbageCollector {
       .name("gc main")
       .single()
       .interval(
-        GC_CHECK_INTERVAL,
+        config.interval,
         wait_gc(queue.clone(), version_visibility.clone(), entry.clone()),
       )
       .to_box();

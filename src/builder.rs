@@ -20,6 +20,7 @@ where
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
       checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
       group_commit_count: DEFAULT_GROUP_COMMIT_COUNT,
+      gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
@@ -111,6 +112,14 @@ where
     self
   }
   /**
+   * Interval at which garbage collection runs. Run more frequently when removes are
+   * heavy, less frequently when removes are rare, to maintain scan performance.
+   */
+  pub const fn gc_trigger_interval(mut self, interval: Duration) -> Self {
+    self.0.gc_trigger_interval = interval;
+    self
+  }
+  /**
    * Number of threads used for GC. More threads speed up GC and therefore
    * checkpoint completion. In write-heavy workloads with frequent WAL segment
    * rotation, increasing this can improve write throughput.
@@ -152,6 +161,7 @@ const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(10);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 32;
 const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_GROUP_COMMIT_COUNT: usize = 512;
+const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_GC_THREAD_COUNT: usize = 5;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb

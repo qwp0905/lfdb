@@ -41,6 +41,7 @@ where
   pub wal_segment_flush_count: usize,
   pub checkpoint_interval: Duration,
   pub group_commit_count: usize,
+  pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
@@ -85,6 +86,7 @@ impl Engine {
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
+      interval: config.gc_trigger_interval,
     };
     let compaction_config = CompactionConfig {
       threshold: config.compaction_threshold,

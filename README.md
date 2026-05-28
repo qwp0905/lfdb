@@ -115,6 +115,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `group_commit_count` | Maximum commits buffered per WAL segment. Larger values improve write throughput but increase potential data loss on crash in high-latency IO environments. |
 | `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
 | `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
+| `gc_trigger_interval` | Interval at which garbage collection runs. Run more frequently when removes are heavy, less frequently when removes are rare. |
 | `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
 | `compaction_threshold` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
 | `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
