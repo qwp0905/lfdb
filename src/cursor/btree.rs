@@ -239,7 +239,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   where
     F: FnOnce() -> VersionRecord,
   {
-    let entry = DataEntry::init(create_record());
+    let record = create_record();
+    let is_empty = record.data.is_tombstone();
+    let entry = DataEntry::init(record);
     let entry_ptr = self.0.alloc_and_log(&entry, table)?;
 
     let split = match node.insert_and_split(pos, key.to_vec(), entry_ptr) {
@@ -247,6 +249,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       None => {
         self.0.serialize_and_log(slot, &node.to_node(), table)?;
         table.inc_live();
+        if is_empty {
+          table.inc_dead();
+        }
         return Ok(None);
       }
     };
@@ -257,6 +262,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     node.set_next(split_ptr);
     self.0.serialize_and_log(slot, &node.to_node(), table)?;
     table.inc_live();
+    if is_empty {
+      table.inc_dead();
+    }
     Ok(Some((mid_key, split_ptr)))
   }
 
