@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, VecDeque},
+  collections::{BTreeMap, LinkedList, VecDeque},
   mem::{replace, take},
   sync::Arc,
   time::Duration,
@@ -280,26 +280,26 @@ const fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(TableHandleRef, TxId, TxId)>) {
-  let mut tables = Vec::new();
-  let mut unpinned = Vec::new();
-  let mut unreachable = Vec::new();
+  let mut tables = LinkedList::new();
+  let mut unpinned = LinkedList::new();
+  let mut unreachable = LinkedList::new();
   move |recv| {
     if let Some((table, tx_id, version)) = recv {
-      tables.push((table, tx_id, version));
+      tables.push_back((table, tx_id, version));
     }
 
     let min_version = version_visibility.min_version();
-    for (table, _, _) in tables.extract_if(.., |(_, tx_id, version)| {
+    for (table, _, _) in tables.extract_if(|(_, tx_id, version)| {
       version_visibility.is_aborted(tx_id) || min_version >= *version
     }) {
-      unpinned.push(table)
+      unpinned.push_back(table)
     }
 
-    for table in unpinned.extract_if(.., |table| table.try_close()) {
-      unreachable.push(table);
+    for table in unpinned.extract_if(|table| table.try_close()) {
+      unreachable.push_back(table);
     }
 
-    for table in unreachable.extract_if(.., |table| table.truncate().is_ok()) {
+    for table in unreachable.extract_if(|table| table.truncate().is_ok()) {
       mapper.remove(table.metadata().get_id());
     }
   }
@@ -333,7 +333,7 @@ const fn wait_gc(
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
 ) -> impl FnMut(Option<()>) -> Result {
   let mut not_committed = BTreeMap::<TxId, Vec<_>>::new();
-  let mut triggered = Vec::new();
+  let mut triggered = LinkedList::new();
   let mut gc_ready = BTreeMap::<(TableId, Pointer), GCMark>::new();
   move |_| {
     while let Some(mark) = queue.pop() {
@@ -348,10 +348,10 @@ const fn wait_gc(
       .into_values()
       .flatten()
     {
-      triggered.push((mark, current));
+      triggered.push_back((mark, current));
     }
 
-    for (mark, _) in triggered.extract_if(.., |(mark, version)| {
+    for (mark, _) in triggered.extract_if(|(mark, version)| {
       if min_version >= *version || version_visibility.is_aborted(&mark.owner) {
         return true;
       }

@@ -1,5 +1,10 @@
 use std::{
-  cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
+  cell::Cell,
+  collections::{LinkedList, VecDeque},
+  mem::take,
+  ops::Bound,
+  sync::Arc,
+  time::Duration,
 };
 
 use crossbeam::queue::SegQueue;
@@ -252,12 +257,12 @@ pub fn wait_compaction(
 ) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
   let meta_table_id = meta_table.metadata().get_id();
-  let mut triggered = Vec::new();
+  let mut triggered = LinkedList::new();
   let mut waited = VecDeque::new();
 
   move |_| {
     while let Some(task) = queue.pop() {
-      triggered.push(task);
+      triggered.push_back(task);
     }
 
     for old in tables
@@ -302,11 +307,11 @@ pub fn wait_compaction(
       };
 
       info!("table {table_name} compacting wait until another tx close.");
-      triggered.push((old.handle(), new_table, wait_until));
+      triggered.push_back((old.handle(), new_table, wait_until));
     }
 
     let min_version = versions.min_version();
-    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version >= *v) {
+    for (old, new, _) in triggered.extract_if(|(_, _, v)| min_version >= *v) {
       waited.push_back((old, new));
     }
 
@@ -431,15 +436,15 @@ pub const fn after_compaction(
   gc: Arc<GarbageCollector>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {
-  let mut buffered = Vec::new();
+  let mut buffered = LinkedList::new();
   move |data| {
     if let Some(v) = data {
-      buffered.push(v);
+      buffered.push_back(v);
     }
 
     let min_version = version_visibility.min_version();
     for (old, _new, tx_id, version) in
-      buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
+      buffered.extract_if(|(_, _, _, v)| min_version >= *v)
     {
       gc.release_table(old.into_inner(), tx_id, version);
     }
