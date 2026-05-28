@@ -25,7 +25,7 @@ pub struct GarbageCollectionConfig {
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const GC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+const GC_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 pub type GCQueue = Arc<SegQueue<GCMark>>;
 pub struct GarbageCollector {
