@@ -280,9 +280,7 @@ pub fn wait_compaction(
           None => return Ok(()),
         };
 
-        if old.metadata().get_id() != metadata.get_id()
-          || metadata.get_compaction_id().is_some()
-        {
+        if metadata.get_compaction_id().is_some() {
           trace!("table {table_name} compacting skipped since already compacted.");
           return Ok(());
         }
