@@ -2,7 +2,7 @@ use std::{
   mem::{forget, transmute},
   ops::Deref,
   sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
   },
 };
@@ -14,6 +14,8 @@ use crate::{
   Result,
 };
 
+pub type TableHandleRef = Arc<TableHandle>;
+
 pub struct TableHandle {
   metadata: TableMetadata,
   disk: DiskController<PAGE_SIZE>,
@@ -23,6 +25,9 @@ pub struct TableHandle {
    */
   pin: ExclusivePin,
   closed: AtomicBool,
+
+  live_keys: AtomicUsize,
+  dead_keys: AtomicUsize,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
@@ -36,14 +41,17 @@ impl TableHandle {
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),
+      live_keys: AtomicUsize::new(0),
+      dead_keys: AtomicUsize::new(0),
     }
   }
 
-  pub fn try_pin<'a>(self: &'a Arc<Self>) -> Option<PinnedHandle<'a>> {
+  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle> {
     let token = self.pin.try_shared()?;
+    // transmute allowed since arc guarantees the lifespan
     Some(PinnedHandle {
-      handle: self,
-      _token: token,
+      handle: self.clone(),
+      _token: unsafe { transmute(token) },
     })
   }
 
@@ -96,20 +104,35 @@ impl TableHandle {
   pub fn truncate(&self) -> Result {
     self.disk.truncate(self.metadata.get_path())
   }
+
+  pub fn inc_live(&self) {
+    self.live_keys.fetch_add(1, Ordering::Relaxed);
+  }
+  pub fn inc_dead(&self) {
+    self.dead_keys.fetch_add(1, Ordering::Relaxed);
+  }
+  pub fn dec_dead(&self) {
+    self.dead_keys.fetch_sub(1, Ordering::Relaxed);
+  }
+
+  pub fn dead_ratio(&self) -> f64 {
+    self.dead_keys.load(Ordering::Relaxed) as f64
+      / self.live_keys.load(Ordering::Relaxed) as f64
+  }
 }
 
-pub struct PinnedHandle<'a> {
-  handle: &'a Arc<TableHandle>,
-  _token: SharedToken<'a>,
+pub struct PinnedHandle {
+  handle: TableHandleRef,
+  _token: SharedToken<'static>,
 }
-impl<'a> PinnedHandle<'a> {
+impl PinnedHandle {
   #[inline]
-  pub fn handle(&self) -> Arc<TableHandle> {
+  pub fn handle(&self) -> TableHandleRef {
     self.handle.clone()
   }
 }
 
-impl<'a> Deref for PinnedHandle<'a> {
+impl Deref for PinnedHandle {
   type Target = TableHandle;
 
   #[inline]
@@ -119,16 +142,16 @@ impl<'a> Deref for PinnedHandle<'a> {
 }
 
 pub struct MutationHandle {
-  handle: Arc<TableHandle>,
+  handle: TableHandleRef,
   _token: ExclusiveToken<'static>,
 }
 impl MutationHandle {
   #[inline]
-  pub fn handle(&self) -> &Arc<TableHandle> {
+  pub fn handle(&self) -> &TableHandleRef {
     &self.handle
   }
 
-  pub fn into_inner(self) -> Arc<TableHandle> {
+  pub fn into_inner(self) -> TableHandleRef {
     self.handle
   }
 }
