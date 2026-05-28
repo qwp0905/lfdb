@@ -38,6 +38,10 @@ impl RecordData {
       RecordData::Tombstone => 1,
     }
   }
+
+  pub const fn is_tombstone(&self) -> bool {
+    matches!(self, RecordData::Tombstone)
+  }
 }
 
 /**
@@ -102,10 +106,6 @@ impl DataEntry {
     self.versions = new_versions;
   }
 
-  pub fn get_versions(&self) -> impl Iterator<Item = &VersionRecord> {
-    self.versions.iter()
-  }
-
   pub fn get_last(&self) -> Option<&VersionRecord> {
     self.versions.front()
   }
@@ -125,6 +125,16 @@ impl DataEntry {
     let byte_len =
       POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();
     record.byte_len() + byte_len <= SERIALIZABLE_BYTES
+  }
+
+  pub fn is_empty(&self) -> bool {
+    if self.versions.is_empty() {
+      return true;
+    }
+    if self.versions.len() > 1 {
+      return false;
+    }
+    self.versions[0].data.is_tombstone()
   }
 }
 impl TypedObject for DataEntry {

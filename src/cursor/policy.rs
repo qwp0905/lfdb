@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use crate::{
   cache::{CachedSlot, RefedSlot},
   disk::Pointer,
   serialize::Serializable,
-  table::TableHandle,
+  table::TableHandleRef,
   wal::TxId,
   Result,
 };
@@ -18,7 +16,7 @@ pub trait ReadonlyPolicy {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
 
   fn is_visible(&self, owner: TxId, version: TxId) -> bool {
@@ -34,24 +32,26 @@ pub trait WritablePolicy: ReadonlyPolicy {
     &self,
     slot: &mut RefedSlot,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result;
   fn alloc_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
 
   fn alloc_and_log<T: Serializable>(
     &self,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<Pointer> {
     let ptr = table.free().alloc();
     let mut slot = self.alloc_slot(ptr, table)?.for_write();
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(ptr)
   }
+
+  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef);
 }
 
 pub trait CreatablePolicy: WritablePolicy {

@@ -3,15 +3,15 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntry, MergeSortable, ReadonlyPolicy, RecordData,
-  TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, GCQueue, MergeSortable,
+  ReadonlyPolicy, RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
   debug,
   disk::Pointer,
   info,
-  table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
+  table::{MutationHandle, TableHandleRef, TableMapper, TableMetadata},
   thread::once,
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
@@ -40,7 +40,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -51,7 +51,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     &self,
     slot: &mut crate::cache::RefedSlot,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result {
     self
       .recorder
@@ -61,10 +61,12 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   fn alloc_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
   }
+
+  fn after_update_hook(&self, _pointer: Pointer, _table: &TableHandleRef) {}
 }
 
 pub fn initialize(
@@ -86,7 +88,7 @@ pub fn open_tables(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
-) -> Result<(Vec<Arc<TableHandle>>, Vec<(MutationHandle, MutationHandle)>)> {
+) -> Result<(Vec<TableHandleRef>, Vec<(MutationHandle, MutationHandle)>)> {
   let mut handles = vec![];
   let mut compactions = vec![];
   let meta_table = tables.meta_table();
@@ -113,7 +115,11 @@ pub fn open_tables(
   Ok((handles, compactions))
 }
 
-pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
+pub fn recovery(
+  block_cache: Arc<BlockCache>,
+  gc_queue: GCQueue,
+  tables: &TableMapper,
+) -> Result {
   let open_handles = Arc::new(SegQueue::new());
   tables
     .get_all()
@@ -123,6 +129,7 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   let threads = (0..5)
     .map(|_| {
       let block_cache = block_cache.clone();
+      let gc = gc_queue.clone();
       let open_handles = open_handles.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
@@ -130,7 +137,7 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
             "table {} start to collect orphaned blocks.",
             table.metadata().get_name(),
           );
-          release_orphaned(&block_cache, table)?;
+          release_orphaned(&block_cache, &gc, table)?;
         }
         Ok(())
       })
@@ -146,7 +153,11 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   Ok(())
 }
 
-fn release_orphaned(block_cache: &BlockCache, table: Arc<TableHandle>) -> Result {
+fn release_orphaned(
+  block_cache: &BlockCache,
+  gc: &SegQueue<GCMark>,
+  table: TableHandleRef,
+) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
     .read(HEADER_POINTER, table.clone())?
@@ -170,15 +181,30 @@ fn release_orphaned(block_cache: &BlockCache, table: Arc<TableHandle>) -> Result
     };
   }
 
+  for &ptr in entry_stack.iter() {
+    table.inc_live();
+    gc.push(GCMark::new(ptr, table.clone(), RESERVED_TX));
+
+    if block_cache
+      .read(ptr, table.clone())?
+      .for_read()
+      .as_ref()
+      .deserialize::<DataEntryView>()?
+      .is_empty()
+    {
+      table.inc_dead();
+    }
+  }
+
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let entry: DataEntry = block_cache
+    let entry: DataEntryView = block_cache
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()
       .deserialize()?;
     for record in entry.get_versions() {
-      if let RecordData::Chunked(pointers) = &record.data {
+      if let RecordDataView::Chunked(pointers) = &record.data {
         visited.extend(pointers);
       }
     }

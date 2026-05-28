@@ -1,14 +1,11 @@
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   cache::RefedSlot,
-  cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
+  cursor::{CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   serialize::Serializable,
-  table::TableHandle,
+  table::TableHandleRef,
   wal::TxId,
   Result,
 };
@@ -68,7 +65,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.fetch(pointer, table.clone())
   }
@@ -78,7 +75,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     &self,
     slot: &mut RefedSlot,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result {
     self.orchestrator.serialize_and_log(
       self.state.get_id(),
@@ -93,9 +90,15 @@ impl<'a> WritablePolicy for &TxContext<'a> {
   fn alloc_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.alloc(pointer, table.clone())
+  }
+
+  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
+    self
+      .orchestrator
+      .mark_gc(GCMark::new(pointer, table.clone(), self.state.get_id()));
   }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {

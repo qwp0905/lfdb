@@ -26,7 +26,7 @@ mod internal;
 use internal::*;
 
 mod compact;
-use compact::*;
+pub use compact::*;
 
 mod btree;
 use btree::*;

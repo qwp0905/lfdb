@@ -1,4 +1,8 @@
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::{
+  cursor::entry_view::{DataEntryView, RecordDataView},
+  disk::Page,
+  serialize::SerializeFrom,
+};
 
 use super::*;
 
@@ -12,16 +16,16 @@ fn test_entry_with_data_roundtrip() {
   ));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntry = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
 
   let records: Vec<_> = decoded.get_versions().collect();
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, 1);
   assert_eq!(records[0].version, 100);
   match &records[0].data {
-    RecordData::Data(d) => assert_eq!(d, &vec![10, 20, 30]),
-    RecordData::Tombstone => panic!("expected Data"),
-    RecordData::Chunked(_) => panic!("expected Data"),
+    RecordDataView::Data(s, e) => assert_eq!(page.range(*s..*e), &vec![10, 20, 30]),
+    RecordDataView::Tombstone => panic!("expected Data"),
+    RecordDataView::Chunked(_) => panic!("expected Data"),
   }
 }
 
@@ -31,15 +35,15 @@ fn test_entry_with_tombstone_roundtrip() {
   let entry = DataEntry::init(VersionRecord::new(2, 200, RecordData::Tombstone));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntry = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
 
   let records: Vec<_> = decoded.get_versions().collect();
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, 2);
   match &records[0].data {
-    RecordData::Data(_) => panic!("expected Tombstone"),
-    RecordData::Tombstone => {}
-    RecordData::Chunked(_) => panic!("expected Tombstone"),
+    RecordDataView::Data(_, _) => panic!("expected Tombstone"),
+    RecordDataView::Tombstone => {}
+    RecordDataView::Chunked(_) => panic!("expected Tombstone"),
   }
 }
 #[test]
@@ -54,16 +58,16 @@ fn test_entry_with_chunked_roundtrip() {
   ));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntry = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
   assert_eq!(decoded.len(), 1);
 
   let records: Vec<_> = decoded.get_versions().collect();
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, owner);
   match &records[0].data {
-    RecordData::Data(_) => panic!("expected Chunked"),
-    RecordData::Tombstone => panic!("expected Chunked"),
-    RecordData::Chunked(p) => assert_eq!(p, &pointers),
+    RecordDataView::Data(_, _) => panic!("expected Chunked"),
+    RecordDataView::Tombstone => panic!("expected Chunked"),
+    RecordDataView::Chunked(p) => assert_eq!(p, &pointers),
   }
 }
 

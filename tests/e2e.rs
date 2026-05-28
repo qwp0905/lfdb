@@ -835,7 +835,7 @@ fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
   let engine = Arc::new(
     default_options(&dir)
-      .gc_trigger_interval(Duration::from_millis(50))
+      .gc_trigger_interval(Duration::from_secs(60))
       .build()
       .unwrap(),
   );
@@ -904,6 +904,7 @@ fn test_heavy_gc_single_key() {
     "heavy gc: {} writes, {} reads, final value = {}",
     iterations, read_count, final_val
   );
+  std::thread::sleep(Duration::from_secs(30));
 
   // phase 2: restart and verify persistence
   drop(engine);

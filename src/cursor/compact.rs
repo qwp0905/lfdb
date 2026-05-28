@@ -1,14 +1,23 @@
 use std::{
-  cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
+  cell::Cell,
+  collections::{LinkedList, VecDeque},
+  mem::take,
+  ops::Bound,
+  sync::Arc,
+  time::Duration,
 };
 
-use super::{BTreeIndex, CreatablePolicy, ReadonlyPolicy, WritablePolicy};
+use crossbeam::queue::SegQueue;
+
+use super::{
+  BTreeIndex, CreatablePolicy, GCMark, GarbageCollector, ReadonlyPolicy, WritablePolicy,
+};
 use crate::{
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   info,
   serialize::Serializable,
-  table::{MutationHandle, TableHandle, TableMapper, TableMetadata},
+  table::{MutationHandle, TableHandleRef, TableMapper, TableMetadata},
   thread::{BackgroundThread, WorkBuilder},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
@@ -17,10 +26,12 @@ use crate::{
   warn, Result,
 };
 
-pub enum CompactTask {
-  New(Arc<TableHandle>),
-  Wait(Arc<TableHandle>, MutationHandle, TxId),
+pub struct CompactionConfig {
+  pub threshold: f64,
+  pub min_size: Pointer,
 }
+
+type CompactTask = (TableHandleRef, MutationHandle, TxId);
 
 struct MiniTx<'a> {
   state: TxState<'a>,
@@ -29,6 +40,7 @@ struct MiniTx<'a> {
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
+  gc: &'a GarbageCollector,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -38,6 +50,7 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
+    gc: &'a GarbageCollector,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -48,6 +61,7 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
+      gc,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -89,7 +103,7 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -111,7 +125,7 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     &self,
     slot: &mut RefedSlot,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result {
     self.recorder.serialize_and_log(
       self.state.get_id(),
@@ -126,9 +140,15 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
   fn alloc_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
+  }
+
+  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
+    self
+      .gc
+      .mark(GCMark::new(pointer, table.clone(), self.state.get_id()));
   }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
@@ -161,7 +181,7 @@ impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -171,12 +191,13 @@ struct CompactionWritePolicy<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
+  gc: &'a GarbageCollector,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn fetch_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table.clone())
   }
@@ -198,7 +219,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
     &self,
     slot: &mut RefedSlot,
     data: &T,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result {
     self
       .recorder
@@ -208,78 +229,89 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   fn alloc_slot(
     &self,
     pointer: Pointer,
-    table: &Arc<TableHandle>,
+    table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table.clone())
   }
+
+  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
+    self
+      .gc
+      .mark(GCMark::new(pointer, table.clone(), RESERVED_TX))
+  }
 }
 
-pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
+pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn wait_compaction(
+  queue: Arc<SegQueue<CompactTask>>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
+  gc: Arc<GarbageCollector>,
   compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
-) -> impl FnMut(Option<CompactTask>) -> Result {
+  compaction_threshold: f64,
+  compaction_min_size: Pointer,
+) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
-  let mut triggered = Vec::new();
+  let meta_table_id = meta_table.metadata().get_id();
+  let mut triggered = LinkedList::new();
   let mut waited = VecDeque::new();
 
-  move |task| {
-    if let Some(task) = task {
-      match task {
-        CompactTask::Wait(old, new, until) => triggered.push((old, new, until)),
-        CompactTask::New(old) => {
-          let table_name = old.metadata().get_name();
-          let (new_table, wait_until) = {
-            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder)?;
+  move |_| {
+    while let Some(task) = queue.pop() {
+      triggered.push_back(task);
+    }
 
-            let index = BTreeIndex::new(&tx);
+    for old in tables
+      .get_all()
+      .into_iter()
+      .flat_map(|t| t.try_pin())
+      .filter(|table| table.dead_ratio() >= compaction_threshold)
+      .filter(|table| table.free().file_len() >= compaction_min_size)
+      .filter(|table| table.metadata().get_id() != meta_table_id)
+    {
+      let table_name = old.metadata().get_name();
+      let (new_table, wait_until) = {
+        let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc)?;
 
-            let mut metadata =
-              match index.get(table_name.as_bytes(), &meta_table)?.flatten() {
-                Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-                None => return Ok(()),
-              };
+        let index = BTreeIndex::new(&tx);
 
-            if old.metadata().get_id() != metadata.get_id()
-              || metadata.get_compaction_id().is_some()
-            {
-              trace!("table {table_name} compacting skipped since already compacted.");
-              return Ok(());
-            }
+        let mut metadata = match index.get(table_name.as_bytes(), &meta_table)?.flatten()
+        {
+          Some(bytes) => TableMetadata::from_bytes(&bytes)?,
+          None => return Ok(()),
+        };
 
-            info!("table {table_name} compacting triggered.");
-            let table_meta = tables.create_metadata(table_name);
-            metadata.set_compaction(&table_meta);
-
-            index.insert_if_matched(
-              table_name.as_bytes(),
-              metadata.to_vec(),
-              &meta_table,
-            )?;
-
-            let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
-
-            tables.insert(new_table.handle().clone());
-
-            index.initialize(new_table.handle())?;
-
-            tx.commit()?;
-            (new_table, versions.current_version())
-          };
-
-          info!("table {table_name} compacting wait until another tx close.");
-          triggered.push((old, new_table, wait_until));
+        if metadata.get_compaction_id().is_some() {
+          trace!("table {table_name} compacting skipped since already compacted.");
+          return Ok(());
         }
+
+        info!("table {table_name} compacting triggered.");
+        let table_meta = tables.create_metadata(table_name);
+        metadata.set_compaction(&table_meta);
+
+        index.insert_if_matched(table_name.as_bytes(), metadata.to_vec(), &meta_table)?;
+
+        let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
+
+        tables.insert(new_table.handle().clone());
+
+        index.initialize(new_table.handle())?;
+
+        tx.commit()?;
+        (new_table, versions.current_version())
       };
+
+      info!("table {table_name} compacting wait until another tx close.");
+      triggered.push_back((old.handle(), new_table, wait_until));
     }
 
     let min_version = versions.min_version();
-    for (old, new, _) in triggered.extract_if(.., |(_, _, v)| min_version >= *v) {
+    for (old, new, _) in triggered.extract_if(|(_, _, v)| min_version >= *v) {
       waited.push_back((old, new));
     }
 
@@ -300,6 +332,7 @@ pub fn handle_compaction(
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
+  gc: Arc<GarbageCollector>,
   after_compaction: Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
@@ -312,6 +345,7 @@ pub fn handle_compaction(
       &wal,
       &recorder,
       &meta_table,
+      &gc,
       old,
       new,
       &after_compaction,
@@ -324,7 +358,8 @@ fn do_compaction(
   version_visibility: &VersionVisibility,
   wal: &WAL,
   recorder: &PageRecorder,
-  meta_table: &Arc<TableHandle>,
+  meta_table: &TableHandleRef,
+  gc: &GarbageCollector,
   old_table: MutationHandle,
   new: MutationHandle,
   after_compaction: &Arc<
@@ -348,10 +383,11 @@ fn do_compaction(
       block_cache,
       version_visibility,
       recorder,
+      gc,
     });
 
     'compaction: loop {
-      for _ in 0..1000 {
+      for _ in 0..100 {
         match old_snapshot.next_snapshot()? {
           Some(snap) => {
             new_index.apply_snapshot(snap, new.handle())?;
@@ -361,7 +397,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         warn!("table {table_name} already dropped.");
         return Ok(());
@@ -372,7 +408,7 @@ fn do_compaction(
   info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
-    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
@@ -397,26 +433,27 @@ fn do_compaction(
 }
 
 pub const fn after_compaction(
-  release_table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+  gc: Arc<GarbageCollector>,
   version_visibility: Arc<VersionVisibility>,
 ) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {
-  let mut buffered = Vec::new();
+  let mut buffered = LinkedList::new();
   move |data| {
     if let Some(v) = data {
-      buffered.push(v);
+      buffered.push_back(v);
     }
 
     let min_version = version_visibility.min_version();
     for (old, _new, tx_id, version) in
-      buffered.extract_if(.., |(_, _, _, v)| min_version >= *v)
+      buffered.extract_if(|(_, _, _, v)| min_version >= *v)
     {
-      release_table.dispatch((old.into_inner(), tx_id, version));
+      gc.release_table(old.into_inner(), tx_id, version);
     }
   }
 }
 
 pub struct Compactor {
-  wait_compaction: Box<dyn BackgroundThread<CompactTask, Result>>,
+  queue: Arc<SegQueue<CompactTask>>,
+  wait_compaction: Box<dyn BackgroundThread<(), Result>>,
   do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
   after_compaction:
     Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
@@ -428,14 +465,15 @@ impl Compactor {
     recorder: Arc<PageRecorder>,
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
-    release_table: Arc<dyn BackgroundThread<(Arc<TableHandle>, TxId, TxId)>>,
+    gc: Arc<GarbageCollector>,
+    config: CompactionConfig,
   ) -> Self {
     let after_compaction = WorkBuilder::new()
       .name("tree after compaction")
       .single()
       .interval(
         COMPACTION_INTERVAL,
-        after_compaction(release_table, version_visibility.clone()),
+        after_compaction(gc.clone(), version_visibility.clone()),
       )
       .to_arc();
 
@@ -448,27 +486,34 @@ impl Compactor {
         version_visibility.clone(),
         wal.clone(),
         recorder.clone(),
+        gc.clone(),
         after_compaction.clone(),
       ))
       .to_arc();
 
+    let queue = SegQueue::new().to_arc();
     let wait_compaction = WorkBuilder::new()
       .name("tree waiting compaction")
       .single()
       .interval(
         COMPACTION_INTERVAL,
         wait_compaction(
+          queue.clone(),
           tables.clone(),
           block_cache.clone(),
           version_visibility.clone(),
           wal.clone(),
           recorder.clone(),
+          gc,
           do_compaction.clone(),
+          config.threshold,
+          config.min_size,
         ),
       )
       .to_box();
 
     Self {
+      queue,
       wait_compaction,
       do_compaction,
       after_compaction,
@@ -478,13 +523,8 @@ impl Compactor {
   pub fn resume(&self, old: MutationHandle, new: MutationHandle) {
     self.do_compaction.dispatch((old, new));
   }
-  pub fn register_wait(&self, old: Arc<TableHandle>, new: MutationHandle, version: TxId) {
-    self
-      .wait_compaction
-      .dispatch(CompactTask::Wait(old, new, version));
-  }
-  pub fn register_new(&self, table: Arc<TableHandle>) {
-    self.wait_compaction.dispatch(CompactTask::New(table));
+  pub fn register(&self, old: TableHandleRef, new: MutationHandle, version: TxId) {
+    self.queue.push((old, new, version));
   }
 
   pub fn close(&self) {

@@ -56,6 +56,11 @@ impl DataEntryView {
     false
   }
 
+  #[allow(unused)]
+  pub const fn len(&self) -> usize {
+    self.versions.len()
+  }
+
   pub const fn get_next(&self) -> Option<Pointer> {
     self.next
   }
