@@ -39,7 +39,6 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
     .group_commit_count(10)
-    .gc_trigger_interval(Duration::from_secs(5))
     .checkpoint_interval(Duration::from_secs(2))
 }
 
@@ -833,12 +832,7 @@ fn test_hard_workload() {
 #[test]
 fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
-  let engine = Arc::new(
-    default_options(&dir)
-      .gc_trigger_interval(Duration::from_millis(50))
-      .build()
-      .unwrap(),
-  );
+  let engine = Arc::new(default_options(&dir).build().unwrap());
 
   create_table(&engine, TEST_TABLE);
 
