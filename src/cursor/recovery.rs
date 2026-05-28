@@ -3,8 +3,8 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, MergeSortable, ReadonlyPolicy,
-  RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, GCQueue, MergeSortable,
+  ReadonlyPolicy, RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -117,7 +117,7 @@ pub fn open_tables(
 
 pub fn recovery(
   block_cache: Arc<BlockCache>,
-  gc_queue: Arc<SegQueue<GCMark>>,
+  gc_queue: GCQueue,
   tables: &TableMapper,
 ) -> Result {
   let open_handles = Arc::new(SegQueue::new());

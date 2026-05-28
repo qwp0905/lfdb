@@ -10,12 +10,10 @@ use std::{
   time::{Duration, Instant},
 };
 
-use crossbeam::queue::SegQueue;
-
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, Compactor,
+    initialize, open_tables, recovery, CompactionConfig, Compactor, GCQueue,
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{Pointer, PAGE_SIZE},
@@ -211,7 +209,7 @@ impl Engine {
 
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    let gc_queue = SegQueue::new().to_arc();
+    let gc_queue = GCQueue::default();
     recovery(block_cache.clone(), gc_queue.clone(), &tables)?;
 
     let gc = GarbageCollector::from_queue(

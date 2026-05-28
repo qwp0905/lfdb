@@ -27,8 +27,9 @@ pub struct GarbageCollectionConfig {
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const GC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
+pub type GCQueue = Arc<SegQueue<GCMark>>;
 pub struct GarbageCollector {
-  queue: Arc<SegQueue<GCMark>>,
+  queue: GCQueue,
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   table: Box<dyn BackgroundThread<(TableHandleRef, TxId, TxId)>>,
@@ -327,7 +328,7 @@ impl GCMark {
 }
 
 const fn wait_gc(
-  queue: Arc<SegQueue<GCMark>>,
+  queue: GCQueue,
   version_visibility: Arc<VersionVisibility>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
 ) -> impl FnMut(Option<()>) -> Result {
