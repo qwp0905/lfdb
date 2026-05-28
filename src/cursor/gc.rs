@@ -27,7 +27,7 @@ pub struct GarbageCollectionConfig {
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const GC_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const GC_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct GarbageCollector {
   main: Box<dyn BackgroundThread<GCMark, Result>>,
