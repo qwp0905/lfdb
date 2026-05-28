@@ -3,8 +3,8 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, GarbageCollector, MergeSortable,
-  ReadonlyPolicy, RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, MergeSortable, ReadonlyPolicy,
+  RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
@@ -117,7 +117,7 @@ pub fn open_tables(
 
 pub fn recovery(
   block_cache: Arc<BlockCache>,
-  gc: Arc<GarbageCollector>,
+  gc_queue: Arc<SegQueue<GCMark>>,
   tables: &TableMapper,
 ) -> Result {
   let open_handles = Arc::new(SegQueue::new());
@@ -129,7 +129,7 @@ pub fn recovery(
   let threads = (0..5)
     .map(|_| {
       let block_cache = block_cache.clone();
-      let gc = gc.clone();
+      let gc = gc_queue.clone();
       let open_handles = open_handles.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
@@ -155,7 +155,7 @@ pub fn recovery(
 
 fn release_orphaned(
   block_cache: &BlockCache,
-  gc: &GarbageCollector,
+  gc: &SegQueue<GCMark>,
   table: TableHandleRef,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
@@ -183,7 +183,7 @@ fn release_orphaned(
 
   for &ptr in entry_stack.iter() {
     table.inc_live();
-    gc.mark(GCMark::new(ptr, table.clone(), RESERVED_TX));
+    gc.push(GCMark::new(ptr, table.clone(), RESERVED_TX));
 
     if block_cache
       .read(ptr, table.clone())?

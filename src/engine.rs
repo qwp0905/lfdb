@@ -10,6 +10,8 @@ use std::{
   time::{Duration, Instant},
 };
 
+use crossbeam::queue::SegQueue;
+
 use crate::{
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
@@ -117,30 +119,30 @@ impl Engine {
     )?
     .to_arc();
 
-    let gc = GarbageCollector::new(
-      block_cache.clone(),
-      version_visibility.clone(),
-      recorder.clone(),
-      tables.clone(),
-      gc_config,
-    )
-    .to_arc();
-
-    let compactor = Compactor::new(
-      block_cache.clone(),
-      tables.clone(),
-      recorder.clone(),
-      version_visibility.clone(),
-      wal.clone(),
-      gc.clone(),
-      compaction_config,
-    )
-    .to_box();
-
     if tables.is_new() {
       info!("engine initial state.");
       initialize(&block_cache, &tables, &recorder, &version_visibility)?;
-      gc.start();
+
+      let gc = GarbageCollector::new(
+        block_cache.clone(),
+        version_visibility.clone(),
+        recorder.clone(),
+        tables.clone(),
+        gc_config,
+      )
+      .to_arc();
+
+      let compactor = Compactor::new(
+        block_cache.clone(),
+        tables.clone(),
+        recorder.clone(),
+        version_visibility.clone(),
+        wal.clone(),
+        gc.clone(),
+        compaction_config,
+      )
+      .to_box();
+
       let orchestrator = TxOrchestrator::new(
         tx_config,
         &wal_config,
@@ -207,13 +209,31 @@ impl Engine {
         .write(data)?;
     }
 
-    // Flush replayed pages to disk so disk_len reflects the true file extent.
-    // TreeManager::clean_and_start uses disk_len to scan for orphaned blocks
-    // (allocated but unreferenced pages) and reclaim them into the free list.
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), gc.clone(), &tables)?;
-    gc.start();
+    let gc_queue = SegQueue::new().to_arc();
+    recovery(block_cache.clone(), gc_queue.clone(), &tables)?;
+
+    let gc = GarbageCollector::from_queue(
+      block_cache.clone(),
+      version_visibility.clone(),
+      recorder.clone(),
+      tables.clone(),
+      gc_queue,
+      gc_config,
+    )
+    .to_arc();
+
+    let compactor = Compactor::new(
+      block_cache.clone(),
+      tables.clone(),
+      recorder.clone(),
+      version_visibility.clone(),
+      wal.clone(),
+      gc.clone(),
+      compaction_config,
+    )
+    .to_box();
 
     for (table, c_table) in compactions {
       compactor.resume(table, c_table);
@@ -287,7 +307,7 @@ impl Drop for Engine {
     {
       info!("engine shutdown");
       if let Err(err) = self.orchestrator.close() {
-        error!("{err}");
+        error!("error occurs in close engine: {err}");
       };
     }
   }

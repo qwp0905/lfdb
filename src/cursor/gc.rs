@@ -1,10 +1,7 @@
 use std::{
   collections::{BTreeMap, VecDeque},
   mem::{replace, take},
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+  sync::Arc,
   time::Duration,
 };
 
@@ -35,7 +32,6 @@ pub struct GarbageCollector {
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   table: Box<dyn BackgroundThread<(TableHandleRef, TxId, TxId)>>,
-  started: Arc<AtomicBool>,
 }
 impl GarbageCollector {
   pub fn mark(&self, mark: GCMark) {
@@ -45,11 +41,12 @@ impl GarbageCollector {
     self.table.dispatch((table, tx_id, version));
   }
 
-  pub fn new(
+  pub fn from_queue(
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
+    queue: Arc<SegQueue<GCMark>>,
     config: GarbageCollectionConfig,
   ) -> Self {
     let entry = WorkBuilder::new()
@@ -71,19 +68,12 @@ impl GarbageCollector {
       )
       .to_box();
 
-    let started = AtomicBool::new(false).to_arc();
-    let queue = SegQueue::new().to_arc();
     let main = WorkBuilder::new()
       .name("gc main")
       .single()
       .interval(
         GC_CHECK_INTERVAL,
-        wait_gc(
-          queue.clone(),
-          version_visibility.clone(),
-          entry.clone(),
-          started.clone(),
-        ),
+        wait_gc(queue.clone(), version_visibility.clone(), entry.clone()),
       )
       .to_box();
 
@@ -92,12 +82,24 @@ impl GarbageCollector {
       main,
       entry,
       table,
-      started,
     }
   }
 
-  pub fn start(&self) {
-    self.started.fetch_or(true, Ordering::Release);
+  pub fn new(
+    block_cache: Arc<BlockCache>,
+    version_visibility: Arc<VersionVisibility>,
+    recorder: Arc<PageRecorder>,
+    mapper: Arc<TableMapper>,
+    config: GarbageCollectionConfig,
+  ) -> Self {
+    Self::from_queue(
+      block_cache,
+      version_visibility,
+      recorder,
+      mapper,
+      SegQueue::new().to_arc(),
+      config,
+    )
   }
 
   pub fn close(&self) {
@@ -328,7 +330,6 @@ const fn wait_gc(
   queue: Arc<SegQueue<GCMark>>,
   version_visibility: Arc<VersionVisibility>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
-  started: Arc<AtomicBool>,
 ) -> impl FnMut(Option<()>) -> Result {
   let mut not_committed = BTreeMap::<TxId, Vec<_>>::new();
   let mut triggered = Vec::new();
@@ -336,10 +337,6 @@ const fn wait_gc(
   move |_| {
     while let Some(mark) = queue.pop() {
       not_committed.entry(mark.owner).or_default().push(mark);
-    }
-
-    if !started.load(Ordering::Acquire) {
-      return Ok(());
     }
 
     let min_version = version_visibility.min_version();
