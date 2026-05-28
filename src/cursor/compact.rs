@@ -234,7 +234,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   }
 }
 
-pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
+pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
 pub fn wait_compaction(
   tables: Arc<TableMapper>,
