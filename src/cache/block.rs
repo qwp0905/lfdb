@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
-  table::TableHandle,
+  table::TableHandleRef,
   thread::TaskHandle,
   utils::{AtomicArc, ShortenedMutex},
 };
@@ -12,16 +12,12 @@ pub type LatchGuard<'a> = MutexGuard<'a, ()>;
 pub struct CachedBlock {
   page: AtomicArc<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
-  handle: Arc<TableHandle>,
+  handle: TableHandleRef,
   latch: Mutex<()>,
 }
 impl CachedBlock {
   #[inline]
-  pub fn new(
-    pointer: Pointer,
-    page: PageRef<PAGE_SIZE>,
-    handle: Arc<TableHandle>,
-  ) -> Self {
+  pub fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>, handle: TableHandleRef) -> Self {
     Self {
       page: AtomicArc::new(page),
       pointer,
@@ -57,7 +53,7 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub const fn handle(&self) -> &Arc<TableHandle> {
+  pub const fn handle(&self) -> &TableHandleRef {
     &self.handle
   }
 }

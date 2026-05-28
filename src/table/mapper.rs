@@ -5,7 +5,7 @@ use std::{
   sync::{atomic::Ordering, Arc, RwLock},
 };
 
-use super::{AtomicTableId, TableHandle, TableId, TableMetadata};
+use super::{AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata};
 use crate::{
   disk::{IOPool, PAGE_SIZE},
   metrics::MetricsRegistry,
@@ -28,9 +28,9 @@ pub struct TableConfig {
 }
 
 pub struct TableMapper {
-  open_handles: RwLock<HashMap<TableId, Arc<TableHandle>>>,
+  open_handles: RwLock<HashMap<TableId, TableHandleRef>>,
   base_path: PathBuf,
-  metadata: Arc<TableHandle>,
+  metadata: TableHandleRef,
   io_pool: IOPool<PAGE_SIZE>,
   last_table_id: AtomicTableId,
   is_new: bool,
@@ -59,12 +59,12 @@ impl TableMapper {
     })
   }
 
-  pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<Arc<TableHandle>> {
+  pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
     let disk = self.io_pool.open_controller(table_meta.get_path())?;
     Ok(TableHandle::new(table_meta, disk).to_arc())
   }
 
-  pub fn replay<Iter: Iterator<Item = Arc<TableHandle>>>(&self, iter: Iter) -> Result {
+  pub fn replay<Iter: Iterator<Item = TableHandleRef>>(&self, iter: Iter) -> Result {
     let dir = read_dir(&self.base_path).map_err(Error::IO)?;
     let mut exists = HashSet::new();
     for entry in dir {
@@ -98,11 +98,11 @@ impl TableMapper {
     self.is_new
   }
 
-  pub fn get(&self, id: TableId) -> Option<Arc<TableHandle>> {
+  pub fn get(&self, id: TableId) -> Option<TableHandleRef> {
     self.open_handles.rl().get(&id).map(|handle| handle.clone())
   }
 
-  pub fn insert(&self, handle: Arc<TableHandle>) {
+  pub fn insert(&self, handle: TableHandleRef) {
     self
       .open_handles
       .wl()
@@ -117,11 +117,11 @@ impl TableMapper {
     TableMetadata::new(id, str.to_string(), to_path(&self.base_path, id))
   }
 
-  pub fn meta_table(&self) -> Arc<TableHandle> {
+  pub fn meta_table(&self) -> TableHandleRef {
     self.metadata.clone()
   }
 
-  pub fn get_all(&self) -> Vec<Arc<TableHandle>> {
+  pub fn get_all(&self) -> Vec<TableHandleRef> {
     self
       .open_handles
       .rl()

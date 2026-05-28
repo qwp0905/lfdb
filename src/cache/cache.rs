@@ -9,7 +9,7 @@ use crate::{
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
-  table::TableHandle,
+  table::TableHandleRef,
   thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
@@ -124,7 +124,7 @@ impl BlockCache {
   pub fn alloc(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
@@ -136,7 +136,7 @@ impl BlockCache {
   pub fn read_unchecked(
     &self,
     pointer: Pointer,
-    handle: Arc<TableHandle>,
+    handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
@@ -150,7 +150,7 @@ impl BlockCache {
     self.handle_eviction(guard, new_block)
   }
 
-  fn __read(&self, pointer: Pointer, handle: Arc<TableHandle>) -> Result<CachedSlot<'_>> {
+  fn __read(&self, pointer: Pointer, handle: TableHandleRef) -> Result<CachedSlot<'_>> {
     let table_id = handle.metadata().get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
@@ -167,11 +167,7 @@ impl BlockCache {
   }
 
   #[inline]
-  pub fn read(
-    &self,
-    pointer: Pointer,
-    handle: Arc<TableHandle>,
-  ) -> Result<CachedSlot<'_>> {
+  pub fn read(&self, pointer: Pointer, handle: TableHandleRef) -> Result<CachedSlot<'_>> {
     self
       .metrics
       .block_cache_read
