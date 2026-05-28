@@ -2,6 +2,8 @@ use std::{
   cell::Cell, collections::VecDeque, mem::take, ops::Bound, sync::Arc, time::Duration,
 };
 
+use crossbeam::queue::SegQueue;
+
 use super::{
   BTreeIndex, CreatablePolicy, GCMark, GarbageCollector, ReadonlyPolicy, WritablePolicy,
 };
@@ -237,6 +239,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
 pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn wait_compaction(
+  queue: Arc<SegQueue<CompactTask>>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   versions: Arc<VersionVisibility>,
@@ -246,14 +249,14 @@ pub fn wait_compaction(
   compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
   compaction_threshold: f64,
   compaction_min_size: Pointer,
-) -> impl FnMut(Option<CompactTask>) -> Result {
+) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
   let meta_table_id = meta_table.metadata().get_id();
   let mut triggered = Vec::new();
   let mut waited = VecDeque::new();
 
-  move |task| {
-    if let Some(task) = task {
+  move |_| {
+    while let Some(task) = queue.pop() {
       triggered.push(task);
     }
 
@@ -446,7 +449,8 @@ pub const fn after_compaction(
 }
 
 pub struct Compactor {
-  wait_compaction: Box<dyn BackgroundThread<CompactTask, Result>>,
+  queue: Arc<SegQueue<CompactTask>>,
+  wait_compaction: Box<dyn BackgroundThread<(), Result>>,
   do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
   after_compaction:
     Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
@@ -484,12 +488,14 @@ impl Compactor {
       ))
       .to_arc();
 
+    let queue = SegQueue::new().to_arc();
     let wait_compaction = WorkBuilder::new()
       .name("tree waiting compaction")
       .single()
       .interval(
         COMPACTION_INTERVAL,
         wait_compaction(
+          queue.clone(),
           tables.clone(),
           block_cache.clone(),
           version_visibility.clone(),
@@ -504,6 +510,7 @@ impl Compactor {
       .to_box();
 
     Self {
+      queue,
       wait_compaction,
       do_compaction,
       after_compaction,
@@ -514,7 +521,7 @@ impl Compactor {
     self.do_compaction.dispatch((old, new));
   }
   pub fn register(&self, old: TableHandleRef, new: MutationHandle, version: TxId) {
-    self.wait_compaction.dispatch((old, new, version));
+    self.queue.push((old, new, version));
   }
 
   pub fn close(&self) {

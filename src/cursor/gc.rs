@@ -8,11 +8,12 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::epoch;
+use crossbeam::{epoch, queue::SegQueue};
 
 use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
   cache::{BlockCache, RefedSlot},
+  debug,
   disk::Pointer,
   error::Result,
   table::{PinnedHandle, TableHandleRef, TableId, TableMapper},
@@ -27,17 +28,18 @@ pub struct GarbageCollectionConfig {
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const GC_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const GC_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
 pub struct GarbageCollector {
-  main: Box<dyn BackgroundThread<GCMark, Result>>,
+  queue: Arc<SegQueue<GCMark>>,
+  main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   table: Box<dyn BackgroundThread<(TableHandleRef, TxId, TxId)>>,
   started: Arc<AtomicBool>,
 }
 impl GarbageCollector {
   pub fn mark(&self, mark: GCMark) {
-    self.main.dispatch(mark);
+    self.queue.push(mark);
   }
   pub fn release_table(&self, table: TableHandleRef, tx_id: TxId, version: TxId) {
     self.table.dispatch((table, tx_id, version));
@@ -70,16 +72,23 @@ impl GarbageCollector {
       .to_box();
 
     let started = AtomicBool::new(false).to_arc();
+    let queue = SegQueue::new().to_arc();
     let main = WorkBuilder::new()
       .name("gc main")
       .single()
       .interval(
         GC_CHECK_INTERVAL,
-        wait_gc(version_visibility.clone(), entry.clone(), started.clone()),
+        wait_gc(
+          queue.clone(),
+          version_visibility.clone(),
+          entry.clone(),
+          started.clone(),
+        ),
       )
       .to_box();
 
     Self {
+      queue,
       main,
       entry,
       table,
@@ -316,17 +325,19 @@ impl GCMark {
 }
 
 const fn wait_gc(
+  queue: Arc<SegQueue<GCMark>>,
   version_visibility: Arc<VersionVisibility>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   started: Arc<AtomicBool>,
-) -> impl FnMut(Option<GCMark>) -> Result {
+) -> impl FnMut(Option<()>) -> Result {
   let mut not_committed = BTreeMap::<TxId, Vec<_>>::new();
   let mut triggered = Vec::new();
   let mut gc_ready = BTreeMap::<(TableId, Pointer), GCMark>::new();
-  move |mark| {
-    if let Some(data) = mark {
-      not_committed.entry(data.owner).or_default().push(data);
+  move |_| {
+    while let Some(mark) = queue.pop() {
+      not_committed.entry(mark.owner).or_default().push(mark);
     }
+
     if !started.load(Ordering::Acquire) {
       return Ok(());
     }
@@ -374,6 +385,7 @@ const fn wait_gc(
       gc_ready.insert((mark.table.metadata().get_id(), mark.pointer), mark);
     }
 
+    debug!("gc {} entries enqueued.", waiting.len());
     waiting
       .into_iter()
       .map(|done| done.wait().flatten())
