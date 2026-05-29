@@ -52,7 +52,7 @@ impl CachedBlock {
     self
       .handle
       .disk()
-      .write_async(self.pointer, unsafe { transmute(&*page) })
+      .write_async(self.pointer, unsafe { transmute(&**page) })
       .wait()
   }
 

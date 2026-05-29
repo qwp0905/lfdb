@@ -11,7 +11,7 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use super::{max_iov, DirectIO, PageRef, Pointer, Pread, Pwrite, Pwritev};
+use super::{max_iov, DirectIO, Page, Pointer, Pread, Pwrite, Pwritev};
 use crate::{
   error::{Error, Result},
   metrics::MetricsRegistry,
@@ -27,7 +27,7 @@ type ThreadArg<const N: usize> = (
   Arc<AtomicBool>,
 );
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
-type WriteTask<const N: usize> = (Pointer, &'static PageRef<N>);
+type WriteTask<const N: usize> = (Pointer, &'static Page<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
@@ -58,7 +58,7 @@ impl<const N: usize> WriteHandle<N> {
     &self,
     file: &Arc<File>,
     pointer: Pointer,
-    page: &'static PageRef<N>,
+    page: &'static Page<N>,
   ) -> TaskHandle<()> {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
@@ -237,7 +237,7 @@ impl<const N: usize> DiskController<N> {
     })
   }
 
-  pub fn read<'a>(&self, pointer: Pointer, page: &'a mut PageRef<N>) -> Result {
+  pub fn read<'a>(&self, pointer: Pointer, page: &'a mut Page<N>) -> Result {
     self
       .metrics
       .disk_read
@@ -245,7 +245,7 @@ impl<const N: usize> DiskController<N> {
       .map_err(Error::IO)
   }
 
-  pub fn read_unchecked<'a>(&self, pointer: Pointer, page: &'a mut PageRef<N>) -> Result {
+  pub fn read_unchecked<'a>(&self, pointer: Pointer, page: &'a mut Page<N>) -> Result {
     let mut offset = pointer * Self::SIZE;
     let mut buf = page.as_mut();
     while !buf.is_empty() {
@@ -265,11 +265,7 @@ impl<const N: usize> DiskController<N> {
   }
 
   #[inline]
-  pub fn write_async(
-    &self,
-    pointer: Pointer,
-    page: &'static PageRef<N>,
-  ) -> TaskHandle<()> {
+  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> TaskHandle<()> {
     self.write_handle.execute(&self.file, pointer, page)
   }
 
