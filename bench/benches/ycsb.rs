@@ -12,7 +12,7 @@ fn record_count() -> usize {
     .and_then(|v| v.parse().ok())
     .unwrap_or(DEFAULT_RECORD_COUNT)
 }
-const DEFAULT_OP_COUNT: usize = 300_000;
+const DEFAULT_OP_COUNT: usize = 30_000;
 
 fn op_count() -> usize {
   std::env::var("YCSB_OP_COUNT")
@@ -21,7 +21,7 @@ fn op_count() -> usize {
     .unwrap_or(DEFAULT_OP_COUNT)
 }
 const THREADS: usize = 128;
-const DEFAULT_SAMPLE_SIZE: usize = 10;
+const DEFAULT_SAMPLE_SIZE: usize = 100;
 
 const CACHE_SIZE: usize = 1024 << 20;
 
