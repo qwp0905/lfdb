@@ -239,7 +239,7 @@ const fn handle_execute(
       };
 
       let block = unsafe { blocks[id].assume_init_ref() };
-      let _lock = block.latch();
+      let _latch = block.latch();
       if !dirty_blocks.contains(id) {
         return Ok(());
       };
