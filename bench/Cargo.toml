@@ -30,7 +30,7 @@ name = "ycsb"
 harness = false
 
 [features]
-default = ["lfdb"]
+default = ["sled"]
 lfdb = ["dep:lfdb"]
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]

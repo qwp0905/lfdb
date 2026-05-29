@@ -1,9 +1,6 @@
 use std::path::Path;
 
-use sled::{
-  Batch, Config, Db,
-  transaction::{ConflictableTransactionResult, TransactionError},
-};
+use sled::{Batch, Config, Db, transaction::ConflictableTransactionResult};
 
 use crate::BenchmarkDB;
 
@@ -30,13 +27,13 @@ impl BenchmarkDB for Db {
       b.insert(k, v);
     }
     t.apply_batch(b).unwrap();
+    t.flush().unwrap();
   }
 
   fn get(&self, table: &str, key: &[u8]) {
     let t = self.open_tree(table).unwrap();
     t.transaction(|tx| {
       tx.get(key)?;
-
       Ok(()) as ConflictableTransactionResult<()>
     })
     .unwrap();
@@ -44,17 +41,12 @@ impl BenchmarkDB for Db {
 
   fn insert(&self, table: &str, key: Vec<u8>, value: Vec<u8>) {
     let t = self.open_tree(table).unwrap();
-
-    loop {
-      match t.transaction(|tx| {
-        tx.insert(key.clone(), value.clone())?;
-        Ok(()) as ConflictableTransactionResult<()>
-      }) {
-        Ok(_) => return,
-        Err(TransactionError::Abort(_)) => continue,
-        Err(TransactionError::Storage(err)) => panic!("{err}"),
-      };
-    }
+    t.transaction(|tx| {
+      tx.insert(key.clone(), value.clone())?;
+      tx.flush();
+      Ok(()) as ConflictableTransactionResult<()>
+    })
+    .unwrap();
   }
 
   fn scan(&self, table: &str, start: &[u8], end: &[u8]) {
@@ -65,16 +57,12 @@ impl BenchmarkDB for Db {
   fn read_modify_write(&self, table: &str, key: Vec<u8>, value: Vec<u8>) {
     let t = self.open_tree(table).unwrap();
 
-    loop {
-      match t.transaction(|tx| {
-        tx.get(&key)?;
-        tx.insert(key.clone(), value.clone())?;
-        Ok(()) as ConflictableTransactionResult<()>
-      }) {
-        Ok(_) => return,
-        Err(TransactionError::Abort(_)) => continue,
-        Err(TransactionError::Storage(err)) => panic!("{err}"),
-      };
-    }
+    t.transaction(|tx| {
+      tx.get(&key)?;
+      tx.insert(key.clone(), value.clone())?;
+      tx.flush();
+      Ok(()) as ConflictableTransactionResult<()>
+    })
+    .unwrap();
   }
 }
