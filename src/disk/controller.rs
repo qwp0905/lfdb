@@ -27,7 +27,7 @@ type ThreadArg<const N: usize> = (
   Arc<AtomicBool>,
 );
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
-type WriteTask<const N: usize> = (Pointer, Arc<PageRef<N>>);
+type WriteTask<const N: usize> = (Pointer, &'static PageRef<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
@@ -58,7 +58,7 @@ impl<const N: usize> WriteHandle<N> {
     &self,
     file: &Arc<File>,
     pointer: Pointer,
-    page: Arc<PageRef<N>>,
+    page: &'static PageRef<N>,
   ) -> TaskHandle<()> {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
@@ -265,7 +265,11 @@ impl<const N: usize> DiskController<N> {
   }
 
   #[inline]
-  pub fn write_async(&self, pointer: Pointer, page: Arc<PageRef<N>>) -> TaskHandle<()> {
+  pub fn write_async(
+    &self,
+    pointer: Pointer,
+    page: &'static PageRef<N>,
+  ) -> TaskHandle<()> {
     self.write_handle.execute(&self.file, pointer, page)
   }
 

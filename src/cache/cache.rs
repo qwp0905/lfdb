@@ -1,7 +1,7 @@
 use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
 
 use super::{
-  Acquired, BatchHandle, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
+  Acquired, BatchHandle, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
   MappingTable,
 };
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  thread::{once, BackgroundThread, TaskHandle, WorkBuilder},
+  thread::{BackgroundThread, TaskHandle, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
 
@@ -33,6 +33,7 @@ pub struct BlockCache {
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
   pre_flush: Box<dyn BackgroundThread<(), Result>>,
+  flush_executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
@@ -53,9 +54,20 @@ impl BlockCache {
     let cached_blocks = Arc::<[_]>::from(blocks.into_boxed_slice());
     let pins = Arc::<[_]>::from(pins.into_boxed_slice());
     let batch_handles = batch_handles.into_boxed_slice();
-    let dirty = AtomicBitmap::new(block_cap).to_arc();
+    let dirty_blocks = AtomicBitmap::new(block_cap).to_arc();
 
     let dirty_tables = DirtyTables::new().to_arc();
+
+    let flush_executor = WorkBuilder::new()
+      .name("flush executor")
+      .multi(MAX_BATCHING)
+      .shared(handle_execute(
+        cached_blocks.clone(),
+        pins.clone(),
+        dirty_blocks.clone(),
+        dirty_tables.clone(),
+      ))
+      .to_arc();
 
     let pre_flush = WorkBuilder::new()
       .name("block cache pre-flush")
@@ -63,9 +75,8 @@ impl BlockCache {
       .interval(
         PRE_FLUSH_INTERVAL,
         handle_flush(
-          cached_blocks.clone(),
-          pins.clone(),
-          dirty.clone(),
+          flush_executor.clone(),
+          dirty_blocks.clone(),
           dirty_tables.clone(),
         ),
       )
@@ -76,9 +87,10 @@ impl BlockCache {
       pins,
       batch_handles,
       table: MappingTable::new(config.shard_count, block_cap),
-      dirty_blocks: dirty,
+      dirty_blocks,
       page_pool,
       pre_flush,
+      flush_executor,
       metrics,
       dirty_tables,
     })
@@ -110,7 +122,7 @@ impl BlockCache {
 
     let old = unsafe { ptr.replace(new) };
     if self.dirty_blocks.contains(block_id) {
-      old.flush_async().wait()?;
+      old.flush()?;
       self.dirty_blocks.remove(block_id);
       self.dirty_tables.mark(old.handle());
     }
@@ -186,6 +198,7 @@ impl BlockCache {
 
   pub fn close(&self) {
     self.pre_flush.close();
+    self.flush_executor.close();
   }
 }
 
@@ -205,11 +218,43 @@ fn __flush(waiting: &mut Vec<TaskHandle<()>>) -> Result {
 
 const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const PRE_FLUSH_THRESHOLD: usize = 100;
-const MAX_BATCHING: usize = 16;
+const MAX_BATCHING: usize = 8;
 
-const fn handle_flush(
+enum FlushTask {
+  Write(BlockId),
+  Fsync(TableHandleRef),
+}
+
+const fn handle_execute(
   blocks: Arc<[MaybeUninit<CachedBlock>]>,
   pins: Arc<[ExclusivePin]>,
+  dirty_blocks: Arc<AtomicBitmap>,
+  dirty_tables: Arc<DirtyTables>,
+) -> impl Fn(FlushTask) -> Result {
+  move |task| match task {
+    FlushTask::Write(id) => {
+      let _token = match pins[id].try_shared() {
+        Some(t) => t,
+        None => return Ok(()),
+      };
+
+      let block = unsafe { blocks[id].assume_init_ref() };
+      let _lock = block.latch();
+      if !dirty_blocks.contains(id) {
+        return Ok(());
+      };
+
+      block.flush()?;
+      dirty_blocks.remove(id);
+      dirty_tables.mark(block.handle());
+      Ok(())
+    }
+    FlushTask::Fsync(table) => table.disk().fsync(),
+  }
+}
+
+const fn handle_flush(
+  executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(Option<()>) -> Result {
@@ -218,47 +263,26 @@ const fn handle_flush(
       return Ok(());
     }
 
-    let mut waits = Vec::with_capacity(MAX_BATCHING);
+    let mut waits = Vec::new();
     for id in dirty_blocks
       .iter()
       .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
     {
-      {
-        let _token = match pins[id].try_shared() {
-          Some(t) => t,
-          None => continue,
-        };
-
-        let block = unsafe { blocks[id].assume_init_ref() };
-        let _lock = block.latch();
-        if !dirty_blocks.remove(id) {
-          continue;
-        };
-
-        // Submit all writes asynchronously first so the DiskController can
-        // buffer and sort them, then batch into a single pwritev call.
-        // Writing synchronously one by one would bypass this optimization
-        // and issue a separate syscall per page.
-        waits.push(block.flush_async());
-        dirty_tables.mark(block.handle());
-      }
-
-      if waits.len() < MAX_BATCHING {
-        continue;
-      }
-      __flush(&mut waits)?;
+      waits.push(executor.execute(FlushTask::Write(id)));
     }
 
-    __flush(&mut waits)?;
+    waits
+      .drain(..)
+      .map(|done| done.wait().flatten())
+      .collect::<Result>()?;
 
-    let mut threads = Vec::new();
     for table in dirty_tables.drain() {
-      threads.push(once(move || table.disk().fsync()));
+      waits.push(executor.execute(FlushTask::Fsync(table)));
     }
 
-    threads
+    waits
       .into_iter()
-      .map(|th| th.wait().flatten())
+      .map(|done| done.wait().flatten())
       .collect::<Result>()?;
 
     Ok(())
