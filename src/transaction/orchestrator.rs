@@ -5,21 +5,20 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  debug,
   disk::Pointer,
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
-  thread::{BackgroundThread, WorkBuilder},
   utils::ToArc,
-  wal::{TxId, WALConfig, WALSegment, WAL},
+  wal::{Checkpoint, TxId, WALSegment, WAL},
 };
 
 pub struct TransactionConfig {
   pub timeout: Duration,
-  pub checkpoint_interval: Duration,
+  pub segment_flush_delay: Duration,
+  pub segment_flush_count: usize,
 }
 
 /**
@@ -31,7 +30,7 @@ pub struct TxOrchestrator {
   wal: Arc<WAL>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
-  checkpoint: Arc<dyn BackgroundThread<(), Result>>,
+  checkpoint: Arc<Checkpoint>,
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
@@ -43,7 +42,6 @@ pub struct TxOrchestrator {
 impl TxOrchestrator {
   pub fn new(
     config: TransactionConfig,
-    wal_config: &WALConfig,
     wal: Arc<WAL>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
@@ -53,15 +51,15 @@ impl TxOrchestrator {
     compactor: Box<Compactor>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
-    let checkpoint = WorkBuilder::new()
-      .name("checkpoint")
-      .single()
-      .interval(
-        config.checkpoint_interval,
-        handle_checkpoint(wal.clone(), block_cache.clone(), version_visibility.clone()),
-      )
-      .to_arc();
-    wal.initialize(wal_config, Arc::downgrade(&checkpoint));
+    let checkpoint = Checkpoint::new(
+      wal.clone(),
+      block_cache.clone(),
+      version_visibility.clone(),
+      config.segment_flush_delay,
+      config.segment_flush_count,
+    )
+    .to_arc();
+    wal.initialize(Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone());
 
     Self {
@@ -81,7 +79,6 @@ impl TxOrchestrator {
 
   pub fn initial_checkpoint(
     config: TransactionConfig,
-    wal_config: &WALConfig,
     wal: Arc<WAL>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
@@ -92,7 +89,7 @@ impl TxOrchestrator {
     metrics: Arc<MetricsRegistry>,
     segments: Vec<WALSegment>,
   ) -> Result<Self> {
-    run_checkpoint(&wal, &block_cache, &version_visibility)?;
+    Checkpoint::run(&wal, &block_cache, &version_visibility)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -100,7 +97,6 @@ impl TxOrchestrator {
 
     Ok(Self::new(
       config,
-      wal_config,
       wal,
       block_cache,
       tables,
@@ -224,46 +220,18 @@ impl TxOrchestrator {
    */
   pub fn close(&self) -> Result {
     self.compactor.close();
+    self.gc.close();
+    info!("gc closed.");
     self.timeout_thread.close();
-    self.wal.half_close();
     self.checkpoint.close();
     info!("last checkpoint completed.");
 
     self.block_cache.close();
     info!("block cache closed.");
-    self.gc.close();
     self.tables.close();
     info!("tables closed.");
     self.wal.close();
     info!("wal closed.");
     Ok(())
   }
-}
-
-const fn handle_checkpoint(
-  wal: Arc<WAL>,
-  block_cache: Arc<BlockCache>,
-  version: Arc<VersionVisibility>,
-) -> impl Fn(Option<()>) -> Result {
-  move |_| run_checkpoint(&wal, &block_cache, &version)
-}
-
-fn run_checkpoint(
-  wal: &WAL,
-  block_cache: &BlockCache,
-  version: &VersionVisibility,
-) -> Result {
-  let log_id = wal.current_log_id();
-  let current_version = version.current_version();
-  info!("checkpoint trigger id {log_id} version {current_version}");
-
-  block_cache.flush()?;
-  let path = version.persist_snapshot(current_version)?;
-  debug!("checkpoint snapshot persisted.");
-
-  wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
-  info!("checkpoint complete id {log_id}");
-
-  version.clear(&path)?;
-  Ok(())
 }
