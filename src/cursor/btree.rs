@@ -698,7 +698,7 @@ where
         return Ok(None);
       }
 
-      if let Some((key, ptr)) = self.buffered.pop_front() {
+      while let Some((key, ptr)) = self.buffered.pop_front() {
         if let Some(found) = self.find_value(ptr)? {
           return Ok(Some(match found {
             Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
