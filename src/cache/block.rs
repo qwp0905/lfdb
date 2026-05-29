@@ -1,10 +1,13 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+  mem::transmute,
+  sync::{Arc, Mutex, MutexGuard},
+};
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  thread::TaskHandle,
   utils::{AtomicArc, ShortenedMutex},
+  Result,
 };
 
 pub type LatchGuard<'a> = MutexGuard<'a, ()>;
@@ -44,12 +47,13 @@ impl CachedBlock {
     self.latch.l()
   }
 
-  #[inline]
-  pub fn flush_async(&self) -> TaskHandle<()> {
+  pub fn flush(&self) -> Result {
+    let page = self.load_page();
     self
       .handle
       .disk()
-      .write_async(self.pointer, self.load_page())
+      .write_async(self.pointer, unsafe { transmute(&**page) })
+      .wait()
   }
 
   #[inline]
