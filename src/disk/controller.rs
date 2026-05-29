@@ -134,11 +134,8 @@ impl<const N: usize> IOPool<N> {
       .map(|g| g.map(|(p, s)| (*p, IoSlice::new(s.as_ref().as_ref()))))
       .map(|g| g.unzip())
       .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| ((ptrs[0] * Self::SIZE), bufs))
-      .map(|(offset, mut bufs)| {
-        metrics
-          .disk_write
-          .measure(|| file.pwritev_all(&mut bufs, offset))
-      })
+      .map(|(offset, mut bufs)| move || file.pwritev_all(&mut bufs, offset))
+      .map(|closure| metrics.disk_write.measure(closure))
       .map(|r| r.map_err(Error::IO))
       .collect()
   }
