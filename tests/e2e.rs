@@ -40,7 +40,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .block_cache_shard_count(1 << 2)
     .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
-    .checkpoint_interval(Duration::from_secs(2))
+    .wal_segment_flush_delay(Duration::from_secs(2))
 }
 
 fn build_engine(dir: &TempDir) -> Engine {

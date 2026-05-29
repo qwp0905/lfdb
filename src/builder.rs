@@ -18,7 +18,6 @@ where
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       wal_segment_flush_count: DEFAULT_WAL_SEGMENT_FLUSH_COUNT,
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
-      checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
       group_commit_count: DEFAULT_GROUP_COMMIT_COUNT,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
@@ -73,15 +72,6 @@ where
    */
   pub const fn wal_segment_flush_count(mut self, count: usize) -> Self {
     self.0.wal_segment_flush_count = count;
-    self
-  }
-  /**
-   * Hard timeout for checkpoint execution. A checkpoint runs at this interval
-   * regardless of WAL segment pressure, ensuring GC and durability are not
-   * indefinitely deferred during idle periods.
-   */
-  pub const fn checkpoint_interval(mut self, interval: Duration) -> Self {
-    self.0.checkpoint_interval = interval;
     self
   }
   /**
@@ -157,9 +147,8 @@ where
 
 const DEFAULT_WAL_FILE_SIZE: usize = 64 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
-const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(10);
-const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 32;
-const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(20);
+const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 16;
 const DEFAULT_GROUP_COMMIT_COUNT: usize = 512;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_GC_THREAD_COUNT: usize = 5;

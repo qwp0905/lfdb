@@ -39,7 +39,6 @@ where
   pub wal_buffer_size: usize,
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
-  pub checkpoint_interval: Duration,
   pub group_commit_count: usize,
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
@@ -77,8 +76,6 @@ impl Engine {
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
       base_dir: base_path.clone(),
-      segment_flush_count: config.wal_segment_flush_count,
-      segment_flush_delay: config.wal_segment_flush_delay,
     };
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,
@@ -94,7 +91,8 @@ impl Engine {
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
-      checkpoint_interval: config.checkpoint_interval,
+      segment_flush_count: config.wal_segment_flush_count,
+      segment_flush_delay: config.wal_segment_flush_delay,
     };
     let table_config = TableConfig {
       base_path: base_path.clone(),
@@ -145,7 +143,6 @@ impl Engine {
 
       let orchestrator = TxOrchestrator::new(
         tx_config,
-        &wal_config,
         wal,
         block_cache,
         tables,
@@ -241,7 +238,6 @@ impl Engine {
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
-      &wal_config,
       wal,
       block_cache,
       tables,

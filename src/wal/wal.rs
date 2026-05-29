@@ -3,9 +3,8 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, Weak,
+    OnceLock, Weak,
   },
-  time::Duration,
 };
 
 use crossbeam::{
@@ -19,19 +18,16 @@ use crate::{
   error::Result,
   info,
   table::TableId,
-  thread::{BackgroundThread, WorkBuilder},
-  utils::{ToArc, ToBox, UnsafeBorrow},
+  utils::{ToBox, UnsafeBorrow},
 };
 
 use super::{
-  replay, AtomicLogId, FsyncResult, LogBuffer, LogId, LogRecord, ReplayResult,
-  SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, Checkpoint, FsyncResult, LogBuffer, LogId, LogRecord,
+  ReplayResult, SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
   pub base_dir: PathBuf,
-  pub segment_flush_delay: Duration,
-  pub segment_flush_count: usize,
   pub group_commit_count: usize,
   pub max_file_size: usize,
   pub max_buffer_size: usize,
@@ -56,7 +52,7 @@ pub struct WAL {
    *  preload wal segment
    *  reuse synced + checkpoint complete segment
    */
-  preloader: Arc<SegmentPreload>,
+  preloader: Box<SegmentPreload>,
   /**
    * last log id (LSN)
    */
@@ -75,19 +71,8 @@ pub struct WAL {
    * preloaded data block.
    */
   page_pool: PagePool<WAL_BLOCK_SIZE>,
-  /**
-   * Batches rotated segments and triggers a checkpoint lazily. During write bursts,
-   * segments rotate frequently — triggering a checkpoint per rotation would stall
-   * rotation and hurt write throughput. Lazy buffering amortizes checkpoint cost
-   * by accumulating segments and triggering once per batch.
-   */
-  wait_checkpoint: OnceLock<Box<dyn BackgroundThread<WALSegment>>>,
-  /**
-   * Segments whose checkpoint has not yet succeeded. These cannot be deleted or
-   * reused until a checkpoint completes — they still contain records that must
-   * be replayable on crash. Drained and returned to the preloader on next success.
-   */
-  checkpoint_failed: Arc<SegQueue<WALSegment>>,
+
+  checkpoint: OnceLock<Weak<Checkpoint>>,
   /**
    * fsync results for rotated segments, pushed asynchronously at rotation time.
    * commit_and_flush drains this queue to ensure all prior segments are durable.
@@ -125,9 +110,7 @@ impl WAL {
       config.group_commit_count,
       max_len,
     )
-    .to_arc();
-
-    let checkpoint_failed = SegQueue::new().to_arc();
+    .to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((
@@ -137,8 +120,7 @@ impl WAL {
         buffer: Atomic::new(buffer),
         page_pool,
         max_len,
-        wait_checkpoint: OnceLock::new(),
-        checkpoint_failed,
+        checkpoint: OnceLock::new(),
         fsync_queue: SegQueue::new(),
         synced_count: AtomicU64::new(0),
       },
@@ -146,27 +128,9 @@ impl WAL {
     ))
   }
 
-  pub fn initialize(
-    &self,
-    config: &WALConfig,
-    checkpoint: Weak<impl BackgroundThread<(), Result> + 'static>,
-  ) {
-    let wait_checkpoint = WorkBuilder::new()
-      .name("wal checkpoint buffering")
-      .single()
-      .lazy_buffering(
-        config.segment_flush_delay,
-        config.segment_flush_count,
-        waiting_checkpoint(
-          checkpoint,
-          self.preloader.clone(),
-          self.checkpoint_failed.clone(),
-        ),
-      )
-      .to_box();
-
-    debug_assert!(self.wait_checkpoint.get().is_none());
-    let _ = self.wait_checkpoint.set(wait_checkpoint);
+  pub fn initialize(&self, checkpoint: Weak<Checkpoint>) {
+    debug_assert!(self.checkpoint.get().is_none());
+    let _ = self.checkpoint.set(checkpoint);
   }
 
   /**
@@ -312,8 +276,15 @@ impl WAL {
       forget(token.upgrade());
 
       let segment = buffer.take_segment();
-      self.fsync_queue.push(segment.fsync());
-      self.wait_checkpoint.wait().dispatch(segment);
+      let sync = segment.fsync();
+      if let Some(checkpoint) = self.checkpoint.wait().upgrade() {
+        self.fsync_queue.push(sync);
+        checkpoint.dispatch(segment);
+        continue;
+      }
+
+      sync.wait().flatten()?;
+      segment.close();
     }
   }
 
@@ -355,26 +326,15 @@ impl WAL {
     self.append(|log_id| LogRecord::new_abort(log_id, tx_id), false)
   }
 
-  /**
-   * Shutdown is split into two steps because the final checkpoint must be written
-   * while the WAL is still operational.
-   *
-   * Step 1 (this call): stops the checkpoint trigger path and drains pending fsyncs,
-   * leaving the WAL open for the caller to perform the final checkpoint_and_flush.
-   *
-   * Step 2 (returned closure): flushes the remaining buffer to disk and closes
-   * the current segment. Called after the final checkpoint completes.
-   */
-  pub fn half_close(&self) {
-    self.wait_checkpoint.wait().close();
+  pub fn reuse(&self, segment: WALSegment) {
+    self.preloader.reuse(segment);
+  }
 
+  pub fn close(&self) {
     while let Some(f) = self.fsync_queue.pop() {
       let _ = f.wait();
       self.synced_count.fetch_add(1, Ordering::Release);
     }
-  }
-
-  pub fn close(&self) {
     let backoff = Backoff::new();
     loop {
       let guard = epoch::pin();
@@ -399,26 +359,3 @@ impl WAL {
 }
 unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
-
-const fn waiting_checkpoint(
-  checkpoint: Weak<impl BackgroundThread<(), Result>>,
-  preloader: Arc<SegmentPreload>,
-  failed: Arc<SegQueue<WALSegment>>,
-) -> impl Fn(Vec<WALSegment>) {
-  move |segments| {
-    let checkpoint = match checkpoint.upgrade() {
-      Some(c) => c,
-      None => return segments.into_iter().for_each(|seg| seg.close()),
-    };
-
-    match checkpoint.execute(()).wait().flatten() {
-      Ok(_) => {
-        while let Some(buffered) = failed.pop() {
-          preloader.reuse(buffered);
-        }
-        segments.into_iter().for_each(|s| preloader.reuse(s));
-      }
-      Err(_) => segments.into_iter().for_each(|s| failed.push(s)),
-    }
-  }
-}

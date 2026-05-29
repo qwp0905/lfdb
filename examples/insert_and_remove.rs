@@ -20,7 +20,6 @@ fn build() -> Engine {
   let _ = log::set_logger(&DebugLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new("./.local")
-    .checkpoint_interval(Duration::from_secs(5))
     .build()
     .expect("bootstrap error")
 }
