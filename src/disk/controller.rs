@@ -155,7 +155,7 @@ impl<const N: usize> IOPool<N> {
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
       .map(|g| g.into_iter())
-      .map(|g| g.map(|(p, s)| (*p, IoSlice::new(s.as_ref().as_ref()))))
+      .map(|g| g.map(|(p, s)| (*p, IoSlice::new(s.as_ref()))))
       .map(|g| g.unzip())
       .map(|(ptrs, bufs): (Vec<_>, Vec<_>)| ((ptrs[0] * Self::SIZE), bufs))
       .map(|(offset, mut bufs)| move || file.pwritev_all(&mut bufs, offset))
