@@ -134,7 +134,7 @@ impl<const N: usize> IOPool<N> {
       }
       return metrics
         .disk_write
-        .measure(|| file.pwrite_all(slice.as_ref().as_ref(), p * Self::SIZE))
+        .measure(|| file.pwrite_all(slice.as_ref(), p * Self::SIZE))
         .map(|_| ())
         .map_err(Error::IO);
     }
