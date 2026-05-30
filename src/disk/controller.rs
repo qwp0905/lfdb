@@ -1,7 +1,9 @@
 use std::{
+  cell::Cell,
   fs::{remove_file, File, OpenOptions},
   io::{Error as IoError, ErrorKind, IoSlice},
   mem::forget,
+  panic::RefUnwindSafe,
   path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,7 +13,7 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use super::{max_iov, DirectIO, Page, Pointer, Pread, Pwrite, Pwritev};
+use super::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev};
 use crate::{
   error::{Error, Result},
   metrics::MetricsRegistry,
@@ -19,43 +21,41 @@ use crate::{
   utils::{ExclusivePin, ToArc},
 };
 
-type ThreadArg<const N: usize> = (
-  Arc<File>,
-  Arc<WriteQueue<N>>,
-  Arc<AtomicBool>,
-  Arc<ExclusivePin>,
-  Arc<AtomicBool>,
-);
+const EXTENT: Pointer = 64;
+
+type ThreadArg<const N: usize> = (Arc<File>, Arc<WriteHandle<N>>);
 type WriteThread<const N: usize> = dyn BackgroundThread<ThreadArg<N>, ()>;
 type WriteTask<const N: usize> = (Pointer, &'static Page<N>);
 type WriteQueue<const N: usize> = SegQueue<(WriteTask<N>, OneshotFulfill<Result>)>;
 
 struct WriteHandle<const N: usize> {
-  queue: Arc<WriteQueue<N>>,
-  occupied: Arc<AtomicBool>,
+  queue: WriteQueue<N>,
+  occupied: AtomicBool,
   thread: Arc<WriteThread<N>>,
   /**
    * Pin to protect file I/O
    */
-  pin: Arc<ExclusivePin>,
+  pin: ExclusivePin,
   /**
    * Flag to check for file existence a little faster.
    */
-  closed: Arc<AtomicBool>,
+  closed: AtomicBool,
+  allocated: Cell<Pointer>,
 }
 impl<const N: usize> WriteHandle<N> {
-  fn new(thread: Arc<WriteThread<N>>) -> Self {
+  fn new(thread: Arc<WriteThread<N>>, len: Pointer) -> Self {
     Self {
-      queue: SegQueue::new().to_arc(),
-      occupied: AtomicBool::new(false).to_arc(),
+      queue: SegQueue::new(),
+      occupied: AtomicBool::new(false),
       thread,
-      closed: AtomicBool::new(false).to_arc(),
-      pin: ExclusivePin::new().to_arc(),
+      closed: AtomicBool::new(false),
+      pin: ExclusivePin::new(),
+      allocated: Cell::new(len),
     }
   }
 
   fn execute(
-    &self,
+    self: &Arc<Self>,
     file: &Arc<File>,
     pointer: Pointer,
     page: &'static Page<N>,
@@ -72,16 +72,13 @@ impl<const N: usize> WriteHandle<N> {
       return handle;
     }
 
-    self.thread.dispatch((
-      file.clone(),
-      self.queue.clone(),
-      self.occupied.clone(),
-      self.pin.clone(),
-      self.closed.clone(),
-    ));
+    self.thread.dispatch((file.clone(), self.clone()));
     handle
   }
 }
+unsafe impl<const N: usize> Send for WriteHandle<N> {}
+unsafe impl<const N: usize> Sync for WriteHandle<N> {}
+impl<const N: usize> RefUnwindSafe for WriteHandle<N> {}
 
 pub struct IOPool<const N: usize> {
   thread: Arc<WriteThread<N>>,
@@ -89,6 +86,7 @@ pub struct IOPool<const N: usize> {
 }
 impl<const N: usize> IOPool<N> {
   const SIZE: Pointer = N as Pointer;
+  const EXTENT_SIZE: Pointer = EXTENT * Self::SIZE;
 
   pub fn new(thread_count: usize, metrics: Arc<MetricsRegistry>) -> Self {
     let thread = WorkBuilder::new()
@@ -101,20 +99,39 @@ impl<const N: usize> IOPool<N> {
 
   #[inline]
   pub fn open_controller(&self, path: &Path) -> Result<DiskController<N>> {
-    DiskController::open(
-      path,
-      WriteHandle::new(self.thread.clone()),
+    // Direct IO bypasses the OS page cache for predictable latency.
+    // To compensate for the lack of OS write buffering, writes are
+    // accumulated and sorted in the eager_buffering layer, then
+    // flushed as a single pwritev call per contiguous block.
+    let file = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .direct_io(path)
+      .map_err(Error::IO)?
+      .to_arc();
+    let len = file.metadata().map_err(Error::IO)?.len() / Self::SIZE;
+    Ok(DiskController::new(
+      file,
+      WriteHandle::new(self.thread.clone(), len).to_arc(),
       self.metrics.clone(),
-    )
+    ))
   }
 
   fn write(
     metrics: &MetricsRegistry,
     file: &File,
+    allocated: &Cell<Pointer>,
     mut buffered: Vec<WriteTask<N>>,
   ) -> Result {
     if buffered.len() == 1 {
       let (p, slice) = &buffered[0];
+      while allocated.get() <= *p {
+        file
+          .fallocate(allocated.get() * Self::SIZE, Self::EXTENT_SIZE)
+          .map_err(Error::IO)?;
+        allocated.set(allocated.get() + EXTENT);
+      }
       return metrics
         .disk_write
         .measure(|| file.pwrite_all(slice.as_ref().as_ref(), p * Self::SIZE))
@@ -128,6 +145,13 @@ impl<const N: usize> IOPool<N> {
     buffered.dedup_by_key(|(i, _)| *i);
     buffered.reverse();
 
+    let p = buffered.last().unwrap().0;
+    while allocated.get() <= p {
+      file
+        .fallocate(allocated.get() * Self::SIZE, Self::EXTENT_SIZE)
+        .map_err(Error::IO)?;
+      allocated.set(allocated.get() + EXTENT);
+    }
     buffered
       .chunk_by(|(a, _), (b, _)| *a + 1 == *b)
       .map(|g| g.into_iter())
@@ -145,6 +169,7 @@ impl<const N: usize> IOPool<N> {
     file: &File,
     pin: &ExclusivePin,
     closed: &AtomicBool,
+    allocated: &Cell<Pointer>,
     buffered: &mut Vec<(WriteTask<N>, OneshotFulfill<Result>)>,
   ) {
     if buffered.is_empty() {
@@ -160,7 +185,7 @@ impl<const N: usize> IOPool<N> {
       }
     };
 
-    let result = Self::write(metrics, file, values);
+    let result = Self::write(metrics, file, allocated, values);
     waiting
       .into_iter()
       .for_each(|done| done.fulfill(result.clone()));
@@ -168,22 +193,28 @@ impl<const N: usize> IOPool<N> {
 
   const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg<N>) {
     let count = max_iov();
-    move |(file, queue, occupied, pin, closed)| {
+    move |(file, handle)| {
       metrics.active_io_threads.inc();
 
       let mut buffered = Vec::with_capacity(count);
-
       loop {
-        for task in (0..count).map_while(|_| queue.pop()) {
+        for task in (0..count).map_while(|_| handle.queue.pop()) {
           buffered.push(task);
         }
 
-        Self::flush(&metrics, &file, &pin, &closed, &mut buffered);
-        occupied.fetch_and(false, Ordering::Release);
-        if queue.is_empty() {
+        Self::flush(
+          &metrics,
+          &file,
+          &handle.pin,
+          &handle.closed,
+          &handle.allocated,
+          &mut buffered,
+        );
+        handle.occupied.fetch_and(false, Ordering::Release);
+        if handle.queue.is_empty() {
           break;
         }
-        if occupied.fetch_or(true, Ordering::AcqRel) {
+        if handle.occupied.fetch_or(true, Ordering::AcqRel) {
           break;
         }
       }
@@ -204,34 +235,22 @@ impl<const N: usize> IOPool<N> {
  */
 pub struct DiskController<const N: usize> {
   file: Arc<File>,
-  write_handle: WriteHandle<N>,
+  write_handle: Arc<WriteHandle<N>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl<const N: usize> DiskController<N> {
   const SIZE: Pointer = N as Pointer;
 
-  fn open(
-    path: &Path,
-    write_handle: WriteHandle<N>,
+  fn new(
+    file: Arc<File>,
+    write_handle: Arc<WriteHandle<N>>,
     metrics: Arc<MetricsRegistry>,
-  ) -> Result<Self> {
-    // Direct IO bypasses the OS page cache for predictable latency.
-    // To compensate for the lack of OS write buffering, writes are
-    // accumulated and sorted in the eager_buffering layer, then
-    // flushed as a single pwritev call per contiguous block.
-    let file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .direct_io(path)
-      .map_err(Error::IO)?
-      .to_arc();
-
-    Ok(Self {
+  ) -> Self {
+    Self {
       file,
       write_handle,
       metrics,
-    })
+    }
   }
 
   pub fn read<'a>(&self, pointer: Pointer, page: &'a mut Page<N>) -> Result {
