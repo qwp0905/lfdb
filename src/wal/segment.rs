@@ -10,7 +10,7 @@ use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{max_iov, DirectIO, Fallocate, Page, Pointer, Pread, Pwrite, Pwritev},
   error::Result,
-  thread::{BackgroundThread, TaskHandle, WorkBuilder},
+  thread::{BackgroundThread, BatchExecution, TaskHandle, WorkBuilder},
   utils::{ShortenedMutex, ToArc, ToBox},
   Error,
 };
@@ -24,7 +24,7 @@ const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 pub struct WALSegment {
   file: Arc<File>,
   path: Mutex<PathBuf>,
-  io: Box<dyn BackgroundThread<(Pointer, &'static [u8]), Result>>,
+  io: Box<BatchExecution<(Pointer, &'static [u8]), Result>>,
   flush: Box<dyn BackgroundThread<(), Result>>,
 }
 impl WALSegment {
@@ -109,12 +109,7 @@ impl WALSegment {
   }
 
   fn new(file: Arc<File>, path: PathBuf, flush_count: usize) -> Self {
-    let io = WorkBuilder::new()
-      .name("wal buffered write")
-      .single()
-      .eager_buffering(max_iov(), handle_write(file.clone()))
-      .to_box();
-
+    let io = BatchExecution::new(handle_write(file.clone()), max_iov()).to_box();
     let flush = WorkBuilder::new()
       .name("wal flush")
       .single()
@@ -142,7 +137,6 @@ impl WALSegment {
 
   #[inline]
   pub fn close(&self) {
-    self.io.close();
     self.flush.close();
   }
 }
@@ -160,7 +154,7 @@ fn pad_start(n: SegmentGeneration) -> String {
   format!("{:0>20}", n)
 }
 
-const fn handle_write(file: Arc<File>) -> impl FnMut(Vec<(Pointer, &[u8])>) -> Result {
+const fn handle_write(file: Arc<File>) -> impl Fn(Vec<(Pointer, &[u8])>) -> Result {
   move |mut buffered| {
     if buffered.len() == 1 {
       let (i, slice) = buffered[0];
