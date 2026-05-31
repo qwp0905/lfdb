@@ -27,9 +27,9 @@ pub struct GarbageCollectionConfig {
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-pub type GCQueue = Arc<SegQueue<GCMark>>;
+pub type GCQueue = SegQueue<GCMark>;
 pub struct GarbageCollector {
-  queue: GCQueue,
+  queue: Arc<GCQueue>,
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   table: Box<dyn BackgroundThread<(TableHandleRef, TxId, TxId)>>,
@@ -136,9 +136,6 @@ fn release_entry(
     recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
   };
 
-  let mut is_empty = false;
-  let mut needs_inc = false;
-
   while let Some(ptr) = next.take() {
     if max_found {
       let mut entry = block_cache
@@ -162,10 +159,6 @@ fn release_entry(
         .as_ref()
         .deserialize::<DataEntryView>()?;
       next = entry.get_next();
-
-      if ptr == pointer {
-        is_empty = entry.is_empty();
-      }
 
       for record in entry.get_versions() {
         if version_visibility.is_aborted(&record.owner) {
@@ -226,11 +219,8 @@ fn release_entry(
           return Ok(());
         }
 
-        entry.set_versions(new_versions);
-        if pointer == ptr {
-          needs_inc = entry.is_empty();
-        }
         if entry.len() > 0 {
+          entry.set_versions(new_versions);
           serialize_and_log(slot, &entry)?;
           return Ok(());
         }
@@ -254,9 +244,6 @@ fn release_entry(
       })?;
   }
 
-  if !is_empty && needs_inc {
-    table.inc_dead();
-  }
   Ok(())
 }
 
@@ -328,7 +315,7 @@ impl GCMark {
 }
 
 const fn wait_gc(
-  queue: GCQueue,
+  queue: Arc<GCQueue>,
   version_visibility: Arc<VersionVisibility>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
 ) -> impl FnMut(Option<()>) -> Result {
