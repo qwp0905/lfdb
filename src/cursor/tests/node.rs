@@ -1,4 +1,8 @@
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::{
+  cursor::{leaf::*, record::*},
+  disk::Page,
+  serialize::SerializeFrom,
+};
 
 use super::*;
 
@@ -25,10 +29,21 @@ fn test_serialize_internal() {
 fn test_serialize_leaf() {
   let mut page = Page::new();
 
-  let entries = vec![(vec![49, 50, 51], 100)];
-  let next = Some(1100);
+  let mut leaf = LeafNode::empty();
 
-  let node = BTreeNode::Leaf(LeafNode::new(entries.clone(), next));
+  let entries = vec![(vec![49, 50, 51], (123, 456, vec![1, 2, 3]), 100)];
+
+  for (i, (key, (o, v, d), p)) in entries.iter().enumerate() {
+    leaf.insert_at(
+      i,
+      key.clone(),
+      VersionRecord::new(*o, *v, RecordData::Data(d.clone())),
+      *p,
+    );
+  }
+  leaf.set_next(200);
+
+  let node = BTreeNode::Leaf(leaf);
   page.serialize_from(&node).expect("serialize error");
 
   let d = page
@@ -36,11 +51,20 @@ fn test_serialize_leaf() {
     .expect("desiralize error")
     .as_leaf()
     .expect("desirialize leaf error");
-  for (i, (k, p)) in d.get_entries().enumerate() {
-    assert_eq!(entries[i].0, k.to_vec());
-    assert_eq!(entries[i].1, p)
+
+  for (i, (s, e, r, ptr)) in d.get_entries().enumerate() {
+    let (k, (o, v, d), p) = &entries[i];
+    assert_eq!(page.range(s..e), k);
+    assert_eq!(*p, ptr);
+    assert_eq!(r.owner, *o);
+    assert_eq!(r.version, *v);
+    assert!(matches!(
+      r.data,
+      RecordDataView::Data(s, e) if d == page.range(s..e)
+    ))
   }
-  assert_eq!(d.get_next(), next)
+
+  assert_eq!(d.get_next(), Some(200))
 }
 
 #[test]
