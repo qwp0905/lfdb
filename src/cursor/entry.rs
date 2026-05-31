@@ -33,6 +33,14 @@ impl DataEntry {
       versions: VecDeque::new(),
     }
   }
+  pub fn init(version: VersionRecord) -> Self {
+    let mut versions = VecDeque::with_capacity(1);
+    versions.push_front(version);
+    Self {
+      next: None,
+      versions,
+    }
+  }
 
   pub fn len(&self) -> usize {
     self.versions.len()

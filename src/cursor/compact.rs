@@ -292,7 +292,7 @@ fn wait_compaction(
 
             index.insert_if_matched(
               table_name.as_bytes(),
-              metadata.to_vec(),
+              Some(metadata.to_vec()),
               &meta_table,
             )?;
 
@@ -420,7 +420,7 @@ fn do_compaction(
 
     index.insert_if_matched(
       table_name.as_bytes(),
-      new.metadata().to_vec(),
+      Some(new.metadata().to_vec()),
       &meta_table,
     )?;
 
