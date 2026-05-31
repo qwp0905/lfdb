@@ -1,15 +1,13 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound};
 
-use crate::{
-  cache::RefedSlot, disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result,
-};
+use crate::{disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result};
 
 use crossbeam::epoch::pin;
 
 use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
-  DataEntryView, InternalNode, LeafNode, MergeSortable, NodeFindResult, ReadonlyPolicy,
-  RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
+  DataEntryView, InternalNode, MergeSortable, NodeFindResult, ReadonlyPolicy, RecordData,
+  RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
   WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
 };
 
@@ -20,34 +18,6 @@ impl<Policy> BTreeIndex<Policy> {
   }
 }
 impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
-  fn get_entry(
-    &self,
-    key: StaticKeyRef,
-    table: &TableHandleRef,
-  ) -> Result<Option<Pointer>> {
-    let mut ptr = self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
-    loop {
-      // This guard protects the next node or data entry from the GC.
-      // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
-        BTreeNodeView::Leaf(node) => match node.find(key) {
-          NodeFindResult::Found(_, i) => return Ok(Some(i)),
-          NodeFindResult::NotFound(_) => return Ok(None),
-          NodeFindResult::Move(i) => ptr = i,
-        },
-      }
-    }
-  }
-
   fn read_chunk(
     policy: &Policy,
     pointers: &[Pointer],
@@ -69,9 +39,35 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     key: StaticKeyRef,
     table: &TableHandleRef,
   ) -> Result<Option<Option<VecRef>>> {
-    let ptr = match self.get_entry(key, table)? {
-      Some(v) => v,
-      None => return Ok(None),
+    let mut ptr = self
+      .0
+      .fetch_slot(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let ptr = loop {
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      match slot.as_ref().view::<BTreeNodeView>()? {
+        BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        BTreeNodeView::Leaf(node) => match node.find(key) {
+          NodeFindResult::NotFound(_) => return Ok(None),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Found(_, record, i) => {
+            if !self.0.is_visible(record.owner, record.version) {
+              break i;
+            }
+            return Ok(Some(match &record.data {
+              RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
+              RecordDataView::Chunked(pointers) => {
+                Some(Self::read_chunk(&self.0, pointers, table)?)
+              }
+              RecordDataView::Tombstone => None,
+            }));
+          }
+        },
+      }
     };
 
     let mut _guard = None;
@@ -100,10 +96,69 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     Ok(None)
   }
 
+  pub fn key_count(&self, table: &TableHandleRef) -> Result<(usize, usize)> {
+    let mut ptr = self
+      .0
+      .fetch_slot(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let mut total = 0;
+    let mut dead = 0;
+    loop {
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      match slot.as_ref().view::<BTreeNodeView>()? {
+        BTreeNodeView::Internal(node) => ptr = node.first_child(),
+        BTreeNodeView::Leaf(node) => {
+          for (_, _, record, _) in node.get_entries() {
+            total += 1;
+            if record.data.is_tombstone()
+              || !self.0.is_visible(record.owner, record.version)
+            {
+              dead += 1;
+            }
+          }
+
+          match node.get_next() {
+            Some(i) => ptr = i,
+            None => return Ok((total, dead)),
+          }
+        }
+      }
+    }
+  }
+
   pub fn contains(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<bool> {
-    let ptr = match self.get_entry(key, table)? {
-      Some(v) => v,
-      None => return Ok(false),
+    let mut ptr = self
+      .0
+      .fetch_slot(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let ptr = loop {
+      // This guard protects the next node or data entry from the GC.
+      // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      match slot.as_ref().view::<BTreeNodeView>()? {
+        BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        BTreeNodeView::Leaf(node) => match node.find(key) {
+          NodeFindResult::NotFound(_) => return Ok(false),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Found(_, record, i) => {
+            if !self.0.is_visible(record.owner, record.version) {
+              break i;
+            }
+            return Ok(match &record.data {
+              RecordDataView::Chunked(_) | RecordDataView::Data(_, _) => true,
+              RecordDataView::Tombstone => false,
+            });
+          }
+        },
+      }
     };
 
     let mut _guard = None;
@@ -225,47 +280,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       })?;
     }
     Ok(result)
-  }
-
-  fn create_entry<F>(
-    &self,
-    key: StaticKeyRef,
-    pos: usize,
-    slot: &mut RefedSlot,
-    mut node: LeafNode,
-    table: &TableHandleRef,
-    create_record: F,
-  ) -> Result<Option<(StaticKey, Pointer)>>
-  where
-    F: FnOnce() -> VersionRecord,
-  {
-    let record = create_record();
-    let is_empty = record.data.is_tombstone();
-    let entry = DataEntry::init(record);
-    let entry_ptr = self.0.alloc_and_log(&entry, table)?;
-
-    let split = match node.insert_and_split(pos, key.to_vec(), entry_ptr) {
-      Some(split) => split,
-      None => {
-        self.0.serialize_and_log(slot, &node.to_node(), table)?;
-        table.inc_live();
-        if is_empty {
-          table.inc_dead();
-        }
-        return Ok(None);
-      }
-    };
-
-    let mid_key = split.top().clone();
-    let split_ptr = self.0.alloc_and_log(&split.to_node(), table)?;
-
-    node.set_next(split_ptr);
-    self.0.serialize_and_log(slot, &node.to_node(), table)?;
-    table.inc_live();
-    if is_empty {
-      table.inc_dead();
-    }
-    Ok(Some((mid_key, split_ptr)))
   }
 
   fn propagate_split(
@@ -398,24 +412,56 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let mut result = None;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-        match node.find(&key) {
-          NodeFindResult::Found(_, i) => result = Some(Ok(i)),
-          NodeFindResult::Move(i) => ptr = i,
-          NodeFindResult::NotFound(i) => {
-            let node = node.writable();
-            let split =
-              self.create_entry(&key, i, slot, node, table, || record.take().unwrap())?;
-            result = Some(Err(split))
+        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        let mut node = match leaf.find(&key) {
+          NodeFindResult::Move(i) => return Ok(ptr = i),
+          NodeFindResult::Found(i, old, entry_ptr) => {
+            let is_aborted = self.0.is_aborted(old.owner);
+            if old.version > snapshot.version && !is_aborted {
+              return Ok(result = Some(Err(entry_ptr)));
+            }
+
+            let mut node = leaf.writable();
+            let new_record = record.take().unwrap();
+            let old = node.replace_at(i, new_record);
+            if !is_aborted {
+              self.apply_version_chain(entry_ptr, old, table)?;
+            } else if let RecordData::Chunked(pointers) = old.data {
+              pointers.into_iter().for_each(|p| table.free().dealloc(p));
+            }
+            node
           }
-        }
-        Ok(())
+          NodeFindResult::NotFound(i) => {
+            let mut node = leaf.writable();
+            let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
+            let new_record = record.take().unwrap();
+            node.insert_at(i, key.to_vec(), new_record, entry_ptr);
+            node
+          }
+        };
+
+        let split = match node.split_if_needed() {
+          Some(split) => split,
+          None => {
+            self.0.serialize_and_log(slot, &node.to_node(), table)?;
+            return Ok(result = Some(Ok(None)));
+          }
+        };
+
+        let mid_key = split.top().clone();
+        let split_ptr = self.0.alloc_and_log(&split.to_node(), table)?;
+
+        node.set_next(split_ptr);
+        self.0.serialize_and_log(slot, &node.to_node(), table)?;
+        Ok(result = Some(Ok(Some((mid_key, split_ptr)))))
       })?;
 
       match result {
-        Some(Ok(i)) => return self.apply_version_chain(i, record.take().unwrap(), table),
-        Some(Err(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
-        Some(Err(None)) => return Ok(()),
+        Some(Ok(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
+        Some(Ok(None)) => return Ok(()),
+        Some(Err(i)) => {
+          return self.apply_version_chain(i, record.take().unwrap(), table)
+        }
         None => continue,
       }
     }
@@ -437,29 +483,67 @@ where
     loop {
       let mut result = None;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-        match node.find(&key) {
-          NodeFindResult::Found(_, i) => result = Some(Ok(i)),
-          NodeFindResult::Move(i) => ptr = i,
-          NodeFindResult::NotFound(i) => {
-            let node = node.writable();
-            let split = self.create_entry(&key, i, slot, node, table, || {
-              VersionRecord::new(
-                self.0.current_owner(),
-                self.0.current_version(),
-                record.take().unwrap(),
-              )
-            })?;
-            result = Some(Err(split))
+        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        let mut node = match leaf.find(&key) {
+          NodeFindResult::Move(i) => return Ok(ptr = i),
+          NodeFindResult::Found(i, old, entry_ptr) => {
+            if self.0.is_conflict(old.owner, old.version) {
+              if let RecordData::Chunked(pointers) = record.take().unwrap() {
+                pointers.into_iter().for_each(|p| table.free().dealloc(p));
+              }
+              return Ok(result = Some(Err(old.owner)));
+            }
+
+            let mut node = leaf.writable();
+            let new_record = VersionRecord::new(
+              self.0.current_owner(),
+              self.0.current_version(),
+              record.take().unwrap(),
+            );
+            let old = node.replace_at(i, new_record);
+            if !self.0.is_aborted(old.owner) {
+              self.apply_version_chain(entry_ptr, old, table)?;
+            } else if let RecordData::Chunked(pointers) = old.data {
+              pointers.into_iter().for_each(|p| table.free().dealloc(p));
+            }
+            node
           }
-        }
-        Ok(())
+          NodeFindResult::NotFound(i) => {
+            let mut node = leaf.writable();
+            let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
+            let new_record = VersionRecord::new(
+              self.0.current_owner(),
+              self.0.current_version(),
+              record.take().unwrap(),
+            );
+            node.insert_at(i, key.clone(), new_record, entry_ptr);
+            node
+          }
+        };
+
+        let split = match node.split_if_needed() {
+          Some(split) => split,
+          None => {
+            self.0.serialize_and_log(slot, &node.to_node(), table)?;
+            return Ok(result = Some(Ok(None)));
+          }
+        };
+
+        let mid_key = split.top().clone();
+        let split_ptr = self.0.alloc_and_log(&split.to_node(), table)?;
+
+        node.set_next(split_ptr);
+        self.0.serialize_and_log(slot, &node.to_node(), table)?;
+        Ok(result = Some(Ok(Some((mid_key, split_ptr)))))
       })?;
 
       match result {
-        Some(Ok(i)) => return self.insert_at(i, record.take().unwrap(), table),
-        Some(Err(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
-        Some(Err(None)) => return Ok(()),
+        Some(Ok(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
+        Some(Ok(None)) => return Ok(()),
+        Some(Err(i)) => {
+          self.0.wait_close(i);
+          return Err(Error::WriteConflict);
+        }
         None => continue,
       }
     }
@@ -469,55 +553,6 @@ where
   }
   pub fn remove(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result {
     self.insert_record_if_matched(key, RecordData::Tombstone, table)
-  }
-
-  fn insert_at(
-    &self,
-    entry_ptr: Pointer,
-    data: RecordData,
-    table: &TableHandleRef,
-  ) -> Result {
-    let mut conflict = None;
-    self
-      .0
-      .fetch_slot(entry_ptr, table)?
-      .for_batch()
-      .mutate(|slot| {
-        let mut entry: DataEntry = slot.as_ref().deserialize()?;
-        if let Some(record) = entry.get_last() {
-          if self.0.is_conflict(record.owner, record.version) {
-            conflict = Some(record.owner);
-            return Ok(());
-          }
-        }
-
-        if !data.is_tombstone() && entry.is_empty() {
-          table.dec_dead();
-        }
-
-        let record =
-          VersionRecord::new(self.0.current_owner(), self.0.current_version(), data);
-
-        if entry.is_available(&record) {
-          entry.append(record);
-          self.0.serialize_and_log(slot, &entry, table)?;
-          return Ok(());
-        }
-
-        let new_entry_index = self.0.alloc_and_log(&entry, table)?;
-        let mut new_entry = DataEntry::init(record);
-        new_entry.set_next(new_entry_index);
-        self.0.serialize_and_log(slot, &new_entry, table)?;
-
-        Ok(())
-      })?;
-    if let Some(owner) = conflict {
-      self.0.wait_close(owner);
-      return Err(Error::WriteConflict);
-    }
-
-    self.0.after_update_hook(entry_ptr, table);
-    Ok(())
   }
 
   pub fn insert_if_matched(
@@ -535,9 +570,65 @@ where
     record: RecordData,
     table: &TableHandleRef,
   ) -> Result {
-    match self.get_entry(&key, table)? {
-      Some(ptr) => self.insert_at(ptr, record, table),
-      None => return Ok(()),
+    let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
+
+    let mut record = Some(record);
+    loop {
+      let mut result = None;
+      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
+        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        let mut node = match leaf.find(&key) {
+          NodeFindResult::Move(i) => return Ok(ptr = i),
+          NodeFindResult::Found(i, old, entry_ptr) => {
+            if self.0.is_conflict(old.owner, old.version) {
+              if let RecordData::Chunked(pointers) = record.take().unwrap() {
+                pointers.into_iter().for_each(|p| table.free().dealloc(p));
+              }
+              return Ok(result = Some(Err(old.owner)));
+            }
+
+            let mut node = leaf.writable();
+            let new_record = VersionRecord::new(
+              self.0.current_owner(),
+              self.0.current_version(),
+              record.take().unwrap(),
+            );
+            let old = node.replace_at(i, new_record);
+            if !self.0.is_aborted(old.owner) {
+              self.apply_version_chain(entry_ptr, old, table)?;
+            } else if let RecordData::Chunked(pointers) = old.data {
+              pointers.into_iter().for_each(|p| table.free().dealloc(p));
+            }
+            node
+          }
+          NodeFindResult::NotFound(_) => return Ok(result = Some(Ok(None))),
+        };
+
+        let split = match node.split_if_needed() {
+          Some(split) => split,
+          None => {
+            self.0.serialize_and_log(slot, &node.to_node(), table)?;
+            return Ok(result = Some(Ok(None)));
+          }
+        };
+
+        let mid_key = split.top().clone();
+        let split_ptr = self.0.alloc_and_log(&split.to_node(), table)?;
+
+        node.set_next(split_ptr);
+        self.0.serialize_and_log(slot, &node.to_node(), table)?;
+        Ok(result = Some(Ok(Some((mid_key, split_ptr)))))
+      })?;
+
+      match result {
+        Some(Ok(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
+        Some(Ok(None)) => return Ok(()),
+        Some(Err(i)) => {
+          self.0.wait_close(i);
+          return Err(Error::WriteConflict);
+        }
+        None => continue,
+      }
     }
   }
 }
@@ -557,7 +648,7 @@ pub struct KVSnapshot {
 pub struct BTreeIterator<'a, Policy> {
   policy: &'a Policy,
   table: TableHandleRef,
-  buffered: VecDeque<(VecRef, Pointer)>,
+  buffered: VecDeque<(VecRef, Option<(Buffered, TxId, TxId)>)>,
   next: Option<Pointer>,
   end: Bound<StaticKey>,
   closed: bool,
@@ -592,7 +683,7 @@ where
         BTreeNodeView::Leaf(node) => {
           let pos = match &start {
             Bound::Included(k) => match node.find(k) {
-              NodeFindResult::Found(i, _) => i,
+              NodeFindResult::Found(i, _, _) => i,
               NodeFindResult::NotFound(i) => i,
               NodeFindResult::Move(i) => {
                 ptr = i;
@@ -600,7 +691,7 @@ where
               }
             },
             Bound::Excluded(k) => match node.find(k) {
-              NodeFindResult::Found(i, _) => i + 1,
+              NodeFindResult::Found(i, _, _) => i + 1,
               NodeFindResult::NotFound(i) => i,
               NodeFindResult::Move(i) => {
                 ptr = i;
@@ -610,12 +701,36 @@ where
             Bound::Unbounded => 0,
           };
 
-          for (s, e, p) in node.get_entries_while(end).skip(pos) {
-            buffered.push_back((VecRef::refed(slot.page(), s, e), p));
+          let mut count = 0;
+          for (s, e, record, p) in node.get_entries_while(end).skip(pos) {
+            count += 1;
+            if policy.is_visible(record.owner, record.version) {
+              buffered.push_back((
+                VecRef::refed(slot.page(), s, e),
+                match &record.data {
+                  RecordDataView::Data(s, e) => Some((
+                    Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
+                    record.owner,
+                    record.version,
+                  )),
+                  RecordDataView::Chunked(pointers) => Some((
+                    Buffered::Chunked(pointers.to_vec()),
+                    record.owner,
+                    record.version,
+                  )),
+                  RecordDataView::Tombstone => None,
+                },
+              ));
+              continue;
+            }
+
+            if let Some(found) = Self::__find(policy, table, p)? {
+              buffered.push_back((VecRef::refed(slot.page(), s, e), found));
+            };
           }
 
           let mut next = None;
-          if buffered.len() == node.len() - pos {
+          if count == node.len() - pos {
             next = node.get_next();
           }
 
@@ -632,17 +747,21 @@ where
     }
   }
 
-  fn find_value(&self, ptr: Pointer) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
+  fn __find(
+    policy: &Policy,
+    table: &TableHandleRef,
+    ptr: Pointer,
+  ) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
     let mut next = Some(ptr);
 
     let mut _guard = None;
     while let Some(ptr) = next.take() {
       let new_guard = pin();
-      let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
+      let slot = policy.fetch_slot(ptr, table)?.for_read();
       let entry: DataEntryView = slot.as_ref().deserialize()?;
 
       if let Some(record) =
-        entry.find(|record| self.policy.is_visible(record.owner, record.version))
+        entry.find(|record| policy.is_visible(record.owner, record.version))
       {
         return Ok(Some(match &record.data {
           RecordDataView::Data(s, e) => Some((
@@ -666,6 +785,10 @@ where
     Ok(None)
   }
 
+  fn find_value(&self, ptr: Pointer) -> Result<Option<Option<(Buffered, TxId, TxId)>>> {
+    Self::__find(self.policy, &self.table, ptr)
+  }
+
   fn fill_up(&mut self) -> Result {
     debug_assert!(self.buffered.is_empty());
 
@@ -680,13 +803,37 @@ where
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
 
-    for (s, e, p) in node.get_entries_while(&self.end) {
-      self
-        .buffered
-        .push_back((VecRef::refed(slot.page(), s, e), p));
+    let mut count = 0;
+    for (s, e, record, p) in node.get_entries_while(&self.end) {
+      count += 1;
+      if self.policy.is_visible(record.owner, record.version) {
+        self.buffered.push_back((
+          VecRef::refed(slot.page(), s, e),
+          match &record.data {
+            RecordDataView::Data(s, e) => Some((
+              Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
+              record.owner,
+              record.version,
+            )),
+            RecordDataView::Chunked(pointers) => Some((
+              Buffered::Chunked(pointers.to_vec()),
+              record.owner,
+              record.version,
+            )),
+            RecordDataView::Tombstone => None,
+          },
+        ));
+        continue;
+      }
+
+      if let Some(found) = self.find_value(p)? {
+        self
+          .buffered
+          .push_back((VecRef::refed(slot.page(), s, e), found));
+      };
     }
 
-    if self.buffered.len() == node.len() {
+    if count == node.len() {
       self.next = node.get_next();
     }
     Ok(())
@@ -698,21 +845,19 @@ where
         return Ok(None);
       }
 
-      while let Some((key, ptr)) = self.buffered.pop_front() {
-        if let Some(found) = self.find_value(ptr)? {
-          return Ok(Some(match found {
-            Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
-            Some((Buffered::Chunked(pointers), o, v)) => (
-              key,
-              Some((
-                BTreeIndex::read_chunk(self.policy, &pointers, &self.table)?,
-                o,
-                v,
-              )),
-            ),
-            None => (key, None),
-          }));
-        }
+      if let Some((key, found)) = self.buffered.pop_front() {
+        return Ok(Some(match found {
+          Some((Buffered::Data(data), o, v)) => (key, Some((data, o, v))),
+          Some((Buffered::Chunked(pointers), o, v)) => (
+            key,
+            Some((
+              BTreeIndex::read_chunk(self.policy, &pointers, &self.table)?,
+              o,
+              v,
+            )),
+          ),
+          None => (key, None),
+        }));
       }
 
       self.fill_up()?;
