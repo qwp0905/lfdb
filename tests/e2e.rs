@@ -40,6 +40,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .block_cache_shard_count(1 << 2)
     .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
+    .compaction_check_interval(Duration::from_secs(10))
     .wal_segment_flush_delay(Duration::from_secs(2))
 }
 
@@ -439,12 +440,15 @@ fn test_snapshot_isolation() {
 #[test]
 fn test_entry_split() {
   let dir = tempdir_in(".").unwrap();
-  let engine = build_engine(&dir);
+  let engine = default_options(&dir)
+    .gc_trigger_interval(Duration::from_secs(3))
+    .build()
+    .unwrap();
   create_table(&engine, TEST_TABLE);
 
   let key = b"hot-key".to_vec();
   // 100-byte value * 50 txs → well over 4KB page, forces split
-  let iterations = 50;
+  let iterations = 1_000;
 
   for i in 0..iterations {
     let mut tx = engine.new_tx().unwrap();
