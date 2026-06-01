@@ -5,7 +5,7 @@ use crate::{
   objects::{
     BTreeNode, BTreeNodeView, DataChunk, DataEntry, FindSlotResult, InternalNode,
     NodeFindResult, RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
-    VersionRecord, CHUNK_SIZE, LARGE_VALUE,
+    TreeHeight, VersionRecord, CHUNK_SIZE, LARGE_VALUE,
   },
   table::TableHandleRef,
   wal::TxId,
@@ -227,7 +227,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       }
     }
 
-    debug_assert_eq!(height, stack.len() as u16);
+    debug_assert_eq!(height, stack.len() as TreeHeight);
     Ok((ptr, stack))
   }
 
@@ -306,7 +306,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   ) -> Result {
     // CAS loop: multiple concurrent splits may race to update the root.
     loop {
-      let old_height = stack.len() as u16;
+      let old_height = stack.len() as TreeHeight;
       while let Some(ptr) = stack.pop() {
         match self.apply_split(split_key.clone(), split_pointer, ptr, table)? {
           Some((k, p)) => {

@@ -4,13 +4,15 @@ use crate::{
   Result,
 };
 
+pub type TreeHeight = u16;
+
 /**
  * Persisted tree metadata: root page index and current height.
  */
 #[derive(Debug)]
 pub struct TreeHeader {
   root: Pointer,
-  height: u16,
+  height: TreeHeight,
 }
 
 impl TreeHeader {
@@ -28,7 +30,7 @@ impl TreeHeader {
   pub const fn increase_height(&mut self) {
     self.height += 1;
   }
-  pub const fn get_height(&self) -> u16 {
+  pub const fn get_height(&self) -> TreeHeight {
     self.height
   }
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
