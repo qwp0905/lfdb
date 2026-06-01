@@ -156,6 +156,15 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     Ok(u64::from_le_bytes(v))
   }
   #[inline]
+  pub const fn read_u32(&mut self) -> Result<u32> {
+    if self.offset + 4 > T {
+      return Err(Error::EOF);
+    }
+    let v = unsafe { (self.inner.add(self.offset) as *const [u8; 4]).read() };
+    self.offset += 4;
+    Ok(u32::from_le_bytes(v))
+  }
+  #[inline]
   pub const fn read_u16(&mut self) -> Result<u16> {
     if self.offset + 2 > T {
       return Err(Error::EOF);
@@ -200,6 +209,10 @@ impl<'a, const T: usize> PageWriter<'a, T> {
 
   #[inline(always)]
   pub const fn write_u64(&mut self, value: u64) -> Result {
+    self.write(&value.to_le_bytes())
+  }
+  #[inline(always)]
+  pub const fn write_u32(&mut self, value: u32) -> Result {
     self.write(&value.to_le_bytes())
   }
   #[inline(always)]
