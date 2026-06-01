@@ -117,7 +117,7 @@ pub fn open_tables(
 
 pub fn recovery(
   block_cache: Arc<BlockCache>,
-  gc_queue: GCQueue,
+  gc_queue: Arc<GCQueue>,
   tables: &TableMapper,
 ) -> Result {
   let open_handles = Arc::new(SegQueue::new());
@@ -155,7 +155,7 @@ pub fn recovery(
 
 fn release_orphaned(
   block_cache: &BlockCache,
-  gc: &SegQueue<GCMark>,
+  gc: &GCQueue,
   table: TableHandleRef,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
@@ -177,23 +177,19 @@ fn release_orphaned(
       .view::<BTreeNodeView>()?
     {
       BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
-      BTreeNodeView::Leaf(node) => entry_stack.extend(node.get_entry_pointers()),
+      BTreeNodeView::Leaf(node) => {
+        for (_, _, record, ptr) in node.get_entries() {
+          entry_stack.push(ptr);
+          if let RecordDataView::Chunked(pointers) = &record.data {
+            visited.extend(pointers);
+          }
+        }
+      }
     };
   }
 
   for &ptr in entry_stack.iter() {
-    table.inc_live();
     gc.push(GCMark::new(ptr, table.clone(), RESERVED_TX));
-
-    if block_cache
-      .read(ptr, table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize::<DataEntryView>()?
-      .is_empty()
-    {
-      table.inc_dead();
-    }
   }
 
   while let Some(ptr) = entry_stack.pop() {

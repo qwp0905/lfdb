@@ -1,8 +1,8 @@
 use std::ops::{Bound, RangeBounds};
 
 use super::{
-  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, RecordData, StaticKey, VecRef,
-  MAX_KEY, MAX_VALUE,
+  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, VecRef, MAX_KEY,
+  MAX_VALUE,
 };
 use crate::{
   metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext, Error, Result,
@@ -96,11 +96,7 @@ impl<'a> Cursor<'a> {
       return self
         .metrics
         .operation_remove
-        .measure(|| {
-          self
-            .index
-            .insert_record(key.as_ref().to_vec(), RecordData::Tombstone, table)
-        })
+        .measure(|| self.index.insert_record(key.as_ref().to_vec(), None, table))
         .map(|_| ());
     }
 

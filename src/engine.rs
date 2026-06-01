@@ -44,6 +44,7 @@ where
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
+  pub compaction_check_interval: Duration,
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
@@ -88,6 +89,7 @@ impl Engine {
     let compaction_config = CompactionConfig {
       threshold: config.compaction_threshold,
       min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
+      check_interval: config.compaction_check_interval,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
@@ -208,7 +210,7 @@ impl Engine {
 
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    let gc_queue = GCQueue::default();
+    let gc_queue = GCQueue::default().to_arc();
     recovery(block_cache.clone(), gc_queue.clone(), &tables)?;
 
     let gc = GarbageCollector::from_queue(

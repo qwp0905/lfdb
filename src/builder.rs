@@ -21,6 +21,7 @@ where
       group_commit_count: DEFAULT_GROUP_COMMIT_COUNT,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
+      compaction_check_interval: DEFAULT_COMPACTION_CHECK_INTERVAL,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
       block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
@@ -135,8 +136,19 @@ where
     self
   }
 
+  /**
+   * Minimum size requirements for auto compaction triggers.
+   */
   pub const fn compaction_min_size(mut self, size: usize) -> Self {
     self.0.compaction_min_size = size;
+    self
+  }
+
+  /**
+   * Compaction ratio measurement interval.
+   */
+  pub const fn compaction_check_interval(mut self, interval: Duration) -> Self {
+    self.0.compaction_check_interval = interval;
     self
   }
 
@@ -158,3 +170,4 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_IO_THREAD_COUNT: usize = 32;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
+const DEFAULT_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(180);
