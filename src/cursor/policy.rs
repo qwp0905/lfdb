@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU32;
+
 use crate::{
   cache::{CachedSlot, RefedSlot},
   disk::Pointer,
@@ -6,6 +8,10 @@ use crate::{
   wal::TxId,
   Result,
 };
+
+pub type RecordId = u32;
+pub const RECORD_ID_BYTES: usize = RecordId::BITS as usize >> 3;
+pub type AtomicRecordId = AtomicU32;
 
 pub trait ReadonlyPolicy {
   fn is_aborted(&self, owner: TxId) -> bool;
@@ -61,4 +67,5 @@ pub trait CreatablePolicy: WritablePolicy {
   fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
+  fn record_id(&self) -> RecordId;
 }
