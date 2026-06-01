@@ -1,6 +1,8 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound};
 
-use crate::{disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result};
+use crate::{
+  cache::ReadonlySlot, disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result,
+};
 
 use crossbeam::epoch::pin;
 
@@ -8,7 +10,7 @@ use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
   DataEntryView, InternalNode, MergeSortable, NodeFindResult, ReadonlyPolicy, RecordData,
   RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
-  WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
+  VersionRecordView, WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -531,7 +533,7 @@ where
               self.create_record(record.take(), table)?,
             );
             let old = node.replace_at(i, new_record);
-            if !self.0.is_aborted(old.owner) {
+            if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               self.append_version_chain(entry_ptr, old, table)?;
             } else if let RecordData::Chunked(pointers) = old.data {
               pointers.into_iter().for_each(|p| table.free().dealloc(p));
@@ -620,7 +622,7 @@ where
               self.create_record(record.take(), table)?,
             );
             let old = node.replace_at(i, new_record);
-            if !self.0.is_aborted(old.owner) {
+            if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               self.append_version_chain(entry_ptr, old, table)?;
             } else if let RecordData::Chunked(pointers) = old.data {
               pointers.into_iter().for_each(|p| table.free().dealloc(p));
@@ -662,6 +664,23 @@ where
 enum Buffered {
   Data(VecRef),
   Chunked(Vec<Pointer>),
+}
+impl Buffered {
+  fn from(slot: &ReadonlySlot, record: &VersionRecordView) -> Option<(Self, TxId, TxId)> {
+    match &record.data {
+      RecordDataView::Data(s, e) => Some((
+        Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
+        record.owner,
+        record.version,
+      )),
+      RecordDataView::Chunked(pointers) => Some((
+        Buffered::Chunked(pointers.to_vec()),
+        record.owner,
+        record.version,
+      )),
+      RecordDataView::Tombstone => None,
+    }
+  }
 }
 
 pub struct KVSnapshot {
@@ -733,19 +752,7 @@ where
             if policy.is_visible(record.owner, record.version) {
               buffered.push_back((
                 VecRef::refed(slot.page(), s, e),
-                match &record.data {
-                  RecordDataView::Data(s, e) => Some((
-                    Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-                    record.owner,
-                    record.version,
-                  )),
-                  RecordDataView::Chunked(pointers) => Some((
-                    Buffered::Chunked(pointers.to_vec()),
-                    record.owner,
-                    record.version,
-                  )),
-                  RecordDataView::Tombstone => None,
-                },
+                Buffered::from(&slot, record),
               ));
               continue;
             }
@@ -789,19 +796,7 @@ where
       if let Some(record) =
         entry.find(|record| policy.is_visible(record.owner, record.version))
       {
-        return Ok(Some(match &record.data {
-          RecordDataView::Data(s, e) => Some((
-            Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-            record.owner,
-            record.version,
-          )),
-          RecordDataView::Chunked(pointers) => Some((
-            Buffered::Chunked(pointers.to_vec()),
-            record.owner,
-            record.version,
-          )),
-          RecordDataView::Tombstone => None,
-        }));
+        return Ok(Some(Buffered::from(&slot, record)));
       }
 
       next = entry.get_next();
@@ -835,19 +830,7 @@ where
       if self.policy.is_visible(record.owner, record.version) {
         self.buffered.push_back((
           VecRef::refed(slot.page(), s, e),
-          match &record.data {
-            RecordDataView::Data(s, e) => Some((
-              Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-              record.owner,
-              record.version,
-            )),
-            RecordDataView::Chunked(pointers) => Some((
-              Buffered::Chunked(pointers.to_vec()),
-              record.owner,
-              record.version,
-            )),
-            RecordDataView::Tombstone => None,
-          },
+          Buffered::from(&slot, record),
         ));
         continue;
       }
