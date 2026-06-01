@@ -7,7 +7,7 @@ use crate::{
 pub const HEADER_POINTER: Pointer = 0;
 
 /**
- * Persisted tree metadata: root page index and current height.
+ * Persisted tree metadata: root page pointer and current height.
  */
 #[derive(Debug)]
 pub struct TreeHeader {

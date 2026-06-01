@@ -273,10 +273,10 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           }
         };
 
-        let split_index = self.0.alloc_and_log(&split_node.to_node(), table)?;
-        internal.set_right(&split_key, split_index);
+        let split_ptr = self.0.alloc_and_log(&split_node.to_node(), table)?;
+        internal.set_right(&split_key, split_ptr);
         self.0.serialize_and_log(slot, &internal.to_node(), table)?;
-        result = Some((split_key, split_index));
+        result = Some((split_key, split_ptr));
 
         Ok(())
       })?;
@@ -316,9 +316,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           if old_height == current_height {
             let new_root =
               InternalNode::initialize(split_key.clone(), ptr, split_pointer);
-            let new_root_index = self.0.alloc_and_log(&new_root.to_node(), table)?;
+            let new_root_ptr = self.0.alloc_and_log(&new_root.to_node(), table)?;
 
-            header.set_root(new_root_index);
+            header.set_root(new_root_ptr);
             header.increase_height();
             return self.0.serialize_and_log(header_slot, &header, table);
           }
@@ -423,9 +423,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           return Ok(());
         }
 
-        let new_entry_index = self.0.alloc_and_log(&entry, table)?;
-        let mut new_entry = DataEntry::init(record);
-        new_entry.set_next(new_entry_index);
+        let new_entry_ptr = self.0.alloc_and_log(&entry, table)?;
+        let new_entry = DataEntry::init(record, Some(new_entry_ptr));
         self.0.serialize_and_log(slot, &new_entry, table)?;
 
         Ok(())
@@ -507,23 +506,24 @@ impl<Policy> BTreeIndex<Policy>
 where
   Policy: CreatablePolicy,
 {
-  pub fn insert_record(
+  fn __insert(
     &self,
-    key: StaticKey,
+    key: StaticKeyRef,
     mut record: Option<Vec<u8>>,
     table: &TableHandleRef,
+    create: bool,
   ) -> Result {
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
     loop {
-      let mut result = None;
+      let mut state = LoopState::Continue;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
         let mut node = match leaf.find(&key) {
           NodeFindResult::Move(i) => return Ok(ptr = i),
           NodeFindResult::Found(i, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
-              return Ok(result = Some(Err(old.owner)));
+              return Ok(state = LoopState::Conflict(old.owner));
             }
 
             let mut node = leaf.writable();
@@ -541,6 +541,10 @@ where
             node
           }
           NodeFindResult::NotFound(i) => {
+            if !create {
+              return Ok(state = LoopState::Break);
+            }
+
             let mut node = leaf.writable();
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             let new_record = VersionRecord::new(
@@ -548,7 +552,7 @@ where
               self.0.current_version(),
               self.create_record(record.take(), &table)?,
             );
-            node.insert_at(i, key.clone(), new_record, entry_ptr);
+            node.insert_at(i, key.to_vec(), new_record, entry_ptr);
             node
           }
         };
@@ -557,7 +561,7 @@ where
           Some(split) => split,
           None => {
             self.0.serialize_and_log(slot, &node.to_node(), table)?;
-            return Ok(result = Some(Ok(None)));
+            return Ok(state = LoopState::Break);
           }
         };
 
@@ -566,19 +570,27 @@ where
 
         node.set_next(split_ptr);
         self.0.serialize_and_log(slot, &node.to_node(), table)?;
-        Ok(result = Some(Ok(Some((mid_key, split_ptr)))))
+        Ok(state = LoopState::Split(mid_key, split_ptr))
       })?;
 
-      match result {
-        Some(Ok(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
-        Some(Ok(None)) => return Ok(()),
-        Some(Err(i)) => {
+      match state {
+        LoopState::Break => return Ok(()),
+        LoopState::Split(k, p) => return self.propagate_split(k, p, stack, table),
+        LoopState::Conflict(i) => {
           self.0.wait_close(i);
           return Err(Error::WriteConflict);
         }
-        None => continue,
+        LoopState::Continue => continue,
       }
     }
+  }
+  pub fn insert_record(
+    &self,
+    key: StaticKey,
+    record: Option<Vec<u8>>,
+    table: &TableHandleRef,
+  ) -> Result {
+    self.__insert(&key, record, table, true)
   }
   pub fn insert(&self, key: StaticKey, data: Vec<u8>, table: &TableHandleRef) -> Result {
     self.insert_record(key, Some(data), table)
@@ -599,66 +611,18 @@ where
   fn insert_record_if_matched(
     &self,
     key: StaticKeyRef,
-    mut record: Option<Vec<u8>>,
+    record: Option<Vec<u8>>,
     table: &TableHandleRef,
   ) -> Result {
-    let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
-
-    loop {
-      let mut result = None;
-      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-        let mut node = match leaf.find(&key) {
-          NodeFindResult::Move(i) => return Ok(ptr = i),
-          NodeFindResult::Found(i, old, entry_ptr) => {
-            if self.0.is_conflict(old.owner, old.version) {
-              return Ok(result = Some(Err(old.owner)));
-            }
-
-            let mut node = leaf.writable();
-            let new_record = VersionRecord::new(
-              self.0.current_owner(),
-              self.0.current_version(),
-              self.create_record(record.take(), table)?,
-            );
-            let old = node.replace_at(i, new_record);
-            if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
-              self.append_version_chain(entry_ptr, old, table)?;
-            } else if let RecordData::Chunked(pointers) = old.data {
-              pointers.into_iter().for_each(|p| table.free().dealloc(p));
-            }
-            node
-          }
-          NodeFindResult::NotFound(_) => return Ok(result = Some(Ok(None))),
-        };
-
-        let split = match node.split_if_needed() {
-          Some(split) => split,
-          None => {
-            self.0.serialize_and_log(slot, &node.to_node(), table)?;
-            return Ok(result = Some(Ok(None)));
-          }
-        };
-
-        let mid_key = split.top().clone();
-        let split_ptr = self.0.alloc_and_log(&split.to_node(), table)?;
-
-        node.set_next(split_ptr);
-        self.0.serialize_and_log(slot, &node.to_node(), table)?;
-        Ok(result = Some(Ok(Some((mid_key, split_ptr)))))
-      })?;
-
-      match result {
-        Some(Ok(Some((k, p)))) => return self.propagate_split(k, p, stack, table),
-        Some(Ok(None)) => return Ok(()),
-        Some(Err(i)) => {
-          self.0.wait_close(i);
-          return Err(Error::WriteConflict);
-        }
-        None => continue,
-      }
-    }
+    self.__insert(key, record, table, false)
   }
+}
+
+enum LoopState {
+  Continue,
+  Break,
+  Conflict(TxId),
+  Split(StaticKey, Pointer),
 }
 
 enum Buffered {
