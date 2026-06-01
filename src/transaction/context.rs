@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   cache::RefedSlot,
-  cursor::{CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
+  cursor::{AtomicRecordId, CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   serialize::Serializable,
   table::TableHandleRef,
@@ -16,6 +16,7 @@ pub struct TxContext<'a> {
   orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
+  record_id: AtomicRecordId,
   modified: AtomicBool,
 }
 impl<'a> TxContext<'a> {
@@ -30,6 +31,7 @@ impl<'a> TxContext<'a> {
       state,
       snapshot,
       modified: AtomicBool::new(false),
+      record_id: AtomicRecordId::new(0),
     }
   }
 
@@ -110,5 +112,8 @@ impl<'a> CreatablePolicy for &TxContext<'a> {
   }
   fn wait_close(&self, owner: TxId) {
     self.orchestrator.wait_commit(owner);
+  }
+  fn record_id(&self) -> crate::cursor::RecordId {
+    self.record_id.fetch_add(1, Ordering::Relaxed)
   }
 }

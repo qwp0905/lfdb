@@ -10,7 +10,8 @@ use std::{
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, CreatablePolicy, GCMark, GarbageCollector, ReadonlyPolicy, WritablePolicy,
+  BTreeIndex, CreatablePolicy, GCMark, GarbageCollector, ReadonlyPolicy, RecordId,
+  WritablePolicy,
 };
 use crate::{
   cache::{BlockCache, RefedSlot},
@@ -50,6 +51,7 @@ struct MiniTx<'a> {
   gc: &'a GarbageCollector,
   committed: Cell<bool>,
   modified: Cell<bool>,
+  record_id: Cell<RecordId>,
 }
 impl<'a> MiniTx<'a> {
   fn start(
@@ -71,6 +73,7 @@ impl<'a> MiniTx<'a> {
       gc,
       committed: Cell::new(false),
       modified: Cell::new(false),
+      record_id: Cell::new(0),
     })
   }
 
@@ -166,6 +169,11 @@ impl<'a> CreatablePolicy for &MiniTx<'a> {
     self.version_visibility.current_version()
   }
   fn wait_close(&self, _owner: TxId) {}
+  fn record_id(&self) -> RecordId {
+    let id = self.record_id.get();
+    self.record_id.set(id + 1);
+    id
+  }
 }
 
 struct CompactionReadPolicy<'a> {
