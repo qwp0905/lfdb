@@ -1,4 +1,8 @@
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::{
+  cursor::record::{RecordData, RecordDataView},
+  disk::Page,
+  serialize::SerializeFrom,
+};
 
 use super::*;
 
@@ -6,11 +10,10 @@ use super::*;
 fn test_entry_with_data_roundtrip() {
   let mut page = Page::new();
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(
+  entry.append(
+    VersionRecord::new(1, 100, 1, RecordData::Data(vec![10, 20, 30])),
     1,
-    100,
-    RecordData::Data(vec![10, 20, 30]),
-  ));
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.deserialize().expect("deserialize error");
@@ -30,7 +33,7 @@ fn test_entry_with_data_roundtrip() {
 fn test_entry_with_tombstone_roundtrip() {
   let mut page = Page::new();
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(2, 200, RecordData::Tombstone));
+  entry.append(VersionRecord::new(2, 200, 1, RecordData::Tombstone), 1);
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.deserialize().expect("deserialize error");
@@ -50,11 +53,10 @@ fn test_entry_with_chunked_roundtrip() {
   let pointers = vec![10, 20, 30, 500];
   let owner = 2;
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(
-    2,
-    200,
-    RecordData::Chunked(pointers.clone()),
-  ));
+  entry.append(
+    VersionRecord::new(2, 200, 1, RecordData::Chunked(pointers.clone())),
+    1,
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.deserialize().expect("deserialize error");
@@ -74,7 +76,7 @@ fn test_entry_with_chunked_roundtrip() {
 fn test_entry_with_next_roundtrip() {
   let mut page = Page::new();
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(1, 10, RecordData::Data(vec![1])));
+  entry.append(VersionRecord::new(1, 10, 1, RecordData::Data(vec![1])), 1);
   entry.set_next(42);
   page.serialize_from(&entry).expect("serialize error");
 
@@ -86,9 +88,12 @@ fn test_entry_with_next_roundtrip() {
 fn test_entry_multiple_versions_roundtrip() {
   let mut page = Page::new();
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(3, 300, RecordData::Data(vec![3])));
-  entry.append(VersionRecord::new(2, 200, RecordData::Tombstone));
-  entry.append(VersionRecord::new(1, 100, RecordData::Data(vec![1, 2])));
+  entry.append(VersionRecord::new(3, 300, 1, RecordData::Data(vec![3])), 1);
+  entry.append(VersionRecord::new(2, 200, 1, RecordData::Tombstone), 1);
+  entry.append(
+    VersionRecord::new(1, 100, 1, RecordData::Data(vec![1, 2])),
+    1,
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntry = page.deserialize().expect("deserialize error");

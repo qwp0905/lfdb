@@ -1,13 +1,13 @@
 use std::collections::VecDeque;
 
-use super::{RecordData, RecordDataView, VersionRecord, VersionRecordView};
+use super::{VersionRecord, VersionRecordView};
 use crate::{
   disk::{Page, Pointer, POINTER_BYTES},
   serialize::{
     Deserializable, Serializable, SerializeType, TypedObject, Viewable,
     SERIALIZABLE_BYTES,
   },
-  Error,
+  wal::{TxId, TX_ID_BYTES},
 };
 
 pub const MAX_KEY: usize = 1 << 8;
@@ -24,7 +24,7 @@ pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
 #[derive(Debug)]
 pub struct DataEntry {
   next: Option<Pointer>,
-  versions: VecDeque<VersionRecord>,
+  versions: VecDeque<(TxId, VersionRecord)>,
 }
 impl DataEntry {
   pub const fn empty() -> Self {
@@ -33,22 +33,28 @@ impl DataEntry {
       versions: VecDeque::new(),
     }
   }
-  pub fn init(version: VersionRecord) -> Self {
+  pub fn init(version: VersionRecord, reclaimer: TxId) -> Self {
     let mut versions = VecDeque::with_capacity(1);
-    versions.push_front(version);
+    versions.push_front((reclaimer, version));
     Self {
       next: None,
       versions,
     }
   }
 
+  pub fn get_last(&self) -> Option<&(TxId, VersionRecord)> {
+    self.versions.front()
+  }
+
   pub fn len(&self) -> usize {
     self.versions.len()
   }
-  pub fn take_versions<'a>(&'a mut self) -> impl Iterator<Item = VersionRecord> + 'a {
+  pub fn take_versions<'a>(
+    &'a mut self,
+  ) -> impl Iterator<Item = (TxId, VersionRecord)> + 'a {
     self.versions.drain(..)
   }
-  pub fn set_versions(&mut self, new_versions: VecDeque<VersionRecord>) {
+  pub fn set_versions(&mut self, new_versions: VecDeque<(TxId, VersionRecord)>) {
     self.versions = new_versions;
   }
 
@@ -59,14 +65,19 @@ impl DataEntry {
     self.next = Some(ptr);
   }
 
-  pub fn append(&mut self, record: VersionRecord) {
-    self.versions.push_front(record);
+  pub fn append(&mut self, record: VersionRecord, reclaimer: TxId) {
+    self.versions.push_front((reclaimer, record));
   }
 
   pub fn is_available(&self, record: &VersionRecord) -> bool {
-    let byte_len =
-      POINTER_BYTES + 2 + self.versions.iter().map(|v| v.byte_len()).sum::<usize>();
-    record.byte_len() + byte_len <= SERIALIZABLE_BYTES
+    let byte_len = (POINTER_BYTES << 1)
+      + 2
+      + self
+        .versions
+        .iter()
+        .map(|(_, v)| TX_ID_BYTES + v.byte_len())
+        .sum::<usize>();
+    record.byte_len() + byte_len + TX_ID_BYTES <= SERIALIZABLE_BYTES
   }
 }
 impl TypedObject for DataEntry {
@@ -77,24 +88,9 @@ impl Serializable for DataEntry {
     writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.versions.len() as u16)?;
 
-    for record in &self.versions {
-      writer.write_u64(record.version)?;
-      writer.write_u64(record.owner)?;
-      match &record.data {
-        RecordData::Data(data) => {
-          writer.write(&[0])?;
-          writer.write_u16(data.len() as u16)?;
-          writer.write(&data)?;
-        }
-        RecordData::Tombstone => writer.write(&[1])?,
-        RecordData::Chunked(pointers) => {
-          writer.write(&[2])?;
-          writer.write_u8(pointers.len() as u8)?;
-          for ptr in pointers {
-            writer.write_u64(*ptr)?;
-          }
-        }
-      }
+    for (r, record) in &self.versions {
+      writer.write_u64(*r)?;
+      record.serialize_to(writer)?;
     }
     Ok(())
   }
@@ -105,25 +101,8 @@ impl Deserializable for DataEntry {
     let len = reader.read_u16()? as usize;
     let mut versions = VecDeque::with_capacity(len + 1);
     for _ in 0..len {
-      let version = reader.read_u64()?;
-      let owner = reader.read_u64()?;
-      let data = match reader.read()? {
-        0 => {
-          let l = reader.read_u16()? as usize;
-          RecordData::Data(reader.read_n(l)?.to_vec())
-        }
-        1 => RecordData::Tombstone,
-        2 => {
-          let l = reader.read()? as usize;
-          let mut pointers = Vec::with_capacity(l);
-          for _ in 0..l {
-            pointers.push(reader.read_u64()?);
-          }
-          RecordData::Chunked(pointers)
-        }
-        _ => return Err(Error::InvalidFormat("invalid type for data version record")),
-      };
-      versions.push_back(VersionRecord::new(owner, version, data))
+      let reclaimer = reader.read_u64()?;
+      versions.push_back((reclaimer, VersionRecord::deserialize_from(reader)?));
     }
     Ok(Self {
       versions,
@@ -153,18 +132,18 @@ impl Serializable for DataChunk {
 
 pub struct DataEntryView {
   next: Option<Pointer>,
-  versions: Vec<VersionRecordView>,
+  versions: Vec<(TxId, VersionRecordView)>,
 }
 impl DataEntryView {
   pub fn find<P>(&self, predicate: P) -> Option<&VersionRecordView>
   where
     P: FnMut(&&VersionRecordView) -> bool,
   {
-    self.versions.iter().find(predicate)
+    self.versions.iter().map(|(_, v)| v).find(predicate)
   }
 
   pub fn get_versions(&self) -> impl Iterator<Item = &'_ VersionRecordView> + '_ {
-    self.versions.iter()
+    self.versions.iter().map(|(_, v)| v)
   }
 
   #[allow(unused)]
@@ -185,26 +164,8 @@ impl Deserializable for DataEntryView {
     let len = reader.read_u16()? as usize;
     let mut versions = Vec::with_capacity(len);
     for _ in 0..len {
-      let version = reader.read_u64()?;
-      let owner = reader.read_u64()?;
-      let data = match reader.read()? {
-        0 => {
-          let l = reader.read_u16()? as usize;
-          let offset = reader.advance(l)?;
-          RecordDataView::Data(offset, offset + l)
-        }
-        1 => RecordDataView::Tombstone,
-        2 => {
-          let l = reader.read()? as usize;
-          let mut pointers = Vec::with_capacity(l);
-          for _ in 0..l {
-            pointers.push(reader.read_u64()?);
-          }
-          RecordDataView::Chunked(pointers)
-        }
-        _ => return Err(Error::InvalidFormat("invalid type for data version record")),
-      };
-      versions.push(VersionRecordView::new(owner, version, data))
+      let reclaimer = reader.read_u64()?;
+      versions.push((reclaimer, VersionRecordView::deserialize_from(reader)?));
     }
     Ok(Self {
       versions,
