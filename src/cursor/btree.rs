@@ -6,9 +6,9 @@ use crossbeam::epoch::pin;
 
 use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
-  DataEntryView, InternalNode, MergeSortable, NodeFindResult, NodeFindResultView,
-  ReadonlyPolicy, RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
-  VecRef, VersionRecord, WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
+  DataEntryView, InternalNode, MergeSortable, NodeFindResult, ReadonlyPolicy, RecordData,
+  RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
+  WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -52,9 +52,9 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
-          NodeFindResultView::NotFound(_) => return Ok(None),
-          NodeFindResultView::Move(i) => ptr = i,
-          NodeFindResultView::Found(_, record, i) => {
+          NodeFindResult::NotFound(_) => return Ok(None),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Found(_, record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
             }
@@ -146,9 +146,9 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
-          NodeFindResultView::NotFound(_) => return Ok(false),
-          NodeFindResultView::Move(i) => ptr = i,
-          NodeFindResultView::Found(_, record, i) => {
+          NodeFindResult::NotFound(_) => return Ok(false),
+          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Found(_, record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
             }
@@ -446,8 +446,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let mut result = None;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let mut node = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
-        match node.find(&key) {
+        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+        let mut node = match leaf.find(&key) {
           NodeFindResult::Move(i) => return Ok(ptr = i),
           NodeFindResult::Found(i, old, entry_ptr) => {
             let is_aborted = self.0.is_aborted(old.owner);
@@ -455,6 +455,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
               return Ok(result = Some(Err(entry_ptr)));
             }
 
+            let mut node = leaf.writable();
             let new_record = record.take().unwrap();
             let old = node.replace_at(i, new_record);
             if !is_aborted {
@@ -462,11 +463,14 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
             } else if let RecordData::Chunked(pointers) = old.data {
               pointers.into_iter().for_each(|p| table.free().dealloc(p));
             }
+            node
           }
           NodeFindResult::NotFound(i) => {
+            let mut node = leaf.writable();
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             let new_record = record.take().unwrap();
             node.insert_at(i, key.to_vec(), new_record, entry_ptr);
+            node
           }
         };
 
@@ -514,8 +518,8 @@ where
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
         let mut node = match leaf.find(&key) {
-          NodeFindResultView::Move(i) => return Ok(ptr = i),
-          NodeFindResultView::Found(i, old, entry_ptr) => {
+          NodeFindResult::Move(i) => return Ok(ptr = i),
+          NodeFindResult::Found(i, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               return Ok(result = Some(Err(old.owner)));
             }
@@ -534,7 +538,7 @@ where
             }
             node
           }
-          NodeFindResultView::NotFound(i) => {
+          NodeFindResult::NotFound(i) => {
             let mut node = leaf.writable();
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             let new_record = VersionRecord::new(
@@ -603,8 +607,8 @@ where
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
         let mut node = match leaf.find(&key) {
-          NodeFindResultView::Move(i) => return Ok(ptr = i),
-          NodeFindResultView::Found(i, old, entry_ptr) => {
+          NodeFindResult::Move(i) => return Ok(ptr = i),
+          NodeFindResult::Found(i, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               return Ok(result = Some(Err(old.owner)));
             }
@@ -623,7 +627,7 @@ where
             }
             node
           }
-          NodeFindResultView::NotFound(_) => return Ok(result = Some(Ok(None))),
+          NodeFindResult::NotFound(_) => return Ok(result = Some(Ok(None))),
         };
 
         let split = match node.split_if_needed() {
@@ -705,17 +709,17 @@ where
         BTreeNodeView::Leaf(node) => {
           let pos = match &start {
             Bound::Included(k) => match node.find(k) {
-              NodeFindResultView::Found(i, _, _) => i,
-              NodeFindResultView::NotFound(i) => i,
-              NodeFindResultView::Move(i) => {
+              NodeFindResult::Found(i, _, _) => i,
+              NodeFindResult::NotFound(i) => i,
+              NodeFindResult::Move(i) => {
                 ptr = i;
                 continue;
               }
             },
             Bound::Excluded(k) => match node.find(k) {
-              NodeFindResultView::Found(i, _, _) => i + 1,
-              NodeFindResultView::NotFound(i) => i,
-              NodeFindResultView::Move(i) => {
+              NodeFindResult::Found(i, _, _) => i + 1,
+              NodeFindResult::NotFound(i) => i,
+              NodeFindResult::Move(i) => {
                 ptr = i;
                 continue;
               }

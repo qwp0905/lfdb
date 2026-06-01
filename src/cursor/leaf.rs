@@ -120,21 +120,6 @@ impl LeafNode {
   pub fn top(&self) -> &StaticKey {
     &self.entries[0].key
   }
-
-  pub fn find(&self, key: StaticKeyRef) -> NodeFindResult<'_> {
-    match self.entries.binary_search_by(|e| (*e.key).cmp(key)) {
-      Ok(i) => NodeFindResult::Found(i, &self.entries[i].record, self.entries[i].next),
-      Err(i) => {
-        if i == self.entries.len() {
-          if let Some(p) = self.next {
-            return NodeFindResult::Move(p);
-          }
-        };
-
-        NodeFindResult::NotFound(i)
-      }
-    }
-  }
 }
 
 /**
@@ -143,13 +128,8 @@ impl LeafNode {
  * so the caller must follow the next pointer to the right sibling — the same
  * mechanism used at the internal level when a search key >= high key.
  */
-pub enum NodeFindResultView<'a> {
-  Found(usize, &'a VersionRecordView, Pointer),
-  Move(Pointer),
-  NotFound(usize),
-}
 pub enum NodeFindResult<'a> {
-  Found(usize, &'a VersionRecord, Pointer),
+  Found(usize, &'a VersionRecordView, Pointer),
   Move(Pointer),
   NotFound(usize),
 }
@@ -209,19 +189,17 @@ impl<'a> LeafNodeView<'a> {
     Ok(Self::new(page, entries, (next != 0).then(|| next)))
   }
 
-  pub fn find(&self, key: StaticKeyRef) -> NodeFindResultView<'_> {
+  pub fn find(&self, key: StaticKeyRef) -> NodeFindResult<'_> {
     match self.binary_search(key) {
-      Ok(i) => {
-        NodeFindResultView::Found(i, &self.entries[i].record, self.entries[i].next)
-      }
+      Ok(i) => NodeFindResult::Found(i, &self.entries[i].record, self.entries[i].next),
       Err(i) => {
         if i == self.entries.len() {
           if let Some(p) = self.next {
-            return NodeFindResultView::Move(p);
+            return NodeFindResult::Move(p);
           }
         };
 
-        NodeFindResultView::NotFound(i)
+        NodeFindResult::NotFound(i)
       }
     }
   }
