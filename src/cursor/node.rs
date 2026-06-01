@@ -53,10 +53,18 @@ impl BTreeNode {
   pub const fn initial_state() -> Self {
     Self::Leaf(LeafNode::empty())
   }
+  #[inline]
   pub fn as_internal(self) -> Result<InternalNode> {
     match self {
       Self::Internal(node) => Ok(node),
       Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
+    }
+  }
+  #[inline]
+  pub fn as_leaf(self) -> Result<LeafNode> {
+    match self {
+      Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
+      Self::Leaf(node) => Ok(node),
     }
   }
 }
