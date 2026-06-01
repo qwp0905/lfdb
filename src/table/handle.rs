@@ -2,7 +2,7 @@ use std::{
   mem::{forget, transmute},
   ops::Deref,
   sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
   },
 };
@@ -25,9 +25,6 @@ pub struct TableHandle {
    */
   pin: ExclusivePin,
   closed: AtomicBool,
-
-  live_keys: AtomicUsize,
-  dead_keys: AtomicUsize,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
@@ -41,8 +38,6 @@ impl TableHandle {
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),
-      live_keys: AtomicUsize::new(0),
-      dead_keys: AtomicUsize::new(0),
     }
   }
 
@@ -103,21 +98,6 @@ impl TableHandle {
   #[inline]
   pub fn truncate(&self) -> Result {
     self.disk.truncate(self.metadata.get_path())
-  }
-
-  pub fn inc_live(&self) {
-    self.live_keys.fetch_add(1, Ordering::Relaxed);
-  }
-  pub fn inc_dead(&self) {
-    self.dead_keys.fetch_add(1, Ordering::Relaxed);
-  }
-  pub fn dec_dead(&self) {
-    self.dead_keys.fetch_sub(1, Ordering::Relaxed);
-  }
-
-  pub fn dead_ratio(&self) -> f64 {
-    self.dead_keys.load(Ordering::Relaxed) as f64
-      / self.live_keys.load(Ordering::Relaxed) as f64
   }
 }
 

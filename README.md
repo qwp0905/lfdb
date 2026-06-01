@@ -118,6 +118,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
 | `compaction_threshold` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
 | `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
+| `compaction_check_interval` | Compaction ratio measurement interval. |
 | `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
 
 ## Architecture

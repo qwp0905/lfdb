@@ -51,7 +51,7 @@ pub enum BTreeNode {
 }
 impl BTreeNode {
   pub const fn initial_state() -> Self {
-    Self::Leaf(LeafNode::new(Vec::new(), None))
+    Self::Leaf(LeafNode::empty())
   }
   pub fn as_internal(self) -> Result<InternalNode> {
     match self {
