@@ -75,11 +75,11 @@ jobs:
         run: git switch main
 
       - name: YCSB baseline
-        run: cargo benchmark --bench ycsb --features lfdb -- --save-baseline main --quiet
+        run: cargo benchmark --bench ycsb --features lfdb -- --save-baseline main --quiet --sample-size 30
         continue-on-error: true
 
       - name: Switch to PR branch
         run: git switch ${{ github.head_ref }}
 
       - name: YCSB (PR vs main)
-        run: cargo benchmark --bench ycsb --features lfdb -- --baseline-lenient main
+        run: cargo benchmark --bench ycsb --features lfdb -- --baseline-lenient main --sample-size 30

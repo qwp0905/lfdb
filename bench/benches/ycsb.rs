@@ -21,7 +21,7 @@ fn op_count() -> usize {
     .unwrap_or(DEFAULT_OP_COUNT)
 }
 const THREADS: usize = 128;
-const DEFAULT_SAMPLE_SIZE: usize = 20;
+const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(60);
 
 const CACHE_SIZE: usize = 1024 << 20;
 
@@ -35,9 +35,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
       engines::lfdb::new(CACHE_SIZE, dir.path())
     });
@@ -47,9 +45,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
@@ -59,9 +55,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
       engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
@@ -71,9 +65,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
       engines::sled::new(CACHE_SIZE, dir.path())
     });
@@ -90,9 +82,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
       engines::lfdb::new(CACHE_SIZE, dir.path())
     });
@@ -102,9 +92,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
@@ -114,9 +102,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
       engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
@@ -126,9 +112,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
       engines::sled::new(CACHE_SIZE, dir.path())
     });
@@ -145,9 +129,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
       engines::lfdb::new(CACHE_SIZE, dir.path())
     });
@@ -157,9 +139,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
@@ -169,9 +149,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
       engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
@@ -181,9 +159,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
       engines::sled::new(CACHE_SIZE, dir.path())
     });
@@ -200,9 +176,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
       engines::lfdb::new(CACHE_SIZE, dir.path())
     });
@@ -212,9 +186,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
@@ -224,9 +196,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
       engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
@@ -236,9 +206,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
       engines::sled::new(CACHE_SIZE, dir.path())
     });
@@ -255,9 +223,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
       engines::lfdb::new(CACHE_SIZE, dir.path())
     });
@@ -267,9 +233,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
       engines::redb::new(CACHE_SIZE, dir.path())
     });
@@ -279,9 +243,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
       engines::rocksdb::new(CACHE_SIZE, dir.path())
     });
@@ -291,9 +253,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
   {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
-    group
-      .sample_size(DEFAULT_SAMPLE_SIZE)
-      .measurement_time(Duration::from_secs(20));
+    group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
       engines::sled::new(CACHE_SIZE, dir.path())
     });
