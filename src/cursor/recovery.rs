@@ -3,14 +3,15 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, GCQueue, MergeSortable,
-  ReadonlyPolicy, RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, GCMark, GCQueue, MergeSortable, ReadonlyPolicy, WritablePolicy,
+  HEADER_POINTER,
 };
 use crate::{
   cache::BlockCache,
   debug,
   disk::Pointer,
   info,
+  objects::{BTreeNodeView, RecordDataView, TypedObject},
   table::{MutationHandle, TableHandleRef, TableMapper, TableMetadata},
   thread::once,
   transaction::{PageRecorder, VersionVisibility},
@@ -47,10 +48,10 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 }
 
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
-  fn serialize_and_log<T: crate::serialize::Serializable>(
+  fn serialize_and_log(
     &self,
     slot: &mut crate::cache::RefedSlot,
-    data: &T,
+    data: &TypedObject,
     table: &TableHandleRef,
   ) -> Result {
     self
@@ -163,7 +164,8 @@ fn release_orphaned(
     .read(HEADER_POINTER, table.clone())?
     .for_read()
     .as_ref()
-    .deserialize::<TreeHeader>()?
+    .view()?
+    .as_tree_header()?
     .get_root();
   let mut node_stack = vec![root];
   let mut entry_stack = vec![];
@@ -174,7 +176,8 @@ fn release_orphaned(
       .read(ptr, table.clone())?
       .for_read()
       .as_ref()
-      .view::<BTreeNodeView>()?
+      .view()?
+      .as_btree_node()?
     {
       BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
       BTreeNodeView::Leaf(node) => {
@@ -194,11 +197,9 @@ fn release_orphaned(
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let entry: DataEntryView = block_cache
-      .read(ptr, table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize()?;
+    let slot = block_cache.read(ptr, table.clone())?.for_read();
+    let obj = slot.as_ref().view()?;
+    let entry = obj.as_data_entry()?;
     for record in entry.get_versions() {
       if let RecordDataView::Chunked(pointers) = &record.data {
         visited.extend(pointers);

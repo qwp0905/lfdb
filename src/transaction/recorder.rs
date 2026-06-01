@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
   cache::RefedSlot,
   error::Result,
-  serialize::{Serializable, SerializeFrom},
+  objects::TypedObject,
   table::TableId,
   wal::{TxId, WAL},
 };
@@ -25,16 +25,13 @@ impl PageRecorder {
     Self { wal }
   }
   #[inline]
-  pub fn serialize_and_log<T>(
+  pub fn serialize_and_log(
     &self,
     tx_id: TxId,
     table_id: TableId,
     slot: &mut RefedSlot,
-    data: &T,
-  ) -> Result
-  where
-    T: Serializable,
-  {
+    data: &TypedObject,
+  ) -> Result {
     let ptr = slot.get_pointer();
     let page = slot.as_mut();
     let byte_len = page.serialize_from(data)?;

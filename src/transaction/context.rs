@@ -4,7 +4,7 @@ use crate::{
   cache::RefedSlot,
   cursor::{CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
-  serialize::Serializable,
+  objects::TypedObject,
   table::TableHandleRef,
   wal::TxId,
   Result,
@@ -71,10 +71,10 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
   }
 }
 impl<'a> WritablePolicy for &TxContext<'a> {
-  fn serialize_and_log<T: Serializable>(
+  fn serialize_and_log(
     &self,
     slot: &mut RefedSlot,
-    data: &T,
+    data: &TypedObject,
     table: &TableHandleRef,
   ) -> Result {
     self.orchestrator.serialize_and_log(

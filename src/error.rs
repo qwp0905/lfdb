@@ -2,6 +2,8 @@ use std::{any::Any, error, io, result, sync::Arc};
 
 use thiserror::Error;
 
+use crate::objects::SerializeType;
+
 #[derive(Debug, Error)]
 pub enum Error {
   #[error("table {0} not found")]
@@ -10,8 +12,8 @@ pub enum Error {
   #[error("invalid format: {0}")]
   InvalidFormat(&'static str),
 
-  #[error("invalid block type expected {0} received {1}")]
-  DeserializeError(u8, u8),
+  #[error("invalid block type expected {0:?} received {1:?}")]
+  DeserializeError(Option<SerializeType>, Option<SerializeType>),
 
   #[error("io error: {0:?}")]
   IO(io::Error),

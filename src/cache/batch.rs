@@ -4,13 +4,14 @@ use crossbeam::queue::SegQueue;
 
 use super::RefedSlot;
 use crate::{
+  objects::TypedObject,
   thread::{oneshot, Oneshot, OneshotFulfill},
   Result,
 };
 
 const MAX_BATCH_SIZE: usize = 32;
 
-pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) -> Result + 'a;
+pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot, &mut TypedObject) -> Result + 'a;
 pub struct BatchHandle {
   queue: SegQueue<(Box<BatchHandler<'static>>, OneshotFulfill<Result>)>,
   occupied: AtomicBool,
@@ -29,9 +30,9 @@ impl BatchHandle {
     (!self.occupied.fetch_or(true, Ordering::Release), o)
   }
 
-  pub fn flush_with(&self, slot: &mut RefedSlot) {
+  pub fn flush_with(&self, slot: &mut RefedSlot, obj: &mut TypedObject) {
     for (handle, f) in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      f.fulfill(handle(slot));
+      f.fulfill(handle(slot, obj));
     }
   }
 

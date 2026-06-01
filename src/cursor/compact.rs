@@ -16,7 +16,7 @@ use crate::{
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   info,
-  serialize::Serializable,
+  objects::TypedObject,
   table::{
     MutationHandle, PinnedHandle, TableHandleRef, TableMapper, TableMetadata,
     META_TABLE_ID,
@@ -128,10 +128,10 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
   }
 }
 impl<'a> WritablePolicy for &MiniTx<'a> {
-  fn serialize_and_log<T: Serializable>(
+  fn serialize_and_log(
     &self,
     slot: &mut RefedSlot,
-    data: &T,
+    data: &TypedObject,
     table: &TableHandleRef,
   ) -> Result {
     self.recorder.serialize_and_log(
@@ -222,10 +222,10 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   }
 }
 impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
-  fn serialize_and_log<T: Serializable>(
+  fn serialize_and_log(
     &self,
     slot: &mut RefedSlot,
-    data: &T,
+    data: &TypedObject,
     table: &TableHandleRef,
   ) -> Result {
     self

@@ -1,11 +1,12 @@
 use std::ops::{Bound, RangeBounds};
 
-use super::{
-  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, VecRef, MAX_KEY,
-  MAX_VALUE,
-};
+use super::{BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, VecRef};
 use crate::{
-  metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext, Error, Result,
+  metrics::MetricsRegistry,
+  objects::{StaticKey, MAX_KEY, MAX_VALUE},
+  table::TableHandleRef,
+  transaction::TxContext,
+  Error, Result,
 };
 
 /**

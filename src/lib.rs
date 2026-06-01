@@ -5,8 +5,6 @@ pub use transaction::Transaction;
 
 mod cache;
 
-mod serialize;
-
 mod thread;
 
 mod engine;
@@ -29,3 +27,5 @@ mod metrics;
 pub use metrics::EngineMetrics;
 
 mod table;
+
+mod objects;

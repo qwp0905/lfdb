@@ -7,12 +7,12 @@ use std::{
 
 use crossbeam::{epoch, queue::SegQueue};
 
-use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
   cache::{BlockCache, RefedSlot},
   debug,
   disk::Pointer,
   error::Result,
+  objects::{RecordData, TypedObject, VersionRecord},
   table::{PinnedHandle, TableHandleRef, TableId, TableMapper},
   thread::{BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
@@ -132,17 +132,18 @@ fn release_entry(
     defer(move || pointers.into_iter().for_each(|p| handle.free().dealloc(p)));
   };
 
-  let serialize_and_log = |slot: &mut RefedSlot, entry: &DataEntry| {
-    recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
+  let serialize_and_log = |slot: &mut RefedSlot, obj: &TypedObject| {
+    recorder.serialize_and_log(RESERVED_TX, table_id, slot, obj)
   };
 
   while let Some(ptr) = next.take() {
     if max_found {
-      let mut entry = block_cache
+      let mut obj = block_cache
         .read(ptr, table.handle())?
         .for_read()
         .as_ref()
-        .deserialize::<DataEntry>()?;
+        .deserialize()?;
+      let entry = obj.as_data_entry_mut()?;
       entry.take_versions().for_each(release);
       next = entry.get_next();
       let handle = table.handle();
@@ -153,11 +154,9 @@ fn release_entry(
     {
       let mut found = false;
       let mut need_trim = false;
-      let entry = block_cache
-        .read(ptr, table.handle())?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntryView>()?;
+      let slot = block_cache.read(ptr, table.handle())?.for_read();
+      let obj = slot.as_ref().view()?;
+      let entry = obj.as_data_entry()?;
       next = entry.get_next();
 
       for record in entry.get_versions() {
@@ -183,8 +182,8 @@ fn release_entry(
     block_cache
       .read(ptr, table.handle())?
       .for_batch()
-      .mutate(|slot| {
-        let mut entry: DataEntry = slot.as_ref().deserialize()?;
+      .mutate(|slot, obj| {
+        let entry = obj.as_data_entry_mut()?;
 
         let prev_len = entry.len();
         let mut expired_max: Option<VersionRecord> = None;
@@ -221,20 +220,20 @@ fn release_entry(
 
         if entry.len() > 0 {
           entry.set_versions(new_versions);
-          serialize_and_log(slot, &entry)?;
+          serialize_and_log(slot, &obj)?;
           return Ok(());
         }
 
         let next_ptr = match entry.get_next() {
           Some(ptr) => ptr,
-          None => return serialize_and_log(slot, &entry),
+          None => return serialize_and_log(slot, &obj),
         };
 
         let next_entry = block_cache
           .read(next_ptr, table.handle())?
           .for_read()
           .as_ref()
-          .deserialize::<DataEntry>()?;
+          .deserialize()?;
         serialize_and_log(slot, &next_entry)?;
         next = Some(ptr);
 

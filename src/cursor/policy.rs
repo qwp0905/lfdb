@@ -1,7 +1,7 @@
 use crate::{
   cache::{CachedSlot, RefedSlot},
   disk::Pointer,
-  serialize::Serializable,
+  objects::TypedObject,
   table::TableHandleRef,
   wal::TxId,
   Result,
@@ -28,10 +28,10 @@ pub trait ReadonlyPolicy {
 }
 
 pub trait WritablePolicy: ReadonlyPolicy {
-  fn serialize_and_log<T: Serializable>(
+  fn serialize_and_log(
     &self,
     slot: &mut RefedSlot,
-    data: &T,
+    data: &TypedObject,
     table: &TableHandleRef,
   ) -> Result;
   fn alloc_slot(
@@ -40,11 +40,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
     table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
 
-  fn alloc_and_log<T: Serializable>(
-    &self,
-    data: &T,
-    table: &TableHandleRef,
-  ) -> Result<Pointer> {
+  fn alloc_and_log(&self, data: &TypedObject, table: &TableHandleRef) -> Result<Pointer> {
     let ptr = table.free().alloc();
     let mut slot = self.alloc_slot(ptr, table)?.for_write();
     self.serialize_and_log(&mut slot, data, table)?;

@@ -9,7 +9,7 @@ use crate::{
   error::Result,
   info,
   metrics::MetricsRegistry,
-  serialize::Serializable,
+  objects::TypedObject,
   table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
   utils::ToArc,
   wal::{Checkpoint, TxId, WALSegment, WAL},
@@ -126,16 +126,13 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn serialize_and_log<T>(
+  pub fn serialize_and_log(
     &self,
     tx_id: TxId,
     table_id: TableId,
     slot: &mut RefedSlot,
-    data: &T,
-  ) -> Result
-  where
-    T: Serializable,
-  {
+    data: &TypedObject,
+  ) -> Result {
     self.recorder.serialize_and_log(tx_id, table_id, slot, data)
   }
 

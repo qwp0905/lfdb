@@ -1,9 +1,10 @@
 use std::{ops::Deref, sync::Arc};
 
-use crate::disk::{PageRef, PAGE_SIZE};
+use crate::disk::{PageRef, Pointer, PAGE_SIZE};
 
-pub type StaticKey = Vec<u8>;
-pub type StaticKeyRef<'a> = &'a [u8];
+// pub type StaticKey = Vec<u8>;
+// pub type StaticKeyRef<'a> = &'a [u8];
+pub const HEADER_POINTER: Pointer = 0;
 
 enum Type {
   Refed(Arc<PageRef<PAGE_SIZE>>, usize, usize),

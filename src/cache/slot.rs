@@ -7,6 +7,7 @@ use std::{
 use super::{BatchHandle, BatchHandler, BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
+  objects::TypedObject,
   utils::{AtomicBitmap, SharedToken},
   Result,
 };
@@ -171,7 +172,8 @@ impl<'a> BatchSlot<'a> {
       page.copy_from(&**self.block.load_page());
 
       let mut slot = RefedSlot::new(self.block.get_pointer(), page);
-      self.batch.flush_with(&mut slot);
+      let mut obj = slot.as_mut().deserialize()?;
+      self.batch.flush_with(&mut slot, &mut obj);
 
       self.dirty.insert(self.block_id);
       self.block.store(slot.into_inner());
@@ -183,7 +185,10 @@ impl<'a> BatchSlot<'a> {
 
     o.wait().flatten()
   }
-  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
+  pub fn mutate(
+    self,
+    handler: impl FnOnce(&mut RefedSlot, &mut TypedObject) -> Result,
+  ) -> Result {
     self.__mutate(Box::new(handler))
   }
 }
