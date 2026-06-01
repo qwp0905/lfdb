@@ -1,21 +1,22 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound};
 
 use crate::{
+  cache::ReadonlySlot,
   disk::Pointer,
   objects::{
     BTreeNode, BTreeNodeView, DataChunk, DataEntry, FindSlotResult, InternalNode,
     NodeFindResult, RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
-    TreeHeight, VersionRecord, CHUNK_SIZE, LARGE_VALUE,
+    TreeHeight, VersionRecord, VersionRecordView, CHUNK_SIZE, LARGE_VALUE,
   },
   table::TableHandleRef,
   wal::TxId,
-  Error, Result,
+  Error, Result, VecRef,
 };
 
 use crossbeam::epoch::pin;
 
 use super::{
-  CreatablePolicy, MergeSortable, ReadonlyPolicy, VecRef, WritablePolicy, HEADER_POINTER,
+  CreatablePolicy, MergeSortable, ReadonlyPolicy, WritablePolicy, HEADER_POINTER,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -684,6 +685,23 @@ enum Buffered {
   Data(VecRef),
   Chunked(Vec<Pointer>),
 }
+impl Buffered {
+  fn from(slot: &ReadonlySlot, record: &VersionRecordView) -> Option<(Self, TxId, TxId)> {
+    match &record.data {
+      RecordDataView::Data(s, e) => Some((
+        Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
+        record.owner,
+        record.version,
+      )),
+      RecordDataView::Chunked(pointers) => Some((
+        Buffered::Chunked(pointers.to_vec()),
+        record.owner,
+        record.version,
+      )),
+      RecordDataView::Tombstone => None,
+    }
+  }
+}
 
 pub struct KVSnapshot {
   key: VecRef,
@@ -756,19 +774,7 @@ where
             if policy.is_visible(record.owner, record.version) {
               buffered.push_back((
                 VecRef::refed(slot.page(), s, e),
-                match &record.data {
-                  RecordDataView::Data(s, e) => Some((
-                    Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-                    record.owner,
-                    record.version,
-                  )),
-                  RecordDataView::Chunked(pointers) => Some((
-                    Buffered::Chunked(pointers.to_vec()),
-                    record.owner,
-                    record.version,
-                  )),
-                  RecordDataView::Tombstone => None,
-                },
+                Buffered::from(&slot, record),
               ));
               continue;
             }
@@ -813,19 +819,7 @@ where
       if let Some(record) =
         entry.find(|record| policy.is_visible(record.owner, record.version))
       {
-        return Ok(Some(match &record.data {
-          RecordDataView::Data(s, e) => Some((
-            Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-            record.owner,
-            record.version,
-          )),
-          RecordDataView::Chunked(pointers) => Some((
-            Buffered::Chunked(pointers.to_vec()),
-            record.owner,
-            record.version,
-          )),
-          RecordDataView::Tombstone => None,
-        }));
+        return Ok(Some(Buffered::from(&slot, record)));
       }
 
       next = entry.get_next();
@@ -860,19 +854,7 @@ where
       if self.policy.is_visible(record.owner, record.version) {
         self.buffered.push_back((
           VecRef::refed(slot.page(), s, e),
-          match &record.data {
-            RecordDataView::Data(s, e) => Some((
-              Buffered::Data(VecRef::refed(slot.page(), *s, *e)),
-              record.owner,
-              record.version,
-            )),
-            RecordDataView::Chunked(pointers) => Some((
-              Buffered::Chunked(pointers.to_vec()),
-              record.owner,
-              record.version,
-            )),
-            RecordDataView::Tombstone => None,
-          },
+          Buffered::from(&slot, record),
         ));
         continue;
       }
