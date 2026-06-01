@@ -143,7 +143,10 @@ fn release_entry(
         .for_read()
         .as_ref()
         .deserialize::<DataEntry>()?;
-      entry.take_versions().for_each(release);
+      entry
+        .take_versions()
+        .map(|(_, record)| record)
+        .for_each(release);
       next = entry.get_next();
       let handle = table.handle();
       defer(move || handle.free().dealloc(ptr));
@@ -187,16 +190,16 @@ fn release_entry(
         let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
         let prev_len = entry.len();
-        let mut expired_max: Option<VersionRecord> = None;
+        let mut expired_max: Option<(TxId, VersionRecord)> = None;
         let mut new_versions = VecDeque::new();
 
-        for record in entry.take_versions() {
+        for (reclaimer, record) in entry.take_versions() {
           if version_visibility.is_aborted(&record.owner) {
             release(record);
             continue;
           }
           if record.version >= min_version {
-            new_versions.push_back(record);
+            new_versions.push_back((reclaimer, record));
             continue;
           }
 
@@ -204,14 +207,16 @@ fn release_entry(
           // transactions started after min_version, so older versions can never
           // be reached again.
           match expired_max.as_mut() {
-            Some(max) if max.version < record.version => release(replace(max, record)),
-            None => expired_max = Some(record),
+            Some((_, max)) if max.version < record.version => {
+              release(replace(max, record))
+            }
+            None => expired_max = Some((reclaimer, record)),
             _ => release(record),
           };
         }
 
-        if let Some(record) = expired_max.take() {
-          new_versions.push_back(record);
+        if let Some(v) = expired_max.take() {
+          new_versions.push_back(v);
           max_found = true;
         }
 

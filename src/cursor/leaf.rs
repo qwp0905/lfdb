@@ -2,18 +2,17 @@ use std::{mem::replace, ops::Bound};
 
 use super::{
   RecordData, RecordDataView, StaticKey, StaticKeyRef, VersionRecord, VersionRecordView,
-  MAX_KEY,
+  MAX_KEY, RECORD_OVERHEAD,
 };
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
-  wal::TX_ID_BYTES,
   Result,
 };
 
 // Maximum inline value size for a leaf entry.
 pub const LARGE_VALUE: usize = ((SERIALIZABLE_BYTES - (1 + POINTER_BYTES + 2)) >> 1)
-  - (MAX_KEY + POINTER_BYTES + 2 + (TX_ID_BYTES << 1) + 1 + 2);
+  - (MAX_KEY + POINTER_BYTES + 2 + RECORD_OVERHEAD);
 
 #[derive(Debug)]
 pub struct LeafEntry {
@@ -117,9 +116,30 @@ impl LeafNode {
       .insert(index, LeafEntry::new(key, record, pointer));
   }
 
+  pub fn find_slot(&self, key: StaticKeyRef) -> FindSlotResult<'_> {
+    match self.entries.binary_search_by(|r| (*r.key).cmp(key)) {
+      Ok(i) => FindSlotResult::Replace(i, &self.entries[i].record, self.entries[i].next),
+      Err(i) => {
+        if i == self.entries.len() {
+          if let Some(p) = self.next {
+            return FindSlotResult::Move(p);
+          }
+        };
+
+        FindSlotResult::Insert(i)
+      }
+    }
+  }
+
   pub fn top(&self) -> &StaticKey {
     &self.entries[0].key
   }
+}
+
+pub enum FindSlotResult<'a> {
+  Replace(usize, &'a VersionRecord, Pointer),
+  Insert(usize),
+  Move(Pointer),
 }
 
 /**
@@ -219,6 +239,7 @@ impl<'a> LeafNodeView<'a> {
         VersionRecord::new(
           e.record.owner,
           e.record.version,
+          e.record.record_id,
           match e.record.data {
             RecordDataView::Data(s, e) => RecordData::Data(self.page.copy_range(s..e)),
             RecordDataView::Chunked(pointers) => RecordData::Chunked(pointers),

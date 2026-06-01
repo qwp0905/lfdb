@@ -31,13 +31,13 @@ fn test_serialize_leaf() {
 
   let mut leaf = LeafNode::empty();
 
-  let entries = vec![(vec![49, 50, 51], (123, 456, vec![1, 2, 3]), 100)];
+  let entries = vec![(vec![49, 50, 51], (123, 456, 1, vec![1, 2, 3]), 100)];
 
-  for (i, (key, (o, v, d), p)) in entries.iter().enumerate() {
+  for (i, (key, (o, v, r, d), p)) in entries.iter().enumerate() {
     leaf.insert_at(
       i,
       key.clone(),
-      VersionRecord::new(*o, *v, RecordData::Data(d.clone())),
+      VersionRecord::new(*o, *v, *r, RecordData::Data(d.clone())),
       *p,
     );
   }
@@ -53,7 +53,7 @@ fn test_serialize_leaf() {
     .expect("desirialize leaf error");
 
   for (i, (s, e, r, ptr)) in d.get_entries().enumerate() {
-    let (k, (o, v, d), p) = &entries[i];
+    let (k, (o, v, ri, d), p) = &entries[i];
     assert_eq!(page.range(s..e), k);
     assert_eq!(*p, ptr);
     assert_eq!(r.owner, *o);
@@ -61,7 +61,8 @@ fn test_serialize_leaf() {
     assert!(matches!(
       r.data,
       RecordDataView::Data(s, e) if d == page.range(s..e)
-    ))
+    ));
+    assert_eq!(r.record_id, *ri);
   }
 
   assert_eq!(d.get_next(), Some(200))
