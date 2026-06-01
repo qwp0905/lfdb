@@ -9,7 +9,7 @@ use crate::{
   Result,
 };
 
-const MAX_BATCH_SIZE: usize = 64;
+const MAX_BATCH_SIZE: usize = 32;
 
 pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot, &mut TypedObject) -> Result + 'a;
 pub struct BatchHandle {
