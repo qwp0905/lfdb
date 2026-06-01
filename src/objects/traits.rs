@@ -1,4 +1,4 @@
-use crate::disk::PAGE_SIZE;
+use crate::{disk::PAGE_SIZE, Error, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub enum SerializeType {
@@ -14,6 +14,16 @@ impl SerializeType {
       Self::BTreeNode => 2,
       Self::DataEntry => 3,
       Self::DataChunk => 4,
+    }
+  }
+
+  pub fn deserialize_byte(byte: u8) -> Result<Self> {
+    match byte {
+      1 => Ok(Self::Header),
+      2 => Ok(Self::BTreeNode),
+      3 => Ok(Self::DataEntry),
+      4 => Ok(Self::DataChunk),
+      _ => Err(Error::DeserializeError(None, None)),
     }
   }
 }

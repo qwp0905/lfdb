@@ -1,6 +1,6 @@
 use crate::{
   disk::{Page, PAGE_SIZE},
-  Error, Result,
+  Result,
 };
 
 use super::{
@@ -92,12 +92,11 @@ object_impl! {
 impl TypedObject {
   fn deserialize_from(page: &Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = page.scanner();
-    match reader.read()? {
-      1 => TreeHeader::read_from(&mut reader).map(Self::Header),
-      2 => BTreeNode::read_from(&mut reader).map(Self::BTreeNode),
-      3 => DataEntry::read_from(&mut reader).map(Self::DataEntry),
-      4 => DataChunk::read_from(&mut reader).map(Self::DataChunk),
-      _ => Err(Error::DeserializeError(None, None)),
+    match reader.read().and_then(SerializeType::deserialize_byte)? {
+      SerializeType::Header => TreeHeader::read_from(&mut reader).map(Self::Header),
+      SerializeType::BTreeNode => BTreeNode::read_from(&mut reader).map(Self::BTreeNode),
+      SerializeType::DataEntry => DataEntry::read_from(&mut reader).map(Self::DataEntry),
+      SerializeType::DataChunk => DataChunk::read_from(&mut reader).map(Self::DataChunk),
     }
   }
 
@@ -114,19 +113,19 @@ impl TypedObject {
     let mut writer = page.writer();
     match self {
       Self::Header(data) => {
-        writer.write(&[1])?;
+        writer.write(&[TreeHeader::TYPE.type_byte()])?;
         data.write_at(&mut writer)?;
       }
       Self::BTreeNode(data) => {
-        writer.write(&[2])?;
+        writer.write(&[BTreeNode::TYPE.type_byte()])?;
         data.write_at(&mut writer)?;
       }
       Self::DataEntry(data) => {
-        writer.write(&[3])?;
+        writer.write(&[DataEntry::TYPE.type_byte()])?;
         data.write_at(&mut writer)?;
       }
       Self::DataChunk(data) => {
-        writer.write(&[4])?;
+        writer.write(&[DataChunk::TYPE.type_byte()])?;
         data.write_at(&mut writer)?;
       }
     }
@@ -143,12 +142,17 @@ pub enum TypedObjectView<'a> {
 impl<'a> TypedObjectView<'a> {
   fn deserialize_from(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = page.scanner();
-    match reader.read()? {
-      1 => TreeHeader::read_from(&mut reader).map(Self::Header),
-      2 => BTreeNodeView::read_from(page, &mut reader).map(Self::BTreeNode),
-      3 => DataEntryView::read_from(&mut reader).map(Self::DataEntry),
-      4 => DataChunkView::read_from(page, &mut reader).map(Self::DataChunk),
-      _ => Err(Error::DeserializeError(None, None)),
+    match reader.read().and_then(SerializeType::deserialize_byte)? {
+      SerializeType::Header => TreeHeader::read_from(&mut reader).map(Self::Header),
+      SerializeType::BTreeNode => {
+        BTreeNodeView::read_from(page, &mut reader).map(Self::BTreeNode)
+      }
+      SerializeType::DataEntry => {
+        DataEntryView::read_from(&mut reader).map(Self::DataEntry)
+      }
+      SerializeType::DataChunk => {
+        DataChunkView::read_from(page, &mut reader).map(Self::DataChunk)
+      }
     }
   }
 
