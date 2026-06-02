@@ -21,7 +21,7 @@ use crate::{
 };
 
 type ThreadArg = (Arc<File>, IOTask, Arc<IOHandleState>);
-type WriteThread = dyn BackgroundThread<ThreadArg, ()>;
+type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 type WriteTask = (u64, IoSlice<'static>);
 
 struct IOHandleState {
@@ -61,7 +61,7 @@ impl<T> Task<T> {
 }
 
 pub struct IOPool {
-  thread: Arc<WriteThread>,
+  thread: Arc<IOThread>,
   metrics: Arc<MetricsRegistry>,
 }
 impl IOPool {
@@ -239,7 +239,7 @@ pub struct IOHandle {
   file: Arc<File>,
   write_handle: Arc<Task<WriteTask>>,
   sync_handle: Arc<Task<()>>,
-  thread: Arc<WriteThread>,
+  thread: Arc<IOThread>,
   state: Arc<IOHandleState>,
   metrics: Arc<MetricsRegistry>,
   path: Mutex<PathBuf>,
