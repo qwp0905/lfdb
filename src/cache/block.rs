@@ -1,7 +1,4 @@
-use std::{
-  mem::transmute,
-  sync::{Arc, Mutex, MutexGuard},
-};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{
   disk::{PageRef, Pointer, PAGE_SIZE},
@@ -49,11 +46,7 @@ impl CachedBlock {
 
   pub fn flush(&self) -> Result {
     let page = self.load_page();
-    self
-      .handle
-      .disk()
-      .write_async(self.pointer, unsafe { transmute(&**page) })
-      .wait()
+    self.handle.disk().write(self.pointer, &page)
   }
 
   #[inline]

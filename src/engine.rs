@@ -16,7 +16,7 @@ use crate::{
     initialize, open_tables, recovery, CompactionConfig, Compactor, GCQueue,
     GarbageCollectionConfig, GarbageCollector,
   },
-  disk::{Pointer, PAGE_SIZE},
+  disk::{IOPool, Pointer, PAGE_SIZE},
   error,
   error::{Error, Result},
   info,
@@ -98,14 +98,15 @@ impl Engine {
     };
     let table_config = TableConfig {
       base_path: base_path.clone(),
-      io_thread_count: config.io_thread_count,
     };
+
+    let io_pool = IOPool::new(config.io_thread_count, metrics_registry.clone()).to_arc();
 
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
-    let tables = TableMapper::new(table_config, metrics_registry.clone())?.to_arc();
+    let tables = TableMapper::new(table_config, io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config)?;
+    let (wal, replay) = WAL::replay(&wal_config, io_pool)?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();

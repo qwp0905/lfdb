@@ -97,7 +97,7 @@ impl TableHandle {
 
   #[inline]
   pub fn truncate(&self) -> Result {
-    self.disk.truncate(self.metadata.get_path())
+    self.disk.truncate()
   }
 }
 
