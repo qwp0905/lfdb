@@ -42,14 +42,7 @@ impl WALSegment {
     handle.fallocate(0, file_len)?;
     handle.fsync()?;
 
-    // let flush = WorkBuilder::new()
-    //   .name("wal flush")
-    //   .single()
-    //   .eager_buffering(flush_count, handle_flush(handle.clone()))
-    //   .to_box();
     Ok(Self { handle })
-
-    // Ok(Self { handle, flush })
   }
   pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> Result {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
