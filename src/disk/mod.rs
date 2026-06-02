@@ -15,3 +15,6 @@ pub use types::*;
 
 mod free;
 pub use free::*;
+
+mod pool;
+pub use pool::*;
