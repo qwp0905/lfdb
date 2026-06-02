@@ -18,7 +18,6 @@ where
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       wal_segment_flush_count: DEFAULT_WAL_SEGMENT_FLUSH_COUNT,
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
-      group_commit_count: DEFAULT_GROUP_COMMIT_COUNT,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       compaction_check_interval: DEFAULT_COMPACTION_CHECK_INTERVAL,
@@ -73,15 +72,6 @@ where
    */
   pub const fn wal_segment_flush_count(mut self, count: usize) -> Self {
     self.0.wal_segment_flush_count = count;
-    self
-  }
-  /**
-   * Maximum commits buffered per WAL segment before flushing. A larger value
-   * improves write throughput but increases potential data loss on crash in
-   * high-latency IO environments.
-   */
-  pub const fn group_commit_count(mut self, count: usize) -> Self {
-    self.0.group_commit_count = count;
     self
   }
   /**
@@ -161,7 +151,6 @@ const DEFAULT_WAL_FILE_SIZE: usize = 64 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(20);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 16;
-const DEFAULT_GROUP_COMMIT_COUNT: usize = 512;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(120);
 const DEFAULT_GC_THREAD_COUNT: usize = 5;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64

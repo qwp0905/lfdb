@@ -99,7 +99,10 @@ impl LeafNode {
       mid += 1;
     }
 
-    Some(Self::new(self.entries.split_off(mid), self.next.take()))
+    let split = Self::new(self.entries.split_off(mid), self.next.take());
+    debug_assert!(self.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(split.bytes_len() <= SERIALIZABLE_BYTES);
+    Some(split)
   }
 
   pub fn replace_at(&mut self, index: usize, record: VersionRecord) -> VersionRecord {

@@ -7,8 +7,7 @@ use std::{
 
 use super::{AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata};
 use crate::{
-  disk::{IOPool, PAGE_SIZE},
-  metrics::MetricsRegistry,
+  disk::{DiskController, IOPool},
   utils::{ShortenedRwLock, ToArc},
   Error, Result,
 };
@@ -24,25 +23,22 @@ fn to_path(base: &Path, id: TableId) -> PathBuf {
 
 pub struct TableConfig {
   pub base_path: PathBuf,
-  pub io_thread_count: usize,
 }
 
 pub struct TableMapper {
   open_handles: RwLock<HashMap<TableId, TableHandleRef>>,
   base_path: PathBuf,
   metadata: TableHandleRef,
-  io_pool: IOPool<PAGE_SIZE>,
+  io_pool: Arc<IOPool>,
   last_table_id: AtomicTableId,
   is_new: bool,
 }
 impl TableMapper {
-  pub fn new(config: TableConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let io_pool = IOPool::new(config.io_thread_count, metrics.clone());
-
+  pub fn new(config: TableConfig, io_pool: Arc<IOPool>) -> Result<Self> {
     let path = to_path(&config.base_path, META_TABLE_ID);
     let is_new = !exists(&path).map_err(Error::IO)?;
 
-    let disk = io_pool.open_controller(&path)?;
+    let disk = DiskController::new(io_pool.create_handle(&path)?);
     let metadata = TableHandle::new(
       &TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
       disk,
@@ -60,7 +56,7 @@ impl TableMapper {
   }
 
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
-    let disk = self.io_pool.open_controller(table_meta.get_path())?;
+    let disk = DiskController::new(self.io_pool.create_handle(table_meta.get_path())?);
     Ok(TableHandle::new(table_meta, disk).to_arc())
   }
 
@@ -69,7 +65,7 @@ impl TableMapper {
     let mut exists = HashSet::new();
     for entry in dir {
       let path = entry.map_err(Error::IO)?.path();
-      if path.extension().map_or(true, |ext| ext != FILE_EXT) {
+      if path.extension().is_none_or(|ext| ext != FILE_EXT) {
         continue;
       }
       if path == self.metadata.metadata().get_path() {
@@ -129,9 +125,5 @@ impl TableMapper {
       .map(|v| v.clone())
       .chain([self.metadata.clone()])
       .collect()
-  }
-
-  pub fn close(&self) {
-    self.io_pool.close();
   }
 }

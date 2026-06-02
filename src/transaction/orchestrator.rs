@@ -5,14 +5,14 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  disk::Pointer,
+  disk::{IOHandle, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
   utils::ToArc,
-  wal::{Checkpoint, TxId, WALSegment, WAL},
+  wal::{Checkpoint, TxId, WAL},
 };
 
 pub struct TransactionConfig {
@@ -35,6 +35,7 @@ pub struct TxOrchestrator {
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
   compactor: Box<Compactor>,
+  io_pool: Arc<IOPool>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
@@ -49,6 +50,7 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Box<Compactor>,
+    io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
@@ -72,6 +74,7 @@ impl TxOrchestrator {
       recorder,
       compactor,
       timeout_thread,
+      io_pool,
       tx_timeout: config.timeout,
       metrics,
     }
@@ -86,8 +89,9 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Box<Compactor>,
+    io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
-    segments: Vec<WALSegment>,
+    segments: Vec<IOHandle>,
   ) -> Result<Self> {
     Checkpoint::run(&wal, &block_cache, &version_visibility)?;
     segments
@@ -104,6 +108,7 @@ impl TxOrchestrator {
       gc,
       recorder,
       compactor,
+      io_pool,
       metrics,
     ))
   }
@@ -228,10 +233,10 @@ impl TxOrchestrator {
 
     self.block_cache.close();
     info!("block cache closed.");
-    self.tables.close();
-    info!("tables closed.");
     self.wal.close();
     info!("wal closed.");
+    self.io_pool.close();
+    info!("io pool closed.");
     Ok(())
   }
 }

@@ -16,7 +16,7 @@ use crate::{
     initialize, open_tables, recovery, CompactionConfig, Compactor, GCQueue,
     GarbageCollectionConfig, GarbageCollector,
   },
-  disk::{Pointer, PAGE_SIZE},
+  disk::{IOPool, Pointer, PAGE_SIZE},
   error,
   error::{Error, Result},
   info,
@@ -39,7 +39,6 @@ where
   pub wal_buffer_size: usize,
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
-  pub group_commit_count: usize,
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
@@ -73,7 +72,6 @@ impl Engine {
       .map_err(Error::IO)?;
 
     let wal_config = WALConfig {
-      group_commit_count: config.group_commit_count,
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
       base_dir: base_path.clone(),
@@ -98,14 +96,15 @@ impl Engine {
     };
     let table_config = TableConfig {
       base_path: base_path.clone(),
-      io_thread_count: config.io_thread_count,
     };
+
+    let io_pool = IOPool::new(config.io_thread_count, metrics_registry.clone()).to_arc();
 
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
-    let tables = TableMapper::new(table_config, metrics_registry.clone())?.to_arc();
+    let tables = TableMapper::new(table_config, io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config)?;
+    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -152,6 +151,7 @@ impl Engine {
         gc,
         recorder,
         compactor,
+        io_pool,
         metrics_registry.clone(),
       );
 
@@ -247,6 +247,7 @@ impl Engine {
       gc,
       recorder,
       compactor,
+      io_pool,
       metrics_registry.clone(),
       replay.segments,
     )?;

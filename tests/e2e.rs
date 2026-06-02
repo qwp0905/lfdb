@@ -38,7 +38,6 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .gc_thread_count(3)
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
-    .group_commit_count(10)
     .gc_trigger_interval(Duration::from_secs(5))
     .compaction_check_interval(Duration::from_secs(10))
     .wal_segment_flush_delay(Duration::from_secs(2))
@@ -604,7 +603,6 @@ fn test_btree_node_split_and_recovery() {
 fn crash_writer() {
   let dir = std::env::var("CRASH_DIR").expect("CRASH_DIR not set");
   let engine = EngineBuilder::new(std::path::Path::new(&dir))
-    .group_commit_count(10)
     .build()
     .expect("engine bootstrap failed");
   let rng = &mut rng();
@@ -1009,7 +1007,6 @@ fn write_not_commit() {
   let dir = std::env::var("CRASH_DIR").expect("CRASH_DIR not set");
   let key = std::env::var("CRASH_KEY").expect("CRASH_KEY not set");
   let engine = EngineBuilder::new(std::path::Path::new(&dir))
-    .group_commit_count(10)
     .build()
     .expect("engine bootstrap failed");
   create_table(&engine, TEST_TABLE);

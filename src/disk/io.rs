@@ -221,21 +221,28 @@ impl Fallocate for File {
   }
   #[cfg(target_vendor = "apple")]
   fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
+    let eof = self.metadata()?.len();
+    if eof >= offset + len {
+      return Ok(());
+    }
+
     let mut fstore = libc::fstore_t {
       fst_flags: libc::F_ALLOCATEALL,
       fst_posmode: libc::F_PEOFPOSMODE,
-      fst_offset: offset as libc::off_t,
-      fst_length: len as libc::off_t,
+      fst_offset: 0,
+      fst_length: (offset + len - eof) as libc::off_t,
       fst_bytesalloc: 0,
     };
     let ret = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore) };
     if ret == -1 {
       return Err(Error::last_os_error());
     }
-    Ok(())
+    self.set_len(offset + len)
   }
   #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-  fn fallocate(&self, _offset: u64, _len: u64) {}
+  fn fallocate(&self, offset: u64, len: u64) {
+    self.set_len(offset + len)
+  }
 }
 
 #[cfg(test)]

@@ -7,14 +7,13 @@ use crate::{
   debug, error, info,
   thread::{BackgroundThread, WorkBuilder},
   transaction::VersionVisibility,
-  utils::{ToArc, ToBox},
+  utils::ToBox,
   wal::{WALSegment, WAL},
   Result,
 };
 
 pub struct Checkpoint {
   thread: Box<dyn BackgroundThread<WALSegment>>,
-  failed: Arc<SegQueue<WALSegment>>,
 }
 impl Checkpoint {
   pub fn new(
@@ -24,17 +23,16 @@ impl Checkpoint {
     interval: Duration,
     max_count: usize,
   ) -> Self {
-    let failed = SegQueue::new().to_arc();
     let thread = WorkBuilder::new()
       .name("checkpoint")
       .single()
       .lazy_buffering(
         interval,
         max_count,
-        handle_thread(wal, block_cache, version_visibility, failed.clone()),
+        handle_thread(wal, block_cache, version_visibility),
       )
       .to_box();
-    Self { thread, failed }
+    Self { thread }
   }
 
   pub fn dispatch(&self, segment: WALSegment) {
@@ -59,9 +57,6 @@ impl Checkpoint {
 
   pub fn close(&self) {
     self.thread.close();
-    while let Some(segment) = self.failed.pop() {
-      segment.close();
-    }
   }
 }
 
@@ -69,8 +64,8 @@ const fn handle_thread(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
-  failed: Arc<SegQueue<WALSegment>>,
 ) -> impl Fn(Vec<WALSegment>) {
+  let failed = SegQueue::new();
   move |segments| {
     if let Err(err) = Checkpoint::run(&wal, &block_cache, &version) {
       error!("checkpoint failed: {err}");

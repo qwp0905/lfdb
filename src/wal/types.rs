@@ -8,3 +8,6 @@ pub const TX_ID_BYTES: usize = TxId::BITS as usize >> 3;
 pub type AtomicTxId = AtomicU64;
 
 pub type SegmentGeneration = u64;
+
+// Sized to hold at least 2 base pages (base page = 4KB) with room for headers.
+pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb

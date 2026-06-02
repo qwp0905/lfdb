@@ -3,7 +3,7 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    OnceLock, Weak,
+    Arc, OnceLock, Weak,
   },
 };
 
@@ -14,7 +14,7 @@ use crossbeam::{
 };
 
 use crate::{
-  disk::{PagePool, Pointer},
+  disk::{IOPool, PagePool, Pointer},
   error::Result,
   info,
   table::TableId,
@@ -28,7 +28,6 @@ use super::{
 
 pub struct WALConfig {
   pub base_dir: PathBuf,
-  pub group_commit_count: usize,
   pub max_file_size: usize,
   pub max_buffer_size: usize,
 }
@@ -87,13 +86,16 @@ pub struct WAL {
   synced_count: AtomicU64,
 }
 impl WAL {
-  pub fn replay(config: &WALConfig) -> Result<(Self, ReplayResult)> {
+  pub fn replay(
+    config: &WALConfig,
+    io_pool: Arc<IOPool>,
+  ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments");
 
-    let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
+    let replay_result = replay(&config.base_dir, &page_pool, &io_pool)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
@@ -107,8 +109,8 @@ impl WAL {
     let preloader = SegmentPreload::new(
       config.base_dir.clone(),
       replay_result.generation,
-      config.group_commit_count,
       max_len,
+      io_pool,
     )
     .to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
@@ -213,13 +215,13 @@ impl WAL {
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           match self.fsync_queue.pop() {
             Some(f) => {
-              f.wait().flatten()?;
+              f.wait()?;
               self.synced_count.fetch_add(1, Ordering::Release);
             }
             None => backoff.snooze(),
           }
         }
-        return f.wait().flatten();
+        return f.wait();
       }
 
       if offset >= WAL_BLOCK_SIZE {
@@ -283,8 +285,7 @@ impl WAL {
         continue;
       }
 
-      sync.wait().flatten()?;
-      segment.close();
+      sync.wait()?;
     }
   }
 
@@ -351,9 +352,9 @@ impl WAL {
       }
 
       let taken = unsafe { ptr.into_owned() };
-      let segment = taken.take_segment();
+      let _ = taken.take_segment();
       let _ = self.preloader.close();
-      return segment.close();
+      return;
     }
   }
 }
