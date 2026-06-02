@@ -122,7 +122,10 @@ impl BlockCache {
 
     let old = unsafe { ptr.replace(new) };
     if self.dirty_blocks.contains(block_id) {
-      old.flush()?;
+      if let Err(err) = old.flush() {
+        unsafe { ptr.replace(old) };
+        return Err(err);
+      }
       self.dirty_blocks.remove(block_id);
       self.dirty_tables.mark(old.handle());
     }

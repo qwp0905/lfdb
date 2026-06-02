@@ -1,6 +1,6 @@
 use std::{
   collections::HashMap,
-  fs,
+  fs::{self, File},
   panic::{RefUnwindSafe, UnwindSafe},
   path::Path,
   sync::{
@@ -70,6 +70,8 @@ impl Engine {
       .as_ref()
       .canonicalize()
       .map_err(Error::IO)?;
+
+    let base_dir = File::open(&base_path).map_err(Error::IO)?;
 
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
@@ -153,6 +155,7 @@ impl Engine {
         compactor,
         io_pool,
         metrics_registry.clone(),
+        base_dir,
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
@@ -250,6 +253,7 @@ impl Engine {
       io_pool,
       metrics_registry.clone(),
       replay.segments,
+      base_dir,
     )?;
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());

@@ -219,7 +219,7 @@ fn release_entry(
           return Ok(());
         }
 
-        if entry.len() > 0 {
+        if new_versions.len() > 0 {
           entry.set_versions(new_versions);
           serialize_and_log(slot, &entry)?;
           return Ok(());

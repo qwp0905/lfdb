@@ -210,7 +210,7 @@ impl VersionVisibility {
       aborted.insert(id);
     }
 
-    Ok((active, aborted, snapshot_id + 1))
+    Ok((active, aborted, snapshot_id.checked_add(1).unwrap_or(0)))
   }
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
