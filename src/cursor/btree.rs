@@ -547,6 +547,8 @@ where
 
             let mut node = leaf.writable();
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
+            self.0.after_update_hook(entry_ptr, table);
+
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
