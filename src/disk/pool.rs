@@ -295,7 +295,7 @@ impl IOHandle {
     handle
   }
 
-  pub fn fdatasync_async(&self) -> TaskHandle<()> {
+  pub fn fdatasync(&self) -> TaskHandle<()> {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
     if self.state.closed.load(Ordering::Acquire) {
@@ -323,14 +323,6 @@ impl IOHandle {
     };
 
     self.file.sync_all().map_err(Error::IO)
-  }
-  pub fn fdatasync(&self) -> Result {
-    let _token = match self.state.pin.try_shared() {
-      Some(token) => token,
-      None => return Ok(()),
-    };
-
-    self.file.sync_data().map_err(Error::IO)
   }
 
   pub fn len(&self) -> Result<u64> {

@@ -72,7 +72,7 @@ impl WALSegment {
 
   #[inline]
   pub fn fsync(&self) -> FsyncResult {
-    self.handle.fdatasync_async()
+    self.handle.fdatasync()
   }
 
   #[inline]
