@@ -106,7 +106,7 @@ impl Engine {
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(table_config, io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, io_pool)?;
+    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -153,6 +153,7 @@ impl Engine {
         gc,
         recorder,
         compactor,
+        io_pool,
         metrics_registry.clone(),
       );
 
@@ -248,6 +249,7 @@ impl Engine {
       gc,
       recorder,
       compactor,
+      io_pool,
       metrics_registry.clone(),
       replay.segments,
     )?;

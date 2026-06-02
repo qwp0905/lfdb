@@ -5,7 +5,7 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  disk::{DiskController, Pointer},
+  disk::{DiskController, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
@@ -35,6 +35,7 @@ pub struct TxOrchestrator {
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
   compactor: Box<Compactor>,
+  io_pool: Arc<IOPool>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
@@ -49,6 +50,7 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Box<Compactor>,
+    io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
@@ -72,6 +74,7 @@ impl TxOrchestrator {
       recorder,
       compactor,
       timeout_thread,
+      io_pool,
       tx_timeout: config.timeout,
       metrics,
     }
@@ -86,6 +89,7 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Box<Compactor>,
+    io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<DiskController<WAL_BLOCK_SIZE>>,
   ) -> Result<Self> {
@@ -104,6 +108,7 @@ impl TxOrchestrator {
       gc,
       recorder,
       compactor,
+      io_pool,
       metrics,
     ))
   }
@@ -230,8 +235,8 @@ impl TxOrchestrator {
     info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
-    self.tables.close();
-    info!("tables closed.");
+    self.io_pool.close();
+    info!("io pool closed.");
     Ok(())
   }
 }

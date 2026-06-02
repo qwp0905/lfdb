@@ -126,8 +126,4 @@ impl TableMapper {
       .chain([self.metadata.clone()])
       .collect()
   }
-
-  pub fn close(&self) {
-    self.io_pool.close();
-  }
 }
