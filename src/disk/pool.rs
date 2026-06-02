@@ -130,7 +130,7 @@ const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
         let mut buffered = Vec::with_capacity(MAX_FLUSH_COUNT);
 
         loop {
-          for (_, fulfill) in (0..count).map_while(|_| handle.queue.pop()) {
+          for (_, fulfill) in (0..MAX_FLUSH_COUNT).map_while(|_| handle.queue.pop()) {
             buffered.push(fulfill);
           }
 
