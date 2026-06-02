@@ -22,8 +22,5 @@ use interval::*;
 mod lazy;
 use lazy::*;
 
-mod batch;
-pub use batch::*;
-
 mod parker;
 pub use parker::*;
