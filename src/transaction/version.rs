@@ -276,7 +276,7 @@ impl VersionVisibility {
   pub fn clear(&self, current: &Path) -> Result {
     for entry in fs::read_dir(&self.base_path).map_err(Error::IO)? {
       let path = entry.map_err(Error::IO)?.path();
-      if path.extension().map_or(true, |ext| ext != FILE_EXT) {
+      if path.extension().is_none_or(|ext| ext != FILE_EXT) {
         continue;
       };
       if path == current {

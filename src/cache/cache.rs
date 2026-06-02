@@ -145,6 +145,10 @@ impl BlockCache {
     self.handle_eviction(guard, new_block)
   }
 
+  /**
+   * Call disk read unchecked method.
+   * It is only allowed in bootstrap.
+   */
   pub fn read_unchecked(
     &self,
     pointer: Pointer,
