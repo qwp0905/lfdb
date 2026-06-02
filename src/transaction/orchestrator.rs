@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{fs::File, sync::Arc, time::Duration};
 
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
@@ -52,11 +52,13 @@ impl TxOrchestrator {
     compactor: Box<Compactor>,
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
+    base_dir: File,
   ) -> Self {
     let checkpoint = Checkpoint::new(
       wal.clone(),
       block_cache.clone(),
       version_visibility.clone(),
+      base_dir,
       config.segment_flush_delay,
       config.segment_flush_count,
     )
@@ -92,8 +94,9 @@ impl TxOrchestrator {
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<IOHandle>,
+    base_dir: File,
   ) -> Result<Self> {
-    Checkpoint::run(&wal, &block_cache, &version_visibility)?;
+    Checkpoint::run(&wal, &block_cache, &version_visibility, &base_dir)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -110,6 +113,7 @@ impl TxOrchestrator {
       compactor,
       io_pool,
       metrics,
+      base_dir,
     ))
   }
 
