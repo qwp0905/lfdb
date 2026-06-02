@@ -1,15 +1,12 @@
 use std::{ffi::OsStr, path::PathBuf, ptr::copy_nonoverlapping, slice::from_raw_parts};
 
-use super::{LogId, TxId};
+use super::{LogId, TxId, WAL_BLOCK_SIZE};
 use crate::{
   disk::{Page, Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
   wal::{LOG_ID_BYTES, TX_ID_BYTES},
   Error,
 };
-
-// Sized to hold at least 2 base pages (base page = 4KB) with room for headers.
-pub const WAL_BLOCK_SIZE: usize = 16 << 10; // 16kb
 
 #[derive(Debug)]
 pub enum Operation {
@@ -295,6 +292,27 @@ impl From<&Page<WAL_BLOCK_SIZE>> for (Vec<LogRecord>, bool) {
     }
     (data, false)
   }
+}
+
+pub fn read_page(value: &Page<WAL_BLOCK_SIZE>) -> (Vec<LogRecord>, bool) {
+  let mut data = vec![];
+  let mut scanner = value.scanner();
+  let len = match scanner.read_u16() {
+    Ok(l) => l,
+    Err(_) => return (data, true), // ignore error cause of partial write
+  };
+
+  for _ in 0..len {
+    let size = match scanner.read_u16() {
+      Ok(s) => s,
+      Err(_) => return (data, true), // ignore error cause of partial write
+    };
+    match scanner.read_n(size as usize).and_then(|p| p.try_into()) {
+      Ok(record) => data.push(record),
+      Err(_) => return (data, true), // ignore error cause of partial write
+    }
+  }
+  (data, false)
 }
 
 #[cfg(test)]

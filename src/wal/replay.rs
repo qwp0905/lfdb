@@ -5,10 +5,11 @@ use std::{
 };
 
 use super::{
-  LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_EXT, WAL_BLOCK_SIZE,
+  read_page, LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_EXT,
+  WAL_BLOCK_SIZE,
 };
 use crate::{
-  disk::{Page, PagePool, Pointer},
+  disk::{DiskController, IOPool, PagePool, Pointer},
   error::{Error, Result},
   table::TableId,
 };
@@ -33,7 +34,7 @@ pub struct ReplayResult {
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
-  pub segments: Vec<WALSegment>,
+  pub segments: Vec<DiskController<WAL_BLOCK_SIZE>>,
   pub generation: SegmentGeneration,
   pub last_snapshot: Option<PathBuf>,
 }
@@ -55,14 +56,14 @@ impl ReplayResult {
 
 pub fn replay(
   base_dir: &Path,
-  flush_count: usize,
   page_pool: &PagePool<WAL_BLOCK_SIZE>,
+  io_pool: &IOPool,
 ) -> Result<ReplayResult> {
   let mut files = Vec::new();
   let mut generation = 0;
   for file in read_dir(base_dir).map_err(Error::IO)? {
     let path = file.map_err(Error::IO)?.path();
-    if path.extension().map_or(true, |ext| ext != FILE_EXT) {
+    if path.extension().is_none_or(|ext| ext != FILE_EXT) {
       continue;
     }
 
@@ -87,7 +88,7 @@ pub fn replay(
 
   let mut last_checkpoint = None as Option<LogId>;
   for path in files.into_iter() {
-    let wal = WALSegment::open_exists(&path, flush_count)?;
+    let wal = DiskController::new(io_pool.create_handle(&path)?);
     let len = wal.len()?;
     let mut records = vec![];
 
@@ -95,7 +96,7 @@ pub fn replay(
       let mut page = page_pool.acquire();
       wal.read(i, &mut page)?;
 
-      let (r, complete) = (&page as &Page<_>).into();
+      let (r, complete) = read_page(&page);
       records.extend(r.into_iter());
       if complete {
         break;
@@ -106,7 +107,7 @@ pub fn replay(
       log_id = record.log_id.max(log_id);
       tx_id = tx_id.max(record.tx_id);
 
-      if last_checkpoint.map_or(false, |c| c > record.log_id) {
+      if last_checkpoint.is_some_and(|c| c > record.log_id) {
         continue;
       }
 

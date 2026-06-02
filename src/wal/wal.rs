@@ -3,7 +3,7 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    OnceLock, Weak,
+    Arc, OnceLock, Weak,
   },
 };
 
@@ -14,7 +14,7 @@ use crossbeam::{
 };
 
 use crate::{
-  disk::{PagePool, Pointer},
+  disk::{IOPool, PagePool, Pointer},
   error::Result,
   info,
   table::TableId,
@@ -87,13 +87,16 @@ pub struct WAL {
   synced_count: AtomicU64,
 }
 impl WAL {
-  pub fn replay(config: &WALConfig) -> Result<(Self, ReplayResult)> {
+  pub fn replay(
+    config: &WALConfig,
+    io_pool: Arc<IOPool>,
+  ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments");
 
-    let replay_result = replay(&config.base_dir, config.group_commit_count, &page_pool)?;
+    let replay_result = replay(&config.base_dir, &page_pool, &io_pool)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
@@ -109,6 +112,7 @@ impl WAL {
       replay_result.generation,
       config.group_commit_count,
       max_len,
+      io_pool,
     )
     .to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);

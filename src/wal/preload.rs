@@ -7,7 +7,7 @@ use crossbeam::{
 
 use super::{SegmentGeneration, WALSegment};
 use crate::{
-  disk::Pointer,
+  disk::{IOPool, Pointer},
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
   Result,
@@ -34,6 +34,7 @@ impl SegmentPreload {
     generation: SegmentGeneration,
     flush_count: usize,
     max_len: Pointer,
+    io_pool: Arc<IOPool>,
   ) -> Self {
     let (tx, rx) = unbounded();
     let reuse = SegQueue::<WALSegment>::new().to_arc();
@@ -54,7 +55,7 @@ impl SegmentPreload {
           .pop()
           .map(|seg| seg.reuse(&prefix, current).map(|_| seg))
           .unwrap_or_else(|| {
-            WALSegment::open_new(&prefix, current, flush_count, max_len)
+            WALSegment::open(&prefix, current, flush_count, max_len, &io_pool)
           })?;
 
         tx.send(Ok(segment)).unwrap();
