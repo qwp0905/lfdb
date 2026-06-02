@@ -72,3 +72,19 @@ fn test_pwrite() -> Result<()> {
 
   Ok(())
 }
+
+#[test]
+fn test_allocate() -> Result<()> {
+  let dir = tempdir_in(".")?;
+  let file = File::create(dir.path().join("fallocate.txt"))?;
+
+  file.fallocate(0, 100)?;
+  assert_eq!(file.metadata()?.len(), 100);
+  file.fallocate(100, 200)?;
+  assert_eq!(file.metadata()?.len(), 300);
+
+  file.fallocate(500, 10)?;
+  assert_eq!(file.metadata()?.len(), 510);
+
+  Ok(())
+}
