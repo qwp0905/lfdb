@@ -20,15 +20,12 @@ use crate::{
   Error, Result,
 };
 
-type ThreadArg = (Arc<File>, Arc<WriteHandle>);
+type ThreadArg = (Arc<File>, Arc<WriteHandle>, Arc<HandleState>);
 type WriteThread = dyn BackgroundThread<ThreadArg, ()>;
 type WriteTask = (u64, IoSlice<'static>);
 type WriteQueue = SegQueue<(WriteTask, OneshotFulfill<Result>)>;
 
-struct WriteHandle {
-  queue: WriteQueue,
-  occupied: AtomicBool,
-  thread: Arc<WriteThread>,
+struct HandleState {
   /**
    * Pin to protect file I/O from truncate.
    */
@@ -38,37 +35,25 @@ struct WriteHandle {
    */
   closed: AtomicBool,
 }
-impl WriteHandle {
-  fn new(thread: Arc<WriteThread>) -> Self {
+impl HandleState {
+  const fn new() -> Self {
     Self {
-      queue: WriteQueue::new(),
-      occupied: AtomicBool::new(false),
-      thread,
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),
     }
   }
+}
 
-  fn execute(
-    self: &Arc<Self>,
-    file: &Arc<File>,
-    offset: u64,
-    buf: &'static [u8],
-  ) -> TaskHandle<()> {
-    let (o, f) = oneshot();
-    let handle = TaskHandle::new(o);
-    if self.closed.load(Ordering::Acquire) {
-      f.fulfill(Ok(()));
-      return handle;
+struct WriteHandle {
+  queue: WriteQueue,
+  occupied: AtomicBool,
+}
+impl WriteHandle {
+  const fn new() -> Self {
+    Self {
+      queue: WriteQueue::new(),
+      occupied: AtomicBool::new(false),
     }
-
-    self.queue.push(((offset, IoSlice::new(buf)), f));
-    if self.occupied.fetch_or(true, Ordering::Release) {
-      return handle;
-    }
-
-    self.thread.dispatch((file.clone(), self.clone()));
-    handle
   }
 }
 
@@ -100,7 +85,9 @@ impl IOPool {
       .to_arc();
     Ok(IOHandle {
       file,
-      write_handle: WriteHandle::new(self.thread.clone()).to_arc(),
+      write_handle: WriteHandle::new().to_arc(),
+      state: HandleState::new().to_arc(),
+      thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       path: Mutex::new(PathBuf::from(path)),
     })
@@ -113,7 +100,7 @@ impl IOPool {
 
 const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   let count = max_iov();
-  move |(file, handle)| {
+  move |(file, handle, state)| {
     metrics.active_io_threads.inc();
 
     let mut buffered = Vec::with_capacity(count);
@@ -123,7 +110,7 @@ const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
         buffered.push(task);
       }
 
-      flush(&metrics, &file, &handle, &mut buffered);
+      flush(&metrics, &file, &state, &mut buffered);
       handle.occupied.fetch_and(false, Ordering::Release);
       if handle.queue.is_empty() {
         break;
@@ -140,7 +127,7 @@ const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
 fn flush(
   metrics: &MetricsRegistry,
   file: &File,
-  handle: &WriteHandle,
+  state: &HandleState,
   buffered: &mut Vec<(WriteTask, OneshotFulfill<Result>)>,
 ) {
   if buffered.is_empty() {
@@ -148,10 +135,10 @@ fn flush(
   }
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
-  let _token = match handle.pin.try_shared() {
+  let _token = match state.pin.try_shared() {
     Some(t) => t,
     None => {
-      handle.closed.fetch_or(true, Ordering::Release);
+      state.closed.fetch_or(true, Ordering::Release);
       return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
     }
   };
@@ -201,6 +188,8 @@ fn write_exec(
 pub struct IOHandle {
   file: Arc<File>,
   write_handle: Arc<WriteHandle>,
+  thread: Arc<WriteThread>,
+  state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   path: Mutex<PathBuf>,
 }
@@ -232,11 +221,31 @@ impl IOHandle {
   }
 
   pub fn write_async(&self, offset: u64, buf: &'static [u8]) -> TaskHandle<()> {
-    self.write_handle.execute(&self.file, offset, buf)
+    let (o, f) = oneshot();
+    let handle = TaskHandle::new(o);
+    if self.state.closed.load(Ordering::Acquire) {
+      f.fulfill(Ok(()));
+      return handle;
+    }
+
+    self
+      .write_handle
+      .queue
+      .push(((offset, IoSlice::new(buf)), f));
+    if self.write_handle.occupied.fetch_or(true, Ordering::Release) {
+      return handle;
+    }
+
+    self.thread.dispatch((
+      self.file.clone(),
+      self.write_handle.clone(),
+      self.state.clone(),
+    ));
+    handle
   }
 
   pub fn fsync(&self) -> Result {
-    let _token = match self.write_handle.pin.try_shared() {
+    let _token = match self.state.pin.try_shared() {
       Some(token) => token,
       None => return Ok(()),
     };
@@ -244,7 +253,7 @@ impl IOHandle {
     self.file.sync_all().map_err(Error::IO)
   }
   pub fn fdatasync(&self) -> Result {
-    let _token = match self.write_handle.pin.try_shared() {
+    let _token = match self.state.pin.try_shared() {
       Some(token) => token,
       None => return Ok(()),
     };
@@ -259,7 +268,7 @@ impl IOHandle {
   pub fn truncate(&self) -> Result {
     let backoff = Backoff::new();
     loop {
-      match self.write_handle.pin.try_exclusive() {
+      match self.state.pin.try_exclusive() {
         Some(t) => break forget(t),
         None => backoff.snooze(),
       }

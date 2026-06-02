@@ -5,14 +5,14 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  disk::{DiskController, IOPool, Pointer},
+  disk::{IOHandle, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
   utils::ToArc,
-  wal::{Checkpoint, TxId, WAL, WAL_BLOCK_SIZE},
+  wal::{Checkpoint, TxId, WAL},
 };
 
 pub struct TransactionConfig {
@@ -91,7 +91,7 @@ impl TxOrchestrator {
     compactor: Box<Compactor>,
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
-    segments: Vec<DiskController<WAL_BLOCK_SIZE>>,
+    segments: Vec<IOHandle>,
   ) -> Result<Self> {
     Checkpoint::run(&wal, &block_cache, &version_visibility)?;
     segments

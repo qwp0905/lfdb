@@ -9,7 +9,7 @@ use super::{
   WAL_BLOCK_SIZE,
 };
 use crate::{
-  disk::{DiskController, IOPool, PagePool, Pointer},
+  disk::{IOHandle, IOPool, PagePool, Pointer},
   error::{Error, Result},
   table::TableId,
 };
@@ -34,7 +34,7 @@ pub struct ReplayResult {
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
-  pub segments: Vec<DiskController<WAL_BLOCK_SIZE>>,
+  pub segments: Vec<IOHandle>,
   pub generation: SegmentGeneration,
   pub last_snapshot: Option<PathBuf>,
 }
@@ -88,13 +88,15 @@ pub fn replay(
 
   let mut last_checkpoint = None as Option<LogId>;
   for path in files.into_iter() {
-    let wal = DiskController::new(io_pool.create_handle(&path)?);
-    let len = wal.len()?;
+    let segment = io_pool.create_handle(&path)?;
+    let len = segment.len()?;
+    let mut offset = 0;
     let mut records = vec![];
 
-    for i in 0..len {
+    while offset < len {
       let mut page = page_pool.acquire();
-      wal.read(i, &mut page)?;
+      segment.read(offset, page.as_mut())?;
+      offset += WAL_BLOCK_SIZE as u64;
 
       let (r, complete) = read_page(&page);
       records.extend(r.into_iter());
@@ -138,7 +140,7 @@ pub fn replay(
       };
     }
 
-    segments.push(wal);
+    segments.push(segment);
   }
 
   Ok(ReplayResult {

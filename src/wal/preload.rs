@@ -63,7 +63,7 @@ impl SegmentPreload {
       })
       .to_box();
 
-    let _ = thread.execute(());
+    let _ = thread.dispatch(());
     Self {
       queue: rx,
       thread,
@@ -73,7 +73,7 @@ impl SegmentPreload {
 
   pub fn load(&self) -> Result<WALSegment> {
     let seg = self.queue.recv().unwrap();
-    self.thread.execute(()).wait().flatten()?;
+    self.thread.dispatch(());
     seg
   }
 
