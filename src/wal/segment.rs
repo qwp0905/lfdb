@@ -1,23 +1,21 @@
-use std::{mem::transmute, path::Path, sync::Arc};
+use std::{mem::transmute, path::Path};
 
 use super::{SegmentGeneration, WAL_BLOCK_SIZE};
 use crate::{
   disk::{IOHandle, IOPool, Page, Pointer},
   error::Result,
-  thread::{BackgroundThread, TaskHandle, WorkBuilder},
-  utils::{ToArc, ToBox},
+  thread::TaskHandle,
   Error,
 };
 
 pub const FILE_EXT: &str = "log";
 
-pub type FsyncResult = TaskHandle<Result>;
+pub type FsyncResult = TaskHandle<()>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
 pub struct WALSegment {
-  handle: Arc<IOHandle>,
-  flush: Box<dyn BackgroundThread<(), Result>>,
+  handle: IOHandle,
 }
 impl WALSegment {
   pub fn parse_generation(path: &Path) -> Result<SegmentGeneration> {
@@ -31,12 +29,11 @@ impl WALSegment {
   pub fn open(
     prefix: &Path,
     generation: SegmentGeneration,
-    flush_count: usize,
     max_len: Pointer,
     pool: &IOPool,
   ) -> Result<Self> {
     let path = prefix.join(pad_start(generation)).with_extension(FILE_EXT);
-    let handle = pool.create_handle(&path)?.to_arc();
+    let handle = pool.create_handle(&path)?;
 
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
@@ -45,13 +42,14 @@ impl WALSegment {
     handle.fallocate(0, file_len)?;
     handle.fsync()?;
 
-    let flush = WorkBuilder::new()
-      .name("wal flush")
-      .single()
-      .eager_buffering(flush_count, handle_flush(handle.clone()))
-      .to_box();
+    // let flush = WorkBuilder::new()
+    //   .name("wal flush")
+    //   .single()
+    //   .eager_buffering(flush_count, handle_flush(handle.clone()))
+    //   .to_box();
+    Ok(Self { handle })
 
-    Ok(Self { handle, flush })
+    // Ok(Self { handle, flush })
   }
   pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> Result {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
@@ -74,25 +72,14 @@ impl WALSegment {
 
   #[inline]
   pub fn fsync(&self) -> FsyncResult {
-    self.flush.execute(())
+    self.handle.fdatasync_async()
   }
 
   #[inline]
   pub fn truncate(self) -> Result {
-    self.close();
     self.handle.truncate()?;
     Ok(())
   }
-
-  #[inline]
-  pub fn close(&self) {
-    self.flush.close();
-  }
-}
-
-#[inline]
-const fn handle_flush(file: Arc<IOHandle>) -> impl Fn(Vec<()>) -> Result {
-  move |_| file.fdatasync()
 }
 
 /**

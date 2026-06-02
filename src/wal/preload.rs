@@ -32,7 +32,6 @@ impl SegmentPreload {
   pub fn new(
     prefix: PathBuf,
     generation: SegmentGeneration,
-    flush_count: usize,
     max_len: Pointer,
     io_pool: Arc<IOPool>,
   ) -> Self {
@@ -54,9 +53,7 @@ impl SegmentPreload {
         let segment = reuse_c
           .pop()
           .map(|seg| seg.reuse(&prefix, current).map(|_| seg))
-          .unwrap_or_else(|| {
-            WALSegment::open(&prefix, current, flush_count, max_len, &io_pool)
-          })?;
+          .unwrap_or_else(|| WALSegment::open(&prefix, current, max_len, &io_pool))?;
 
         tx.send(Ok(segment)).unwrap();
         Ok(())

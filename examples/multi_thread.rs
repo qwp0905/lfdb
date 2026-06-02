@@ -21,7 +21,6 @@ fn main() {
   log::set_max_level(log::LevelFilter::Trace);
   let engine = Arc::new(
     EngineBuilder::new("./.local")
-      .group_commit_count(512)
       .block_cache_memory_capacity(512 << 20)
       .block_cache_shard_count(1 << 8)
       .wal_file_size(32 << 20)

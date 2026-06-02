@@ -39,7 +39,6 @@ where
   pub wal_buffer_size: usize,
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
-  pub group_commit_count: usize,
   pub gc_trigger_interval: Duration,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
@@ -73,7 +72,6 @@ impl Engine {
       .map_err(Error::IO)?;
 
     let wal_config = WALConfig {
-      group_commit_count: config.group_commit_count,
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
       base_dir: base_path.clone(),

@@ -111,7 +111,6 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `io_thread_count` | Number of background IO worker threads shared across tables for write batching. Each table holds at most one worker at a time. |
 | `wal_segment_flush_delay` | Maximum time to wait before triggering a checkpoint for WAL segment reuse. |
 | `wal_segment_flush_count` | Maximum number of commits to buffer before triggering a checkpoint for WAL segment reuse. |
-| `group_commit_count` | Maximum commits buffered per WAL segment. Larger values improve write throughput but increase potential data loss on crash in high-latency IO environments. |
 | `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
 | `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
 | `gc_trigger_interval` | Interval at which garbage collection runs. Run more frequently when removes are heavy, less frequently when removes are rare. |

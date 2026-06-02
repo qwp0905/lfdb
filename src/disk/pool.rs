@@ -20,12 +20,11 @@ use crate::{
   Error, Result,
 };
 
-type ThreadArg = (Arc<File>, Arc<WriteHandle>, Arc<HandleState>);
+type ThreadArg = (Arc<File>, IOTask, Arc<IOHandleState>);
 type WriteThread = dyn BackgroundThread<ThreadArg, ()>;
 type WriteTask = (u64, IoSlice<'static>);
-type WriteQueue = SegQueue<(WriteTask, OneshotFulfill<Result>)>;
 
-struct HandleState {
+struct IOHandleState {
   /**
    * Pin to protect file I/O from truncate.
    */
@@ -35,7 +34,7 @@ struct HandleState {
    */
   closed: AtomicBool,
 }
-impl HandleState {
+impl IOHandleState {
   const fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
@@ -44,14 +43,18 @@ impl HandleState {
   }
 }
 
-struct WriteHandle {
-  queue: WriteQueue,
+enum IOTask {
+  Write(Arc<Task<WriteTask>>),
+  Sync(Arc<Task<()>>),
+}
+struct Task<T> {
+  queue: SegQueue<(T, OneshotFulfill<Result>)>,
   occupied: AtomicBool,
 }
-impl WriteHandle {
+impl<T> Task<T> {
   const fn new() -> Self {
     Self {
-      queue: WriteQueue::new(),
+      queue: SegQueue::new(),
       occupied: AtomicBool::new(false),
     }
   }
@@ -85,8 +88,9 @@ impl IOPool {
       .to_arc();
     Ok(IOHandle {
       file,
-      write_handle: WriteHandle::new().to_arc(),
-      state: HandleState::new().to_arc(),
+      write_handle: Task::new().to_arc(),
+      sync_handle: Task::new().to_arc(),
+      state: IOHandleState::new().to_arc(),
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       path: Mutex::new(PathBuf::from(path)),
@@ -97,26 +101,48 @@ impl IOPool {
     self.thread.close();
   }
 }
-
+const MAX_FLUSH_COUNT: usize = 512;
 const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   let count = max_iov();
-  move |(file, handle, state)| {
+  move |(file, task, state)| {
     metrics.active_io_threads.inc();
 
-    let mut buffered = Vec::with_capacity(count);
+    match task {
+      IOTask::Write(handle) => {
+        let mut buffered = Vec::with_capacity(count);
 
-    loop {
-      for task in (0..count).map_while(|_| handle.queue.pop()) {
-        buffered.push(task);
-      }
+        loop {
+          for task in (0..count).map_while(|_| handle.queue.pop()) {
+            buffered.push(task);
+          }
 
-      flush(&metrics, &file, &state, &mut buffered);
-      handle.occupied.fetch_and(false, Ordering::Release);
-      if handle.queue.is_empty() {
-        break;
+          flush_write(&metrics, &file, &state, &mut buffered);
+          handle.occupied.fetch_and(false, Ordering::Release);
+          if handle.queue.is_empty() {
+            break;
+          }
+          if handle.occupied.fetch_or(true, Ordering::AcqRel) {
+            break;
+          }
+        }
       }
-      if handle.occupied.fetch_or(true, Ordering::AcqRel) {
-        break;
+      IOTask::Sync(handle) => {
+        let mut buffered = Vec::with_capacity(MAX_FLUSH_COUNT);
+
+        loop {
+          for (_, fulfill) in (0..count).map_while(|_| handle.queue.pop()) {
+            buffered.push(fulfill);
+          }
+
+          flush_fdatasync(&file, &state, &mut buffered);
+          handle.occupied.fetch_and(false, Ordering::Release);
+          if handle.queue.is_empty() {
+            break;
+          }
+          if handle.occupied.fetch_or(true, Ordering::AcqRel) {
+            break;
+          }
+        }
       }
     }
 
@@ -124,10 +150,33 @@ const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   }
 }
 
-fn flush(
+fn flush_fdatasync(
+  file: &File,
+  state: &IOHandleState,
+  waiting: &mut Vec<OneshotFulfill<Result>>,
+) {
+  if waiting.is_empty() {
+    return;
+  }
+
+  let _token = match state.pin.try_shared() {
+    Some(t) => t,
+    None => {
+      state.closed.fetch_or(true, Ordering::Release);
+      return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
+    }
+  };
+
+  let result = file.sync_data().map_err(Error::IO);
+  waiting
+    .drain(..)
+    .for_each(|done| done.fulfill(result.clone()))
+}
+
+fn flush_write(
   metrics: &MetricsRegistry,
   file: &File,
-  state: &HandleState,
+  state: &IOHandleState,
   buffered: &mut Vec<(WriteTask, OneshotFulfill<Result>)>,
 ) {
   if buffered.is_empty() {
@@ -178,6 +227,7 @@ fn write_exec(
         .measure(|| file.pwrite_all(&bufs[0], offset))?;
       continue;
     }
+
     metrics
       .disk_write
       .measure(|| file.pwritev_all(&mut bufs, offset))?;
@@ -187,9 +237,10 @@ fn write_exec(
 
 pub struct IOHandle {
   file: Arc<File>,
-  write_handle: Arc<WriteHandle>,
+  write_handle: Arc<Task<WriteTask>>,
+  sync_handle: Arc<Task<()>>,
   thread: Arc<WriteThread>,
-  state: Arc<HandleState>,
+  state: Arc<IOHandleState>,
   metrics: Arc<MetricsRegistry>,
   path: Mutex<PathBuf>,
 }
@@ -238,7 +289,28 @@ impl IOHandle {
 
     self.thread.dispatch((
       self.file.clone(),
-      self.write_handle.clone(),
+      IOTask::Write(self.write_handle.clone()),
+      self.state.clone(),
+    ));
+    handle
+  }
+
+  pub fn fdatasync_async(&self) -> TaskHandle<()> {
+    let (o, f) = oneshot();
+    let handle = TaskHandle::new(o);
+    if self.state.closed.load(Ordering::Acquire) {
+      f.fulfill(Ok(()));
+      return handle;
+    }
+
+    self.sync_handle.queue.push(((), f));
+    if self.sync_handle.occupied.fetch_or(true, Ordering::Release) {
+      return handle;
+    }
+
+    self.thread.dispatch((
+      self.file.clone(),
+      IOTask::Sync(self.sync_handle.clone()),
       self.state.clone(),
     ));
     handle
