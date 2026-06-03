@@ -1,6 +1,5 @@
 use std::{
   collections::HashMap,
-  fs::{self, File},
   panic::{RefUnwindSafe, UnwindSafe},
   path::Path,
   sync::{
@@ -64,14 +63,13 @@ impl Engine {
 
     info!("start engine");
 
-    fs::create_dir_all(config.base_path.as_ref()).map_err(Error::IO)?;
+    let io_pool = IOPool::new(config.io_thread_count, metrics_registry.clone()).to_arc();
+    let base_dir = io_pool.create_dir(config.base_path.as_ref())?.to_arc();
     let base_path = config
       .base_path
       .as_ref()
       .canonicalize()
       .map_err(Error::IO)?;
-
-    let base_dir = File::open(&base_path).map_err(Error::IO)?;
 
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
@@ -100,13 +98,11 @@ impl Engine {
       base_path: base_path.clone(),
     };
 
-    let io_pool = IOPool::new(config.io_thread_count, metrics_registry.clone()).to_arc();
-
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(table_config, io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone())?;
+    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone(), base_dir.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();

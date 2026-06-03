@@ -1,19 +1,22 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
-
-use crossbeam::{
-  channel::{unbounded, Receiver},
-  queue::SegQueue,
+use std::{
+  path::PathBuf,
+  sync::{atomic::Ordering, Arc},
+  time::Duration,
 };
 
-use super::{SegmentGeneration, WALSegment};
+use crossbeam::queue::SegQueue;
+
+use super::{AtomicSegmentGeneration, SegmentGeneration, WALSegment};
 use crate::{
-  disk::{IOPool, Pointer},
+  disk::{DirHandle, IOPool, Pointer},
+  error,
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
   Result,
 };
 
 const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
+const SEGMENT_MAX_BATCH: usize = 10;
 
 /**
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
@@ -24,9 +27,9 @@ const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  reuse: Arc<SegQueue<WALSegment>>,
-  queue: Receiver<Result<WALSegment>>,
-  thread: Box<dyn BackgroundThread<(), Result>>,
+  reuse: Box<dyn BackgroundThread<WALSegment, ()>>,
+  preload: Box<dyn BackgroundThread<(), Result<WALSegment>>>,
+  ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
   pub fn new(
@@ -34,63 +37,124 @@ impl SegmentPreload {
     generation: SegmentGeneration,
     max_len: Pointer,
     io_pool: Arc<IOPool>,
+    base_dir: Arc<DirHandle>,
   ) -> Self {
-    let (tx, rx) = unbounded();
-    let reuse = SegQueue::<WALSegment>::new().to_arc();
-    let reuse_c = reuse.clone();
-    let mut generation = generation;
-    let thread = WorkBuilder::new()
-      .name("wal segment preloader")
+    let ready = SegQueue::new().to_arc();
+    let generation = AtomicSegmentGeneration::new(generation).to_arc();
+    let reuse = WorkBuilder::new()
+      .name("wal segment reuse")
       .single()
-      .interval(SEGMENT_MAX_LIFE, move |trigger| {
-        if trigger.is_none() {
-          return reuse_c.pop().map(|seg| seg.truncate()).unwrap_or(Ok(()));
-        }
-
-        let current = generation;
-        generation += 1;
-
-        let segment = reuse_c
-          .pop()
-          .map(|seg| seg.reuse(&prefix, current).map(|_| seg))
-          .unwrap_or_else(|| WALSegment::open(&prefix, current, max_len, &io_pool))?;
-
-        tx.send(Ok(segment)).unwrap();
-        Ok(())
-      })
+      .eager_buffering(
+        SEGMENT_MAX_BATCH,
+        handle_reuse(
+          ready.clone(),
+          generation.clone(),
+          base_dir.clone(),
+          prefix.clone(),
+        ),
+      )
       .to_box();
-
-    let _ = thread.dispatch(());
+    let preload = WorkBuilder::new()
+      .name("wal segment preload")
+      .single()
+      .preload(
+        SEGMENT_MAX_LIFE,
+        handle_preload(
+          ready.clone(),
+          generation,
+          prefix,
+          io_pool,
+          base_dir,
+          max_len,
+        ),
+        handle_fallback(ready.clone()),
+      )
+      .to_box();
     Self {
-      queue: rx,
-      thread,
       reuse,
+      preload,
+      ready,
     }
   }
 
   pub fn load(&self) -> Result<WALSegment> {
-    let seg = self.queue.recv().unwrap();
-    self.thread.dispatch(());
-    seg
+    self.preload.execute(()).wait().flatten()
   }
 
   /**
    * must call after close segment rotate thread
    */
-  pub fn close(&self) -> Result {
-    self.thread.close();
-    while let Ok(result) = self.queue.recv() {
-      result.and_then(|seg| seg.truncate())?;
+  pub fn close(&self) {
+    self.reuse.close();
+    self.preload.close();
+    while let Some(segment) = self.ready.pop() {
+      let _ = segment.truncate();
     }
-    while let Some(seg) = self.reuse.pop() {
-      seg.truncate()?;
-    }
-    Ok(())
   }
 
   pub fn reuse(&self, segment: WALSegment) {
-    self.reuse.push(segment)
+    self.reuse.dispatch(segment);
   }
 }
-unsafe impl Send for SegmentPreload {}
-unsafe impl Sync for SegmentPreload {}
+
+fn handle_reuse(
+  ready: Arc<SegQueue<WALSegment>>,
+  generation: Arc<AtomicSegmentGeneration>,
+  base_dir: Arc<DirHandle>,
+  prefix: PathBuf,
+) -> impl FnMut(Vec<WALSegment>) {
+  let mut succeed = Vec::with_capacity(SEGMENT_MAX_BATCH);
+  let mut failed = Vec::with_capacity(SEGMENT_MAX_BATCH);
+  move |reused| {
+    for segment in reused {
+      let cur = generation.fetch_add(1, Ordering::Relaxed);
+      if let Err(err) = segment.reuse(&prefix, cur) {
+        error!("error occurs in segment reuse: {err}");
+        failed.push(segment);
+        continue;
+      };
+      succeed.push(segment);
+    }
+    if let Err(err) = base_dir.fdatasync() {
+      error!("error occurs in basedir sync: {err}");
+      succeed.drain(..).for_each(|s| failed.push(s));
+    }
+
+    for segment in succeed.drain(..) {
+      ready.push(segment);
+    }
+
+    for segment in failed.drain(..) {
+      let _ = segment.truncate();
+    }
+  }
+}
+
+const fn handle_preload(
+  ready: Arc<SegQueue<WALSegment>>,
+  generation: Arc<AtomicSegmentGeneration>,
+  prefix: PathBuf,
+  io_pool: Arc<IOPool>,
+  base_dir: Arc<DirHandle>,
+  max_len: Pointer,
+) -> impl FnMut(()) -> Result<WALSegment> {
+  move |_| match ready.pop() {
+    Some(segment) => Ok(segment),
+    None => WALSegment::open(
+      &prefix,
+      generation.fetch_add(1, Ordering::Relaxed),
+      max_len,
+      &io_pool,
+    )
+    .and_then(|seg| base_dir.fdatasync().map(|_| seg)),
+  }
+}
+const fn handle_fallback(
+  ready: Arc<SegQueue<WALSegment>>,
+) -> impl FnMut(Option<Result<WALSegment>>) {
+  move |finalize| {
+    if let Some(Ok(segment)) = finalize.or_else(|| ready.pop().map(Ok)) {
+      let _ = segment.truncate();
+    };
+  }
+}

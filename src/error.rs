@@ -1,4 +1,10 @@
-use std::{any::Any, error, io, result, sync::Arc};
+use std::{
+  any::Any,
+  error, io,
+  panic::{RefUnwindSafe, UnwindSafe},
+  result,
+  sync::Arc,
+};
 
 use thiserror::Error;
 
@@ -93,3 +99,5 @@ impl Clone for Error {
 pub type Result<T = ()> = result::Result<T, Error>;
 unsafe impl Send for Error {}
 unsafe impl Sync for Error {}
+impl RefUnwindSafe for Error {}
+impl UnwindSafe for Error {}

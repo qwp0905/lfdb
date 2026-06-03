@@ -80,8 +80,8 @@ impl<'a> ExclusiveToken<'a> {
     let pin = self.0;
     debug_assert_eq!(pin.load(Ordering::Acquire), EXCLUSIVE);
 
-    pin.store(1, Ordering::Release);
     forget(self);
+    pin.store(1, Ordering::Release);
 
     SharedToken(pin)
   }

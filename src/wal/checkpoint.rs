@@ -1,15 +1,17 @@
-use std::{fs::File, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
 use crate::{
   cache::BlockCache,
-  debug, error, info,
+  debug,
+  disk::DirHandle,
+  error, info,
   thread::{BackgroundThread, WorkBuilder},
   transaction::VersionVisibility,
   utils::ToBox,
   wal::{WALSegment, WAL},
-  Error, Result,
+  Result,
 };
 
 pub struct Checkpoint {
@@ -20,7 +22,7 @@ impl Checkpoint {
     wal: Arc<WAL>,
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
-    base_dir: File,
+    base_dir: Arc<DirHandle>,
     interval: Duration,
     max_count: usize,
   ) -> Self {
@@ -44,7 +46,7 @@ impl Checkpoint {
     wal: &WAL,
     block_cache: &BlockCache,
     version: &VersionVisibility,
-    base_dir: &File,
+    base_dir: &DirHandle,
   ) -> Result {
     let log_id = wal.current_log_id();
     let current_version = version.current_version();
@@ -53,7 +55,7 @@ impl Checkpoint {
     block_cache.flush()?;
     let path = version.persist_snapshot(current_version)?;
     debug!("checkpoint snapshot persisted.");
-    base_dir.sync_data().map_err(Error::IO)?;
+    base_dir.fdatasync()?;
 
     wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
     info!("checkpoint complete id {log_id}");
@@ -71,7 +73,7 @@ const fn handle_thread(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
-  base_dir: File,
+  base_dir: Arc<DirHandle>,
 ) -> impl Fn(Vec<WALSegment>) {
   let failed = SegQueue::new();
   move |segments| {
