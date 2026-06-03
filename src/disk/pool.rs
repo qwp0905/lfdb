@@ -337,11 +337,8 @@ impl IOHandle {
 
   pub fn truncate(&self) -> Result {
     let backoff = Backoff::new();
-    loop {
-      match self.state.pin.try_exclusive() {
-        Some(t) => break forget(t),
-        None => backoff.snooze(),
-      }
+    while self.state.pin.try_exclusive().map(forget).is_none() {
+      backoff.snooze();
     }
 
     remove_file(self.path.l().as_path()).map_err(Error::IO)

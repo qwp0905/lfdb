@@ -78,9 +78,10 @@ impl<'a> ExclusiveToken<'a> {
   #[inline]
   pub fn downgrade(self) -> SharedToken<'a> {
     let pin = self.0;
+    debug_assert_eq!(pin.load(Ordering::Acquire), EXCLUSIVE);
 
-    pin.store(1, Ordering::Release);
     forget(self);
+    pin.store(1, Ordering::Release);
 
     SharedToken(pin)
   }
@@ -88,6 +89,7 @@ impl<'a> ExclusiveToken<'a> {
 impl<'a> Drop for ExclusiveToken<'a> {
   #[inline]
   fn drop(&mut self) {
+    debug_assert_eq!(self.0.load(Ordering::Acquire), EXCLUSIVE);
     self.0.store(0, Ordering::Release);
   }
 }
