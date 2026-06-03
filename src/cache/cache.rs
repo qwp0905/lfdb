@@ -1,4 +1,6 @@
-use std::{mem::MaybeUninit, ptr::drop_in_place, sync::Arc, time::Duration};
+use std::{
+  cell::UnsafeCell, mem::MaybeUninit, panic::RefUnwindSafe, sync::Arc, time::Duration,
+};
 
 use super::{
   Acquired, BatchHandle, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
@@ -19,9 +21,31 @@ pub struct BlockCacheConfig {
   pub capacity: usize,
 }
 
+struct BlockCell(UnsafeCell<MaybeUninit<CachedBlock>>);
+impl BlockCell {
+  const fn uninit() -> Self {
+    Self(UnsafeCell::new(MaybeUninit::uninit()))
+  }
+  const fn get(&self) -> &CachedBlock {
+    unsafe { (*self.0.get()).assume_init_ref() }
+  }
+  const fn write(&self, block: CachedBlock) {
+    unsafe { (*self.0.get()).write(block) };
+  }
+  const fn replace(&self, block: CachedBlock) -> CachedBlock {
+    unsafe { (*self.0.get()).as_mut_ptr().replace(block) }
+  }
+  fn drop_in_place(&self) {
+    unsafe { (*self.0.get()).assume_init_drop() };
+  }
+}
+unsafe impl Send for BlockCell {}
+unsafe impl Sync for BlockCell {}
+impl RefUnwindSafe for BlockCell {}
+
 pub struct BlockCache {
   table: MappingTable,
-  cached_blocks: Arc<[MaybeUninit<CachedBlock>]>,
+  cached_blocks: Arc<[BlockCell]>,
   /**
    * pin to protect each block in cached blocks from eviction
    */
@@ -45,9 +69,11 @@ impl BlockCache {
     // free for copy on write.
     let block_cap = (config.capacity * 9) / 10;
     let mut blocks = Vec::with_capacity(block_cap);
-    blocks.resize_with(block_cap, MaybeUninit::uninit);
+    blocks.resize_with(block_cap, BlockCell::uninit);
+
     let mut pins = Vec::with_capacity(block_cap);
     pins.resize_with(block_cap, ExclusivePin::new);
+
     let mut batch_handles = Vec::with_capacity(block_cap);
     batch_handles.resize_with(block_cap, BatchHandle::new);
 
@@ -99,7 +125,7 @@ impl BlockCache {
   #[inline]
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
-      unsafe { self.cached_blocks[id].assume_init_ref() },
+      self.cached_blocks[id].get(),
       &self.dirty_blocks,
       &self.batch_handles[id],
       id,
@@ -114,16 +140,15 @@ impl BlockCache {
     new: CachedBlock,
   ) -> Result<CachedSlot<'a>> {
     let block_id = guard.get_block_id();
-    let ptr = self.cached_blocks[block_id].as_ptr() as *mut CachedBlock;
     if !guard.is_evicted() {
-      unsafe { ptr.write(new) };
+      self.cached_blocks[block_id].write(new);
       return Ok(self.cache_slot(block_id, guard.commit()));
     }
 
-    let old = unsafe { ptr.replace(new) };
+    let old = self.cached_blocks[block_id].replace(new);
     if self.dirty_blocks.contains(block_id) {
       if let Err(err) = old.flush() {
-        unsafe { ptr.replace(old) };
+        self.cached_blocks[block_id].replace(old);
         return Err(err);
       }
       self.dirty_blocks.remove(block_id);
@@ -213,7 +238,7 @@ impl Drop for BlockCache {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
       for i in offset..offset + len {
-        unsafe { drop_in_place(self.cached_blocks[i].as_ptr() as *mut CachedBlock) };
+        self.cached_blocks[i].drop_in_place();
       }
     }
   }
@@ -233,7 +258,7 @@ enum FlushTask {
 }
 
 const fn handle_execute(
-  blocks: Arc<[MaybeUninit<CachedBlock>]>,
+  blocks: Arc<[BlockCell]>,
   pins: Arc<[ExclusivePin]>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
@@ -245,7 +270,7 @@ const fn handle_execute(
         None => return Ok(()),
       };
 
-      let block = unsafe { blocks[id].assume_init_ref() };
+      let block = blocks[id].get();
       let _latch = block.latch();
       if !dirty_blocks.contains(id) {
         return Ok(());
