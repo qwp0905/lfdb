@@ -1,4 +1,8 @@
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::{
+  cursor::record::{RecordData, RecordDataView},
+  disk::Page,
+  serialize::SerializeFrom,
+};
 
 use super::*;
 
@@ -13,9 +17,13 @@ fn test_entry_with_data_roundtrip() {
   ));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.view().expect("deserialize error");
 
-  let records: Vec<_> = decoded.get_versions().collect();
+  let mut records = Vec::new();
+  let mut iter = decoded.get_versions();
+  while let Some(record) = iter.try_next().unwrap() {
+    records.push(record);
+  }
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, 1);
   assert_eq!(records[0].version, 100);
@@ -33,9 +41,13 @@ fn test_entry_with_tombstone_roundtrip() {
   entry.append(VersionRecord::new(2, 200, RecordData::Tombstone));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.view().expect("deserialize error");
 
-  let records: Vec<_> = decoded.get_versions().collect();
+  let mut records = Vec::new();
+  let mut iter = decoded.get_versions();
+  while let Some(record) = iter.try_next().unwrap() {
+    records.push(record);
+  }
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, 2);
   match &records[0].data {
@@ -57,10 +69,14 @@ fn test_entry_with_chunked_roundtrip() {
   ));
   page.serialize_from(&entry).expect("serialize error");
 
-  let decoded: DataEntryView = page.deserialize().expect("deserialize error");
+  let decoded: DataEntryView = page.view().expect("deserialize error");
   assert_eq!(decoded.len(), 1);
 
-  let records: Vec<_> = decoded.get_versions().collect();
+  let mut records = Vec::new();
+  let mut iter = decoded.get_versions();
+  while let Some(record) = iter.try_next().unwrap() {
+    records.push(record);
+  }
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, owner);
   match &records[0].data {

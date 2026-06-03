@@ -153,14 +153,12 @@ fn release_entry(
     {
       let mut found = false;
       let mut need_trim = false;
-      let entry = block_cache
-        .read(ptr, table.handle())?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntryView>()?;
+      let slot = block_cache.read(ptr, table.handle())?.for_read();
+      let entry = slot.as_ref().view::<DataEntryView>()?;
       next = entry.get_next();
 
-      for record in entry.get_versions() {
+      let mut iter = entry.get_versions();
+      while let Some(record) = iter.try_next()? {
         if version_visibility.is_aborted(&record.owner) {
           need_trim = true;
           break;

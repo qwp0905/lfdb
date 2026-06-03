@@ -169,15 +169,13 @@ fn flush_fdatasync(
     return;
   }
 
-  let _token = match state.pin.try_shared() {
-    Some(t) => t,
+  let result = match state.pin.try_shared() {
+    Some(_t) => file.sync_data().map_err(Error::IO),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
     }
   };
-
-  let result = file.sync_data().map_err(Error::IO);
   waiting
     .drain(..)
     .for_each(|done| done.fulfill(result.clone()))
@@ -194,15 +192,13 @@ fn flush_write(
   }
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
-  let _token = match state.pin.try_shared() {
-    Some(t) => t,
+  let result = match state.pin.try_shared() {
+    Some(_t) => write_exec(metrics, file, values).map_err(Error::IO),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
     }
   };
-
-  let result = write_exec(metrics, file, values).map_err(Error::IO);
   waiting
     .into_iter()
     .for_each(|done| done.fulfill(result.clone()));
