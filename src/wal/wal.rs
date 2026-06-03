@@ -1,5 +1,6 @@
 use std::{
   mem::forget,
+  panic::RefUnwindSafe,
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -360,3 +361,4 @@ impl WAL {
 }
 unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
+impl RefUnwindSafe for WAL {}
