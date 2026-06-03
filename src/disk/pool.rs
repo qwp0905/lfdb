@@ -1,5 +1,5 @@
 use std::{
-  fs::{remove_file, rename, File, OpenOptions},
+  fs::{create_dir_all, remove_file, rename, File, OpenOptions},
   io::{Error as IoError, ErrorKind, IoSlice},
   mem::forget,
   path::{Path, PathBuf},
@@ -20,11 +20,11 @@ use crate::{
   Error, Result,
 };
 
-type ThreadArg = (Arc<File>, IOTask, Arc<IOHandleState>);
+type ThreadArg = (Arc<File>, IOTask, Arc<HandleState>);
 type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 type WriteTask = (u64, IoSlice<'static>);
 
-struct IOHandleState {
+struct HandleState {
   /**
    * Pin to protect file I/O from truncate.
    */
@@ -34,7 +34,7 @@ struct IOHandleState {
    */
   closed: AtomicBool,
 }
-impl IOHandleState {
+impl HandleState {
   const fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
@@ -74,6 +74,16 @@ impl IOPool {
     Self { thread, metrics }
   }
 
+  pub fn create_dir(&self, path: &Path) -> Result<DirHandle> {
+    create_dir_all(path).map_err(Error::IO)?;
+    Ok(DirHandle {
+      file: File::open(path).map_err(Error::IO)?.to_arc(),
+      sync_handle: Task::new().to_arc(),
+      thread: self.thread.clone(),
+      state: HandleState::new().to_arc(),
+    })
+  }
+
   pub fn create_handle(&self, path: &Path) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
@@ -90,7 +100,7 @@ impl IOPool {
       file,
       write_handle: Task::new().to_arc(),
       sync_handle: Task::new().to_arc(),
-      state: IOHandleState::new().to_arc(),
+      state: HandleState::new().to_arc(),
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       path: Mutex::new(PathBuf::from(path)),
@@ -152,7 +162,7 @@ const fn handle_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
 
 fn flush_fdatasync(
   file: &File,
-  state: &IOHandleState,
+  state: &HandleState,
   waiting: &mut Vec<OneshotFulfill<Result>>,
 ) {
   if waiting.is_empty() {
@@ -176,7 +186,7 @@ fn flush_fdatasync(
 fn flush_write(
   metrics: &MetricsRegistry,
   file: &File,
-  state: &IOHandleState,
+  state: &HandleState,
   buffered: &mut Vec<(WriteTask, OneshotFulfill<Result>)>,
 ) {
   if buffered.is_empty() {
@@ -240,7 +250,7 @@ pub struct IOHandle {
   write_handle: Arc<Task<WriteTask>>,
   sync_handle: Arc<Task<()>>,
   thread: Arc<IOThread>,
-  state: Arc<IOHandleState>,
+  state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   path: Mutex<PathBuf>,
 }
@@ -350,5 +360,34 @@ impl IOHandle {
 
   pub fn fallocate(&self, offset: u64, len: u64) -> Result {
     self.file.fallocate(offset, len).map_err(Error::IO)
+  }
+}
+
+pub struct DirHandle {
+  file: Arc<File>,
+  sync_handle: Arc<Task<()>>,
+  thread: Arc<IOThread>,
+  state: Arc<HandleState>,
+}
+impl DirHandle {
+  pub fn fdatasync(&self) -> Result {
+    let (o, f) = oneshot();
+    let handle = TaskHandle::new(o);
+    if self.state.closed.load(Ordering::Acquire) {
+      f.fulfill(Ok(()));
+      return handle.wait();
+    }
+
+    self.sync_handle.queue.push(((), f));
+    if self.sync_handle.occupied.fetch_or(true, Ordering::Release) {
+      return handle.wait();
+    }
+
+    self.thread.dispatch((
+      self.file.clone(),
+      IOTask::Sync(self.sync_handle.clone()),
+      self.state.clone(),
+    ));
+    handle.wait()
   }
 }
