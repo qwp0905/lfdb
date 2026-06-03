@@ -176,7 +176,7 @@ fn release_orphaned(
       .as_ref()
       .view::<BTreeNodeView>()?
     {
-      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
+      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()?),
       BTreeNodeView::Leaf(node) => {
         for (_, _, record, ptr) in node.get_entries() {
           entry_stack.push(ptr);

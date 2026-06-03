@@ -52,7 +52,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     loop {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
           NodeFindResult::NotFound(_) => return Ok(None),
           NodeFindResult::Move(i) => ptr = i,
@@ -112,7 +112,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     loop {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.first_child(),
+        BTreeNodeView::Internal(node) => ptr = node.first_child()?,
         BTreeNodeView::Leaf(node) => {
           for (_, _, record, _) in node.get_entries() {
             total += 1;
@@ -146,7 +146,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.find(key).unwrap_or_else(|i| i),
+        BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key) {
           NodeFindResult::NotFound(_) => return Ok(false),
           NodeFindResult::Move(i) => ptr = i,
@@ -213,7 +213,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       .as_ref()
       .view::<BTreeNodeView>()?
     {
-      match node.find(&key) {
+      match node.find(&key)? {
         Ok(i) => stack.push(replace(&mut ptr, i)),
         Err(i) => ptr = i,
       }
@@ -336,7 +336,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       while stack.len() < diff {
         let slot = self.0.fetch_slot(ptr, table)?.for_read();
         let node = slot.as_ref().view::<BTreeNodeView>()?.as_internal()?;
-        match node.find(&split_key) {
+        match node.find(&split_key)? {
           Ok(i) => stack.push(replace(&mut ptr, i)),
           Err(i) => ptr = i,
         }
@@ -687,9 +687,9 @@ where
       let slot = policy.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => match &start {
-          Bound::Included(k) => ptr = node.find(k).unwrap_or_else(|i| i),
-          Bound::Excluded(k) => ptr = node.find(k).unwrap_or_else(|i| i),
-          Bound::Unbounded => ptr = node.first_child(),
+          Bound::Included(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
+          Bound::Excluded(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
+          Bound::Unbounded => ptr = node.first_child()?,
         },
         BTreeNodeView::Leaf(node) => {
           let pos = match &start {
