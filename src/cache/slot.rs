@@ -159,7 +159,7 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  pub fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
+  fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
     let (occupied, o) = self.batch.register(unsafe { transmute(handler) });
     if !occupied {
       return o.wait().flatten();

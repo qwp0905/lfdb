@@ -1,5 +1,5 @@
 use std::{
-  mem::{forget, transmute},
+  mem::{forget, transmute, ManuallyDrop},
   ops::Deref,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -46,7 +46,7 @@ impl TableHandle {
     // transmute allowed since arc guarantees the lifespan
     Some(PinnedHandle {
       handle: self.clone(),
-      _token: unsafe { transmute(token) },
+      token: ManuallyDrop::new(unsafe { transmute(token) }),
     })
   }
 
@@ -55,7 +55,7 @@ impl TableHandle {
     // transmute allowed since arc guarantees the lifespan
     Some(MutationHandle {
       handle: self.clone(),
-      _token: unsafe { transmute(token) },
+      token: ManuallyDrop::new(unsafe { transmute(token) }),
     })
   }
 
@@ -103,7 +103,7 @@ impl TableHandle {
 
 pub struct PinnedHandle {
   handle: TableHandleRef,
-  _token: SharedToken<'static>,
+  token: ManuallyDrop<SharedToken<'static>>,
 }
 impl PinnedHandle {
   #[inline]
@@ -120,10 +120,15 @@ impl Deref for PinnedHandle {
     &self.handle
   }
 }
+impl Drop for PinnedHandle {
+  fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.token) };
+  }
+}
 
 pub struct MutationHandle {
   handle: TableHandleRef,
-  _token: ExclusiveToken<'static>,
+  token: ManuallyDrop<ExclusiveToken<'static>>,
 }
 impl MutationHandle {
   #[inline]
@@ -132,7 +137,7 @@ impl MutationHandle {
   }
 
   pub fn into_inner(self) -> TableHandleRef {
-    self.handle
+    self.handle.clone()
   }
 }
 
@@ -142,5 +147,10 @@ impl Deref for MutationHandle {
   #[inline]
   fn deref(&self) -> &Self::Target {
     &self.handle
+  }
+}
+impl Drop for MutationHandle {
+  fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.token) };
   }
 }
