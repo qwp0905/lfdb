@@ -107,13 +107,10 @@ const fn handle_thread(
     let current = generation;
     generation += 1;
 
-    if let Some(segment) = reuse.pop() {
-      segment.reuse(&prefix, current)?;
-      ready.send(Ok(segment)).unwrap();
-      return Ok(());
-    }
-
-    let segment = WALSegment::open(&prefix, current, max_len, &io_pool)?;
+    let segment = reuse
+      .pop()
+      .map(|seg| seg.reuse(&prefix, current).map(|_| seg))
+      .unwrap_or_else(|| WALSegment::open(&prefix, current, max_len, &io_pool))?;
     base_dir.fdatasync()?;
     ready.send(Ok(segment)).unwrap();
     Ok(())
