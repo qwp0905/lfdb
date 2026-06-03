@@ -15,7 +15,7 @@ use crossbeam::{
 };
 
 use crate::{
-  disk::{IOPool, PagePool, Pointer},
+  disk::{DirHandle, IOPool, PagePool, Pointer},
   error::Result,
   info,
   table::TableId,
@@ -90,6 +90,7 @@ impl WAL {
   pub fn replay(
     config: &WALConfig,
     io_pool: Arc<IOPool>,
+    base_dir: Arc<DirHandle>,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
@@ -112,6 +113,7 @@ impl WAL {
       replay_result.generation,
       max_len,
       io_pool,
+      base_dir,
     )
     .to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);

@@ -1,11 +1,11 @@
-use std::{fs::File, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
 
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  disk::{IOHandle, IOPool, Pointer},
+  disk::{DirHandle, IOHandle, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
@@ -52,7 +52,7 @@ impl TxOrchestrator {
     compactor: Box<Compactor>,
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
-    base_dir: File,
+    base_dir: Arc<DirHandle>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
       wal.clone(),
@@ -94,7 +94,7 @@ impl TxOrchestrator {
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<IOHandle>,
-    base_dir: File,
+    base_dir: Arc<DirHandle>,
   ) -> Result<Self> {
     Checkpoint::run(&wal, &block_cache, &version_visibility, &base_dir)?;
     segments
