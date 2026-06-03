@@ -83,13 +83,12 @@ where
         let mut flush = make_flush(when_buffered);
 
         loop {
-          'burst: while !backoff.is_completed() {
-            'inner: while buffered.len() < count {
-              match queue_c.pop() {
-                Some(Context::Work(v, done)) => buffered.push((v, Some(done))),
-                Some(Context::Dispatch(v)) => buffered.push((v, None)),
-                None => break 'inner,
-                Some(Context::Term) => {
+          while !backoff.is_completed() {
+            for ctx in (0..count).map_while(|_| queue_c.pop()) {
+              match ctx {
+                Context::Work(v, done) => buffered.push((v, Some(done))),
+                Context::Dispatch(v) => buffered.push((v, None)),
+                Context::Term => {
                   flush(&mut buffered);
                   return;
                 }
@@ -98,7 +97,7 @@ where
 
             if flush(&mut buffered) {
               backoff.reset();
-              continue 'burst;
+              continue;
             };
             backoff.snooze();
           }
