@@ -74,6 +74,21 @@ impl LeafNode {
     Ok(Self::new(entries, (next != 0).then(|| next)))
   }
 
+  pub fn find_slot(&self, key: StaticKeyRef) -> FindSlotResult<'_> {
+    match self.entries.binary_search_by(|e| (*e.key).cmp(key)) {
+      Ok(i) => FindSlotResult::Replace(i, &self.entries[i].record, self.entries[i].next),
+      Err(i) => {
+        if let Some(next) = self.next {
+          if i == self.entries.len() {
+            return FindSlotResult::Move(next);
+          }
+        }
+
+        FindSlotResult::Insert(i)
+      }
+    }
+  }
+
   pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
     self.next.replace(pointer)
   }
@@ -122,6 +137,12 @@ impl LeafNode {
   }
 }
 
+pub enum FindSlotResult<'a> {
+  Replace(usize, &'a VersionRecord, Pointer),
+  Move(Pointer),
+  Insert(usize),
+}
+
 /**
  * Result of a leaf node key lookup.
  * Move is the B-link tree right-move: the key falls beyond this node's range,
@@ -129,9 +150,9 @@ impl LeafNode {
  * mechanism used at the internal level when a search key >= high key.
  */
 pub enum NodeFindResult {
-  Found(usize, VersionRecordView, Pointer),
+  Found(VersionRecordView, Pointer),
   Move(Pointer),
-  NotFound(usize),
+  NotFound,
 }
 
 #[derive(Debug)]
@@ -161,7 +182,7 @@ impl<'a> LeafNodeView<'a> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
 
-    for i in 0..self.len {
+    for _ in 0..self.len {
       let l = scanner.read_u16()? as usize;
       let offset = scanner.advance(l)?;
       let record = VersionRecordView::deserialize_from(&mut scanner)?;
@@ -171,9 +192,9 @@ impl<'a> LeafNodeView<'a> {
       if k < key {
         continue;
       } else if k == key {
-        return Ok(NodeFindResult::Found(i, record, ptr));
+        return Ok(NodeFindResult::Found(record, ptr));
       } else {
-        return Ok(NodeFindResult::NotFound(i));
+        return Ok(NodeFindResult::NotFound);
       }
     }
 
@@ -181,24 +202,8 @@ impl<'a> LeafNodeView<'a> {
       self
         .next
         .map(NodeFindResult::Move)
-        .unwrap_or_else(|| NodeFindResult::NotFound(self.len)),
+        .unwrap_or_else(|| NodeFindResult::NotFound),
     )
-  }
-
-  pub fn writable(self) -> Result<LeafNode> {
-    let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
-
-    let mut entries = Vec::with_capacity(self.len + 1);
-    for _ in 0..self.len {
-      let l = scanner.read_u16()? as usize;
-      let key = scanner.read_n(l)?.to_vec();
-      let record = VersionRecord::deserialize_from(&mut scanner)?;
-      let next = scanner.read_u64()?;
-      entries.push(LeafEntry::new(key, record, next))
-    }
-
-    Ok(LeafNode::new(entries, self.next))
   }
 
   pub fn get_entries(&self) -> LeafNodeIter<'_> {

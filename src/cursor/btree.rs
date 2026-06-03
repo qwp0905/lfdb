@@ -8,9 +8,10 @@ use crossbeam::epoch::pin;
 
 use super::{
   BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView, DataEntry,
-  DataEntryView, InternalNode, MergeSortable, NodeFindResult, ReadonlyPolicy, RecordData,
-  RecordDataView, StaticKey, StaticKeyRef, TreeHeader, VecRef, VersionRecord,
-  VersionRecordView, WritablePolicy, CHUNK_SIZE, HEADER_POINTER, LARGE_VALUE,
+  DataEntryView, FindSlotResult, InternalNode, MergeSortable, NodeFindResult,
+  ReadonlyPolicy, RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
+  VecRef, VersionRecord, VersionRecordView, WritablePolicy, CHUNK_SIZE, HEADER_POINTER,
+  LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -54,9 +55,9 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(None),
+          NodeFindResult::NotFound => return Ok(None),
           NodeFindResult::Move(i) => ptr = i,
-          NodeFindResult::Found(_, record, i) => {
+          NodeFindResult::Found(record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
             }
@@ -149,9 +150,9 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(false),
+          NodeFindResult::NotFound => return Ok(false),
           NodeFindResult::Move(i) => ptr = i,
-          NodeFindResult::Found(_, record, i) => {
+          NodeFindResult::Found(record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
             }
@@ -443,16 +444,15 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let mut result = None;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-        let mut node = match leaf.find(&key)? {
-          NodeFindResult::Move(i) => return Ok(ptr = i),
-          NodeFindResult::Found(i, old, entry_ptr) => {
+        let mut node = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
+        match node.find_slot(&key) {
+          FindSlotResult::Move(i) => return Ok(ptr = i),
+          FindSlotResult::Replace(i, old, entry_ptr) => {
             let is_aborted = self.0.is_aborted(old.owner);
             if old.version > snapshot.version && !is_aborted {
               return Ok(result = Some(Err(entry_ptr)));
             }
 
-            let mut node = leaf.writable()?;
             let new_record = record.take().unwrap();
             let old = node.replace_at(i, new_record);
             if !is_aborted {
@@ -460,14 +460,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
             } else if let RecordData::Chunked(pointers) = old.data {
               pointers.into_iter().for_each(|p| table.free().dealloc(p));
             }
-            node
           }
-          NodeFindResult::NotFound(i) => {
-            let mut node = leaf.writable()?;
+          FindSlotResult::Insert(i) => {
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             let new_record = record.take().unwrap();
             node.insert_at(i, key.to_vec(), new_record, entry_ptr);
-            node
           }
         };
 
@@ -514,15 +511,14 @@ where
     loop {
       let mut state = LoopState::Continue;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let leaf = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
-        let mut node = match leaf.find(&key)? {
-          NodeFindResult::Move(i) => return Ok(ptr = i),
-          NodeFindResult::Found(i, old, entry_ptr) => {
+        let mut node = slot.as_ref().deserialize::<BTreeNode>()?.as_leaf()?;
+        match node.find_slot(&key) {
+          FindSlotResult::Move(i) => return Ok(ptr = i),
+          FindSlotResult::Replace(i, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               return Ok(state = LoopState::Conflict(old.owner));
             }
 
-            let mut node = leaf.writable()?;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
@@ -534,14 +530,12 @@ where
             } else if let RecordData::Chunked(pointers) = old.data {
               pointers.into_iter().for_each(|p| table.free().dealloc(p));
             }
-            node
           }
-          NodeFindResult::NotFound(i) => {
+          FindSlotResult::Insert(i) => {
             if !create {
               return Ok(state = LoopState::Break);
             }
 
-            let mut node = leaf.writable()?;
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             self.0.after_update_hook(entry_ptr, table);
 
@@ -551,7 +545,6 @@ where
               self.create_record(record.take(), &table)?,
             );
             node.insert_at(i, key.to_vec(), new_record, entry_ptr);
-            node
           }
         };
 
