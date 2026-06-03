@@ -1,13 +1,13 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crossbeam::{
-  channel::{unbounded, Receiver},
+  channel::{unbounded, Receiver, Sender},
   queue::SegQueue,
 };
 
 use super::{SegmentGeneration, WALSegment};
 use crate::{
-  disk::{IOPool, Pointer},
+  disk::{DirHandle, IOPool, Pointer},
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
   Result,
@@ -34,30 +34,25 @@ impl SegmentPreload {
     generation: SegmentGeneration,
     max_len: Pointer,
     io_pool: Arc<IOPool>,
+    base_dir: Arc<DirHandle>,
   ) -> Self {
     let (tx, rx) = unbounded();
     let reuse = SegQueue::<WALSegment>::new().to_arc();
-    let reuse_c = reuse.clone();
-    let mut generation = generation;
     let thread = WorkBuilder::new()
       .name("wal segment preloader")
       .single()
-      .interval(SEGMENT_MAX_LIFE, move |trigger| {
-        if trigger.is_none() {
-          return reuse_c.pop().map(|seg| seg.truncate()).unwrap_or(Ok(()));
-        }
-
-        let current = generation;
-        generation += 1;
-
-        let segment = reuse_c
-          .pop()
-          .map(|seg| seg.reuse(&prefix, current).map(|_| seg))
-          .unwrap_or_else(|| WALSegment::open(&prefix, current, max_len, &io_pool))?;
-
-        tx.send(Ok(segment)).unwrap();
-        Ok(())
-      })
+      .interval(
+        SEGMENT_MAX_LIFE,
+        handle_thread(
+          prefix,
+          reuse.clone(),
+          generation,
+          tx,
+          max_len,
+          io_pool,
+          base_dir,
+        ),
+      )
       .to_box();
 
     let _ = thread.dispatch(());
@@ -94,3 +89,33 @@ impl SegmentPreload {
 }
 unsafe impl Send for SegmentPreload {}
 unsafe impl Sync for SegmentPreload {}
+
+const fn handle_thread(
+  prefix: PathBuf,
+  reuse: Arc<SegQueue<WALSegment>>,
+  mut generation: SegmentGeneration,
+  ready: Sender<Result<WALSegment>>,
+  max_len: Pointer,
+  io_pool: Arc<IOPool>,
+  base_dir: Arc<DirHandle>,
+) -> impl FnMut(Option<()>) -> Result {
+  move |trigger| {
+    if trigger.is_none() {
+      return reuse.pop().map(|seg| seg.truncate()).unwrap_or(Ok(()));
+    }
+
+    let current = generation;
+    generation += 1;
+
+    if let Some(segment) = reuse.pop() {
+      segment.reuse(&prefix, current)?;
+      ready.send(Ok(segment)).unwrap();
+      return Ok(());
+    }
+
+    let segment = WALSegment::open(&prefix, current, max_len, &io_pool)?;
+    base_dir.fdatasync()?;
+    ready.send(Ok(segment)).unwrap();
+    Ok(())
+  }
+}
