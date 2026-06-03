@@ -152,15 +152,9 @@ const fn handle_preload(
 const fn handle_fallback(
   ready: Arc<SegQueue<WALSegment>>,
 ) -> impl FnMut(Option<Result<WALSegment>>) {
-  move |finalize| match finalize {
-    Some(Ok(segment)) => {
+  move |finalize| {
+    if let Some(Ok(segment)) = finalize.or_else(|| ready.pop().map(Ok)) {
       let _ = segment.truncate();
-    }
-    None => {
-      if let Some(seg) = ready.pop() {
-        let _ = seg.truncate();
-      }
-    }
-    _ => {}
+    };
   }
 }
