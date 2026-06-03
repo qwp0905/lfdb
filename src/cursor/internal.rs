@@ -29,15 +29,14 @@ impl InternalNode {
 
     let len = scanner.read_u16()? as usize;
     let mut keys = Vec::with_capacity(len);
+    let mut children = Vec::with_capacity(len + 1);
+    children.push(scanner.read_u64()?);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
       keys.push(scanner.read_n(l)?.to_vec());
-    }
-
-    let mut children = Vec::with_capacity(len + 1);
-    for _ in 0..=len {
       children.push(scanner.read_u64()?);
     }
+
     Ok(Self::new(keys, children, right))
   }
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
@@ -51,12 +50,13 @@ impl InternalNode {
       None => writer.write(&[0]),
     }?;
     writer.write_u16(self.keys.len() as u16)?;
-    for key in &self.keys {
+    writer.write_u64(self.children[0])?;
+    for i in 0..self.keys.len() {
+      let key = &self.keys[i];
+      let ptr = self.children[i + 1];
       writer.write_u16(key.len() as u16)?;
       writer.write(key)?;
-    }
-    for ptr in &self.children {
-      writer.write_u64(*ptr)?;
+      writer.write_u64(ptr)?;
     }
     Ok(())
   }
@@ -144,8 +144,8 @@ impl InternalNode {
 
 pub struct InternalNodeView<'a> {
   page: &'a Page,
-  keys: Vec<(usize, usize)>,
-  children: Vec<Pointer>,
+  len: usize,
+  offset: usize,
   right: Option<(Pointer, usize, usize)>,
 }
 impl<'a> InternalNodeView<'a> {
@@ -159,52 +159,71 @@ impl<'a> InternalNodeView<'a> {
     };
 
     let len = scanner.read_u16()? as usize;
-    let mut keys = Vec::with_capacity(len);
-    for _ in 0..len {
-      let l = scanner.read_u16()? as usize;
-      let offset = scanner.advance(l)?;
-      keys.push((offset, offset + l))
-    }
+    let offset = scanner.advance(0)?;
 
-    let mut children = Vec::with_capacity(len + 1);
-    for _ in 0..=len {
-      children.push(scanner.read_u64()?);
-    }
-    Ok(Self::new(page, keys, children, right))
+    Ok(Self::new(page, len, offset, right))
   }
 
   pub const fn new(
     page: &'a Page,
-    keys: Vec<(usize, usize)>,
-    children: Vec<Pointer>,
+    len: usize,
+    offset: usize,
     right: Option<(Pointer, usize, usize)>,
   ) -> Self {
     Self {
       page,
-      keys,
-      children,
+      len,
+      offset,
       right,
     }
   }
-  pub fn find(&self, key: StaticKeyRef) -> std::result::Result<Pointer, Pointer> {
+  pub fn find(&self, key: StaticKeyRef) -> Result<std::result::Result<Pointer, Pointer>> {
     if let Some((right, s, e)) = &self.right {
       if self.page.range(*s..*e) <= key {
-        return Err(*right);
-      }
-    };
-    match self
-      .keys
-      .binary_search_by(|(s, e)| self.page.range(*s..*e).cmp(key))
-    {
-      Ok(i) => Ok(self.children[i + 1]),
-      Err(i) => Ok(self.children[i]),
+        return Ok(Err(*right));
+      };
     }
+
+    let mut scanner = self.page.scanner();
+    let _ = scanner.advance(self.offset);
+
+    let mut prev_child = scanner.read_u64()?;
+    for _ in 0..self.len {
+      let l = scanner.read_u16()? as usize;
+      let offset = scanner.advance(l)?;
+      let k = self.page.range(offset..(offset + l));
+      let child = scanner.read_u64()?;
+      if k < key {
+        prev_child = child;
+        continue;
+      } else if k == key {
+        return Ok(Ok(child));
+      } else {
+        return Ok(Ok(prev_child));
+      }
+    }
+
+    Ok(Ok(prev_child))
   }
-  pub fn first_child(&self) -> Pointer {
-    self.children[0]
+  pub fn first_child(&self) -> Result<Pointer> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+    scanner.read_u64()
   }
 
-  pub fn get_all_child(&self) -> impl Iterator<Item = Pointer> + '_ {
-    self.children.iter().map(|i| *i)
+  pub fn get_all_child(&self) -> Result<Vec<Pointer>> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+
+    let mut children = Vec::with_capacity(self.len + 1);
+    children.push(scanner.read_u64()?);
+
+    for _ in 0..self.len {
+      let l = scanner.read_u16()? as usize;
+      scanner.advance(l)?;
+      children.push(scanner.read_u64()?);
+    }
+
+    Ok(children)
   }
 }

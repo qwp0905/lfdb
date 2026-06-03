@@ -20,7 +20,7 @@ fn test_serialize_internal() {
     BTreeNodeView::Leaf(_) => panic!("must be internal"),
   };
 
-  for (i, c) in d.get_all_child().enumerate() {
+  for (i, c) in d.get_all_child().unwrap().into_iter().enumerate() {
     assert_eq!(children[i], c)
   }
 }
@@ -85,8 +85,8 @@ fn test_serialize_internal_with_keys_and_right() {
     BTreeNodeView::Leaf(_) => panic!("must be internal"),
   };
 
-  assert_eq!(d.find(&vec![1, 1]).unwrap(), children[0]);
-  assert_eq!(d.find(&vec![2, 2]).unwrap(), children[1]);
-  assert_eq!(d.find(&vec![4, 4]).unwrap(), children[2]);
-  assert_eq!(d.find(&vec![9, 9]).err(), Some(99));
+  assert_eq!(d.find(&vec![1, 1]).unwrap().unwrap(), children[0]);
+  assert_eq!(d.find(&vec![2, 2]).unwrap().unwrap(), children[1]);
+  assert_eq!(d.find(&vec![4, 4]).unwrap().unwrap(), children[2]);
+  assert_eq!(d.find(&vec![9, 9]).unwrap().err(), Some(99));
 }
