@@ -176,9 +176,10 @@ fn release_orphaned(
       .as_ref()
       .view::<BTreeNodeView>()?
     {
-      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()),
+      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()?),
       BTreeNodeView::Leaf(node) => {
-        for (_, _, record, ptr) in node.get_entries() {
+        let mut iter = node.get_entries();
+        while let Some((_, _, record, ptr)) = iter.try_next()? {
           entry_stack.push(ptr);
           if let RecordDataView::Chunked(pointers) = &record.data {
             visited.extend(pointers);
@@ -194,12 +195,10 @@ fn release_orphaned(
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let entry: DataEntryView = block_cache
-      .read(ptr, table.clone())?
-      .for_read()
-      .as_ref()
-      .deserialize()?;
-    for record in entry.get_versions() {
+    let slot = block_cache.read(ptr, table.clone())?.for_read();
+    let entry: DataEntryView = slot.as_ref().view()?;
+    let mut iter = entry.get_versions();
+    while let Some(record) = iter.try_next()? {
       if let RecordDataView::Chunked(pointers) = &record.data {
         visited.extend(pointers);
       }
