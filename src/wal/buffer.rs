@@ -1,17 +1,59 @@
 use std::{
+  cell::Cell,
+  mem::MaybeUninit,
   ptr::copy_nonoverlapping,
-  sync::atomic::{AtomicU32, AtomicU64, Ordering},
+  sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc,
+  },
 };
 
 use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
   disk::{PageRef, Pointer},
   error::Result,
-  utils::{
-    ExclusivePin, ExclusiveToken, SharedToken, ToRawPointer, UnsafeBorrow, UnsafeDrop,
-    UnsafeTake,
-  },
+  utils::{ExclusivePin, ExclusiveToken, SharedToken, ToArc},
 };
+
+struct SegmentState {
+  /**
+   * Shared across all buffers within the same segment. Raw pointer allows exclusive
+   * ownership transfer via take_segment() when the last buffer finishes — required
+   * for segment reuse. It must taken after pin is empty.
+   */
+  segment: MaybeUninit<WALSegment>,
+  /**
+   * pin for using segment
+   * it must taken with segment pointer.
+   */
+  pin: ExclusivePin,
+  /**
+   * rotated and written complete data block count for current segment
+   */
+  written_count: AtomicU64,
+  /**
+   * flag which segment has been taken to check drop.
+   */
+  taken: Cell<bool>,
+}
+impl SegmentState {
+  const fn new(segment: WALSegment) -> Self {
+    Self {
+      segment: MaybeUninit::new(segment),
+      pin: ExclusivePin::new(),
+      written_count: AtomicU64::new(0),
+      taken: Cell::new(false),
+    }
+  }
+}
+impl Drop for SegmentState {
+  fn drop(&mut self) {
+    if self.taken.get() {
+      return;
+    }
+    unsafe { self.segment.assume_init_drop() };
+  }
+}
 
 const U16_MASK: u32 = 0xFFFF;
 
@@ -49,21 +91,8 @@ pub struct LogBuffer {
    * disk pointer for current data block
    */
   segment_ptr: Pointer,
-  /**
-   * pin for using segment
-   * it must taken with segment pointer.
-   */
-  segment_pin: *const ExclusivePin,
-  /**
-   * Shared across all buffers within the same segment. Raw pointer allows exclusive
-   * ownership transfer via take_segment() when the last buffer finishes — required
-   * for segment reuse. It must taken after pin is empty.
-   */
-  segment: *const WALSegment,
-  /**
-   * rotated and written complete data block count for current segment
-   */
-  written_count: *const AtomicU64,
+
+  segment_state: Arc<SegmentState>,
   /**
    * current generation for current segment
    */
@@ -75,25 +104,16 @@ impl LogBuffer {
     segment: WALSegment,
     generation: SegmentGeneration,
   ) -> Self {
-    Self::new(
-      entry,
-      0,
-      ExclusivePin::new().to_raw_ptr(),
-      segment.to_raw_ptr(),
-      AtomicU64::new(0).to_raw_ptr(),
-      generation,
-    )
+    Self::new(entry, 0, SegmentState::new(segment).to_arc(), generation)
   }
   /**
    * if segment is not full, then copy pointers and recreate buffer
    */
-  pub const fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
+  pub fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
     Self::new(
       entry,
       self.segment_ptr + 1,
-      self.segment_pin,
-      self.segment,
-      self.written_count,
+      self.segment_state.clone(),
       self.generation,
     )
   }
@@ -101,9 +121,7 @@ impl LogBuffer {
   const fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment_ptr: Pointer,
-    segment_pin: *const ExclusivePin,
-    segment: *const WALSegment,
-    written_count: *const AtomicU64,
+    segment_state: Arc<SegmentState>,
     generation: SegmentGeneration,
   ) -> Self {
     Self {
@@ -111,18 +129,16 @@ impl LogBuffer {
       entry,
       commit_count: AtomicU32::new(0),
       segment_ptr,
-      segment_pin,
-      segment,
-      written_count,
+      segment_state,
       generation,
     }
   }
 
   pub fn pin_segment(&self) -> Option<SharedToken<'_>> {
-    self.segment_pin.borrow_unsafe().try_shared()
+    self.segment_state.pin.try_shared()
   }
   pub fn pin_segment_exclusive(&self) -> Option<ExclusiveToken<'_>> {
-    self.segment_pin.borrow_unsafe().try_exclusive()
+    self.segment_state.pin.try_exclusive()
   }
 
   /**
@@ -150,12 +166,12 @@ impl LogBuffer {
     self.commit_count.load(Ordering::Acquire)
   }
   pub fn flush(&self) -> FsyncResult {
-    self.segment.borrow_unsafe().fsync()
+    debug_assert!(!self.segment_state.taken.get());
+    unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
   pub fn write_to_disk(&self) -> Result {
-    self
-      .segment
-      .borrow_unsafe()
+    debug_assert!(!self.segment_state.taken.get());
+    unsafe { self.segment_state.segment.assume_init_ref() }
       .write(self.segment_ptr, &self.entry)
   }
   /**
@@ -174,17 +190,18 @@ impl LogBuffer {
    * it should be call when nothing to refer this segment
    */
   pub fn take_segment(&self) -> WALSegment {
-    self.written_count.drop_unsafe();
-    self.segment_pin.drop_unsafe();
-    self.segment.take_unsafe()
+    debug_assert!(self.segment_state.pin.is_exclusive());
+    debug_assert!(!self.segment_state.taken.get());
+    self.segment_state.taken.set(true);
+    unsafe { self.segment_state.segment.assume_init_read() }
   }
   pub fn load_offset(&self) -> usize {
     (self.offset.load(Ordering::Acquire) & MASK) as usize
   }
   pub fn increase_written_count(&self) {
     self
+      .segment_state
       .written_count
-      .borrow_unsafe()
       .fetch_add(1, Ordering::Release);
   }
   /**
@@ -193,7 +210,7 @@ impl LogBuffer {
    * so segment_ptr <= written_count + 1 means blocks 0..segment_ptr-1 are persisted.
    */
   pub fn is_ready_to_flush(&self) -> bool {
-    self.segment_ptr <= self.written_count.borrow_unsafe().load(Ordering::Acquire) + 1
+    self.segment_ptr <= self.segment_state.written_count.load(Ordering::Acquire) + 1
   }
   pub const fn get_generation(&self) -> SegmentGeneration {
     self.generation
