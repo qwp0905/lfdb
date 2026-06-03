@@ -52,8 +52,11 @@ fn test_serialize_leaf() {
     .as_leaf()
     .expect("desirialize leaf error");
 
-  for (i, (s, e, r, ptr)) in d.get_entries().enumerate() {
+  let mut iter = d.get_entries();
+  let mut i = 0;
+  while let Some((s, e, r, ptr)) = iter.try_next().unwrap() {
     let (k, (o, v, d), p) = &entries[i];
+    i += 1;
     assert_eq!(page.range(s..e), k);
     assert_eq!(*p, ptr);
     assert_eq!(r.owner, *o);

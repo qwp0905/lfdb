@@ -1,9 +1,6 @@
 use std::{mem::replace, ops::Bound};
 
-use super::{
-  RecordData, RecordDataView, StaticKey, StaticKeyRef, VersionRecord, VersionRecordView,
-  MAX_KEY,
-};
+use super::{StaticKey, StaticKeyRef, VersionRecord, VersionRecordView, MAX_KEY};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
@@ -131,135 +128,178 @@ impl LeafNode {
  * so the caller must follow the next pointer to the right sibling — the same
  * mechanism used at the internal level when a search key >= high key.
  */
-pub enum NodeFindResult<'a> {
-  Found(usize, &'a VersionRecordView, Pointer),
+pub enum NodeFindResult {
+  Found(usize, VersionRecordView, Pointer),
   Move(Pointer),
   NotFound(usize),
 }
 
 #[derive(Debug)]
-struct LeafEntryView {
-  key_start: usize,
-  key_end: usize,
-  record: VersionRecordView,
-  next: Pointer,
-}
-impl LeafEntryView {
-  const fn new(
-    key_start: usize,
-    key_end: usize,
-    record: VersionRecordView,
-    next: Pointer,
-  ) -> Self {
-    Self {
-      key_start,
-      key_end,
-      record,
-      next,
-    }
-  }
-}
-
-#[derive(Debug)]
 pub struct LeafNodeView<'a> {
   page: &'a Page,
-  entries: Vec<LeafEntryView>,
+  offset: usize,
+  len: usize,
   next: Option<Pointer>,
 }
 impl<'a> LeafNodeView<'a> {
-  const fn new(
-    page: &'a Page,
-    entries: Vec<LeafEntryView>,
-    next: Option<Pointer>,
-  ) -> Self {
+  const fn new(page: &'a Page, offset: usize, len: usize, next: Option<Pointer>) -> Self {
     Self {
       page,
-      entries,
+      offset,
+      len,
       next,
     }
   }
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
-    let mut entries = Vec::with_capacity(len);
-    for _ in 0..len {
+    let offset = scanner.advance(0)?;
+    Ok(Self::new(page, offset, len, (next != 0).then(|| next)))
+  }
+
+  pub fn find(&self, key: StaticKeyRef) -> Result<NodeFindResult> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+
+    for i in 0..self.len {
       let l = scanner.read_u16()? as usize;
       let offset = scanner.advance(l)?;
-      let record = VersionRecordView::deserialize_from(scanner)?;
+      let record = VersionRecordView::deserialize_from(&mut scanner)?;
       let ptr = scanner.read_u64()?;
-      entries.push(LeafEntryView::new(offset, offset + l, record, ptr));
-    }
-    Ok(Self::new(page, entries, (next != 0).then(|| next)))
-  }
 
-  pub fn find(&self, key: StaticKeyRef) -> NodeFindResult<'_> {
-    match self.binary_search(key) {
-      Ok(i) => NodeFindResult::Found(i, &self.entries[i].record, self.entries[i].next),
-      Err(i) => {
-        if i == self.entries.len() {
-          if let Some(p) = self.next {
-            return NodeFindResult::Move(p);
-          }
-        };
-
-        NodeFindResult::NotFound(i)
+      let k = self.page.range(offset..offset + l);
+      if k < key {
+        continue;
+      } else if k == key {
+        return Ok(NodeFindResult::Found(i, record, ptr));
+      } else {
+        return Ok(NodeFindResult::NotFound(i));
       }
     }
+
+    Ok(
+      self
+        .next
+        .map(NodeFindResult::Move)
+        .unwrap_or_else(|| NodeFindResult::NotFound(self.len)),
+    )
   }
 
-  #[inline]
-  fn binary_search(&self, key: StaticKeyRef) -> std::result::Result<usize, usize> {
-    self
-      .entries
-      .binary_search_by(|e| (self.page.range(e.key_start..e.key_end)).cmp(key))
-  }
+  pub fn writable(self) -> Result<LeafNode> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
 
-  pub fn writable(self) -> LeafNode {
-    let mut entries = Vec::with_capacity(self.entries.len() + 1);
-    for e in self.entries {
-      entries.push(LeafEntry::new(
-        self.page.copy_range(e.key_start..e.key_end),
-        VersionRecord::new(
-          e.record.owner,
-          e.record.version,
-          match e.record.data {
-            RecordDataView::Data(s, e) => RecordData::Data(self.page.copy_range(s..e)),
-            RecordDataView::Chunked(pointers) => RecordData::Chunked(pointers),
-            RecordDataView::Tombstone => RecordData::Tombstone,
-          },
-        ),
-        e.next,
-      ))
+    let mut entries = Vec::with_capacity(self.len + 1);
+    for _ in 0..self.len {
+      let l = scanner.read_u16()? as usize;
+      let key = scanner.read_n(l)?.to_vec();
+      let record = VersionRecord::deserialize_from(&mut scanner)?;
+      let next = scanner.read_u64()?;
+      entries.push(LeafEntry::new(key, record, next))
     }
-    LeafNode::new(entries, self.next)
+
+    Ok(LeafNode::new(entries, self.next))
   }
 
-  pub fn get_entries_while<'b: 'a>(
-    &self,
-    end: &'b Bound<StaticKey>,
-  ) -> impl Iterator<Item = (usize, usize, &'_ VersionRecordView, Pointer)> + '_ {
-    let e = match end {
-      Bound::Included(k) => self.binary_search(k).map(|i| i + 1).unwrap_or_else(|i| i),
-      Bound::Excluded(k) => self.binary_search(k).unwrap_or_else(|i| i),
-      Bound::Unbounded => self.len(),
-    };
-    self.get_entries().take(e)
+  pub fn get_entries(&self) -> LeafNodeIter<'_> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+    LeafNodeIter {
+      scanner,
+      page: self.page,
+      start: &Bound::Unbounded,
+      end: &Bound::Unbounded,
+      pos: 0,
+      len: self.len,
+      closed: false,
+    }
   }
 
-  pub fn get_entries(
-    &self,
-  ) -> impl Iterator<Item = (usize, usize, &'_ VersionRecordView, Pointer)> + '_ {
-    self
-      .entries
-      .iter()
-      .map(|e| (e.key_start, e.key_end, &e.record, e.next))
+  pub fn range_entries(
+    &'a self,
+    start: &'a Bound<StaticKey>,
+    end: &'a Bound<StaticKey>,
+  ) -> LeafNodeIter<'a> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+    LeafNodeIter {
+      scanner,
+      page: self.page,
+      start,
+      end,
+      pos: 0,
+      len: self.len,
+      closed: false,
+    }
   }
 
   pub const fn get_next(&self) -> Option<Pointer> {
     self.next
   }
+}
 
-  pub const fn len(&self) -> usize {
-    self.entries.len()
+pub struct LeafNodeIter<'a> {
+  scanner: PageScanner<'a>,
+  page: &'a Page,
+  start: &'a Bound<StaticKey>,
+  end: &'a Bound<StaticKey>,
+  pos: usize,
+  len: usize,
+  closed: bool,
+}
+impl<'a> LeafNodeIter<'a> {
+  pub fn is_completed(&self) -> bool {
+    self.pos == self.len
+  }
+  pub fn try_next(
+    &mut self,
+  ) -> Result<Option<(usize, usize, VersionRecordView, Pointer)>> {
+    loop {
+      if self.closed {
+        return Ok(None);
+      }
+      if self.is_completed() {
+        self.closed = true;
+        return Ok(None);
+      }
+
+      let l = self.scanner.read_u16()? as usize;
+      let offset = self.scanner.advance(l)?;
+      let record = VersionRecordView::deserialize_from(&mut self.scanner)?;
+      let ptr = self.scanner.read_u64()?;
+
+      let key = self.page.range(offset..offset + l);
+      match self.start {
+        Bound::Included(k) if k.as_slice() > key => {
+          self.pos += 1;
+          continue;
+        }
+        Bound::Excluded(k) if k.as_slice() >= key => {
+          self.pos += 1;
+          continue;
+        }
+        _ => {}
+      }
+
+      let result = (offset, offset + l, record, ptr);
+      match self.end {
+        Bound::Included(k) if k.as_slice() >= key => {
+          self.pos += 1;
+          return Ok(Some(result));
+        }
+        Bound::Excluded(k) if k.as_slice() > key => {
+          self.pos += 1;
+          return Ok(Some(result));
+        }
+        Bound::Unbounded => {
+          self.pos += 1;
+          return Ok(Some(result));
+        }
+        _ => {
+          self.closed = true;
+          return Ok(None);
+        }
+      }
+    }
   }
 }
