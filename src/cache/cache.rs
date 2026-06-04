@@ -86,7 +86,7 @@ impl BlockCache {
 
     let flush_executor = WorkBuilder::new()
       .name("flush executor")
-      .multi(MAX_BATCHING)
+      .multi(PRE_FLUSH_CONCURRENCY)
       .shared(handle_execute(
         cached_blocks.clone(),
         pins.clone(),
@@ -247,7 +247,7 @@ impl Drop for BlockCache {
 
 const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const PRE_FLUSH_THRESHOLD: usize = 100;
-const MAX_BATCHING: usize = 8;
+const PRE_FLUSH_CONCURRENCY: usize = 4;
 
 enum FlushTask {
   Write(BlockId),
