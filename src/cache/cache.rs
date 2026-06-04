@@ -12,7 +12,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  thread::{BackgroundThread, TaskHandle, WorkBuilder},
+  thread::{BackgroundThread, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
 
@@ -243,10 +243,6 @@ impl Drop for BlockCache {
       }
     }
   }
-}
-
-fn __flush(waiting: &mut Vec<TaskHandle<()>>) -> Result {
-  waiting.drain(..).map(|w| w.wait()).collect()
 }
 
 const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
