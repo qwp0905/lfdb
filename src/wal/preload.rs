@@ -12,7 +12,7 @@ use crate::{
 };
 
 const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
-const SEGMENT_MAX_BATCH: usize = 3;
+const SEGMENT_MAX_BATCH: usize = 10;
 
 /**
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
