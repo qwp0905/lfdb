@@ -4,10 +4,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use super::{
-  read_page, LogId, Operation, SegmentGeneration, TxId, WALSegment, FILE_EXT,
-  WAL_BLOCK_SIZE,
-};
+use super::{read_page, LogId, Operation, TxId, FILE_EXT, WAL_BLOCK_SIZE};
 use crate::{
   disk::{IOHandle, IOPool, PagePool, Pointer},
   error::{Error, Result},
@@ -35,7 +32,6 @@ pub struct ReplayResult {
   pub closed: BTreeSet<TxId>,
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
   pub segments: Vec<IOHandle>,
-  pub generation: SegmentGeneration,
   pub last_snapshot: Option<PathBuf>,
 }
 impl ReplayResult {
@@ -43,7 +39,6 @@ impl ReplayResult {
     Self {
       last_log_id: 0,
       last_tx_id: RESERVED_TX + 1,
-      generation: 0,
       aborted: BTreeSet::new(),
       started: BTreeSet::new(),
       closed: BTreeSet::new(),
@@ -60,15 +55,12 @@ pub fn replay(
   io_pool: &IOPool,
 ) -> Result<ReplayResult> {
   let mut files = Vec::new();
-  let mut generation = 0;
   for file in read_dir(base_dir).map_err(Error::IO)? {
     let path = file.map_err(Error::IO)?.path();
     if path.extension().is_none_or(|ext| ext != FILE_EXT) {
       continue;
     }
 
-    let current = WALSegment::parse_generation(&path)?;
-    generation = generation.max(current + 1);
     files.push(path)
   }
 
@@ -151,7 +143,6 @@ pub fn replay(
     closed: closed.into_values().collect(),
     redo: redo.into_values().collect::<Vec<_>>(),
     segments,
-    generation,
     last_snapshot,
   })
 }
