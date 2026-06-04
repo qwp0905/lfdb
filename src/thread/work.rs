@@ -23,8 +23,8 @@ pub enum Context<T, R> {
 pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>);
 impl<'a, T, R> SharedFn<'a, T, R>
 where
-  T: Send + UnwindSafe + 'static,
-  R: Send + 'static,
+  T: Send + UnwindSafe + 'a,
+  R: Send + 'a,
 {
   pub const fn new(f: Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>) -> Self {
     Self(f)
