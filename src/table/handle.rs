@@ -1,27 +1,24 @@
 use std::{
   mem::{forget, transmute, ManuallyDrop},
   ops::Deref,
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+  sync::atomic::{AtomicBool, Ordering},
 };
 
 use super::TableMetadata;
 use crate::{
   disk::{DiskController, FreeList, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
   Result,
 };
 
-pub type TableHandleRef = Arc<TableHandle>;
+pub type TableHandleRef = SBox<TableHandle>;
 
 pub struct TableHandle {
   metadata: TableMetadata,
   disk: DiskController<PAGE_SIZE>,
   free_list: FreeList,
   /**
-   * pin for mutation (eg. compaction / gc)
+   * pin for background mutation (eg. compaction / gc)
    */
   pin: ExclusivePin,
   closed: AtomicBool,
@@ -39,24 +36,6 @@ impl TableHandle {
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),
     }
-  }
-
-  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle> {
-    let token = self.pin.try_shared()?;
-    // transmute allowed since arc guarantees the lifespan
-    Some(PinnedHandle {
-      handle: self.clone(),
-      token: ManuallyDrop::new(unsafe { transmute(token) }),
-    })
-  }
-
-  pub fn try_mutation(self: &Arc<Self>) -> Option<MutationHandle> {
-    let token = self.pin.try_exclusive()?;
-    // transmute allowed since arc guarantees the lifespan
-    Some(MutationHandle {
-      handle: self.clone(),
-      token: ManuallyDrop::new(unsafe { transmute(token) }),
-    })
   }
 
   #[inline]
@@ -98,6 +77,26 @@ impl TableHandle {
   #[inline]
   pub fn truncate(&self) -> Result {
     self.disk.truncate()
+  }
+}
+
+impl TableHandleRef {
+  pub fn try_pin(&self) -> Option<PinnedHandle> {
+    let token = self.pin.try_shared()?;
+    // transmute allowed since sbox guarantees the lifespan
+    Some(PinnedHandle {
+      handle: self.clone(),
+      token: ManuallyDrop::new(unsafe { transmute(token) }),
+    })
+  }
+
+  pub fn try_mutation(&self) -> Option<MutationHandle> {
+    let token = self.pin.try_exclusive()?;
+    // transmute allowed since sbox guarantees the lifespan
+    Some(MutationHandle {
+      handle: self.clone(),
+      token: ManuallyDrop::new(unsafe { transmute(token) }),
+    })
   }
 }
 

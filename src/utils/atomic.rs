@@ -1,26 +1,27 @@
 use std::{
   cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
 };
 
 use crossbeam::utils::Backoff;
 
+use crate::utils::SBox;
+
 use super::ExclusivePin;
 
-pub struct AtomicArc<T> {
-  value: UnsafeCell<Arc<T>>,
+pub struct AtomicSBox<T> {
+  value: UnsafeCell<SBox<T>>,
   lock: ExclusivePin,
 }
-impl<T> AtomicArc<T> {
+impl<T> AtomicSBox<T> {
   pub fn new(value: T) -> Self {
     Self {
-      value: UnsafeCell::new(Arc::new(value)),
+      value: UnsafeCell::new(SBox::new(value)),
       lock: ExclusivePin::new(),
     }
   }
 
-  pub fn load(&self) -> Arc<T> {
+  pub fn load(&self) -> SBox<T> {
     let backoff = Backoff::new();
     loop {
       if let Some(_token) = self.lock.try_shared() {
@@ -30,8 +31,8 @@ impl<T> AtomicArc<T> {
     }
   }
 
-  pub fn swap(&self, value: T) -> Arc<T> {
-    let value = Arc::new(value);
+  pub fn swap(&self, value: T) -> SBox<T> {
+    let value = SBox::new(value);
     let backoff = Backoff::new();
     loop {
       if let Some(_token) = self.lock.try_exclusive() {
@@ -47,7 +48,7 @@ impl<T> AtomicArc<T> {
   }
 }
 
-unsafe impl<T: Send> Send for AtomicArc<T> {}
-unsafe impl<T: Send> Sync for AtomicArc<T> {}
-impl<T: RefUnwindSafe> RefUnwindSafe for AtomicArc<T> {}
-impl<T: UnwindSafe> UnwindSafe for AtomicArc<T> {}
+unsafe impl<T: Send> Send for AtomicSBox<T> {}
+unsafe impl<T: Send> Sync for AtomicSBox<T> {}
+impl<T: RefUnwindSafe> RefUnwindSafe for AtomicSBox<T> {}
+impl<T: UnwindSafe> UnwindSafe for AtomicSBox<T> {}

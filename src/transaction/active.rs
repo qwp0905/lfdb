@@ -2,13 +2,13 @@ use std::{
   collections::BTreeMap,
   sync::{
     atomic::{AtomicU8, Ordering},
-    Arc, RwLock,
+    RwLock,
   },
 };
 
 use crate::{
   thread::OnceParker,
-  utils::{OffsetBitmap, ShortenedRwLock},
+  utils::{OffsetBitmap, SBox, ShortenedRwLock},
   wal::TxId,
 };
 
@@ -87,7 +87,7 @@ impl ActiveState {
 }
 
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, Arc<ActiveState>>>,
+  inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
 }
 impl ActiveSet {
   pub const fn new() -> Self {
@@ -95,7 +95,7 @@ impl ActiveSet {
       inner: RwLock::new(BTreeMap::new()),
     }
   }
-  pub fn insert(&self, state: Arc<ActiveState>) {
+  pub fn insert(&self, state: SBox<ActiveState>) {
     self.inner.wl().insert(state.tx_id, state);
   }
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
@@ -120,8 +120,8 @@ impl ActiveSet {
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
   }
-  pub fn get(&self, tx_id: &TxId) -> Option<Arc<ActiveState>> {
-    self.inner.rl().get(tx_id).map(Arc::clone)
+  pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
+    self.inner.rl().get(tx_id).map(SBox::clone)
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()

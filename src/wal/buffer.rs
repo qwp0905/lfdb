@@ -2,17 +2,14 @@ use std::{
   cell::Cell,
   mem::MaybeUninit,
   ptr::copy_nonoverlapping,
-  sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
-    Arc,
-  },
+  sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
   disk::{PageRef, Pointer},
   error::Result,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ToArc},
+  utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
 struct SegmentState {
@@ -92,7 +89,7 @@ pub struct LogBuffer {
    */
   segment_ptr: Pointer,
 
-  segment_state: Arc<SegmentState>,
+  segment_state: SBox<SegmentState>,
   /**
    * current generation for current segment
    */
@@ -104,7 +101,7 @@ impl LogBuffer {
     segment: WALSegment,
     generation: SegmentGeneration,
   ) -> Self {
-    Self::new(entry, 0, SegmentState::new(segment).to_arc(), generation)
+    Self::new(entry, 0, SBox::new(SegmentState::new(segment)), generation)
   }
   /**
    * if segment is not full, then copy pointers and recreate buffer
@@ -121,7 +118,7 @@ impl LogBuffer {
   const fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment_ptr: Pointer,
-    segment_state: Arc<SegmentState>,
+    segment_state: SBox<SegmentState>,
     generation: SegmentGeneration,
   ) -> Self {
     Self {

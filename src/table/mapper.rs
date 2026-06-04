@@ -8,7 +8,7 @@ use std::{
 use super::{AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata};
 use crate::{
   disk::{DiskController, IOPool},
-  utils::{ShortenedRwLock, ToArc},
+  utils::{SBox, ShortenedRwLock},
   Error, Result,
 };
 
@@ -42,13 +42,12 @@ impl TableMapper {
     let metadata = TableHandle::new(
       &TableMetadata::new(META_TABLE_ID, META_TABLE.to_string(), path),
       disk,
-    )
-    .to_arc();
+    );
 
     Ok(Self {
       open_handles: Default::default(),
       base_path: config.base_path,
-      metadata,
+      metadata: SBox::new(metadata),
       io_pool,
       last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
       is_new,
@@ -57,7 +56,7 @@ impl TableMapper {
 
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
     let disk = DiskController::new(self.io_pool.create_handle(table_meta.get_path())?);
-    Ok(TableHandle::new(table_meta, disk).to_arc())
+    Ok(SBox::new(TableHandle::new(table_meta, disk)))
   }
 
   pub fn replay<Iter: Iterator<Item = TableHandleRef>>(&self, iter: Iter) -> Result {
