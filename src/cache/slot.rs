@@ -163,8 +163,9 @@ impl<'a> BatchSlot<'a> {
     }
 
     loop {
+      let mut page = self.page_pool.acquire();
+
       {
-        let mut page = self.page_pool.acquire();
         let mut latch = self.block.latch();
         page.copy_from(&**self.block.load_page());
 
@@ -175,6 +176,7 @@ impl<'a> BatchSlot<'a> {
 
         latch.apply(slot.into_inner());
       }
+
       if self.batch.try_release() {
         break;
       }
