@@ -147,7 +147,7 @@ where
   }
 }
 
-const DEFAULT_WAL_FILE_SIZE: usize = 256 << 20; // 64 mb
+const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 16;
