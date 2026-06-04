@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use crossbeam::queue::SegQueue;
+use crossbeam::queue::ArrayQueue;
 
 use super::WALSegment;
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
 };
 
 const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
-const SEGMENT_MAX_BATCH: usize = 10;
+const SEGMENT_MAX_BATCH: usize = 3;
 
 /**
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
@@ -25,7 +25,7 @@ const SEGMENT_MAX_BATCH: usize = 10;
 pub struct SegmentPreload {
   reuse: Box<dyn BackgroundThread<WALSegment, ()>>,
   preload: Box<dyn BackgroundThread<(), Result<WALSegment>>>,
-  ready: Arc<SegQueue<WALSegment>>,
+  ready: Arc<ArrayQueue<WALSegment>>,
 }
 impl SegmentPreload {
   pub fn new(
@@ -34,7 +34,7 @@ impl SegmentPreload {
     io_pool: Arc<IOPool>,
     base_dir: Arc<DirHandle>,
   ) -> Self {
-    let ready = SegQueue::new().to_arc();
+    let ready = ArrayQueue::new(SEGMENT_MAX_BATCH).to_arc();
     let reuse = WorkBuilder::new()
       .name("wal segment reuse")
       .single()
@@ -80,7 +80,7 @@ impl SegmentPreload {
 }
 
 fn handle_reuse(
-  ready: Arc<SegQueue<WALSegment>>,
+  ready: Arc<ArrayQueue<WALSegment>>,
   base_dir: Arc<DirHandle>,
   prefix: PathBuf,
 ) -> impl FnMut(Vec<WALSegment>) {
@@ -88,6 +88,11 @@ fn handle_reuse(
   let mut failed = Vec::with_capacity(SEGMENT_MAX_BATCH);
   move |reused| {
     for segment in reused {
+      if ready.len() + succeed.len() >= SEGMENT_MAX_BATCH {
+        failed.push(segment);
+        continue;
+      }
+
       if let Err(err) = segment.reuse(&prefix) {
         error!("error occurs in segment reuse: {err}");
         failed.push(segment);
@@ -100,18 +105,18 @@ fn handle_reuse(
       succeed.drain(..).for_each(|s| failed.push(s));
     }
 
-    for segment in succeed.drain(..) {
-      ready.push(segment);
-    }
-
-    for segment in failed.drain(..) {
+    for segment in succeed
+      .drain(..)
+      .flat_map(|s| ready.push(s).err())
+      .chain(failed.drain(..))
+    {
       let _ = segment.truncate();
     }
   }
 }
 
 const fn handle_preload(
-  ready: Arc<SegQueue<WALSegment>>,
+  ready: Arc<ArrayQueue<WALSegment>>,
   prefix: PathBuf,
   io_pool: Arc<IOPool>,
   base_dir: Arc<DirHandle>,
@@ -124,7 +129,7 @@ const fn handle_preload(
   }
 }
 const fn handle_fallback(
-  ready: Arc<SegQueue<WALSegment>>,
+  ready: Arc<ArrayQueue<WALSegment>>,
 ) -> impl FnMut(Option<Result<WALSegment>>) {
   move |finalize| {
     if let Some(Ok(segment)) = finalize.or_else(|| ready.pop().map(Ok)) {
