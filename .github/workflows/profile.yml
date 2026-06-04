@@ -23,6 +23,10 @@ on:
         description: "YCSB operation count per iteration"
         required: false
         default: ""
+      thread_count:
+        description: "YCSB thread count per iteration"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,6 +71,7 @@ jobs:
         env:
           YCSB_RECORD_COUNT: ${{ github.event.inputs.record_count }}
           YCSB_OP_COUNT: ${{ github.event.inputs.op_count }}
+          YCSB_THREAD_COUNT: ${{ github.event.inputs.thread_count }}
         run: |
           FILTER="${{ github.event.inputs.filter }}"
           SAMPLE="${{ github.event.inputs.sample_size }}"
@@ -74,7 +79,7 @@ jobs:
           if [ -n "$FILTER" ]; then
             ARGS="$ARGS --bench $FILTER"
           fi
-          ROOT_ENVS="--preserve-env=YCSB_RECORD_COUNT,YCSB_OP_COUNT"
+          ROOT_ENVS="--preserve-env=YCSB_RECORD_COUNT,YCSB_OP_COUNT,YCSB_THREAD_COUNT"
           cargo flamegraph --root="$ROOT_ENVS" --package bench --bench ${{ github.event.inputs.bench }} -o flamegraph.svg -- $ARGS
 
       - name: Upload flamegraph
