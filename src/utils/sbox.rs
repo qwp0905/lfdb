@@ -1,0 +1,110 @@
+use std::{
+  ops::Deref,
+  sync::atomic::{fence, AtomicUsize, Ordering},
+};
+
+#[repr(C, align(2))]
+struct Inner<T: ?Sized> {
+  count: AtomicUsize,
+  data: T,
+}
+impl<T> Inner<T> {
+  const fn new(data: T) -> Self {
+    Self {
+      count: AtomicUsize::new(1),
+      data,
+    }
+  }
+}
+
+/**
+ * A lightweight shared box with atomic strong reference counting.
+ */
+pub struct SBox<T: ?Sized> {
+  inner: *mut Inner<T>,
+}
+impl<T> SBox<T> {
+  pub fn new(data: T) -> Self {
+    Self {
+      inner: Box::into_raw(Box::new(Inner::new(data))),
+    }
+  }
+}
+impl<T: ?Sized> Clone for SBox<T> {
+  fn clone(&self) -> Self {
+    if unsafe { &*self.inner }
+      .count
+      .fetch_add(1, Ordering::Relaxed)
+      == usize::MAX
+    {
+      std::process::abort();
+    };
+    Self { inner: self.inner }
+  }
+}
+
+impl<T: ?Sized> Drop for SBox<T> {
+  fn drop(&mut self) {
+    if unsafe { &*self.inner }
+      .count
+      .fetch_sub(1, Ordering::Release)
+      > 1
+    {
+      return;
+    }
+
+    fence(Ordering::Acquire);
+    let _ = unsafe { Box::from_raw(self.inner) };
+  }
+}
+
+unsafe impl<T: Send + Sync + ?Sized> Send for SBox<T> {}
+unsafe impl<T: Send + Sync + ?Sized> Sync for SBox<T> {}
+
+impl<T: ?Sized> Deref for SBox<T> {
+  type Target = T;
+
+  fn deref(&self) -> &T {
+    unsafe { &(*self.inner).data }
+  }
+}
+
+// impl<T: ?Sized> std::borrow::Borrow<T> for SArc<T> {
+//   fn borrow(&self) -> &T {
+//     &**self
+//   }
+// }
+// impl<T: ?Sized> AsRef<T> for SBox<T> {
+//   fn as_ref(&self) -> &T {
+//     &**self
+//   }
+// }
+// impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for SBox<T> {
+//   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//     self.deref().fmt(f)
+//   }
+// }
+// impl<T: ?Sized + std::fmt::Display> std::fmt::Display for SBox<T> {
+//   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//     self.deref().fmt(f)
+//   }
+// }
+// impl<T: Default> Default for SBox<T> {
+//   fn default() -> Self {
+//     Self::new(Default::default())
+//   }
+// }
+// impl<T: core::error::Error + ?Sized> core::error::Error for SBox<T> {
+//   #[allow(deprecated)]
+//   fn cause(&self) -> Option<&dyn core::error::Error> {
+//     core::error::Error::cause(self.deref())
+//   }
+
+//   fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+//     core::error::Error::source(self.deref())
+//   }
+// }
+
+#[cfg(test)]
+#[path = "tests/sbox.rs"]
+mod tests;
