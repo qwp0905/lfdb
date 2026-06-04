@@ -59,12 +59,6 @@ impl<'a, T: 'a> UnsafeBorrowMut<'a, T> for *mut T {
 pub trait UnsafeTake<T> {
   fn take_unsafe(self) -> T;
 }
-impl<T> UnsafeTake<T> for *const T {
-  #[inline(always)]
-  fn take_unsafe(self) -> T {
-    unsafe { *Box::from_raw(self as *mut T) }
-  }
-}
 impl<T> UnsafeTake<T> for *mut T {
   #[inline(always)]
   fn take_unsafe(self) -> T {
@@ -74,12 +68,6 @@ impl<T> UnsafeTake<T> for *mut T {
 
 pub trait UnsafeDrop<T> {
   fn drop_unsafe(self);
-}
-impl<T> UnsafeDrop<T> for *const T {
-  #[inline(always)]
-  fn drop_unsafe(self) {
-    let _ = self.take_unsafe();
-  }
 }
 impl<T> UnsafeDrop<T> for *mut T {
   #[inline(always)]
