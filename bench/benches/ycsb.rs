@@ -33,7 +33,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
 
   #[cfg(feature = "lfdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
@@ -43,7 +43,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
 
   #[cfg(feature = "redb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
@@ -53,7 +53,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
 
   #[cfg(feature = "rocksdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
@@ -63,7 +63,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
 
   #[cfg(feature = "sled")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, THREADS, group, || {
@@ -80,7 +80,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
 
   #[cfg(feature = "lfdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
@@ -90,7 +90,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
 
   #[cfg(feature = "redb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
@@ -100,7 +100,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
 
   #[cfg(feature = "rocksdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
@@ -110,7 +110,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
 
   #[cfg(feature = "sled")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, THREADS, group, || {
@@ -127,7 +127,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
 
   #[cfg(feature = "lfdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
@@ -137,7 +137,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
 
   #[cfg(feature = "redb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
@@ -147,7 +147,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
 
   #[cfg(feature = "rocksdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
@@ -157,7 +157,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
 
   #[cfg(feature = "sled")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, THREADS, group, || {
@@ -174,7 +174,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
 
   #[cfg(feature = "lfdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
@@ -184,7 +184,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
 
   #[cfg(feature = "redb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
@@ -194,7 +194,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
 
   #[cfg(feature = "rocksdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
@@ -204,7 +204,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
 
   #[cfg(feature = "sled")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, THREADS, group, || {
@@ -221,7 +221,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
 
   #[cfg(feature = "lfdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
@@ -231,7 +231,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
 
   #[cfg(feature = "redb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
@@ -241,7 +241,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
 
   #[cfg(feature = "rocksdb")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {
@@ -251,7 +251,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
 
   #[cfg(feature = "sled")]
   {
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, THREADS, group, || {

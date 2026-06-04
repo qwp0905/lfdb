@@ -16,7 +16,7 @@ fn bench_sequential_get(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_get(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -28,7 +28,7 @@ fn bench_sequential_get(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_get(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -44,7 +44,7 @@ fn bench_sequential_insert(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_insert(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -56,7 +56,7 @@ fn bench_sequential_insert(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_insert(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -72,7 +72,7 @@ fn bench_sequential_update(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_update(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -84,7 +84,7 @@ fn bench_sequential_update(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::sequential_update(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -100,7 +100,7 @@ fn bench_concurrent_get(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_get(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -112,7 +112,7 @@ fn bench_concurrent_get(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_get(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -128,7 +128,7 @@ fn bench_concurrent_insert(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_insert(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -140,7 +140,7 @@ fn bench_concurrent_insert(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_insert(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -156,7 +156,7 @@ fn bench_concurrent_update(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_update(group, || {
       engines::lfdb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
@@ -168,7 +168,7 @@ fn bench_concurrent_update(c: &mut Criterion) {
     group
       .sample_size(DEFAULT_SAMPLE_SIZE)
       .measurement_time(Duration::from_secs(15));
-    let dir = TempDir::new_in(".").expect("dir failed.");
+    let dir = TempDir::new_in("..").expect("dir failed.");
     scenarios::throughput::concurrent_update(group, || {
       engines::redb::new(DEFAULT_CACHE_SIZE, dir.path())
     });
