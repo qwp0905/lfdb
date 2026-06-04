@@ -5,10 +5,11 @@ use std::{
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::atomic::{AtomicU8, Ordering},
+  sync::atomic::Ordering,
 };
 
 use crossbeam_skiplist::SkipSet;
+use uuid::Uuid;
 
 use super::{ActiveSet, ActiveState};
 
@@ -74,7 +75,6 @@ pub struct VersionVisibility {
   active: ActiveSet,
   last_tx_id: AtomicTxId,
   base_path: PathBuf,
-  snapshot_id: AtomicU8,
 }
 impl VersionVisibility {
   pub fn replay(
@@ -85,9 +85,9 @@ impl VersionVisibility {
     closed: BTreeSet<TxId>,
     last_snapshot: Option<PathBuf>,
   ) -> Result<Self> {
-    let (active_s, aborted_s, snap_id) = match last_snapshot {
+    let (active_s, aborted_s) = match last_snapshot {
       Some(path) => Self::replay_snapshot(&path)?,
-      None => (BTreeSet::new(), BTreeSet::new(), 0),
+      None => (BTreeSet::new(), BTreeSet::new()),
     };
     Ok(Self {
       aborted: active_s
@@ -100,7 +100,6 @@ impl VersionVisibility {
       active: ActiveSet::new(),
       last_tx_id: AtomicTxId::new(last_tx_id),
       base_path,
-      snapshot_id: AtomicU8::new(snap_id),
     })
   }
 
@@ -163,13 +162,7 @@ impl VersionVisibility {
       .map(|state| TxState::new(state, &self.active))
   }
 
-  fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>, u8)> {
-    let snapshot_id = path
-      .file_stem()
-      .unwrap()
-      .to_string_lossy()
-      .parse::<u8>()
-      .map_err(Error::unknown)?;
+  fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
@@ -207,16 +200,13 @@ impl VersionVisibility {
       aborted.insert(id);
     }
 
-    Ok((active, aborted, snapshot_id.checked_add(1).unwrap_or(0)))
+    Ok((active, aborted))
   }
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
     let current = self
       .base_path
-      .join(format!(
-        "{}",
-        self.snapshot_id.fetch_add(1, Ordering::Relaxed)
-      ))
+      .join(Uuid::new_v4().to_string())
       .with_extension(FILE_EXT);
 
     let file = fs::OpenOptions::new()

@@ -108,14 +108,8 @@ impl WAL {
       replay_result.segments.len(),
     );
 
-    let preloader = SegmentPreload::new(
-      config.base_dir.clone(),
-      replay_result.generation,
-      max_len,
-      io_pool,
-      base_dir,
-    )
-    .to_box();
+    let preloader =
+      SegmentPreload::new(config.base_dir.clone(), max_len, io_pool, base_dir).to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((

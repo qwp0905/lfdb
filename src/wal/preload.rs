@@ -1,12 +1,8 @@
-use std::{
-  path::PathBuf,
-  sync::{atomic::Ordering, Arc},
-  time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
-use super::{AtomicSegmentGeneration, SegmentGeneration, WALSegment};
+use super::WALSegment;
 use crate::{
   disk::{DirHandle, IOPool, Pointer},
   error,
@@ -34,24 +30,17 @@ pub struct SegmentPreload {
 impl SegmentPreload {
   pub fn new(
     prefix: PathBuf,
-    generation: SegmentGeneration,
     max_len: Pointer,
     io_pool: Arc<IOPool>,
     base_dir: Arc<DirHandle>,
   ) -> Self {
     let ready = SegQueue::new().to_arc();
-    let generation = AtomicSegmentGeneration::new(generation).to_arc();
     let reuse = WorkBuilder::new()
       .name("wal segment reuse")
       .single()
       .eager_buffering(
         SEGMENT_MAX_BATCH,
-        handle_reuse(
-          ready.clone(),
-          generation.clone(),
-          base_dir.clone(),
-          prefix.clone(),
-        ),
+        handle_reuse(ready.clone(), base_dir.clone(), prefix.clone()),
       )
       .to_box();
     let preload = WorkBuilder::new()
@@ -59,14 +48,7 @@ impl SegmentPreload {
       .single()
       .preload(
         SEGMENT_MAX_LIFE,
-        handle_preload(
-          ready.clone(),
-          generation,
-          prefix,
-          io_pool,
-          base_dir,
-          max_len,
-        ),
+        handle_preload(ready.clone(), prefix, io_pool, base_dir, max_len),
         handle_fallback(ready.clone()),
       )
       .to_box();
@@ -99,7 +81,6 @@ impl SegmentPreload {
 
 fn handle_reuse(
   ready: Arc<SegQueue<WALSegment>>,
-  generation: Arc<AtomicSegmentGeneration>,
   base_dir: Arc<DirHandle>,
   prefix: PathBuf,
 ) -> impl FnMut(Vec<WALSegment>) {
@@ -107,8 +88,7 @@ fn handle_reuse(
   let mut failed = Vec::with_capacity(SEGMENT_MAX_BATCH);
   move |reused| {
     for segment in reused {
-      let cur = generation.fetch_add(1, Ordering::Relaxed);
-      if let Err(err) = segment.reuse(&prefix, cur) {
+      if let Err(err) = segment.reuse(&prefix) {
         error!("error occurs in segment reuse: {err}");
         failed.push(segment);
         continue;
@@ -132,7 +112,6 @@ fn handle_reuse(
 
 const fn handle_preload(
   ready: Arc<SegQueue<WALSegment>>,
-  generation: Arc<AtomicSegmentGeneration>,
   prefix: PathBuf,
   io_pool: Arc<IOPool>,
   base_dir: Arc<DirHandle>,
@@ -140,13 +119,8 @@ const fn handle_preload(
 ) -> impl FnMut(()) -> Result<WALSegment> {
   move |_| match ready.pop() {
     Some(segment) => Ok(segment),
-    None => WALSegment::open(
-      &prefix,
-      generation.fetch_add(1, Ordering::Relaxed),
-      max_len,
-      &io_pool,
-    )
-    .and_then(|seg| base_dir.fdatasync().map(|_| seg)),
+    None => WALSegment::open(&prefix, max_len, &io_pool)
+      .and_then(|seg| base_dir.fdatasync().map(|_| seg)),
   }
 }
 const fn handle_fallback(
