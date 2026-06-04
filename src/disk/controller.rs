@@ -1,7 +1,7 @@
 use std::mem::transmute;
 
 use super::{IOHandle, Page, Pointer};
-use crate::error::Result;
+use crate::{error::Result, thread::TaskHandle};
 
 /**
  * Just a wrapper for IOHandle that provides a logical offset function.
@@ -29,10 +29,11 @@ impl<const N: usize> DiskController<N> {
   #[inline]
   pub fn write(&self, pointer: Pointer, page: &Page<N>) -> Result {
     // transmute allowed since page lifetime available until wait called.
-    self
-      .handle
-      .write_async(pointer * Self::SIZE, unsafe { transmute(page.as_ref()) })
-      .wait()
+    self.write_async(pointer, unsafe { transmute(page) }).wait()
+  }
+
+  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> TaskHandle<()> {
+    self.handle.write_async(pointer * Self::SIZE, page.as_ref())
   }
 
   #[inline]
