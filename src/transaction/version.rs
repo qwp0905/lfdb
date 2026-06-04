@@ -5,10 +5,7 @@ use std::{
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-  },
+  sync::atomic::{AtomicU8, Ordering},
 };
 
 use crossbeam_skiplist::SkipSet;
@@ -17,7 +14,7 @@ use super::{ActiveSet, ActiveState};
 
 use crate::{
   disk::{max_iov, Pread, Pwrite, Pwritev},
-  utils::OffsetBitmap,
+  utils::{OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
   Error, Result,
 };
@@ -25,11 +22,11 @@ use crate::{
 const FILE_EXT: &str = "snap";
 
 pub struct TxState<'a> {
-  state: Arc<ActiveState>,
+  state: SBox<ActiveState>,
   set: &'a ActiveSet,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
+  const fn new(state: SBox<ActiveState>, set: &'a ActiveSet) -> Self {
     Self { state, set }
   }
   pub fn deactive(&self) {
@@ -147,7 +144,7 @@ impl VersionVisibility {
   }
   pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
-    let state = Arc::new(ActiveState::new(tx_id));
+    let state = SBox::new(ActiveState::new(tx_id));
     self.active.insert(state.clone());
     (
       TxState::new(state, &self.active),

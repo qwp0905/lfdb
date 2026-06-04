@@ -1,13 +1,12 @@
 use std::{
   mem::{transmute, ManuallyDrop},
   ops::{Deref, DerefMut},
-  sync::Arc,
 };
 
 use super::{BatchHandle, BatchHandler, BlockId, CachedBlock, LatchGuard};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
-  utils::{AtomicBitmap, SharedToken},
+  utils::{AtomicBitmap, SBox, SharedToken},
   Result,
 };
 
@@ -109,10 +108,10 @@ impl<'a> CachedSlot<'a> {
 }
 
 pub struct ReadonlySlot {
-  page: Arc<PageRef<PAGE_SIZE>>,
+  page: SBox<PageRef<PAGE_SIZE>>,
 }
 impl ReadonlySlot {
-  pub fn page(&self) -> Arc<PageRef<PAGE_SIZE>> {
+  pub fn page(&self) -> SBox<PageRef<PAGE_SIZE>> {
     self.page.clone()
   }
 }

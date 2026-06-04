@@ -1,18 +1,21 @@
-use std::{ops::Deref, sync::Arc};
+use std::ops::Deref;
 
-use crate::disk::{PageRef, PAGE_SIZE};
+use crate::{
+  disk::{PageRef, PAGE_SIZE},
+  utils::SBox,
+};
 
 pub type StaticKey = Vec<u8>;
 pub type StaticKeyRef<'a> = &'a [u8];
 
 enum Type {
-  Refed(Arc<PageRef<PAGE_SIZE>>, usize, usize),
+  Refed(SBox<PageRef<PAGE_SIZE>>, usize, usize),
   Copied(Vec<u8>),
 }
 
 pub struct VecRef(Type);
 impl VecRef {
-  pub fn refed(page: Arc<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
+  pub fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
     Self(Type::Refed(page, start, end))
   }
   pub fn copied(data: Vec<u8>) -> Self {
@@ -21,7 +24,7 @@ impl VecRef {
 
   pub fn into_vec(self) -> Vec<u8> {
     match self.0 {
-      Type::Refed(slot, s, e) => slot.as_ref().copy_range(s..e),
+      Type::Refed(slot, s, e) => slot.copy_range(s..e),
       Type::Copied(data) => data,
     }
   }
@@ -31,7 +34,7 @@ impl Deref for VecRef {
 
   fn deref(&self) -> &Self::Target {
     match &self.0 {
-      Type::Refed(slot, s, e) => slot.as_ref().range(*s..*e),
+      Type::Refed(slot, s, e) => slot.range(*s..*e),
       Type::Copied(data) => data.as_slice(),
     }
   }

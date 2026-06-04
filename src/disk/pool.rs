@@ -16,11 +16,11 @@ use crate::{
   disk::Fallocate,
   metrics::MetricsRegistry,
   thread::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle, WorkBuilder},
-  utils::{ExclusivePin, ShortenedMutex, ToArc},
+  utils::{ExclusivePin, SBox, ShortenedMutex, ToArc},
   Error, Result,
 };
 
-type ThreadArg = (Arc<File>, IOTask, Arc<HandleState>);
+type ThreadArg = (SBox<File>, IOTask, SBox<HandleState>);
 type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 type WriteTask = (u64, IoSlice<'static>);
 
@@ -44,8 +44,8 @@ impl HandleState {
 }
 
 enum IOTask {
-  Write(Arc<Task<WriteTask>>),
-  Sync(Arc<Task<()>>),
+  Write(SBox<Task<WriteTask>>),
+  Sync(SBox<Task<()>>),
 }
 struct Task<T> {
   queue: SegQueue<(T, OneshotFulfill<Result>)>,
@@ -77,10 +77,10 @@ impl IOPool {
   pub fn create_dir(&self, path: &Path) -> Result<DirHandle> {
     create_dir_all(path).map_err(Error::IO)?;
     Ok(DirHandle {
-      file: File::open(path).map_err(Error::IO)?.to_arc(),
-      sync_handle: Task::new().to_arc(),
+      file: SBox::new(File::open(path).map_err(Error::IO)?),
+      sync_handle: SBox::new(Task::new()),
       thread: self.thread.clone(),
-      state: HandleState::new().to_arc(),
+      state: SBox::new(HandleState::new()),
     })
   }
 
@@ -94,13 +94,12 @@ impl IOPool {
       .write(true)
       .create(true)
       .direct_io(path)
-      .map_err(Error::IO)?
-      .to_arc();
+      .map_err(Error::IO)?;
     Ok(IOHandle {
-      file,
-      write_handle: Task::new().to_arc(),
-      sync_handle: Task::new().to_arc(),
-      state: HandleState::new().to_arc(),
+      file: SBox::new(file),
+      write_handle: SBox::new(Task::new()),
+      sync_handle: SBox::new(Task::new()),
+      state: SBox::new(HandleState::new()),
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       path: Mutex::new(PathBuf::from(path)),
@@ -242,11 +241,11 @@ fn write_exec(
 }
 
 pub struct IOHandle {
-  file: Arc<File>,
-  write_handle: Arc<Task<WriteTask>>,
-  sync_handle: Arc<Task<()>>,
+  file: SBox<File>,
+  write_handle: SBox<Task<WriteTask>>,
+  sync_handle: SBox<Task<()>>,
   thread: Arc<IOThread>,
-  state: Arc<HandleState>,
+  state: SBox<HandleState>,
   metrics: Arc<MetricsRegistry>,
   path: Mutex<PathBuf>,
 }
@@ -357,10 +356,10 @@ impl IOHandle {
 }
 
 pub struct DirHandle {
-  file: Arc<File>,
-  sync_handle: Arc<Task<()>>,
+  file: SBox<File>,
+  sync_handle: SBox<Task<()>>,
   thread: Arc<IOThread>,
-  state: Arc<HandleState>,
+  state: SBox<HandleState>,
 }
 impl DirHandle {
   pub fn fdatasync(&self) -> Result {
