@@ -3,7 +3,7 @@ use std::{
   ops::{Deref, DerefMut},
 };
 
-use super::{BatchHandle, BatchHandler, BlockId, CachedBlock, LatchGuard};
+use super::{BatchHandle, BatchHandler, BlockId, BlockLatch, CachedBlock};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SBox, SharedToken},
@@ -93,16 +93,15 @@ impl<'a> CachedSlot<'a> {
     'a: 'b,
   {
     let mut shadow = self.page_pool.acquire();
-    let _latch = self.block.latch();
+    let latch = self.block.latch();
     shadow.copy_from(&**self.block.load_page());
     WritableSlot {
       shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
 
-      block: self.block,
       dirty: self.dirty,
       block_id: self.block_id,
+      latch,
       _token: self.token,
-      _latch,
     }
   }
 }
@@ -122,11 +121,10 @@ impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
 }
 pub struct WritableSlot<'a> {
   shadow: ManuallyDrop<RefedSlot>,
-  block: &'a CachedBlock,
   dirty: &'a AtomicBitmap,
   block_id: BlockId,
+  latch: BlockLatch<'a>,
   _token: SharedToken<'a>,
-  _latch: LatchGuard<'a>,
 }
 
 impl<'a> Deref for WritableSlot<'a> {
@@ -145,7 +143,7 @@ impl<'a> Drop for WritableSlot<'a> {
   fn drop(&mut self) {
     let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
     self.dirty.insert(self.block_id);
-    self.block.store(shadow.into_inner());
+    self.latch.apply(shadow.into_inner());
   }
 }
 
@@ -166,14 +164,18 @@ impl<'a> BatchSlot<'a> {
 
     loop {
       let mut page = self.page_pool.acquire();
-      let _guard = self.block.latch();
-      page.copy_from(&**self.block.load_page());
 
-      let mut slot = RefedSlot::new(self.block.get_pointer(), page);
-      self.batch.flush_with(&mut slot);
+      {
+        let mut latch = self.block.latch();
+        page.copy_from(&**self.block.load_page());
 
-      self.dirty.insert(self.block_id);
-      self.block.store(slot.into_inner());
+        let mut slot = RefedSlot::new(self.block.get_pointer(), page);
+        self.batch.flush_with(&mut slot);
+
+        self.dirty.insert(self.block_id);
+
+        latch.apply(slot.into_inner());
+      }
 
       if self.batch.try_release() {
         break;

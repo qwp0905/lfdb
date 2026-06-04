@@ -12,7 +12,7 @@ use crate::{
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  thread::{BackgroundThread, TaskHandle, WorkBuilder},
+  thread::{BackgroundThread, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
 
@@ -86,7 +86,7 @@ impl BlockCache {
 
     let flush_executor = WorkBuilder::new()
       .name("flush executor")
-      .multi(MAX_BATCHING)
+      .multi(PRE_FLUSH_CONCURRENCY)
       .shared(handle_execute(
         cached_blocks.clone(),
         pins.clone(),
@@ -147,7 +147,8 @@ impl BlockCache {
 
     let old = self.cached_blocks[block_id].replace(new);
     if self.dirty_blocks.contains(block_id) {
-      if let Err(err) = old.flush() {
+      // hard flush allowed since exclusive token acquired.
+      if let Err(err) = old.flush_hard() {
         self.cached_blocks[block_id].replace(old);
         return Err(err);
       }
@@ -244,13 +245,9 @@ impl Drop for BlockCache {
   }
 }
 
-fn __flush(waiting: &mut Vec<TaskHandle<()>>) -> Result {
-  waiting.drain(..).map(|w| w.wait()).collect()
-}
-
 const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const PRE_FLUSH_THRESHOLD: usize = 100;
-const MAX_BATCHING: usize = 8;
+const PRE_FLUSH_CONCURRENCY: usize = 4;
 
 enum FlushTask {
   Write(BlockId),
@@ -271,13 +268,20 @@ const fn handle_execute(
       };
 
       let block = blocks[id].get();
-      let _latch = block.latch();
-      if !dirty_blocks.contains(id) {
+      let flusher = block.flusher();
+      if !dirty_blocks.remove(id) {
         return Ok(());
-      };
+      }
 
-      block.flush()?;
-      dirty_blocks.remove(id);
+      let result = flusher.submit();
+      if let (epoch, Err(err)) = result.finalize() {
+        let latch = block.latch();
+        if latch.epoch() == epoch {
+          dirty_blocks.insert(id);
+        }
+        return Err(err);
+      }
+
       dirty_tables.mark(block.handle());
       Ok(())
     }
@@ -291,15 +295,21 @@ const fn handle_flush(
   dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(Option<()>) -> Result {
   move |trigger| {
-    if trigger.is_none() && dirty_blocks.len() < PRE_FLUSH_THRESHOLD {
+    let mut waits = Vec::new();
+    if trigger.is_none() {
+      // periodical pre flush. it does not trigger fsync of a table.
+      for id in dirty_blocks.iter().take(PRE_FLUSH_THRESHOLD) {
+        waits.push(executor.execute(FlushTask::Write(id)));
+      }
+
+      waits
+        .drain(..)
+        .map(|done| done.wait().flatten())
+        .collect::<Result>()?;
       return Ok(());
     }
 
-    let mut waits = Vec::new();
-    for id in dirty_blocks
-      .iter()
-      .take(trigger.map(|_| usize::MAX).unwrap_or(PRE_FLUSH_THRESHOLD))
-    {
+    for id in dirty_blocks.iter() {
       waits.push(executor.execute(FlushTask::Write(id)));
     }
 
