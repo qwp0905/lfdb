@@ -2,11 +2,11 @@ use std::{
   cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
   thread::{Builder, JoinHandle},
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 use crate::{
-  utils::{AsTimer, UnsafeBorrowMut, UnwrappedSender},
+  utils::{UnsafeBorrowMut, UnwrappedSender},
   Result,
 };
 
@@ -45,7 +45,6 @@ where
       .stack_size(size)
       .spawn(move || {
         let mut buffered = Vec::with_capacity(max_buffering_count);
-        let mut timer = timeout.as_timer();
 
         let mut flush = |buffer: &mut Vec<(T, Option<OneshotFulfill<Result<R>>>)>| {
           if buffer.is_empty() {
@@ -53,26 +52,25 @@ where
           }
 
           let (values, waiting): (Vec<_>, Vec<_>) = buffer.drain(..).unzip();
-          let result = when_buffered.call(values).map(Ok).unwrap_or_else(Err);
+          let result = when_buffered.call(values);
           waiting
             .into_iter()
             .flatten()
             .for_each(|done| done.fulfill(result.clone()));
         };
 
+        let mut deadline = Instant::now() + timeout;
         loop {
-          match rx.recv_timeout(timer.get_remain()) {
+          match rx.recv_deadline(deadline) {
             Ok(Context::Work(v, done)) => {
               buffered.push((v, Some(done)));
               if buffered.len() < max_buffering_count {
-                timer.check();
                 continue;
               }
             }
             Ok(Context::Dispatch(v)) => {
               buffered.push((v, None));
               if buffered.len() < max_buffering_count {
-                timer.check();
                 continue;
               }
             }
@@ -83,7 +81,7 @@ where
           }
 
           flush(&mut buffered);
-          timer.reset();
+          deadline = Instant::now() + timeout;
         }
       })
       .unwrap();
