@@ -12,9 +12,7 @@ impl DirtyTables {
 
   #[inline]
   pub fn mark(&self, table: &TableHandleRef) {
-    self
-      .0
-      .get_or_insert_with(table.metadata().get_id(), || table.clone());
+    self.0.get_or_insert_with(table.get_id(), || table.clone());
   }
 
   #[inline]

@@ -117,7 +117,7 @@ fn release_entry(
   table: &PinnedHandle,
   pointer: Pointer,
 ) -> Result {
-  let table_id = table.metadata().get_id();
+  let table_id = table.get_id();
   let mut next = Some(pointer);
   let mut max_found = false;
   let min_version = version_visibility.min_version();
@@ -285,7 +285,7 @@ const fn run_release_table(
     }
 
     for table in unreachable.extract_if(|table| table.truncate().is_ok()) {
-      mapper.remove(table.metadata().get_id());
+      mapper.remove(table.get_id());
     }
   }
 }
@@ -345,7 +345,7 @@ const fn wait_gc(
       available_version = available_version.min(mark.owner);
       false
     }) {
-      let key = (mark.table.metadata().get_id(), mark.pointer);
+      let key = (mark.table.get_id(), mark.pointer);
       match gc_ready.get_mut(&key) {
         Some(m) if m.owner > mark.owner => *m = mark,
         None => drop(gc_ready.insert(key, mark)),
@@ -365,7 +365,7 @@ const fn wait_gc(
 
       // keep owner which remaining in gc_ready
       available_version = available_version.min(mark.owner);
-      gc_ready.insert((mark.table.metadata().get_id(), mark.pointer), mark);
+      gc_ready.insert((mark.table.get_id(), mark.pointer), mark);
     }
 
     debug!("gc {} entries enqueued.", waiting.len());

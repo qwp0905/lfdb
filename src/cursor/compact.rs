@@ -36,7 +36,7 @@ pub struct CompactionConfig {
 }
 
 enum CompactTask {
-  Wait(TableHandleRef, MutationHandle, TxId),
+  Wait(TableHandleRef, MutationHandle, TableMetadata, TxId),
   New(PinnedHandle),
 }
 
@@ -134,12 +134,9 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
-    self.recorder.serialize_and_log(
-      self.state.get_id(),
-      table.metadata().get_id(),
-      slot,
-      data,
-    )?;
+    self
+      .recorder
+      .serialize_and_log(self.state.get_id(), table.get_id(), slot, data)?;
     self.modified.set(true);
     Ok(())
   }
@@ -230,7 +227,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.metadata().get_id(), slot, data)
+      .serialize_and_log(RESERVED_TX, table.get_id(), slot, data)
   }
 
   fn alloc_slot(
@@ -258,7 +255,9 @@ fn wait_compaction(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   gc: Arc<GarbageCollector>,
-  compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+  compaction: Arc<
+    dyn BackgroundThread<(MutationHandle, MutationHandle, TableMetadata), Result>,
+  >,
 ) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
   let mut triggered = LinkedList::new();
@@ -267,10 +266,12 @@ fn wait_compaction(
   move |_| {
     while let Some(task) = queue.pop() {
       match task {
-        CompactTask::Wait(old, new, version) => triggered.push_back((old, new, version)),
+        CompactTask::Wait(old, new, metadata, version) => {
+          triggered.push_back((old, new, metadata, version))
+        }
         CompactTask::New(old) => {
-          let table_name = old.metadata().get_name();
-          let (new_table, wait_until) = {
+          let table_name = old.get_name();
+          let (new_table, wait_until, metadata) = {
             let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc)?;
 
             let index = BTreeIndex::new(&tx);
@@ -303,24 +304,25 @@ fn wait_compaction(
             index.initialize(new_table.handle())?;
 
             tx.commit()?;
-            (new_table, versions.current_version())
+            (new_table, versions.current_version(), table_meta)
           };
 
           info!("table {table_name} compacting wait until another tx close.");
-          triggered.push_back((old.handle(), new_table, wait_until));
+          triggered.push_back((old.handle(), new_table, metadata, wait_until));
         }
       }
     }
 
     let min_version = versions.min_version();
-    for (old, new, _) in triggered.extract_if(|(_, _, v)| min_version >= *v) {
-      waited.push_back((old, new));
+    for (old, new, metadata, _) in triggered.extract_if(|(_, _, _, v)| min_version >= *v)
+    {
+      waited.push_back((old, new, metadata));
     }
 
-    for (old, new) in take(&mut waited) {
+    for (old, new, metadata) in take(&mut waited) {
       match old.try_mutation() {
-        Some(old) => compaction.dispatch((old, new)),
-        None => waited.push_back((old, new)),
+        Some(old) => compaction.dispatch((old, new, metadata)),
+        None => waited.push_back((old, new, metadata)),
       }
     }
 
@@ -338,9 +340,9 @@ pub fn handle_compaction(
   after_compaction: Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
-) -> impl Fn((MutationHandle, MutationHandle)) -> Result {
+) -> impl Fn((MutationHandle, MutationHandle, TableMetadata)) -> Result {
   let meta_table = tables.meta_table();
-  move |(old, new)| {
+  move |(old, new, metadata)| {
     do_compaction(
       &block_cache,
       &versions,
@@ -351,6 +353,7 @@ pub fn handle_compaction(
       old,
       new,
       &after_compaction,
+      metadata,
     )
   }
 }
@@ -367,8 +370,9 @@ fn do_compaction(
   after_compaction: &Arc<
     dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
   >,
+  new_metadata: TableMetadata,
 ) -> Result {
-  let table_name = old_table.metadata().get_name();
+  let table_name = old_table.get_name();
   info!("table {table_name} compacting begin.");
   let mut moved_count = 0;
 
@@ -420,7 +424,7 @@ fn do_compaction(
 
     index.insert_if_matched(
       table_name.as_bytes(),
-      Some(new.metadata().to_vec()),
+      Some(new_metadata.to_vec()),
       &meta_table,
     )?;
 
@@ -456,7 +460,8 @@ pub const fn after_compaction(
 pub struct Compactor {
   queue: Arc<SegQueue<CompactTask>>,
   wait_compaction: Box<dyn BackgroundThread<(), Result>>,
-  do_compaction: Arc<dyn BackgroundThread<(MutationHandle, MutationHandle), Result>>,
+  do_compaction:
+    Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TableMetadata), Result>>,
   after_compaction:
     Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
   check: Box<dyn BackgroundThread<(), Result>>,
@@ -538,11 +543,24 @@ impl Compactor {
     }
   }
 
-  pub fn resume(&self, old: MutationHandle, new: MutationHandle) {
-    self.do_compaction.dispatch((old, new));
+  pub fn resume(
+    &self,
+    old: MutationHandle,
+    new: MutationHandle,
+    metadata: TableMetadata,
+  ) {
+    self.do_compaction.dispatch((old, new, metadata));
   }
-  pub fn register(&self, old: TableHandleRef, new: MutationHandle, version: TxId) {
-    self.queue.push(CompactTask::Wait(old, new, version));
+  pub fn register(
+    &self,
+    old: TableHandleRef,
+    new: MutationHandle,
+    metadata: TableMetadata,
+    version: TxId,
+  ) {
+    self
+      .queue
+      .push(CompactTask::Wait(old, new, metadata, version));
   }
 
   pub fn close(&self) {
@@ -565,7 +583,7 @@ const fn check_compaction(
     for table in tables
       .get_all()
       .into_iter()
-      .filter(|table| table.metadata().get_id() != META_TABLE_ID)
+      .filter(|table| table.get_id() != META_TABLE_ID)
       .filter(|table| table.free().file_len() > compaction_min_size)
       .flat_map(|table| table.try_pin())
     {

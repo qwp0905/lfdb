@@ -1,23 +1,22 @@
 use std::{
   collections::BTreeSet,
-  fs,
-  io::IoSlice,
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::atomic::Ordering,
+  sync::{atomic::Ordering, Arc},
 };
 
 use crossbeam_skiplist::SkipSet;
-use uuid::Uuid;
 
 use super::{ActiveSet, ActiveState};
 
 use crate::{
-  disk::{max_iov, Pread, Pwrite, Pwritev},
-  utils::{OffsetBitmap, SBox},
+  debug,
+  disk::IOPool,
+  info,
+  utils::{uuid_simple, OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
-  Error, Result,
+  Result,
 };
 
 const FILE_EXT: &str = "snap";
@@ -74,11 +73,11 @@ pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
   last_tx_id: AtomicTxId,
-  base_path: PathBuf,
+  io_pool: Arc<IOPool>,
 }
 impl VersionVisibility {
   pub fn replay(
-    base_path: PathBuf,
+    io_pool: Arc<IOPool>,
     last_tx_id: TxId,
     aborted: BTreeSet<TxId>,
     started: BTreeSet<TxId>,
@@ -86,10 +85,11 @@ impl VersionVisibility {
     last_snapshot: Option<PathBuf>,
   ) -> Result<Self> {
     let (active_s, aborted_s) = match last_snapshot {
-      Some(path) => Self::replay_snapshot(&path)?,
+      Some(path) => Self::replay_snapshot(path, &io_pool)?,
       None => (BTreeSet::new(), BTreeSet::new()),
     };
     Ok(Self {
+      io_pool,
       aborted: active_s
         .into_iter()
         .chain(started)
@@ -99,7 +99,6 @@ impl VersionVisibility {
         .collect(),
       active: ActiveSet::new(),
       last_tx_id: AtomicTxId::new(last_tx_id),
-      base_path,
     })
   }
 
@@ -162,60 +161,35 @@ impl VersionVisibility {
       .map(|state| TxState::new(state, &self.active))
   }
 
-  fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
+  fn replay_snapshot(
+    filename: PathBuf,
+    io_pool: &IOPool,
+  ) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
+    info!("trying to open snapshot {:?}", filename);
+    let mut file = io_pool.open_scan_io(filename)?;
+    debug!("snapshot opened.");
+
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
-    let file = fs::OpenOptions::new()
-      .read(true)
-      .open(&path)
-      .map_err(Error::IO)?;
-    let mut offset = 0;
-    let mut buf = vec![0; 4];
-    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
-    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
-    offset += 4;
-
+    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
     for _ in 0..len {
-      let mut buf = vec![0; TX_ID_BYTES];
-      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
-      offset += TX_ID_BYTES as u64;
-
-      let id =
-        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
       active.insert(id);
     }
 
-    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
-    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
-    offset += 4;
-
+    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
     for _ in 0..len {
-      let mut buf = vec![0; TX_ID_BYTES];
-      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
-      offset += TX_ID_BYTES as u64;
-
-      let id =
-        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
       aborted.insert(id);
     }
-
+    debug!("snapshot replay completed.");
     Ok((active, aborted))
   }
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
-    let current = self
-      .base_path
-      .join(Uuid::new_v4().to_string())
-      .with_extension(FILE_EXT);
-
-    let file = fs::OpenOptions::new()
-      .create(true)
-      .write(true)
-      .open(&current)
-      .map_err(Error::IO)?;
-
-    let mut offset = 0;
+    let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    let mut file = self.io_pool.open_append_io(current)?;
 
     let active = self
       .active
@@ -223,17 +197,10 @@ impl VersionVisibility {
       .iter()
       .map(|v| v.to_le_bytes())
       .collect::<Vec<_>>();
-    file
-      .pwrite_all(&(active.len() as u32).to_le_bytes(), offset)
-      .map_err(Error::IO)?;
-    offset += 4;
-    for chuck in active.chunks(max_iov()) {
-      let mut v = chuck
-        .into_iter()
-        .map(|v| IoSlice::new(v))
-        .collect::<Vec<_>>();
-      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
-      offset += (TX_ID_BYTES * v.len()) as u64;
+    debug!("snapshot active ids {}", active.len());
+    file.append(&(active.len() as u32).to_le_bytes())?;
+    for bytes in active {
+      file.append(&bytes)?;
     }
 
     let aborted = self
@@ -241,35 +208,24 @@ impl VersionVisibility {
       .range(..tx_id)
       .map(|v| v.value().to_le_bytes())
       .collect::<Vec<_>>();
-    file
-      .pwrite_all(&(aborted.len() as u32).to_le_bytes(), offset)
-      .map_err(Error::IO)?;
-    offset += 4;
-
-    for chuck in aborted.chunks(max_iov()) {
-      let mut v = chuck
-        .into_iter()
-        .map(|v| IoSlice::new(v))
-        .collect::<Vec<_>>();
-      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
-      offset += (TX_ID_BYTES * v.len()) as u64;
+    debug!("snapshot aborted ids {}", aborted.len());
+    file.append(&(aborted.len() as u32).to_le_bytes())?;
+    for bytes in aborted {
+      file.append(&bytes)?;
     }
-
-    file.sync_data().map_err(Error::IO)?;
-
-    Ok(current)
+    file.flush()
   }
 
   pub fn clear(&self, current: &Path) -> Result {
-    for entry in fs::read_dir(&self.base_path).map_err(Error::IO)? {
-      let path = entry.map_err(Error::IO)?.path();
+    for entry in self.io_pool.read_dir()? {
+      let path = PathBuf::from(entry.file_name());
       if path.extension().is_none_or(|ext| ext != FILE_EXT) {
         continue;
       };
       if path == current {
         continue;
       }
-      fs::remove_file(path).map_err(Error::IO)?;
+      self.io_pool.remove(&path)?;
     }
     Ok(())
   }

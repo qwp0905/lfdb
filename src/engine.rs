@@ -20,7 +20,7 @@ use crate::{
   error::{Error, Result},
   info,
   metrics::{EngineMetrics, MetricsRegistry},
-  table::{TableConfig, TableMapper, META_TABLE_ID},
+  table::{TableMapper, META_TABLE_ID},
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
@@ -63,18 +63,16 @@ impl Engine {
 
     info!("start engine");
 
-    let io_pool = IOPool::new(config.io_thread_count, metrics_registry.clone()).to_arc();
-    let base_dir = io_pool.create_dir(config.base_path.as_ref())?.to_arc();
-    let base_path = config
-      .base_path
-      .as_ref()
-      .canonicalize()
-      .map_err(Error::IO)?;
+    let io_pool = IOPool::new(
+      config.io_thread_count,
+      config.base_path.as_ref(),
+      metrics_registry.clone(),
+    )?
+    .to_arc();
 
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
-      base_dir: base_path.clone(),
     };
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,
@@ -94,20 +92,17 @@ impl Engine {
       segment_flush_count: config.wal_segment_flush_count,
       segment_flush_delay: config.wal_segment_flush_delay,
     };
-    let table_config = TableConfig {
-      base_path: base_path.clone(),
-    };
 
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
-    let tables = TableMapper::new(table_config, io_pool.clone())?.to_arc();
+    let tables = TableMapper::new(io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone(), base_dir.clone())?;
+    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
     let version_visibility = VersionVisibility::replay(
-      base_path.clone(),
+      io_pool.clone(),
       replay.last_tx_id,
       replay.aborted,
       replay.started,
@@ -151,7 +146,6 @@ impl Engine {
         compactor,
         io_pool,
         metrics_registry.clone(),
-        base_dir,
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
@@ -182,12 +176,12 @@ impl Engine {
     let mut handles = HashMap::new();
     let (open_handles, compactions) =
       open_tables(&block_cache, &tables, &version_visibility)?;
-    for table in open_handles {
-      handles.insert(table.metadata().get_id(), table);
+    for (table, metadata) in open_handles {
+      handles.insert(table.get_id(), (metadata, table));
     }
-    for (table, c_table) in compactions.iter() {
-      handles.insert(table.metadata().get_id(), table.handle().clone());
-      handles.insert(c_table.metadata().get_id(), c_table.handle().clone());
+    for ((table, metadata), (c_table, c_meta)) in compactions.iter() {
+      handles.insert(table.get_id(), (metadata.clone(), table.handle().clone()));
+      handles.insert(c_table.get_id(), (c_meta.clone(), c_table.handle().clone()));
     }
 
     for (table_id, ptr, data) in replay
@@ -196,7 +190,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
     {
       let handle = match handles.get(table_id) {
-        Some(handle) => handle.clone(),
+        Some((_, handle)) => handle.clone(),
         None => continue,
       };
       block_cache
@@ -233,8 +227,8 @@ impl Engine {
     )
     .to_box();
 
-    for (table, c_table) in compactions {
-      compactor.resume(table, c_table);
+    for ((table, _), (c_table, c_meta)) in compactions {
+      compactor.resume(table, c_table, c_meta);
     }
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
@@ -249,7 +243,6 @@ impl Engine {
       io_pool,
       metrics_registry.clone(),
       replay.segments,
-      base_dir,
     )?;
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());

@@ -1,8 +1,8 @@
 mod page;
 pub use page::*;
 
-mod controller;
-pub use controller::*;
+mod handle;
+pub use handle::*;
 
 mod io;
 pub use io::*;
@@ -16,5 +16,8 @@ pub use types::*;
 mod free;
 pub use free::*;
 
-mod pool;
-pub use pool::*;
+mod io_pool;
+pub use io_pool::*;
+
+mod thread;
+use thread::*;

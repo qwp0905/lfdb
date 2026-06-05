@@ -1,10 +1,10 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  disk::{DirHandle, IOPool, Pointer},
+  disk::{IOPool, Pointer},
   error,
   thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
@@ -28,19 +28,14 @@ pub struct SegmentPreload {
   ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
-  pub fn new(
-    prefix: PathBuf,
-    max_len: Pointer,
-    io_pool: Arc<IOPool>,
-    base_dir: Arc<DirHandle>,
-  ) -> Self {
+  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>) -> Self {
     let ready = SegQueue::new().to_arc();
     let reuse = WorkBuilder::new()
       .name("wal segment reuse")
       .single()
       .eager_buffering(
         SEGMENT_MAX_BATCH,
-        handle_reuse(ready.clone(), base_dir.clone(), prefix.clone()),
+        handle_reuse(ready.clone(), io_pool.clone()),
       )
       .to_box();
     let preload = WorkBuilder::new()
@@ -48,7 +43,7 @@ impl SegmentPreload {
       .single()
       .preload(
         SEGMENT_MAX_LIFE,
-        handle_preload(ready.clone(), prefix, io_pool, base_dir, max_len),
+        handle_preload(ready.clone(), io_pool, max_len),
         handle_fallback(ready.clone()),
       )
       .to_box();
@@ -81,21 +76,20 @@ impl SegmentPreload {
 
 fn handle_reuse(
   ready: Arc<SegQueue<WALSegment>>,
-  base_dir: Arc<DirHandle>,
-  prefix: PathBuf,
+  io_pool: Arc<IOPool>,
 ) -> impl FnMut(Vec<WALSegment>) {
   let mut succeed = Vec::with_capacity(SEGMENT_MAX_BATCH);
   let mut failed = Vec::with_capacity(SEGMENT_MAX_BATCH);
   move |reused| {
     for segment in reused {
-      if let Err(err) = segment.reuse(&prefix) {
+      if let Err(err) = segment.reuse() {
         error!("error occurs in segment reuse: {err}");
         failed.push(segment);
         continue;
       };
       succeed.push(segment);
     }
-    if let Err(err) = base_dir.fdatasync() {
+    if let Err(err) = io_pool.sync_dir() {
       error!("error occurs in basedir sync: {err}");
       succeed.drain(..).for_each(|s| failed.push(s));
     }
@@ -112,15 +106,14 @@ fn handle_reuse(
 
 const fn handle_preload(
   ready: Arc<SegQueue<WALSegment>>,
-  prefix: PathBuf,
   io_pool: Arc<IOPool>,
-  base_dir: Arc<DirHandle>,
   max_len: Pointer,
 ) -> impl FnMut(()) -> Result<WALSegment> {
   move |_| match ready.pop() {
     Some(segment) => Ok(segment),
-    None => WALSegment::open(&prefix, max_len, &io_pool)
-      .and_then(|seg| base_dir.fdatasync().map(|_| seg)),
+    None => {
+      WALSegment::open(max_len, &io_pool).and_then(|seg| io_pool.sync_dir().map(|_| seg))
+    }
   }
 }
 const fn handle_fallback(

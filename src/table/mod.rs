@@ -6,3 +6,6 @@ pub use metadata::*;
 
 mod handle;
 pub use handle::*;
+
+mod table_name;
+pub use table_name::*;

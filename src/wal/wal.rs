@@ -15,7 +15,7 @@ use crossbeam::{
 };
 
 use crate::{
-  disk::{DirHandle, IOPool, PagePool, Pointer},
+  disk::{IOPool, PagePool, Pointer},
   error::Result,
   info,
   table::TableId,
@@ -28,7 +28,6 @@ use super::{
 };
 
 pub struct WALConfig {
-  pub base_dir: PathBuf,
   pub max_file_size: usize,
   pub max_buffer_size: usize,
 }
@@ -90,26 +89,25 @@ impl WAL {
   pub fn replay(
     config: &WALConfig,
     io_pool: Arc<IOPool>,
-    base_dir: Arc<DirHandle>,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments");
 
-    let replay_result = replay(&config.base_dir, &page_pool, &io_pool)?;
+    let replay_result = replay(&page_pool, &io_pool)?;
 
     info!(
-      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {}",
+      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {} last snapshot {:?}",
       replay_result.last_log_id,
       replay_result.last_tx_id,
       replay_result.aborted.len(),
       replay_result.redo.len(),
       replay_result.segments.len(),
+      replay_result.last_snapshot,
     );
 
-    let preloader =
-      SegmentPreload::new(config.base_dir.clone(), max_len, io_pool, base_dir).to_box();
+    let preloader = SegmentPreload::new(max_len, io_pool).to_box();
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((

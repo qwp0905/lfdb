@@ -1,13 +1,12 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
-  fs::read_dir,
-  path::{Path, PathBuf},
+  path::PathBuf,
 };
 
 use super::{read_page, LogId, Operation, TxId, FILE_EXT, WAL_BLOCK_SIZE};
 use crate::{
   disk::{IOHandle, IOPool, PagePool, Pointer},
-  error::{Error, Result},
+  error::Result,
   table::TableId,
 };
 
@@ -50,18 +49,17 @@ impl ReplayResult {
 }
 
 pub fn replay(
-  base_dir: &Path,
   page_pool: &PagePool<WAL_BLOCK_SIZE>,
   io_pool: &IOPool,
 ) -> Result<ReplayResult> {
   let mut files = Vec::new();
-  for file in read_dir(base_dir).map_err(Error::IO)? {
-    let path = file.map_err(Error::IO)?.path();
-    if path.extension().is_none_or(|ext| ext != FILE_EXT) {
+  for file in io_pool.read_dir()? {
+    let filename = PathBuf::from(file.file_name());
+    if filename.extension().is_none_or(|ext| ext != FILE_EXT) {
       continue;
     }
 
-    files.push(path)
+    files.push(filename)
   }
 
   if files.len() == 0 {
@@ -80,14 +78,14 @@ pub fn replay(
 
   let mut last_checkpoint = None as Option<LogId>;
   for path in files.into_iter() {
-    let segment = io_pool.create_handle(&path)?;
+    let segment = io_pool.open_direct_io(path)?;
     let len = segment.len()?;
     let mut offset = 0;
     let mut records = vec![];
 
     while offset < len {
       let mut page = page_pool.acquire();
-      segment.read(offset, page.as_mut())?;
+      segment.read(page.as_mut(), offset)?;
       offset += WAL_BLOCK_SIZE as u64;
 
       let (r, complete) = read_page(&page);

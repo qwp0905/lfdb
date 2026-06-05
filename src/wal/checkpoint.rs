@@ -5,7 +5,7 @@ use crossbeam::queue::SegQueue;
 use crate::{
   cache::BlockCache,
   debug,
-  disk::DirHandle,
+  disk::IOPool,
   error, info,
   thread::{BackgroundThread, WorkBuilder},
   transaction::VersionVisibility,
@@ -22,7 +22,7 @@ impl Checkpoint {
     wal: Arc<WAL>,
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
-    base_dir: Arc<DirHandle>,
+    io_pool: Arc<IOPool>,
     interval: Duration,
     max_count: usize,
   ) -> Self {
@@ -32,7 +32,7 @@ impl Checkpoint {
       .lazy_buffering(
         interval,
         max_count,
-        handle_thread(wal, block_cache, version_visibility, base_dir),
+        handle_thread(wal, block_cache, version_visibility, io_pool),
       )
       .to_box();
     Self { thread }
@@ -46,7 +46,7 @@ impl Checkpoint {
     wal: &WAL,
     block_cache: &BlockCache,
     version: &VersionVisibility,
-    base_dir: &DirHandle,
+    io_pool: &IOPool,
   ) -> Result {
     let log_id = wal.current_log_id();
     let current_version = version.current_version();
@@ -55,7 +55,7 @@ impl Checkpoint {
     block_cache.flush()?;
     let path = version.persist_snapshot(current_version)?;
     debug!("checkpoint snapshot persisted.");
-    base_dir.fdatasync()?;
+    io_pool.sync_dir()?;
 
     wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
     info!("checkpoint complete id {log_id}");
@@ -73,12 +73,12 @@ const fn handle_thread(
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
-  base_dir: Arc<DirHandle>,
+  io_pool: Arc<IOPool>,
 ) -> impl Fn(Vec<WALSegment>) {
   let failed = SegQueue::new();
   move |segments| {
     debug!("{} segment buffered for checkpoint.", segments.len());
-    if let Err(err) = Checkpoint::run(&wal, &block_cache, &version, &base_dir) {
+    if let Err(err) = Checkpoint::run(&wal, &block_cache, &version, &io_pool) {
       error!("checkpoint failed: {err}");
       return segments.into_iter().for_each(|s| failed.push(s));
     }

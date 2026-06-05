@@ -167,7 +167,7 @@ impl BlockCache {
     pointer: Pointer,
     handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
-    let table_id = handle.metadata().get_id();
+    let table_id = handle.get_id();
     let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
 
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle);
@@ -183,7 +183,7 @@ impl BlockCache {
     pointer: Pointer,
     handle: TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
-    let table_id = handle.metadata().get_id();
+    let table_id = handle.get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
       Acquired::Evicted(guard) => guard,
@@ -196,7 +196,7 @@ impl BlockCache {
   }
 
   fn __read(&self, pointer: Pointer, handle: TableHandleRef) -> Result<CachedSlot<'_>> {
-    let table_id = handle.metadata().get_id();
+    let table_id = handle.get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();

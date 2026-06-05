@@ -79,7 +79,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
   ) -> Result {
     self.orchestrator.serialize_and_log(
       self.state.get_id(),
-      table.metadata().get_id(),
+      table.get_id(),
       slot,
       data,
     )?;
