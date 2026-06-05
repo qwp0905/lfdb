@@ -36,7 +36,7 @@ fn main() {
     tx.commit().unwrap();
   }
 
-  let count = 100_000_usize;
+  let count = 300_000_usize;
   let rng = &mut rng();
   let keys = (0..count)
     .map(|i| format!("123{:0>6}", i).as_bytes().to_vec())
