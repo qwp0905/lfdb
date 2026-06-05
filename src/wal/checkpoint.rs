@@ -77,6 +77,7 @@ const fn handle_thread(
 ) -> impl Fn(Vec<WALSegment>) {
   let failed = SegQueue::new();
   move |segments| {
+    debug!("{} segment buffered for checkpoint.", segments.len());
     if let Err(err) = Checkpoint::run(&wal, &block_cache, &version, &base_dir) {
       error!("checkpoint failed: {err}");
       return segments.into_iter().for_each(|s| failed.push(s));
