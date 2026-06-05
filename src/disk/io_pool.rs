@@ -48,7 +48,6 @@ impl IOPool {
   pub fn open_append_io(&self, filename: PathBuf) -> Result<AppendIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
     let file = OpenOptions::new()
-      .read(true)
       .write(true)
       .append(true)
       .create(true)
