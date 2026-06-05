@@ -1,6 +1,6 @@
 use crate::{
   cache::{CachedSlot, RefedSlot},
-  disk::Pointer,
+  disk::{FreePointer, Pointer},
   serialize::Serializable,
   table::TableHandleRef,
   wal::TxId,
@@ -45,10 +45,13 @@ pub trait WritablePolicy: ReadonlyPolicy {
     data: &T,
     table: &TableHandleRef,
   ) -> Result<Pointer> {
-    let ptr = table.free().alloc();
-    let mut slot = self.alloc_slot(ptr, table)?.for_write();
+    let mut slot = match table.free().alloc() {
+      FreePointer::Reuse(ptr) => self.fetch_slot(ptr, table),
+      FreePointer::Alloc(ptr) => self.alloc_slot(ptr, table),
+    }?
+    .for_write();
     self.serialize_and_log(&mut slot, data, table)?;
-    Ok(ptr)
+    Ok(slot.get_pointer())
   }
 
   fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef);
