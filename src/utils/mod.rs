@@ -23,3 +23,6 @@ pub use atomic::*;
 
 mod sbox;
 pub use sbox::*;
+
+mod uuid;
+pub use uuid::*;
