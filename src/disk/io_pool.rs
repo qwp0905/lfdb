@@ -1,5 +1,7 @@
 use std::{
-  fs::{create_dir_all, remove_file, rename, File, OpenOptions},
+  fs::{
+    create_dir_all, exists, read_dir, remove_file, rename, DirEntry, File, OpenOptions,
+  },
   io::{Error as IoError, ErrorKind, IoSlice},
   mem::forget,
   path::{Path, PathBuf},
@@ -63,37 +65,38 @@ impl<T> Task<T> {
 pub struct IOPool {
   thread: Arc<IOThread>,
   metrics: Arc<MetricsRegistry>,
+  base_dir: SBox<DirHandle>,
 }
 impl IOPool {
-  pub fn new(thread_count: usize, metrics: Arc<MetricsRegistry>) -> Self {
+  pub fn new(
+    thread_count: usize,
+    base_path: &Path,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Result<Self> {
     let thread = WorkBuilder::new()
       .name("io pool")
       .multi(thread_count)
       .shared(handle_thread(metrics.clone()))
       .to_arc();
-    Self { thread, metrics }
-  }
-
-  pub fn create_dir(&self, path: &Path) -> Result<DirHandle> {
-    create_dir_all(path).map_err(Error::IO)?;
-    Ok(DirHandle {
-      file: SBox::new(File::open(path).map_err(Error::IO)?),
-      sync_handle: SBox::new(Task::new()),
-      thread: self.thread.clone(),
-      state: SBox::new(HandleState::new()),
+    let base_dir = SBox::new(DirHandle::ensure(base_path, thread.clone())?);
+    Ok(Self {
+      thread,
+      metrics,
+      base_dir,
     })
   }
 
-  pub fn create_handle(&self, path: &Path) -> Result<IOHandle> {
+  pub fn create_handle(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
     // accumulated and sorted in the eager_buffering layer, then
     // flushed as a single pwritev call per contiguous block.
+    let path = self.base_dir.get_path().join(&filename);
     let file = OpenOptions::new()
       .read(true)
       .write(true)
       .create(true)
-      .direct_io(path)
+      .direct_io(&path)
       .map_err(Error::IO)?;
     Ok(IOHandle {
       file: SBox::new(file),
@@ -102,8 +105,22 @@ impl IOPool {
       state: SBox::new(HandleState::new()),
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
-      path: Mutex::new(PathBuf::from(path)),
+      base_dir: self.base_dir.clone(),
+      filename: Mutex::new(PathBuf::from(filename)),
     })
+  }
+
+  pub fn sync_dir(&self) -> Result {
+    self.base_dir.fdatasync()
+  }
+  pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
+    self.base_dir.read()
+  }
+  pub fn remove(&self, filename: &Path) -> Result {
+    self.base_dir.remove(filename)
+  }
+  pub fn exists(&self, filename: &Path) -> Result<bool> {
+    self.base_dir.exists(filename)
   }
 
   pub fn close(&self) {
@@ -247,10 +264,11 @@ pub struct IOHandle {
   thread: Arc<IOThread>,
   state: SBox<HandleState>,
   metrics: Arc<MetricsRegistry>,
-  path: Mutex<PathBuf>,
+  base_dir: SBox<DirHandle>,
+  filename: Mutex<PathBuf>,
 }
 impl IOHandle {
-  pub fn read(&self, offset: u64, buf: &mut [u8]) -> Result {
+  pub fn read(&self, buf: &mut [u8], offset: u64) -> Result {
     self
       .metrics
       .disk_read
@@ -258,7 +276,7 @@ impl IOHandle {
       .map_err(Error::IO)
   }
 
-  pub fn read_unchecked(&self, mut offset: u64, mut buf: &mut [u8]) -> Result {
+  pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> Result {
     let full = buf.len();
     while !buf.is_empty() {
       match self.file.pread(buf, offset) {
@@ -276,7 +294,7 @@ impl IOHandle {
     Ok(())
   }
 
-  pub fn write_async(&self, offset: u64, buf: &'static [u8]) -> TaskHandle<()> {
+  pub fn write_async(&self, buf: &'static [u8], offset: u64) -> TaskHandle<()> {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
     if self.state.closed.load(Ordering::Acquire) {
@@ -340,29 +358,49 @@ impl IOHandle {
       backoff.snooze();
     }
 
-    remove_file(self.path.l().as_path()).map_err(Error::IO)
+    self.base_dir.remove(&*self.filename.l())
   }
 
-  pub fn rename(&self, new_path: &Path) -> Result {
-    let mut path = self.path.l();
-    rename(path.as_path(), new_path).map_err(Error::IO)?;
-    *path = PathBuf::from(new_path);
+  pub fn rename(&self, new_filename: PathBuf) -> Result {
+    {
+      let mut filename = self.filename.l();
+      self.base_dir.rename(&*filename, &new_filename)?;
+      *filename = new_filename;
+    }
     Ok(())
   }
 
   pub fn fallocate(&self, offset: u64, len: u64) -> Result {
     self.file.fallocate(offset, len).map_err(Error::IO)
   }
+  pub fn filename(&self) -> PathBuf {
+    self.filename.l().clone()
+  }
 }
 
-pub struct DirHandle {
+struct DirHandle {
   file: SBox<File>,
   sync_handle: SBox<Task<()>>,
   thread: Arc<IOThread>,
   state: SBox<HandleState>,
+  path: PathBuf,
 }
 impl DirHandle {
-  pub fn fdatasync(&self) -> Result {
+  fn ensure(path: &Path, thread: Arc<IOThread>) -> Result<Self> {
+    let (file, path) = create_dir_all(path)
+      .and_then(|_| path.canonicalize())
+      .and_then(|path| File::open(&path).map(|f| (f, path)))
+      .map_err(Error::IO)?;
+
+    Ok(Self {
+      file: SBox::new(file),
+      sync_handle: SBox::new(Task::new()),
+      thread,
+      state: SBox::new(HandleState::new()),
+      path,
+    })
+  }
+  fn fdatasync(&self) -> Result {
     let (o, f) = oneshot();
     let handle = TaskHandle::new(o);
     if self.state.closed.load(Ordering::Acquire) {
@@ -381,5 +419,28 @@ impl DirHandle {
       self.state.clone(),
     ));
     handle.wait()
+  }
+
+  fn get_path(&self) -> &Path {
+    self.path.as_path()
+  }
+  fn read(&self) -> Result<Vec<DirEntry>> {
+    let mut entries = Vec::new();
+
+    for entry in read_dir(&self.path).map_err(Error::IO)? {
+      let entry = entry.map_err(Error::IO)?;
+      entries.push(entry);
+    }
+
+    Ok(entries)
+  }
+  fn remove(&self, filename: &Path) -> Result {
+    remove_file(self.path.join(filename)).map_err(Error::IO)
+  }
+  fn exists(&self, filename: &Path) -> Result<bool> {
+    exists(self.path.join(filename)).map_err(Error::IO)
+  }
+  fn rename(&self, from: &Path, to: &Path) -> Result {
+    rename(self.path.join(from), self.path.join(to)).map_err(Error::IO)
   }
 }

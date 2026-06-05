@@ -16,5 +16,5 @@ pub use types::*;
 mod free;
 pub use free::*;
 
-mod pool;
-pub use pool::*;
+mod io_pool;
+pub use io_pool::*;
