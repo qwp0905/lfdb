@@ -1,6 +1,5 @@
 use std::{
   collections::BTreeSet,
-  mem::transmute,
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
@@ -13,7 +12,7 @@ use super::{ActiveSet, ActiveState};
 
 use crate::{
   debug,
-  disk::{max_iov, IOPool},
+  disk::IOPool,
   info,
   utils::{uuid_simple, OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
@@ -167,39 +166,21 @@ impl VersionVisibility {
     io_pool: &IOPool,
   ) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
     info!("trying to open snapshot {:?}", filename);
-    let file = io_pool.open_buffered_io(filename)?;
+    let mut file = io_pool.open_scan_io(filename)?;
     debug!("snapshot opened.");
 
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
-    let mut offset = 0;
-    let mut buf = vec![0; 4];
-    file.read(&mut buf, offset)?;
-    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
-    offset += 4;
-
+    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
     for _ in 0..len {
-      let mut buf = vec![0; TX_ID_BYTES];
-      file.read(&mut buf, offset)?;
-      offset += TX_ID_BYTES as u64;
-
-      let id =
-        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
       active.insert(id);
     }
 
-    file.read(&mut buf, offset)?;
-    let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
-    offset += 4;
-
+    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
     for _ in 0..len {
-      let mut buf = vec![0; TX_ID_BYTES];
-      file.read(&mut buf, offset)?;
-      offset += TX_ID_BYTES as u64;
-
-      let id =
-        TxId::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; TX_ID_BYTES]).read() });
+      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
       aborted.insert(id);
     }
     debug!("snapshot replay completed.");
@@ -208,27 +189,18 @@ impl VersionVisibility {
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    let file = self.io_pool.open_buffered_io(current)?;
+    let mut file = self.io_pool.open_append_io(current)?;
 
-    let mut offset = 0;
     let active = self
       .active
       .until(tx_id)
       .iter()
       .map(|v| v.to_le_bytes())
       .collect::<Vec<_>>();
-    let len = (active.len() as u32).to_le_bytes();
-    file
-      .write_async(unsafe { transmute(len.as_slice()) }, offset)
-      .wait()?;
-    offset += 4;
-    for chunk in active.chunks(max_iov()) {
-      let mut waiting = Vec::with_capacity(chunk.len());
-      for v in chunk {
-        waiting.push(file.write_async(unsafe { transmute(v.as_slice()) }, offset));
-        offset += (TX_ID_BYTES * v.len()) as u64;
-      }
-      waiting.into_iter().map(|d| d.wait()).collect::<Result>()?;
+    debug!("snapshot active ids {}", active.len());
+    file.append(&(active.len() as u32).to_le_bytes())?;
+    for bytes in active {
+      file.append(&bytes)?;
     }
 
     let aborted = self
@@ -236,23 +208,12 @@ impl VersionVisibility {
       .range(..tx_id)
       .map(|v| v.value().to_le_bytes())
       .collect::<Vec<_>>();
-    let len = (aborted.len() as u32).to_le_bytes();
-    file
-      .write_async(unsafe { transmute(len.as_slice()) }, offset)
-      .wait()?;
-    offset += 4;
-
-    for chunk in aborted.chunks(max_iov()) {
-      let mut waiting = Vec::with_capacity(chunk.len());
-      for v in chunk {
-        waiting.push(file.write_async(unsafe { transmute(v.as_slice()) }, offset));
-        offset += (TX_ID_BYTES * v.len()) as u64;
-      }
-      waiting.into_iter().map(|d| d.wait()).collect::<Result>()?;
+    debug!("snapshot aborted ids {}", aborted.len());
+    file.append(&(aborted.len() as u32).to_le_bytes())?;
+    for bytes in aborted {
+      file.append(&bytes)?;
     }
-
-    file.fsync()?;
-    Ok(file.filename())
+    file.flush()
   }
 
   pub fn clear(&self, current: &Path) -> Result {
