@@ -2,7 +2,7 @@ use std::{
   fs::{
     create_dir_all, exists, read_dir, remove_file, rename, DirEntry, File, OpenOptions,
   },
-  io::{BufWriter, Error as IoError, ErrorKind, IoSlice, Write},
+  io::{BufReader, BufWriter, Error as IoError, ErrorKind, IoSlice, Read, Write},
   mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -64,7 +64,9 @@ impl IOPool {
       .read(true)
       .open(path)
       .map_err(Error::IO)?;
-    Ok(ScanIOHandle { file, offset: 0 })
+    Ok(ScanIOHandle {
+      file: BufReader::new(file),
+    })
   }
   pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
@@ -267,17 +269,12 @@ impl AppendIOHandle {
   }
 }
 pub struct ScanIOHandle {
-  file: File,
-  offset: u64,
+  file: BufReader<File>,
 }
 impl ScanIOHandle {
   pub fn read(&mut self, bytes: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0; bytes];
-    self
-      .file
-      .pread_exact(&mut buf, self.offset)
-      .map_err(Error::IO)?;
-    self.offset += bytes as u64;
+    self.file.read_exact(&mut buf).map_err(Error::IO)?;
     Ok(buf)
   }
 }
