@@ -78,7 +78,7 @@ pub fn replay(
 
   let mut last_checkpoint = None as Option<LogId>;
   for path in files.into_iter() {
-    let segment = io_pool.direct_io_handle(path)?;
+    let segment = io_pool.open_direct_io(path)?;
     let len = segment.len()?;
     let mut offset = 0;
     let mut records = vec![];

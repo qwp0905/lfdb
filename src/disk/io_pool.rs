@@ -86,7 +86,7 @@ impl IOPool {
     })
   }
 
-  pub fn buffered_io_handle(&self, filename: PathBuf) -> Result<IOHandle> {
+  pub fn open_buffered_io(&self, filename: PathBuf) -> Result<IOHandle> {
     let path = self.base_dir.get_path().join(&filename);
     let file = OpenOptions::new()
       .read(true)
@@ -96,7 +96,7 @@ impl IOPool {
       .map_err(Error::IO)?;
     Ok(self.new_handle(file, filename))
   }
-  pub fn direct_io_handle(&self, filename: PathBuf) -> Result<IOHandle> {
+  pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
     // accumulated and sorted in the eager_buffering layer, then

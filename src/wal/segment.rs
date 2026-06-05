@@ -19,8 +19,8 @@ pub struct WALSegment {
 }
 impl WALSegment {
   pub fn open(max_len: Pointer, pool: &IOPool) -> Result<Self> {
-    let path = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    let handle = pool.direct_io_handle(path)?;
+    let filename = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    let handle = pool.open_direct_io(filename)?;
 
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
