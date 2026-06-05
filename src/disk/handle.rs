@@ -6,10 +6,10 @@ use crate::{error::Result, thread::TaskHandle};
 /**
  * Just a wrapper for IOHandle that provides a logical offset function.
  */
-pub struct DiskController<const N: usize> {
+pub struct DiskHandle<const N: usize> {
   handle: IOHandle,
 }
-impl<const N: usize> DiskController<N> {
+impl<const N: usize> DiskHandle<N> {
   const SIZE: Pointer = N as Pointer;
 
   pub const fn new(handle: IOHandle) -> Self {
