@@ -120,6 +120,8 @@ pub struct IOHandle {
 }
 impl IOHandle {
   pub fn read(&self, buf: &mut [u8], offset: u64) -> Result {
+    // SAFETY: Since the removed table cannot access this path, a pin guarantee is not required.
+    // If a path for read access to the removed table is established, pin guarantees are required.
     self
       .metrics
       .disk_read
