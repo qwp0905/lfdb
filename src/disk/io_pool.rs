@@ -86,7 +86,17 @@ impl IOPool {
     })
   }
 
-  pub fn create_handle(&self, filename: PathBuf) -> Result<IOHandle> {
+  pub fn buffered_io_handle(&self, filename: PathBuf) -> Result<IOHandle> {
+    let path = self.base_dir.get_path().join(&filename);
+    let file = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .open(path)
+      .map_err(Error::IO)?;
+    Ok(self.new_handle(file, filename))
+  }
+  pub fn direct_io_handle(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
     // accumulated and sorted in the eager_buffering layer, then
@@ -98,7 +108,10 @@ impl IOPool {
       .create(true)
       .direct_io(&path)
       .map_err(Error::IO)?;
-    Ok(IOHandle {
+    Ok(self.new_handle(file, filename))
+  }
+  fn new_handle(&self, file: File, filename: PathBuf) -> IOHandle {
+    IOHandle {
       file: SBox::new(file),
       write_handle: SBox::new(Task::new()),
       sync_handle: SBox::new(Task::new()),
@@ -106,8 +119,8 @@ impl IOPool {
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
-      filename: Mutex::new(PathBuf::from(filename)),
-    })
+      filename: Mutex::new(filename),
+    }
   }
 
   pub fn sync_dir(&self) -> Result {

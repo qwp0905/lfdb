@@ -34,7 +34,7 @@ impl TableMapper {
     let filename = PathBuf::from(META_TABLE).with_extension(FILE_EXT);
     let is_new = !io_pool.exists(&filename)?;
 
-    let disk = BlockIOHandle::new(io_pool.create_handle(filename.clone())?);
+    let disk = BlockIOHandle::new(io_pool.direct_io_handle(filename.clone())?);
     let metadata = TableHandle::new(
       &TableMetadata::new(
         META_TABLE_ID,
@@ -57,7 +57,7 @@ impl TableMapper {
     let disk = BlockIOHandle::new(
       self
         .io_pool
-        .create_handle(table_meta.get_filename().to_path_buf())?,
+        .direct_io_handle(table_meta.get_filename().to_path_buf())?,
     );
     Ok(SBox::new(TableHandle::new(table_meta, disk)))
   }

@@ -167,7 +167,7 @@ impl VersionVisibility {
     io_pool: &IOPool,
   ) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
     info!("trying to open snapshot {:?}", filename);
-    let file = io_pool.create_handle(filename)?;
+    let file = io_pool.buffered_io_handle(filename)?;
     debug!("snapshot opened.");
 
     let mut active = BTreeSet::new();
@@ -208,7 +208,7 @@ impl VersionVisibility {
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    let file = self.io_pool.create_handle(current)?;
+    let file = self.io_pool.buffered_io_handle(current)?;
 
     let mut offset = 0;
     let active = self
