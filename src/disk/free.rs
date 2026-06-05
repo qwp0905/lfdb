@@ -4,6 +4,11 @@ use crossbeam::queue::SegQueue;
 
 use super::Pointer;
 
+pub enum FreePointer {
+  Reuse(Pointer),
+  Alloc(Pointer),
+}
+
 /**
  * Free page list, reconstructed at startup via a full B-tree scan.
  */
@@ -19,22 +24,25 @@ impl FreeList {
     }
   }
 
-  pub fn alloc(&self) -> Pointer {
+  pub fn alloc(&self) -> FreePointer {
     self
       .released
       .pop()
-      .unwrap_or_else(|| self.file_end.fetch_add(1, Ordering::Release))
+      .map(FreePointer::Reuse)
+      .unwrap_or_else(|| {
+        FreePointer::Alloc(self.file_end.fetch_add(1, Ordering::Relaxed))
+      })
   }
 
   pub fn dealloc(&self, pointer: Pointer) {
     self.released.push(pointer);
   }
   pub fn replay(&self, file_end: Pointer) {
-    self.file_end.store(file_end, Ordering::Release);
+    self.file_end.store(file_end, Ordering::Relaxed);
   }
 
   #[inline]
   pub fn file_len(&self) -> Pointer {
-    self.file_end.load(Ordering::Acquire)
+    self.file_end.load(Ordering::Relaxed)
   }
 }
