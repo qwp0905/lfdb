@@ -1,8 +1,14 @@
 use super::*;
 
 fn assert_roundtrip(record: &LogRecord) -> LogRecord {
-  let bytes: &[u8] = &record.to_bytes();
-  let parsed: LogRecord = bytes.try_into().expect("deserialize failed");
+  let bytes = record.to_bytes_with_len();
+  assert_eq!(
+    bytes.len(),
+    u16::from_le_bytes(unsafe { (bytes[..2].as_ptr() as *const [u8; 2]).read() })
+      as usize
+      + 2
+  );
+  let parsed: LogRecord = LogRecord::read_from(&bytes[2..]).unwrap();
   assert_eq!(parsed.log_id, record.log_id);
   assert_eq!(parsed.tx_id, record.tx_id);
   parsed
@@ -71,17 +77,17 @@ fn test_entry_roundtrip() {
   let mut page = Page::new();
   let mut writer = page.writer();
 
-  let _ = writer.write(&(4 as u16).to_le_bytes());
+  writer.write(&(4 as u16).to_le_bytes()).unwrap();
   let r1 = LogRecord::new_start(1, 1);
-  let r2 = LogRecord::new_insert(2, 1, 0, 10, vec![]);
+  let r2 = LogRecord::new_insert(2, 1, 0, 10, vec![1]);
   let r4 = LogRecord::new_checkpoint(3, 456, 123, format!("sdlfkj").into());
   let r3 = LogRecord::new_commit(4, 1);
-  let _ = writer.write(&r1.to_bytes_with_len());
-  let _ = writer.write(&r2.to_bytes_with_len());
-  let _ = writer.write(&r4.to_bytes_with_len());
-  let _ = writer.write(&r3.to_bytes_with_len());
+  writer.write(&r1.to_bytes_with_len()).unwrap();
+  writer.write(&r2.to_bytes_with_len()).unwrap();
+  writer.write(&r4.to_bytes_with_len()).unwrap();
+  writer.write(&r3.to_bytes_with_len()).unwrap();
 
-  let (d, complete) = (&page).into();
+  let (d, complete) = read_page(&page);
   assert_eq!(complete, false);
 
   assert_eq!(d.len(), 4);
@@ -109,9 +115,9 @@ fn test_entry_roundtrip() {
 #[test]
 fn test_invalid_format() {
   let short: Vec<u8> = vec![0; 10];
-  assert!(LogRecord::try_from(short.as_ref()).is_err());
+  assert!(LogRecord::read_from(short.as_ref()).is_none());
 
   let mut bad_op = vec![0u8; 17];
   bad_op[16] = 255; // invalid operation type
-  assert!(LogRecord::try_from(bad_op.as_ref()).is_err());
+  assert!(LogRecord::read_from(bad_op.as_ref()).is_none());
 }
