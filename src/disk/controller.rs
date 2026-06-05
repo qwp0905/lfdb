@@ -17,13 +17,13 @@ impl<const N: usize> DiskController<N> {
   }
 
   pub fn read(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
-    self.handle.read(pointer * Self::SIZE, page.as_mut())
+    self.handle.read(page.as_mut(), pointer * Self::SIZE)
   }
 
   pub fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
-      .read_unchecked(pointer * Self::SIZE, page.as_mut())
+      .read_unchecked(page.as_mut(), pointer * Self::SIZE)
   }
 
   #[inline]
@@ -33,7 +33,7 @@ impl<const N: usize> DiskController<N> {
   }
 
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> TaskHandle<()> {
-    self.handle.write_async(pointer * Self::SIZE, page.as_ref())
+    self.handle.write_async(page.as_ref(), pointer * Self::SIZE)
   }
 
   #[inline]
