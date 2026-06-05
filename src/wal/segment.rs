@@ -1,12 +1,11 @@
-use std::{mem::transmute, path::Path};
-
-use uuid::Uuid;
+use std::{mem::transmute, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
   disk::{IOHandle, IOPool, Page, Pointer},
   error::Result,
   thread::TaskHandle,
+  utils::uuid_simple,
 };
 
 pub const FILE_EXT: &str = "log";
@@ -19,11 +18,9 @@ pub struct WALSegment {
   handle: IOHandle,
 }
 impl WALSegment {
-  pub fn open(prefix: &Path, max_len: Pointer, pool: &IOPool) -> Result<Self> {
-    let path = prefix
-      .join(Uuid::new_v4().to_string())
-      .with_extension(FILE_EXT);
-    let handle = pool.create_handle(&path)?;
+  pub fn open(max_len: Pointer, pool: &IOPool) -> Result<Self> {
+    let path = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    let handle = pool.create_handle(path)?;
 
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
@@ -40,7 +37,7 @@ impl WALSegment {
     // the page buffer outlives the background thread's use of the pointer.
     self
       .handle
-      .write_async(pointer * SIZE, unsafe { transmute(page.as_ref()) })
+      .write_async(unsafe { transmute(page.as_ref()) }, pointer * SIZE)
       .wait()
   }
 
@@ -48,11 +45,9 @@ impl WALSegment {
    * Repurposes this segment for a new generation by renaming it in place.
    * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
    */
-  pub fn reuse(&self, prefix: &Path) -> Result {
-    let new_path = prefix
-      .join(Uuid::new_v4().to_string())
-      .with_extension(FILE_EXT);
-    self.handle.rename(&new_path)
+  pub fn reuse(&self) -> Result {
+    let new_path = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    self.handle.rename(new_path)
   }
 
   #[inline]

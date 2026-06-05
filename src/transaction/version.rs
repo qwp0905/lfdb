@@ -1,23 +1,21 @@
 use std::{
   collections::BTreeSet,
-  fs,
-  io::IoSlice,
+  mem::transmute,
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::atomic::Ordering,
+  sync::{atomic::Ordering, Arc},
 };
 
 use crossbeam_skiplist::SkipSet;
-use uuid::Uuid;
 
 use super::{ActiveSet, ActiveState};
 
 use crate::{
-  disk::{max_iov, Pread, Pwrite, Pwritev},
-  utils::{OffsetBitmap, SBox},
+  disk::{max_iov, IOHandle, IOPool},
+  utils::{uuid_simple, OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
-  Error, Result,
+  Result,
 };
 
 const FILE_EXT: &str = "snap";
@@ -74,11 +72,11 @@ pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
   last_tx_id: AtomicTxId,
-  base_path: PathBuf,
+  io_pool: Arc<IOPool>,
 }
 impl VersionVisibility {
   pub fn replay(
-    base_path: PathBuf,
+    io_pool: Arc<IOPool>,
     last_tx_id: TxId,
     aborted: BTreeSet<TxId>,
     started: BTreeSet<TxId>,
@@ -86,10 +84,11 @@ impl VersionVisibility {
     last_snapshot: Option<PathBuf>,
   ) -> Result<Self> {
     let (active_s, aborted_s) = match last_snapshot {
-      Some(path) => Self::replay_snapshot(&path)?,
+      Some(path) => Self::replay_snapshot(io_pool.create_handle(path)?)?,
       None => (BTreeSet::new(), BTreeSet::new()),
     };
     Ok(Self {
+      io_pool,
       aborted: active_s
         .into_iter()
         .chain(started)
@@ -99,7 +98,6 @@ impl VersionVisibility {
         .collect(),
       active: ActiveSet::new(),
       last_tx_id: AtomicTxId::new(last_tx_id),
-      base_path,
     })
   }
 
@@ -162,23 +160,19 @@ impl VersionVisibility {
       .map(|state| TxState::new(state, &self.active))
   }
 
-  fn replay_snapshot(path: &Path) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
+  fn replay_snapshot(file: IOHandle) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
-    let file = fs::OpenOptions::new()
-      .read(true)
-      .open(&path)
-      .map_err(Error::IO)?;
     let mut offset = 0;
     let mut buf = vec![0; 4];
-    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
+    file.read(&mut buf, offset)?;
     let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
     offset += 4;
 
     for _ in 0..len {
       let mut buf = vec![0; TX_ID_BYTES];
-      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
+      file.read(&mut buf, offset)?;
       offset += TX_ID_BYTES as u64;
 
       let id =
@@ -186,13 +180,13 @@ impl VersionVisibility {
       active.insert(id);
     }
 
-    file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
+    file.read(&mut buf, offset)?;
     let len = u32::from_le_bytes(unsafe { (buf.as_ptr() as *const [_; 4]).read() });
     offset += 4;
 
     for _ in 0..len {
       let mut buf = vec![0; TX_ID_BYTES];
-      file.pread_exact(&mut buf, offset).map_err(Error::IO)?;
+      file.read(&mut buf, offset)?;
       offset += TX_ID_BYTES as u64;
 
       let id =
@@ -204,36 +198,28 @@ impl VersionVisibility {
   }
 
   pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
-    let current = self
-      .base_path
-      .join(Uuid::new_v4().to_string())
-      .with_extension(FILE_EXT);
-
-    let file = fs::OpenOptions::new()
-      .create(true)
-      .write(true)
-      .open(&current)
-      .map_err(Error::IO)?;
+    let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    let file = self.io_pool.create_handle(current)?;
 
     let mut offset = 0;
-
     let active = self
       .active
       .until(tx_id)
       .iter()
       .map(|v| v.to_le_bytes())
       .collect::<Vec<_>>();
+    let len = (active.len() as u32).to_le_bytes();
     file
-      .pwrite_all(&(active.len() as u32).to_le_bytes(), offset)
-      .map_err(Error::IO)?;
+      .write_async(unsafe { transmute(len.as_slice()) }, offset)
+      .wait()?;
     offset += 4;
-    for chuck in active.chunks(max_iov()) {
-      let mut v = chuck
-        .into_iter()
-        .map(|v| IoSlice::new(v))
-        .collect::<Vec<_>>();
-      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
-      offset += (TX_ID_BYTES * v.len()) as u64;
+    for chunk in active.chunks(max_iov()) {
+      let mut waiting = Vec::with_capacity(chunk.len());
+      for v in chunk {
+        waiting.push(file.write_async(unsafe { transmute(v.as_slice()) }, offset));
+        offset += (TX_ID_BYTES * v.len()) as u64;
+      }
+      waiting.into_iter().map(|d| d.wait()).collect::<Result>()?;
     }
 
     let aborted = self
@@ -241,35 +227,35 @@ impl VersionVisibility {
       .range(..tx_id)
       .map(|v| v.value().to_le_bytes())
       .collect::<Vec<_>>();
+    let len = (aborted.len() as u32).to_le_bytes();
     file
-      .pwrite_all(&(aborted.len() as u32).to_le_bytes(), offset)
-      .map_err(Error::IO)?;
+      .write_async(unsafe { transmute(len.as_slice()) }, offset)
+      .wait()?;
     offset += 4;
 
-    for chuck in aborted.chunks(max_iov()) {
-      let mut v = chuck
-        .into_iter()
-        .map(|v| IoSlice::new(v))
-        .collect::<Vec<_>>();
-      file.pwritev_all(&mut v, offset).map_err(Error::IO)?;
-      offset += (TX_ID_BYTES * v.len()) as u64;
+    for chunk in aborted.chunks(max_iov()) {
+      let mut waiting = Vec::with_capacity(chunk.len());
+      for v in chunk {
+        waiting.push(file.write_async(unsafe { transmute(v.as_slice()) }, offset));
+        offset += (TX_ID_BYTES * v.len()) as u64;
+      }
+      waiting.into_iter().map(|d| d.wait()).collect::<Result>()?;
     }
 
-    file.sync_data().map_err(Error::IO)?;
-
-    Ok(current)
+    file.fsync()?;
+    Ok(file.filename())
   }
 
   pub fn clear(&self, current: &Path) -> Result {
-    for entry in fs::read_dir(&self.base_path).map_err(Error::IO)? {
-      let path = entry.map_err(Error::IO)?.path();
+    for entry in self.io_pool.read_dir()? {
+      let path = PathBuf::from(entry.file_name());
       if path.extension().is_none_or(|ext| ext != FILE_EXT) {
         continue;
       };
       if path == current {
         continue;
       }
-      fs::remove_file(path).map_err(Error::IO)?;
+      self.io_pool.remove(&path)?;
     }
     Ok(())
   }

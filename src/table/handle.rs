@@ -4,7 +4,7 @@ use std::{
   sync::atomic::{AtomicBool, Ordering},
 };
 
-use super::TableMetadata;
+use super::{TableId, TableMetadata, TableName};
 use crate::{
   disk::{DiskController, FreeList, PAGE_SIZE},
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
@@ -14,7 +14,8 @@ use crate::{
 pub type TableHandleRef = SBox<TableHandle>;
 
 pub struct TableHandle {
-  metadata: TableMetadata,
+  id: TableId,
+  name: TableName,
   disk: DiskController<PAGE_SIZE>,
   free_list: FreeList,
   /**
@@ -26,11 +27,8 @@ pub struct TableHandle {
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: DiskController<PAGE_SIZE>) -> Self {
     Self {
-      metadata: TableMetadata::new(
-        metadata.get_id(),
-        metadata.get_name().to_string(),
-        metadata.get_path().into(),
-      ),
+      id: metadata.get_id(),
+      name: metadata.get_name().clone(),
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
@@ -44,16 +42,19 @@ impl TableHandle {
     Ok(())
   }
 
-  #[inline(always)]
-  pub fn metadata(&self) -> &TableMetadata {
-    &self.metadata
+  pub const fn get_name(&self) -> &TableName {
+    &self.name
   }
+  pub const fn get_id(&self) -> TableId {
+    self.id
+  }
+
   #[inline(always)]
-  pub fn disk(&self) -> &DiskController<PAGE_SIZE> {
+  pub const fn disk(&self) -> &DiskController<PAGE_SIZE> {
     &self.disk
   }
   #[inline(always)]
-  pub fn free(&self) -> &FreeList {
+  pub const fn free(&self) -> &FreeList {
     &self.free_list
   }
 
