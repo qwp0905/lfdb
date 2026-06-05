@@ -49,6 +49,12 @@ pub enum Error {
   #[error("exceeded maximum table name length. maximum {0}, received {1}")]
   TableNameExceeded(usize, usize),
 
+  #[error("table name is empty.")]
+  TableNameEmpty,
+
+  #[error("un allowed char {}", 0)]
+  NotAllowedChar(char),
+
   #[error("exceeded maximum key length. maximum {0}, received {1}")]
   KeyExceeded(usize, usize),
 
@@ -89,6 +95,8 @@ impl Clone for Error {
       Self::ThreadConflict => Self::ThreadConflict,
       Self::ChannelDisconnected => Self::ChannelDisconnected,
       Self::TableNameExceeded(e, r) => Self::TableNameExceeded(*e, *r),
+      Self::TableNameEmpty => Self::TableNameEmpty,
+      Self::NotAllowedChar(char) => Self::NotAllowedChar(char.clone()),
       Self::KeyExceeded(e, r) => Self::KeyExceeded(*e, *r),
       Self::ValueExceeded(e, r) => Self::ValueExceeded(*e, *r),
       Self::Panic(err) => Self::Panic(err.clone()),
