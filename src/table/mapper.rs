@@ -9,7 +9,7 @@ use super::{
   META_TABLE,
 };
 use crate::{
-  disk::{DiskHandle, IOPool},
+  disk::{BlockHandle, IOPool},
   utils::{uuid_simple, SBox, ShortenedRwLock},
   Result,
 };
@@ -34,7 +34,7 @@ impl TableMapper {
     let filename = PathBuf::from(META_TABLE).with_extension(FILE_EXT);
     let is_new = !io_pool.exists(&filename)?;
 
-    let disk = DiskHandle::new(io_pool.create_handle(filename.clone())?);
+    let disk = BlockHandle::new(io_pool.create_handle(filename.clone())?);
     let metadata = TableHandle::new(
       &TableMetadata::new(
         META_TABLE_ID,
@@ -54,7 +54,7 @@ impl TableMapper {
   }
 
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
-    let disk = DiskHandle::new(
+    let disk = BlockHandle::new(
       self
         .io_pool
         .create_handle(table_meta.get_filename().to_path_buf())?,

@@ -6,7 +6,7 @@ use std::{
 
 use super::{TableId, TableMetadata, TableName};
 use crate::{
-  disk::{DiskHandle, FreeList, PAGE_SIZE},
+  disk::{BlockHandle, FreeList, PAGE_SIZE},
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
   Result,
 };
@@ -16,7 +16,7 @@ pub type TableHandleRef = SBox<TableHandle>;
 pub struct TableHandle {
   id: TableId,
   name: TableName,
-  disk: DiskHandle<PAGE_SIZE>,
+  disk: BlockHandle<PAGE_SIZE>,
   free_list: FreeList,
   /**
    * pin for background mutation (eg. compaction / gc)
@@ -25,7 +25,7 @@ pub struct TableHandle {
   closed: AtomicBool,
 }
 impl TableHandle {
-  pub fn new(metadata: &TableMetadata, disk: DiskHandle<PAGE_SIZE>) -> Self {
+  pub fn new(metadata: &TableMetadata, disk: BlockHandle<PAGE_SIZE>) -> Self {
     Self {
       id: metadata.get_id(),
       name: metadata.get_name().clone(),
@@ -50,7 +50,7 @@ impl TableHandle {
   }
 
   #[inline(always)]
-  pub const fn disk(&self) -> &DiskHandle<PAGE_SIZE> {
+  pub const fn disk(&self) -> &BlockHandle<PAGE_SIZE> {
     &self.disk
   }
   #[inline(always)]
