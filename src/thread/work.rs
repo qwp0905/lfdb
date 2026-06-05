@@ -67,6 +67,9 @@ impl<R> TaskHandle<R> {
   pub const fn new(v: Oneshot<Result<R>>) -> Self {
     TaskHandle(v)
   }
+  pub fn fulfilled(v: Result<R>) -> Self {
+    TaskHandle(Oneshot::fulfilled(v))
+  }
 }
 
 pub struct OnceHandle<T>(JoinHandle<T>);
