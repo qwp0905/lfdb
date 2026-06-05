@@ -1,13 +1,14 @@
 use std::{
   ffi::OsStr,
   path::{Path, PathBuf},
-  ptr::copy_nonoverlapping,
-  slice::from_raw_parts,
   sync::atomic::AtomicU32,
 };
 
 use super::TableName;
-use crate::{Error, Result};
+use crate::{
+  utils::{OffsetReader, OffsetWriter},
+  Error, Result,
+};
 
 pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
@@ -57,119 +58,68 @@ impl TableMetadata {
         .unwrap_or(0);
     let mut vec =
       vec![0; filename_len + 2 + name_len + 2 + TABLE_ID_BYTES + compaction_len];
-    let ptr = vec.as_mut_ptr();
-    let mut offset = 0;
-    unsafe {
-      match &self.compaction {
-        Some((id, path)) => {
-          *ptr.add(offset) = 1;
-          offset += 1;
 
-          copy_nonoverlapping(id.to_le_bytes().as_ptr(), ptr.add(offset), TABLE_ID_BYTES);
-          offset += TABLE_ID_BYTES;
+    let mut writer = OffsetWriter::new(&mut vec);
+    match &self.compaction {
+      Some((id, path)) => {
+        writer.write_u8(1);
+        writer.write_u32(*id);
 
-          let path = path.as_os_str().as_encoded_bytes();
-          copy_nonoverlapping(
-            (path.len() as u16).to_le_bytes().as_ptr(),
-            ptr.add(offset),
-            2,
-          );
-          offset += 2;
-
-          copy_nonoverlapping(path.as_ptr(), ptr.add(offset), path.len());
-          offset += path.len();
-        }
-        None => {
-          *ptr.add(offset) = 0;
-          offset += 1;
-        }
+        let path = path.as_os_str().as_encoded_bytes();
+        writer.write_u16(path.len() as u16);
+        writer.write(path);
       }
-      copy_nonoverlapping(
-        self.id.to_le_bytes().as_ptr(),
-        ptr.add(offset),
-        TABLE_ID_BYTES,
-      );
-      offset += TABLE_ID_BYTES;
-      copy_nonoverlapping((name_len as u16).to_le_bytes().as_ptr(), ptr.add(offset), 2);
-      offset += 2;
-      copy_nonoverlapping(self.name.as_ptr(), ptr.add(offset), name_len);
-      offset += name_len;
-
-      copy_nonoverlapping(
-        (filename_len as u16).to_le_bytes().as_ptr(),
-        ptr.add(offset),
-        2,
-      );
-      offset += 2;
-
-      copy_nonoverlapping(filename.as_ptr(), ptr.add(offset), filename_len);
+      None => {
+        writer.write_u8(0);
+      }
     };
+
+    writer.write_u32(self.id);
+
+    writer.write_u16(name_len as u16);
+    writer.write(self.name.as_bytes());
+
+    writer.write_u16(filename_len as u16);
+    writer.write(filename);
+
     vec
   }
 
+  fn read_from(bytes: &[u8]) -> Option<Self> {
+    let mut reader = OffsetReader::new(bytes);
+    let compaction = match reader.read_byte()? {
+      0 => None,
+      1 => {
+        let id = reader.read_u32()?;
+        let len = reader.read_u16()? as usize;
+        let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read(len)?) };
+        Some((id, PathBuf::from(path)))
+      }
+      _ => return None,
+    };
+
+    let id = reader.read_u32()?;
+
+    let name_len = reader.read_u16()? as usize;
+    let name = TableName::from_str_unchecked(unsafe {
+      str::from_utf8_unchecked(reader.read(name_len)?)
+    });
+
+    let path_len = reader.read_u16()? as usize;
+    let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read(path_len)?) };
+
+    Some(Self {
+      id,
+      name,
+      filename: PathBuf::from(path),
+      compaction,
+    })
+  }
+
   pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-    let len = bytes.len();
-    if len < TABLE_ID_BYTES + 2 + 2 {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    }
-
-    let ptr = bytes.as_ptr();
-    let mut offset = 1;
-    unsafe {
-      let compaction = match *ptr {
-        0 => None,
-        1 => {
-          let id = TableId::from_le_bytes(
-            (ptr.add(offset) as *const [u8; TABLE_ID_BYTES]).read(),
-          );
-          offset += TABLE_ID_BYTES;
-
-          let len =
-            u16::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read()) as usize;
-          offset += 2;
-
-          let path =
-            OsStr::from_encoded_bytes_unchecked(from_raw_parts(ptr.add(offset), len));
-          offset += len;
-          Some((id, PathBuf::from(path)))
-        }
-        _ => return Err(Error::InvalidFormat("metadata crashed.")),
-      };
-
-      let id =
-        TableId::from_le_bytes((ptr.add(offset) as *const [u8; TABLE_ID_BYTES]).read());
-      offset += TABLE_ID_BYTES;
-
-      let name_len =
-        u16::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read()) as usize;
-      offset += 2;
-      if len < offset + name_len + 2 {
-        return Err(Error::InvalidFormat("metadata crashed."));
-      }
-
-      let name = TableName::from_str_unchecked(str::from_utf8_unchecked(from_raw_parts(
-        ptr.add(offset),
-        name_len,
-      )));
-      offset += name_len;
-
-      let path_len =
-        u16::from_le_bytes((ptr.add(offset) as *const [u8; 2]).read()) as usize;
-      offset += 2;
-
-      if len < offset + path_len {
-        return Err(Error::InvalidFormat("metadata crashed."));
-      }
-
-      let path =
-        OsStr::from_encoded_bytes_unchecked(from_raw_parts(ptr.add(offset), path_len));
-
-      Ok(Self {
-        id,
-        name,
-        filename: PathBuf::from(path),
-        compaction,
-      })
+    match Self::read_from(bytes) {
+      Some(v) => Ok(v),
+      None => Err(Error::InvalidFormat("metadata crashed.")),
     }
   }
 

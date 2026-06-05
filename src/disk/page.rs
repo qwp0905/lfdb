@@ -1,14 +1,17 @@
 use std::{
   alloc::{alloc_zeroed, dealloc, Layout},
   marker::PhantomData,
-  mem::replace,
   ops::Range,
   panic::RefUnwindSafe,
   ptr::copy_nonoverlapping,
   slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-use crate::error::{Error, Result};
+use crate::{
+  error::Result,
+  utils::{OffsetReader, OffsetWriter},
+  Error,
+};
 
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 
@@ -65,6 +68,7 @@ impl<const T: usize> Page<T> {
 }
 
 impl<const T: usize> Drop for Page<T> {
+  #[inline(always)]
   fn drop(&mut self) {
     unsafe { dealloc(self.0, Self::LAYOUT) };
   }
@@ -98,122 +102,94 @@ unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}
 impl<const T: usize> RefUnwindSafe for Page<T> {}
 
-/**
- * A cursor for reading a Page via raw pointer arithmetic.
- *
- * PhantomData ties the scanner's lifetime to the Page it points into.
- * Without it, the compiler would not know that the raw pointer depends
- * on the Page's lifetime, allowing use-after-free.
- */
-pub struct PageScanner<'a, const T: usize = PAGE_SIZE> {
-  inner: *const u8,
-  offset: usize,
-  _marker: PhantomData<&'a Page<T>>,
-}
+const EOF: Error = Error::EOF;
+
+pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
 impl<'a, const T: usize> PageScanner<'a, T> {
   const fn new(inner: *const u8) -> Self {
-    Self {
-      inner,
-      offset: 0,
-      _marker: PhantomData,
-    }
+    Self(OffsetReader::from_ptr(inner, T))
   }
 
+  #[inline(always)]
   pub const fn advance(&mut self, n: usize) -> Result<usize> {
-    let end = self.offset + n;
-    if end > T {
-      return Err(Error::EOF);
+    match self.0.advance(n) {
+      Some(offset) => Ok(offset),
+      None => Err(EOF),
     }
-    Ok(replace(&mut self.offset, end))
   }
 
+  #[inline(always)]
   pub const fn read(&mut self) -> Result<u8> {
-    if self.offset >= T {
-      return Err(Error::EOF);
+    match self.0.read_byte() {
+      Some(v) => Ok(v),
+      None => Err(Error::EOF),
     }
-    let v = unsafe { *self.inner.add(self.offset) };
-    self.offset += 1;
-    Ok(v)
   }
 
+  #[inline(always)]
   pub const fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
-    let end = self.offset + n;
-    if end > T {
-      return Err(Error::EOF);
+    match self.0.read(n) {
+      Some(v) => Ok(v),
+      None => Err(EOF),
     }
-    let b = unsafe { from_raw_parts(self.inner.add(self.offset), n) };
-    self.offset = end;
-    Ok(b)
   }
 
-  #[inline]
+  #[inline(always)]
   pub const fn read_u64(&mut self) -> Result<u64> {
-    if self.offset + 8 > T {
-      return Err(Error::EOF);
+    match self.0.read_u64() {
+      Some(v) => Ok(v),
+      None => Err(EOF),
     }
-    let v = unsafe { (self.inner.add(self.offset) as *const [u8; 8]).read() };
-    self.offset += 8;
-    Ok(u64::from_le_bytes(v))
   }
-  #[inline]
+
+  #[inline(always)]
   pub const fn read_u16(&mut self) -> Result<u16> {
-    if self.offset + 2 > T {
-      return Err(Error::EOF);
+    match self.0.read_u16() {
+      Some(v) => Ok(v),
+      None => Err(EOF),
     }
-    let v = unsafe { (self.inner.add(self.offset) as *const [u8; 2]).read() };
-    self.offset += 2;
-    Ok(u16::from_le_bytes(v))
   }
 }
 
-/**
- * A cursor for writing into a Page via raw pointer arithmetic.
- *
- * PhantomData ties the writer's lifetime to the Page it points into.
- * Without it, the compiler would not know that the raw pointer depends
- * on the Page's lifetime, allowing use-after-free.
- */
-pub struct PageWriter<'a, const T: usize = PAGE_SIZE> {
-  inner: *mut u8,
-  offset: usize,
-  marker: PhantomData<&'a Page<T>>,
-}
+pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
 impl<'a, const T: usize> PageWriter<'a, T> {
   const fn new(inner: *mut u8) -> Self {
-    Self {
-      inner,
-      offset: 0,
-      marker: PhantomData,
-    }
+    Self(OffsetWriter::from_ptr(inner, T))
   }
 
+  #[inline(always)]
   pub const fn write(&mut self, bytes: &[u8]) -> Result<()> {
-    let len = bytes.len();
-    let end = self.offset + len;
-    if end > T {
-      return Err(Error::EOF);
-    };
-    unsafe { copy_nonoverlapping(bytes.as_ptr(), self.inner.add(self.offset), len) };
-    self.offset = end;
-    Ok(())
+    match self.0.write(bytes) {
+      true => Ok(()),
+      false => Err(EOF),
+    }
   }
 
   #[inline(always)]
   pub const fn write_u64(&mut self, value: u64) -> Result {
-    self.write(&value.to_le_bytes())
+    match self.0.write_u64(value) {
+      true => Ok(()),
+      false => Err(EOF),
+    }
   }
   #[inline(always)]
   pub const fn write_u16(&mut self, value: u16) -> Result {
-    self.write(&value.to_le_bytes())
+    match self.0.write_u16(value) {
+      true => Ok(()),
+      false => Err(EOF),
+    }
   }
   #[inline(always)]
   pub const fn write_u8(&mut self, value: u8) -> Result {
-    self.write(&value.to_le_bytes())
+    match self.0.write_u8(value) {
+      true => Ok(()),
+      false => Err(EOF),
+    }
   }
 
   #[inline(always)]
   pub const fn finalize(self) -> usize {
-    self.offset
+    self.0.written_bytes()
   }
 }
 
