@@ -12,7 +12,8 @@ use crossbeam_skiplist::SkipSet;
 use super::{ActiveSet, ActiveState};
 
 use crate::{
-  disk::{max_iov, IOHandle, IOPool},
+  disk::{max_iov, IOPool},
+  info,
   utils::{uuid_simple, OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId, TX_ID_BYTES},
   Result,
@@ -84,7 +85,7 @@ impl VersionVisibility {
     last_snapshot: Option<PathBuf>,
   ) -> Result<Self> {
     let (active_s, aborted_s) = match last_snapshot {
-      Some(path) => Self::replay_snapshot(io_pool.create_handle(path)?)?,
+      Some(path) => Self::replay_snapshot(path, &io_pool)?,
       None => (BTreeSet::new(), BTreeSet::new()),
     };
     Ok(Self {
@@ -160,7 +161,12 @@ impl VersionVisibility {
       .map(|state| TxState::new(state, &self.active))
   }
 
-  fn replay_snapshot(file: IOHandle) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
+  fn replay_snapshot(
+    filename: PathBuf,
+    io_pool: &IOPool,
+  ) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
+    info!("trying to open {:?}", filename);
+    let file = io_pool.create_handle(filename)?;
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
