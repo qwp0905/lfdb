@@ -8,7 +8,7 @@ fn assert_roundtrip(record: &LogRecord) -> LogRecord {
       as usize
       + 2
   );
-  let parsed: LogRecord = bytes[2..].try_into().unwrap();
+  let parsed: LogRecord = LogRecord::read_from(&bytes[2..]).unwrap();
   assert_eq!(parsed.log_id, record.log_id);
   assert_eq!(parsed.tx_id, record.tx_id);
   parsed
@@ -115,9 +115,9 @@ fn test_entry_roundtrip() {
 #[test]
 fn test_invalid_format() {
   let short: Vec<u8> = vec![0; 10];
-  assert!(LogRecord::try_from(short.as_ref()).is_err());
+  assert!(LogRecord::read_from(short.as_ref()).is_none());
 
   let mut bad_op = vec![0u8; 17];
   bad_op[16] = 255; // invalid operation type
-  assert!(LogRecord::try_from(bad_op.as_ref()).is_err());
+  assert!(LogRecord::read_from(bad_op.as_ref()).is_none());
 }

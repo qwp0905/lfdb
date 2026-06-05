@@ -6,7 +6,6 @@ use crate::{
   table::{TableId, TABLE_ID_BYTES},
   utils::{OffsetReader, OffsetWriter},
   wal::{LOG_ID_BYTES, TX_ID_BYTES},
-  Error,
 };
 
 #[derive(Debug)]
@@ -182,16 +181,6 @@ impl LogRecord {
     vec[..2].copy_from_slice(&(len as u16).to_le_bytes());
     self.write_at(&mut vec[2..]);
     vec
-  }
-}
-
-impl TryFrom<&[u8]> for LogRecord {
-  type Error = Error;
-
-  fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-    LogRecord::read_from(value)
-      .map(Ok)
-      .unwrap_or_else(|| Err(Error::InvalidFormat("log record parse failed.")))
   }
 }
 
