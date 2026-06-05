@@ -55,7 +55,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.metadata().get_id(), slot, data)
+      .serialize_and_log(RESERVED_TX, table.get_id(), slot, data)
   }
 
   fn alloc_slot(
@@ -88,7 +88,13 @@ pub fn open_tables(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
-) -> Result<(Vec<TableHandleRef>, Vec<(MutationHandle, MutationHandle)>)> {
+) -> Result<(
+  Vec<(TableHandleRef, TableMetadata)>,
+  Vec<(
+    (MutationHandle, TableMetadata),
+    (MutationHandle, TableMetadata),
+  )>,
+)> {
   let mut handles = vec![];
   let mut compactions = vec![];
   let meta_table = tables.meta_table();
@@ -105,10 +111,16 @@ pub fn open_tables(
     let metadata = TableMetadata::from_bytes(&bytes)?;
     match metadata.get_compaction_metadata() {
       Some(c_meta) => compactions.push((
-        tables.create_handle(&metadata)?.try_mutation().unwrap(),
-        tables.create_handle(&c_meta)?.try_mutation().unwrap(),
+        (
+          tables.create_handle(&metadata)?.try_mutation().unwrap(),
+          metadata,
+        ),
+        (
+          tables.create_handle(&c_meta)?.try_mutation().unwrap(),
+          c_meta,
+        ),
       )),
-      None => handles.push(tables.create_handle(&metadata)?),
+      None => handles.push((tables.create_handle(&metadata)?, metadata)),
     }
   }
 
@@ -135,7 +147,7 @@ pub fn recovery(
         while let Some(table) = open_handles.pop() {
           debug!(
             "table {} start to collect orphaned blocks.",
-            table.metadata().get_name(),
+            table.get_name(),
           );
           release_orphaned(&block_cache, &gc, table)?;
         }

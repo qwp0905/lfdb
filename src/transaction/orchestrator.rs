@@ -5,12 +5,14 @@ use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility}
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GCMark, GarbageCollector},
-  disk::{DirHandle, IOHandle, IOPool, Pointer},
+  disk::{IOHandle, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata},
+  table::{
+    MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata, TableName,
+  },
   utils::ToArc,
   wal::{Checkpoint, TxId, WAL},
 };
@@ -52,13 +54,12 @@ impl TxOrchestrator {
     compactor: Box<Compactor>,
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
-    base_dir: Arc<DirHandle>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
       wal.clone(),
       block_cache.clone(),
       version_visibility.clone(),
-      base_dir,
+      io_pool.clone(),
       config.segment_flush_delay,
       config.segment_flush_count,
     )
@@ -94,9 +95,8 @@ impl TxOrchestrator {
     io_pool: Arc<IOPool>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<IOHandle>,
-    base_dir: Arc<DirHandle>,
   ) -> Result<Self> {
-    Checkpoint::run(&wal, &block_cache, &version_visibility, &base_dir)?;
+    Checkpoint::run(&wal, &block_cache, &version_visibility, &io_pool)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
@@ -113,7 +113,6 @@ impl TxOrchestrator {
       compactor,
       io_pool,
       metrics,
-      base_dir,
     ))
   }
 
@@ -201,7 +200,7 @@ impl TxOrchestrator {
     self.tables.create_handle(table_meta)
   }
   #[inline]
-  pub fn create_table_metadata(&self, name: &str) -> TableMetadata {
+  pub fn create_table_metadata(&self, name: &TableName) -> TableMetadata {
     self.tables.create_metadata(name)
   }
 
@@ -214,8 +213,14 @@ impl TxOrchestrator {
     self.tables.meta_table()
   }
   #[inline]
-  pub fn compact_table(&self, old: TableHandleRef, new: MutationHandle, version: TxId) {
-    self.compactor.register(old, new, version);
+  pub fn compact_table(
+    &self,
+    old: TableHandleRef,
+    new: MutationHandle,
+    metadata: TableMetadata,
+    version: TxId,
+  ) {
+    self.compactor.register(old, new, metadata, version);
   }
 
   pub fn wait_commit(&self, owner: TxId) {
