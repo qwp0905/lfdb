@@ -27,3 +27,6 @@ pub use eager::*;
 
 mod preload;
 pub use preload::*;
+
+mod event_bus;
+pub use event_bus::*;
