@@ -38,7 +38,8 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .gc_thread_count(3)
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
-    .gc_trigger_interval(Duration::from_secs(5))
+    .gc_trigger_interval(Duration::from_millis(50))
+    .gc_key_count(1024)
     .wal_segment_flush_delay(Duration::from_secs(2))
 }
 
@@ -438,10 +439,7 @@ fn test_snapshot_isolation() {
 #[test]
 fn test_entry_split() {
   let dir = tempdir_in(".").unwrap();
-  let engine = default_options(&dir)
-    .gc_trigger_interval(Duration::from_secs(3))
-    .build()
-    .unwrap();
+  let engine = default_options(&dir).build().unwrap();
   create_table(&engine, TEST_TABLE);
 
   let key = b"hot-key".to_vec();
@@ -834,12 +832,7 @@ fn test_hard_workload() {
 #[test]
 fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
-  let engine = Arc::new(
-    default_options(&dir)
-      .gc_trigger_interval(Duration::from_secs(60))
-      .build()
-      .unwrap(),
-  );
+  let engine = Arc::new(default_options(&dir).build().unwrap());
 
   create_table(&engine, TEST_TABLE);
 

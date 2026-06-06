@@ -215,10 +215,6 @@ impl<'a> LeafNodeView<'a> {
     }
   }
 
-  pub const fn len(&self) -> usize {
-    self.len
-  }
-
   pub fn range_entries(
     &'a self,
     start: &'a Bound<StaticKey>,

@@ -39,6 +39,7 @@ where
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
   pub gc_trigger_interval: Duration,
+  pub gc_key_count: usize,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
@@ -83,6 +84,7 @@ impl Engine {
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
       interval: config.gc_trigger_interval,
+      key_count: config.gc_key_count,
       compact_threshold: config.compaction_threshold,
       compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
