@@ -53,8 +53,6 @@ pub trait WritablePolicy: ReadonlyPolicy {
     self.serialize_and_log(&mut slot, data, table)?;
     Ok(slot.get_pointer())
   }
-
-  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef);
 }
 
 pub trait CreatablePolicy: WritablePolicy {
