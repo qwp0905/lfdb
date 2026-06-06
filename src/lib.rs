@@ -7,7 +7,7 @@ mod cache;
 
 mod serialize;
 
-mod thread;
+mod background;
 
 mod engine;
 pub use engine::*;

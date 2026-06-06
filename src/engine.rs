@@ -10,9 +10,10 @@ use std::{
 };
 
 use crate::{
+  background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, Compactor, GCQueue,
+    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{IOPool, Pointer, PAGE_SIZE},
@@ -22,7 +23,7 @@ use crate::{
   transaction::{
     PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
   },
-  utils::{ToArc, ToBox},
+  utils::ToArc,
   wal::{WALConfig, WAL},
   Error, Result,
 };
@@ -49,6 +50,7 @@ where
 
 pub struct Engine {
   orchestrator: TxOrchestrator,
+  event_bus: Arc<EventBus>,
   available: AtomicBool,
   metrics_registry: Arc<MetricsRegistry>,
 }
@@ -59,6 +61,8 @@ impl Engine {
   {
     let st = Instant::now();
     let metrics_registry = MetricsRegistry::new().to_arc();
+
+    let event_bus = Arc::new(EventBus::new());
 
     info!("start engine");
 
@@ -96,7 +100,7 @@ impl Engine {
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, io_pool.clone())?;
+    let (wal, replay) = WAL::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -119,9 +123,9 @@ impl Engine {
         version_visibility.clone(),
         recorder.clone(),
         tables.clone(),
+        &event_bus,
         gc_config,
-      )
-      .to_arc();
+      );
 
       let compactor = Compactor::new(
         block_cache.clone(),
@@ -129,10 +133,9 @@ impl Engine {
         recorder.clone(),
         version_visibility.clone(),
         wal.clone(),
-        gc.clone(),
+        event_bus.clone(),
         compaction_config,
-      )
-      .to_box();
+      );
 
       let orchestrator = TxOrchestrator::new(
         tx_config,
@@ -144,12 +147,14 @@ impl Engine {
         recorder,
         compactor,
         io_pool,
+        &event_bus,
         metrics_registry.clone(),
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
       return Ok(Self {
         orchestrator,
+        event_bus,
         available: AtomicBool::new(true),
         metrics_registry,
       });
@@ -202,18 +207,16 @@ impl Engine {
 
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    let gc_queue = GCQueue::default().to_arc();
-    recovery(block_cache.clone(), gc_queue.clone(), &tables)?;
+    recovery(block_cache.clone(), event_bus.clone(), &tables)?;
 
-    let gc = GarbageCollector::from_queue(
+    let gc = GarbageCollector::new(
       block_cache.clone(),
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
-      gc_queue,
+      &event_bus,
       gc_config,
-    )
-    .to_arc();
+    );
 
     let compactor = Compactor::new(
       block_cache.clone(),
@@ -221,14 +224,16 @@ impl Engine {
       recorder.clone(),
       version_visibility.clone(),
       wal.clone(),
-      gc.clone(),
+      event_bus.clone(),
       compaction_config,
-    )
-    .to_box();
+    );
 
-    for ((table, _), (c_table, c_meta)) in compactions {
-      compactor.resume(table, c_table, c_meta);
-    }
+    let events = compactions
+      .into_iter()
+      .map(|((table, _), (c_table, c_meta))| {
+        CompactionPublished::new(table, c_table, c_meta)
+      });
+    event_bus.batch_publish(events);
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
@@ -240,6 +245,7 @@ impl Engine {
       recorder,
       compactor,
       io_pool,
+      &event_bus,
       metrics_registry.clone(),
       replay.segments,
     )?;
@@ -247,6 +253,7 @@ impl Engine {
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
     Ok(Self {
       orchestrator,
+      event_bus,
       available: AtomicBool::new(true),
       metrics_registry,
     })
@@ -264,6 +271,7 @@ impl Engine {
       &self.orchestrator,
       state,
       snapshot,
+      &self.event_bus,
       &self.metrics_registry,
     ))
   }
@@ -280,6 +288,7 @@ impl Engine {
       &self.orchestrator,
       state,
       snapshot,
+      &self.event_bus,
       &self.metrics_registry,
     ))
   }
@@ -300,6 +309,8 @@ impl Drop for Engine {
       if let Err(err) = self.orchestrator.close() {
         error!("error occurs in close engine: {err}");
       };
+
+      self.event_bus.close();
     }
   }
 }

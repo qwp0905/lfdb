@@ -4,7 +4,7 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, OnceLock, Weak,
+    Arc,
   },
 };
 
@@ -15,6 +15,7 @@ use crossbeam::{
 };
 
 use crate::{
+  background::EventBus,
   disk::{IOPool, PagePool, Pointer},
   error::Result,
   info,
@@ -23,14 +24,16 @@ use crate::{
 };
 
 use super::{
-  replay, AtomicLogId, Checkpoint, FsyncResult, LogBuffer, LogId, LogRecordUninit,
-  ReplayResult, SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, FsyncResult, LogBuffer, LogId, LogRecordUninit, ReplayResult,
+  SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
   pub max_file_size: usize,
   pub max_buffer_size: usize,
 }
+
+pub struct WALSegmentRotated(pub WALSegment);
 
 /**
  * Lock-free, group-commit write-ahead log.
@@ -71,7 +74,7 @@ pub struct WAL {
    */
   page_pool: PagePool<WAL_BLOCK_SIZE>,
 
-  checkpoint: OnceLock<Weak<Checkpoint>>,
+  event_bus: Arc<EventBus>,
   /**
    * fsync results for rotated segments, pushed asynchronously at rotation time.
    * commit_and_flush drains this queue to ensure all prior segments are durable.
@@ -88,6 +91,7 @@ pub struct WAL {
 impl WAL {
   pub fn replay(
     config: &WALConfig,
+    event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
@@ -117,17 +121,12 @@ impl WAL {
         buffer: Atomic::new(buffer),
         page_pool,
         max_len,
-        checkpoint: OnceLock::new(),
+        event_bus,
         fsync_queue: SegQueue::new(),
         synced_count: AtomicU64::new(0),
       },
       replay_result,
     ))
-  }
-
-  pub fn initialize(&self, checkpoint: Weak<Checkpoint>) {
-    debug_assert!(self.checkpoint.get().is_none());
-    let _ = self.checkpoint.set(checkpoint);
   }
 
   /**
@@ -276,9 +275,7 @@ impl WAL {
 
       let segment = buffer.take_segment();
       self.fsync_queue.push(segment.fsync());
-      if let Some(checkpoint) = self.checkpoint.wait().upgrade() {
-        checkpoint.dispatch(segment);
-      }
+      self.event_bus.publish(WALSegmentRotated(segment));
     }
   }
 

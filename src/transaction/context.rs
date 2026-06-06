@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
+  background::EventBus,
   cache::RefedSlot,
   cursor::{CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
@@ -16,6 +17,7 @@ pub struct TxContext<'a> {
   orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
+  event_bus: &'a EventBus,
   modified: AtomicBool,
 }
 impl<'a> TxContext<'a> {
@@ -24,11 +26,13 @@ impl<'a> TxContext<'a> {
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,
+    event_bus: &'a EventBus,
   ) -> Self {
     Self {
       orchestrator,
       state,
       snapshot,
+      event_bus,
       modified: AtomicBool::new(false),
     }
   }
@@ -46,6 +50,10 @@ impl<'a> TxContext<'a> {
   #[inline]
   pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
+  }
+
+  pub const fn event_bus(&self) -> &'_ EventBus {
+    self.event_bus
   }
 }
 
@@ -97,8 +105,8 @@ impl<'a> WritablePolicy for &TxContext<'a> {
 
   fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
     self
-      .orchestrator
-      .mark_gc(GCMark::new(pointer, table.clone(), self.state.get_id()));
+      .event_bus
+      .publish(GCMark::new(pointer, table.clone(), self.state.get_id()));
   }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {

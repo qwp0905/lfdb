@@ -5,12 +5,9 @@ use std::{
   time::Duration,
 };
 
-use crate::{
-  thread::SingleFn,
-  utils::{UnsafeBorrowMut, UnwrappedSender},
-};
+use crate::utils::{UnsafeBorrowMut, UnwrappedSender};
 
-use super::{BackgroundThread, Context};
+use super::{BackgroundThread, Context, SingleFn};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 
 /**

@@ -10,9 +10,11 @@ use std::{
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, CreatablePolicy, GCMark, GarbageCollector, ReadonlyPolicy, WritablePolicy,
+  BTreeIndex, CreatablePolicy, DropTableCommitted, GCMark, ReadonlyPolicy, WritablePolicy,
 };
 use crate::{
+  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  binding_events,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   info,
@@ -21,7 +23,6 @@ use crate::{
     MutationHandle, PinnedHandle, TableHandleRef, TableMapper, TableMetadata,
     META_TABLE_ID,
   },
-  thread::{BackgroundThread, WorkBuilder},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox},
@@ -35,11 +36,6 @@ pub struct CompactionConfig {
   pub check_interval: Duration,
 }
 
-enum CompactTask {
-  Wait(TableHandleRef, MutationHandle, TableMetadata, TxId),
-  New(PinnedHandle),
-}
-
 struct MiniTx<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
@@ -47,7 +43,7 @@ struct MiniTx<'a> {
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
-  gc: &'a GarbageCollector,
+  event_bus: &'a EventBus,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -57,7 +53,7 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
-    gc: &'a GarbageCollector,
+    event_bus: &'a EventBus,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -68,7 +64,7 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
-      gc,
+      event_bus,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -151,8 +147,8 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
 
   fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
     self
-      .gc
-      .mark(GCMark::new(pointer, table.clone(), self.state.get_id()));
+      .event_bus
+      .publish(GCMark::new(pointer, table.clone(), self.state.get_id()));
   }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
@@ -195,7 +191,7 @@ struct CompactionWritePolicy<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  gc: &'a GarbageCollector,
+  event_bus: &'a EventBus,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn fetch_slot(
@@ -240,8 +236,8 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
 
   fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
     self
-      .gc
-      .mark(GCMark::new(pointer, table.clone(), RESERVED_TX))
+      .event_bus
+      .publish(GCMark::new(pointer, table.clone(), RESERVED_TX))
   }
 }
 
@@ -254,10 +250,7 @@ fn wait_compaction(
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
-  gc: Arc<GarbageCollector>,
-  compaction: Arc<
-    dyn BackgroundThread<(MutationHandle, MutationHandle, TableMetadata), Result>,
-  >,
+  event_bus: Arc<EventBus>,
 ) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
   let mut triggered = LinkedList::new();
@@ -266,13 +259,17 @@ fn wait_compaction(
   move |_| {
     while let Some(task) = queue.pop() {
       match task {
-        CompactTask::Wait(old, new, metadata, version) => {
-          triggered.push_back((old, new, metadata, version))
-        }
+        CompactTask::Committed(committed) => triggered.push_back((
+          committed.old,
+          committed.new,
+          committed.metadata,
+          committed.commit_version,
+        )),
         CompactTask::New(old) => {
           let table_name = old.get_name();
           let (new_table, wait_until, metadata) = {
-            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder, &gc)?;
+            let mut tx =
+              MiniTx::start(&versions, &wal, &block_cache, &recorder, &event_bus)?;
 
             let index = BTreeIndex::new(&tx);
 
@@ -321,7 +318,7 @@ fn wait_compaction(
 
     for (old, new, metadata) in take(&mut waited) {
       match old.try_mutation() {
-        Some(old) => compaction.dispatch((old, new, metadata)),
+        Some(old) => event_bus.publish(CompactionPublished::new(old, new, metadata)),
         None => waited.push_back((old, new, metadata)),
       }
     }
@@ -336,24 +333,20 @@ pub fn handle_compaction(
   versions: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
-  gc: Arc<GarbageCollector>,
-  after_compaction: Arc<
-    dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
-  >,
-) -> impl Fn((MutationHandle, MutationHandle, TableMetadata)) -> Result {
+  event_bus: Arc<EventBus>,
+) -> impl Fn(CompactionPublished) -> Result {
   let meta_table = tables.meta_table();
-  move |(old, new, metadata)| {
+  move |task| {
     do_compaction(
       &block_cache,
       &versions,
       &wal,
       &recorder,
       &meta_table,
-      &gc,
-      old,
-      new,
-      &after_compaction,
-      metadata,
+      task.old,
+      task.new,
+      task.metadata,
+      &event_bus,
     )
   }
 }
@@ -364,13 +357,10 @@ fn do_compaction(
   wal: &WAL,
   recorder: &PageRecorder,
   meta_table: &TableHandleRef,
-  gc: &GarbageCollector,
   old_table: MutationHandle,
   new: MutationHandle,
-  after_compaction: &Arc<
-    dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>,
-  >,
   new_metadata: TableMetadata,
+  event_bus: &EventBus,
 ) -> Result {
   let table_name = old_table.get_name();
   info!("table {table_name} compacting begin.");
@@ -389,7 +379,7 @@ fn do_compaction(
       block_cache,
       version_visibility,
       recorder,
-      gc,
+      event_bus,
     });
 
     'compaction: loop {
@@ -403,7 +393,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, event_bus)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         warn!("table {table_name} already dropped.");
         return Ok(());
@@ -414,7 +404,8 @@ fn do_compaction(
   info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
-    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, gc)?;
+    let mut tx =
+      MiniTx::start(version_visibility, wal, block_cache, recorder, event_bus)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
@@ -433,15 +424,20 @@ fn do_compaction(
   };
 
   info!("table {table_name} compacting totally complete.");
-  after_compaction.dispatch((old_table, new, tx_id, version));
+  event_bus.publish(CompactionCompleted {
+    old: old_table,
+    _new: new,
+    owner: tx_id,
+    commit_version: version,
+  });
 
   Ok(())
 }
 
-pub const fn after_compaction(
-  gc: Arc<GarbageCollector>,
+const fn after_compaction(
+  event_bus: Arc<EventBus>,
   version_visibility: Arc<VersionVisibility>,
-) -> impl FnMut(Option<(MutationHandle, MutationHandle, TxId, TxId)>) {
+) -> impl FnMut(Option<CompactionCompleted>) {
   let mut buffered = LinkedList::new();
   move |data| {
     if let Some(v) = data {
@@ -449,21 +445,69 @@ pub const fn after_compaction(
     }
 
     let min_version = version_visibility.min_version();
-    for (old, _new, tx_id, version) in
-      buffered.extract_if(|(_, _, _, v)| min_version >= *v)
-    {
-      gc.release_table(old.into_inner(), tx_id, version);
+    for task in buffered.extract_if(|v| min_version >= v.commit_version) {
+      event_bus.publish(DropTableCommitted::new(
+        task.old.into_inner(),
+        task.owner,
+        task.commit_version,
+      ));
     }
   }
+}
+
+pub struct CompactionCommitted {
+  old: TableHandleRef,
+  new: MutationHandle,
+  metadata: TableMetadata,
+  commit_version: TxId,
+}
+impl CompactionCommitted {
+  pub const fn new(
+    old: TableHandleRef,
+    new: MutationHandle,
+    metadata: TableMetadata,
+    commit_version: TxId,
+  ) -> Self {
+    Self {
+      old,
+      new,
+      metadata,
+      commit_version,
+    }
+  }
+}
+
+enum CompactTask {
+  Committed(CompactionCommitted),
+  New(PinnedHandle),
+}
+
+pub struct CompactionPublished {
+  old: MutationHandle,
+  new: MutationHandle,
+  metadata: TableMetadata,
+}
+impl CompactionPublished {
+  pub const fn new(
+    old: MutationHandle,
+    new: MutationHandle,
+    metadata: TableMetadata,
+  ) -> Self {
+    Self { old, new, metadata }
+  }
+}
+struct CompactionCompleted {
+  old: MutationHandle,
+  _new: MutationHandle,
+  owner: TxId,
+  commit_version: TxId,
 }
 
 pub struct Compactor {
   queue: Arc<SegQueue<CompactTask>>,
   wait_compaction: Box<dyn BackgroundThread<(), Result>>,
-  do_compaction:
-    Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TableMetadata), Result>>,
-  after_compaction:
-    Arc<dyn BackgroundThread<(MutationHandle, MutationHandle, TxId, TxId)>>,
+  do_compaction: Arc<dyn BackgroundThread<CompactionPublished, Result>>,
+  after_compaction: Arc<dyn BackgroundThread<CompactionCompleted>>,
   check: Box<dyn BackgroundThread<(), Result>>,
 }
 impl Compactor {
@@ -473,15 +517,15 @@ impl Compactor {
     recorder: Arc<PageRecorder>,
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
-    gc: Arc<GarbageCollector>,
+    event_bus: Arc<EventBus>,
     config: CompactionConfig,
-  ) -> Self {
+  ) -> Arc<Self> {
     let after_compaction = WorkBuilder::new()
       .name("tree after compaction")
       .single()
       .interval(
         COMPACTION_INTERVAL,
-        after_compaction(gc.clone(), version_visibility.clone()),
+        after_compaction(event_bus.clone(), version_visibility.clone()),
       )
       .to_arc();
 
@@ -494,8 +538,7 @@ impl Compactor {
         version_visibility.clone(),
         wal.clone(),
         recorder.clone(),
-        gc.clone(),
-        after_compaction.clone(),
+        event_bus.clone(),
       ))
       .to_arc();
 
@@ -512,8 +555,7 @@ impl Compactor {
           version_visibility.clone(),
           wal.clone(),
           recorder.clone(),
-          gc,
-          do_compaction.clone(),
+          event_bus.clone(),
         ),
       )
       .to_box();
@@ -534,33 +576,17 @@ impl Compactor {
       )
       .to_box();
 
-    Self {
+    let this = Arc::new(Self {
       queue,
       wait_compaction,
       do_compaction,
       after_compaction,
       check,
-    }
-  }
-
-  pub fn resume(
-    &self,
-    old: MutationHandle,
-    new: MutationHandle,
-    metadata: TableMetadata,
-  ) {
-    self.do_compaction.dispatch((old, new, metadata));
-  }
-  pub fn register(
-    &self,
-    old: TableHandleRef,
-    new: MutationHandle,
-    metadata: TableMetadata,
-    version: TxId,
-  ) {
-    self
-      .queue
-      .push(CompactTask::Wait(old, new, metadata, version));
+    });
+    event_bus.register(&this.after_compaction);
+    event_bus.register(&this.do_compaction);
+    event_bus.register(&this);
+    this
   }
 
   pub fn close(&self) {
@@ -602,3 +628,11 @@ const fn check_compaction(
     Ok(())
   }
 }
+impl OwnedSubscription<CompactionCommitted> for Compactor {
+  fn handle(&self, event: CompactionCommitted) {
+    self.queue.push(CompactTask::Committed(event));
+  }
+}
+binding_events!(Compactor {
+  owned: [CompactionCommitted]
+});

@@ -1,4 +1,4 @@
-use crate::{thread::SingleFn, utils::UnsafeBorrowMut};
+use crate::{background::SingleFn, utils::UnsafeBorrowMut};
 
 use super::{BackgroundThread, Context};
 use std::{

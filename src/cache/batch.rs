@@ -4,7 +4,7 @@ use crossbeam::queue::SegQueue;
 
 use super::RefedSlot;
 use crate::{
-  thread::{oneshot, Oneshot, OneshotFulfill},
+  background::{oneshot, Oneshot, OneshotFulfill},
   Result,
 };
 
