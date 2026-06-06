@@ -28,9 +28,8 @@ pub struct GarbageCollectionConfig {
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-pub type GCQueue = SegQueue<GCMark>;
 pub struct GarbageCollector {
-  queue: Arc<GCQueue>,
+  queue: Arc<SegQueue<GCMark>>,
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
   table: Arc<dyn BackgroundThread<DropTableCommitted>>,
@@ -44,7 +43,7 @@ impl GarbageCollector {
     event_bus: &EventBus,
     config: GarbageCollectionConfig,
   ) -> Arc<Self> {
-    let queue = GCQueue::new().to_arc();
+    let queue = SegQueue::new().to_arc();
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -309,7 +308,7 @@ impl GCMark {
 }
 
 const fn wait_gc(
-  queue: Arc<GCQueue>,
+  queue: Arc<SegQueue<GCMark>>,
   version_visibility: Arc<VersionVisibility>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
 ) -> impl FnMut(Option<()>) -> Result {
