@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-  replay, AtomicLogId, Checkpoint, FsyncResult, LogBuffer, LogId, LogRecord,
+  replay, AtomicLogId, Checkpoint, FsyncResult, LogBuffer, LogId, LogRecordUninit,
   ReplayResult, SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
@@ -133,7 +133,7 @@ impl WAL {
   /**
    * ## lock freely append wal record.
    *
-   * 1.  create record by closure.
+   * 1.  create uninitialized record by closure.
    *
    * 2.  load current buffer.
    *
@@ -142,12 +142,13 @@ impl WAL {
    * 4.  obtain offset and record count from buffer.
    *
    * 5.  is able to write in entry
-   *   5-1. write and commit entry + unpin segment.
+   *   5-1. obtain log id and initialize record to a vector.
+   *   5-2. write record vector and commit entry.
    *
    * 6.  if fsync required and able to write in entry
    *   6-1. wait commit for previous writes in entry.
    *   6-2. apply records count to entry and commit entry.
-   *   6-3. wait previous writes in disk and fsync call and then unpin segment.
+   *   6-3. wait previous writes in disk and fsync call.
    *   6-4. wait previous fsync and current fsync, then return.
    *
    * 7.  if obtained offset exceed the threshold(eg. WAL_BLOCK_SIZE), yield and move to 2 and retry.
@@ -160,16 +161,15 @@ impl WAL {
    *
    * 10. if succeeded to rotate buffer,
    *   10-1. wait previous writes in entry, and write records count, and write to disk.
-   *   10-2. if current segment has not been rotated, then unpin segment and continue.
+   *   10-2. if current segment has not been rotated, then continue.
    *   10-3. if current segment has been rotated, wait until pin is empty.
    *   10-4. take segment raw pointer in buffer, and then trigger checkpoint.
    */
   fn append<F>(&self, create_record: F, flush: bool) -> Result
   where
-    F: FnOnce(LogId) -> LogRecord,
+    F: FnOnce() -> LogRecordUninit,
   {
-    let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
-    let record = create_record(log_id).to_bytes_with_len();
+    let record = create_record();
     let len = record.len();
     let backoff = Backoff::new();
 
@@ -185,18 +185,20 @@ impl WAL {
           continue;
         }
       };
-      let (offset, ready) = buffer.pin_entry(len);
+
+      let (offset, order) = buffer.reserve_entry(len);
       if offset + len < WAL_BLOCK_SIZE {
-        buffer.write_at(&record, offset);
+        let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
+        buffer.write_at(&record.init(log_id), offset);
         if !flush {
           buffer.commit_entry();
           return Ok(());
         }
 
-        while ready > buffer.load_commit() {
+        while order > buffer.load_commit() {
           backoff.snooze();
         }
-        buffer.apply_record_count(ready + 1);
+        buffer.apply_record_count(order + 1);
         buffer.commit_entry();
 
         buffer.write_to_disk()?;
@@ -256,11 +258,11 @@ impl WAL {
       unsafe { guard.defer_destroy(buffer_ptr) };
 
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
-      while ready > buffer.load_commit() {
+      while order > buffer.load_commit() {
         backoff.snooze();
       }
 
-      buffer.apply_record_count(ready);
+      buffer.apply_record_count(order);
       buffer.write_to_disk()?;
       buffer.increase_written_count();
 
@@ -273,14 +275,10 @@ impl WAL {
       forget(token.upgrade());
 
       let segment = buffer.take_segment();
-      let sync = segment.fsync();
+      self.fsync_queue.push(segment.fsync());
       if let Some(checkpoint) = self.checkpoint.wait().upgrade() {
-        self.fsync_queue.push(sync);
         checkpoint.dispatch(segment);
-        continue;
       }
-
-      sync.wait()?;
     }
   }
 
@@ -296,7 +294,7 @@ impl WAL {
     data: Vec<u8>,
   ) -> Result {
     self.append(
-      |log_id| LogRecord::new_insert(log_id, tx_id, table_id, ptr, data),
+      || LogRecordUninit::new_insert(tx_id, table_id, ptr, data),
       false,
     )
   }
@@ -308,18 +306,18 @@ impl WAL {
     path: PathBuf,
   ) -> Result {
     self.append(
-      |log_id| LogRecord::new_checkpoint(log_id, last_log_id, current_version, path),
+      || LogRecordUninit::new_checkpoint(last_log_id, current_version, path),
       true,
     )
   }
   pub fn append_start(&self, tx_id: TxId) -> Result {
-    self.append(|log_id| LogRecord::new_start(log_id, tx_id), false)
+    self.append(|| LogRecordUninit::new_start(tx_id), false)
   }
   pub fn commit_and_flush(&self, tx_id: TxId) -> Result {
-    self.append(|log_id| LogRecord::new_commit(log_id, tx_id), true)
+    self.append(|| LogRecordUninit::new_commit(tx_id), true)
   }
   pub fn append_abort(&self, tx_id: TxId) -> Result {
-    self.append(|log_id| LogRecord::new_abort(log_id, tx_id), false)
+    self.append(|| LogRecordUninit::new_abort(tx_id), false)
   }
 
   pub fn reuse(&self, segment: WALSegment) {

@@ -16,9 +16,7 @@ use crate::{
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{IOPool, Pointer, PAGE_SIZE},
-  error,
-  error::{Error, Result},
-  info,
+  error, info,
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableMapper, META_TABLE_ID},
   transaction::{
@@ -26,6 +24,7 @@ use crate::{
   },
   utils::{ToArc, ToBox},
   wal::{WALConfig, WAL},
+  Error, Result,
 };
 
 pub struct EngineConfig<T>

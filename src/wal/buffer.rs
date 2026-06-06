@@ -145,7 +145,7 @@ impl LogBuffer {
    * of records already in the block — used by flush callers to write the correct
    * record count header and to wait for all prior writers to finish.
    */
-  pub fn pin_entry(&self, len: usize) -> (usize, u32) {
+  pub fn reserve_entry(&self, len: usize) -> (usize, u32) {
     let prev = self
       .offset
       .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
