@@ -12,7 +12,7 @@ use super::{
   VersionRecord, HEADER_POINTER,
 };
 use crate::{
-  background::{BackgroundThread, EventBus, WorkBuilder},
+  background::{BackgroundThread, EventBus, TaskHandle, WorkBuilder},
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   error::Result,
@@ -24,6 +24,7 @@ use crate::{
 
 pub struct GarbageCollectionConfig {
   pub interval: Duration,
+  pub key_count: usize,
   pub thread_count: usize,
   pub compact_threshold: f64,
   pub compact_min_size: Pointer,
@@ -75,6 +76,7 @@ impl GarbageCollector {
           version_visibility,
           entry.clone(),
           event_bus.clone(),
+          config.key_count,
           config.compact_threshold,
           config.compact_min_size,
         ),
@@ -291,78 +293,131 @@ where
   epoch::pin().defer(f)
 }
 
-const fn gc_main_loop(
+struct GCState {
+  tasks: LinkedList<GCTask>,
+  min_version: TxId,
+}
+impl GCState {
+  const fn new() -> Self {
+    Self {
+      tasks: LinkedList::new(),
+      min_version: 0,
+    }
+  }
+}
+struct GCTask {
+  table: TableHandleRef,
+  total: usize,
+  dead: usize,
+  leaf_ptr: Option<Pointer>,
+}
+impl GCTask {
+  const fn new(table: TableHandleRef) -> Self {
+    Self {
+      table,
+      total: 0,
+      dead: 0,
+      leaf_ptr: None,
+    }
+  }
+}
+
+fn gc_main_loop(
   block_cache: Arc<BlockCache>,
   tables: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
   entry_worker: Arc<dyn BackgroundThread<(TableHandleRef, Pointer), Result<TxId>>>,
   event_bus: Arc<EventBus>,
+  key_count: usize,
   compaction_threshold: f64,
   compaction_min_size: Pointer,
-) -> impl Fn(Option<()>) -> Result {
+) -> impl FnMut(Option<()>) -> Result {
+  let mut state = GCState::new();
+  let mut buffered = VecDeque::new();
+  let flush = |buffered: &mut VecDeque<TaskHandle<Result<TxId>>>| -> Result<TxId> {
+    let mut min = TxId::MAX;
+    while let Some(handle) = buffered.pop_front() {
+      min = min.min(handle.wait().flatten()?);
+    }
+    Ok(min)
+  };
+
   move |_| {
-    let mut min_version = version_visibility.min_version();
-
-    for table in tables
-      .get_all()
-      .into_iter()
-      .flat_map(|table| table.try_pin())
-    {
-      let handle = table.handle();
-      let mut total: usize = 0;
-      let mut dead: usize = 0;
-      let mut ptr = block_cache
-        .read(HEADER_POINTER, handle)?
-        .for_read()
-        .as_ref()
-        .deserialize::<TreeHeader>()?
-        .get_root();
-
-      loop {
-        let slot = block_cache.read(ptr, handle)?.for_read();
-        match slot.as_ref().view::<BTreeNodeView>()? {
-          BTreeNodeView::Internal(node) => ptr = node.first_child()?,
-          BTreeNodeView::Leaf(node) => {
-            let mut iter = node.get_entries();
-            let mut buffered = Vec::with_capacity(node.len());
-            while let Some((_, _, record, p)) = iter.try_next()? {
-              min_version = min_version.min(record.version);
-              buffered.push(entry_worker.execute((handle.clone(), p)));
-              total += 1;
-              if record.data.is_tombstone()
-                || version_visibility.is_aborted(&record.owner)
-              {
-                dead += 1;
-              }
-            }
-
-            for done in buffered {
-              min_version = min_version.min(done.wait().flatten()?);
-            }
-
-            match node.get_next() {
-              Some(i) => ptr = i,
-              None => break,
-            };
+    for _ in 0..key_count {
+      let mut task = match state.tasks.pop_front() {
+        Some(task) => task,
+        None => {
+          version_visibility
+            .remove_aborted(&state.min_version.min(flush(&mut buffered)?));
+          state.min_version = version_visibility.min_version();
+          for task in tables.get_all().into_iter().map(GCTask::new) {
+            state.tasks.push_back(task);
           }
-        };
+          return Ok(());
+        }
+      };
+
+      let table = match task.table.try_pin() {
+        Some(table) => table,
+        None => continue,
+      };
+
+      let ptr = match task.leaf_ptr.take() {
+        Some(ptr) => ptr,
+        None => {
+          let mut ptr = block_cache
+            .read(HEADER_POINTER, table.handle())?
+            .for_read()
+            .as_ref()
+            .deserialize::<TreeHeader>()?
+            .get_root();
+
+          loop {
+            let slot = block_cache.read(ptr, table.handle())?.for_read();
+            match slot.as_ref().view::<BTreeNodeView>()? {
+              BTreeNodeView::Internal(node) => ptr = node.first_child()?,
+              BTreeNodeView::Leaf(_) => break,
+            }
+          }
+
+          task.leaf_ptr = Some(ptr);
+          state.tasks.push_back(task);
+          continue;
+        }
+      };
+
+      let slot = block_cache.read(ptr, table.handle())?.for_read();
+      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+      let mut iter = node.get_entries();
+      while let Some((_, _, record, p)) = iter.try_next()? {
+        state.min_version = state.min_version.min(record.version);
+        buffered.push_back(entry_worker.execute((table.handle().clone(), p)));
+        task.total += 1;
+        if record.data.is_tombstone() || version_visibility.is_aborted(&record.owner) {
+          task.dead += 1;
+        }
       }
 
-      if handle.get_id() == META_TABLE_ID {
+      if let Some(i) = node.get_next() {
+        task.leaf_ptr = Some(i);
+        state.tasks.push_back(task);
+        continue;
+      }
+
+      if table.get_id() == META_TABLE_ID {
         continue;
       }
       if table.free().file_len() <= compaction_min_size {
         continue;
       }
-      if dead as f64 / total as f64 <= compaction_threshold {
+      if task.dead as f64 / task.total as f64 <= compaction_threshold {
         continue;
       }
 
       event_bus.publish(CompactionTriggered::new(table.into_inner()));
     }
 
-    version_visibility.remove_aborted(&min_version);
-
+    state.min_version = state.min_version.min(flush(&mut buffered)?);
     Ok(())
   }
 }
