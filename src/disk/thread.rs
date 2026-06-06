@@ -11,8 +11,8 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, Pwrite, Pwritev};
 use crate::{
+  background::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle},
   metrics::MetricsRegistry,
-  thread::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle},
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
   Error, Result,
 };

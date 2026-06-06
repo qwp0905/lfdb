@@ -1,7 +1,7 @@
 use std::mem::transmute;
 
 use super::{IOHandle, Page, Pointer};
-use crate::{error::Result, thread::TaskHandle};
+use crate::{background::TaskHandle, error::Result};
 
 /**
  * Just a wrapper for IOHandle that provides a logical offset function.

@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use super::{TxContext, TxOrchestrator, TxSnapshot, TxState};
 use crate::{
-  cursor::Cursor,
+  background::EventBus,
+  cursor::{CompactionCommitted, Cursor, DropTableCommitted},
   metrics::MetricsRegistry,
   table::{MutationHandle, TableHandleRef, TableMetadata, TableName},
   Error, Result,
@@ -26,10 +27,11 @@ impl<'a> Transaction<'a> {
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,
+    event_bus: &'a EventBus,
     metrics: &'a MetricsRegistry,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
-    let context = TxContext::new(orchestrator, state, snapshot);
+    let context = TxContext::new(orchestrator, state, snapshot, event_bus);
     Self {
       orchestrator,
       context,
@@ -202,10 +204,14 @@ impl<'a> Transaction<'a> {
 
     for _ in self.created_tables.drain(..) {}
     for table in self.dropped_tables.drain(..) {
-      self.orchestrator.drop_table(table, id, version);
+      self
+        .context
+        .publish(DropTableCommitted::new(table, id, version));
     }
     for (old, new, metadata) in self.compacted_tables.drain(..) {
-      self.orchestrator.compact_table(old, new, metadata, version);
+      self
+        .context
+        .publish(CompactionCommitted::new(old, new, metadata, version))
     }
 
     Ok(())
@@ -234,10 +240,14 @@ impl<'a> Transaction<'a> {
     let version = self.orchestrator.current_version();
 
     for table in self.created_tables.drain(..) {
-      self.orchestrator.drop_table(table, id, version);
+      self
+        .context
+        .publish(DropTableCommitted::new(table, id, version));
     }
     for (_, new, _) in self.compacted_tables.drain(..) {
-      self.orchestrator.drop_table(new.into_inner(), id, version);
+      self
+        .context
+        .publish(DropTableCommitted::new(new.into_inner(), id, version));
     }
   }
 }

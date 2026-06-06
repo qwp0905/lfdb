@@ -2,9 +2,9 @@ use std::{mem::transmute, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
+  background::TaskHandle,
   disk::{IOHandle, IOPool, Page, Pointer},
   error::Result,
-  thread::TaskHandle,
   utils::uuid_simple,
 };
 

@@ -1,20 +1,21 @@
 use std::{sync::Arc, time::Duration};
 
-use super::{PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility};
+use super::{
+  Checkpoint, PageRecorder, TimeoutThread, TxSnapshot, TxState, VersionVisibility,
+};
 
 use crate::{
+  background::EventBus,
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{Compactor, GCMark, GarbageCollector},
+  cursor::{Compactor, GarbageCollector},
   disk::{IOHandle, IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
   serialize::Serializable,
-  table::{
-    MutationHandle, TableHandleRef, TableId, TableMapper, TableMetadata, TableName,
-  },
+  table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
   utils::ToArc,
-  wal::{Checkpoint, TxId, WAL},
+  wal::{TxId, WAL},
 };
 
 pub struct TransactionConfig {
@@ -36,7 +37,7 @@ pub struct TxOrchestrator {
   version_visibility: Arc<VersionVisibility>,
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
-  compactor: Box<Compactor>,
+  compactor: Arc<Compactor>,
   io_pool: Arc<IOPool>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
@@ -51,8 +52,9 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    compactor: Box<Compactor>,
+    compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
+    event_bus: &EventBus,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
@@ -60,11 +62,11 @@ impl TxOrchestrator {
       block_cache.clone(),
       version_visibility.clone(),
       io_pool.clone(),
+      &event_bus,
       config.segment_flush_delay,
       config.segment_flush_count,
     )
     .to_arc();
-    wal.initialize(Arc::downgrade(&checkpoint));
     let timeout_thread = TimeoutThread::new(version_visibility.clone());
 
     Self {
@@ -91,8 +93,9 @@ impl TxOrchestrator {
     version_visibility: Arc<VersionVisibility>,
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    compactor: Box<Compactor>,
+    compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
+    event_bus: &EventBus,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<IOHandle>,
   ) -> Result<Self> {
@@ -112,6 +115,7 @@ impl TxOrchestrator {
       recorder,
       compactor,
       io_pool,
+      event_bus,
       metrics,
     ))
   }
@@ -178,10 +182,6 @@ impl TxOrchestrator {
     Ok(())
   }
 
-  pub fn mark_gc(&self, mark: GCMark) {
-    self.gc.mark(mark);
-  }
-
   #[inline]
   pub fn current_version(&self) -> TxId {
     self.version_visibility.current_version()
@@ -205,22 +205,8 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn drop_table(&self, table: TableHandleRef, tx_id: TxId, version: TxId) {
-    self.gc.release_table(table, tx_id, version);
-  }
-  #[inline]
   pub fn get_metadata_table(&self) -> TableHandleRef {
     self.tables.meta_table()
-  }
-  #[inline]
-  pub fn compact_table(
-    &self,
-    old: TableHandleRef,
-    new: MutationHandle,
-    metadata: TableMetadata,
-    version: TxId,
-  ) {
-    self.compactor.register(old, new, metadata, version);
   }
 
   pub fn wait_commit(&self, owner: TxId) {

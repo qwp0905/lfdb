@@ -9,12 +9,13 @@ use crossbeam::{epoch, queue::SegQueue};
 
 use super::{DataEntry, DataEntryView, RecordData, VersionRecord};
 use crate::{
+  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  binding_events,
   cache::{BlockCache, RefedSlot},
   debug,
   disk::Pointer,
   error::Result,
   table::{PinnedHandle, TableHandleRef, TableId, TableMapper},
-  thread::{BackgroundThread, WorkBuilder},
   transaction::{PageRecorder, VersionVisibility},
   utils::{ToArc, ToBox},
   wal::{TxId, RESERVED_TX},
@@ -32,24 +33,18 @@ pub struct GarbageCollector {
   queue: Arc<GCQueue>,
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(PinnedHandle, Pointer), Result>>,
-  table: Box<dyn BackgroundThread<(TableHandleRef, TxId, TxId)>>,
+  table: Arc<dyn BackgroundThread<DropTableCommitted>>,
 }
 impl GarbageCollector {
-  pub fn mark(&self, mark: GCMark) {
-    self.queue.push(mark);
-  }
-  pub fn release_table(&self, table: TableHandleRef, tx_id: TxId, version: TxId) {
-    self.table.dispatch((table, tx_id, version));
-  }
-
-  pub fn from_queue(
+  pub fn new(
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
-    queue: Arc<SegQueue<GCMark>>,
+    event_bus: &EventBus,
     config: GarbageCollectionConfig,
-  ) -> Self {
+  ) -> Arc<Self> {
+    let queue = GCQueue::new().to_arc();
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -67,7 +62,7 @@ impl GarbageCollector {
         RELEASE_CHECK_INTERVAL,
         run_release_table(mapper.clone(), version_visibility.clone()),
       )
-      .to_box();
+      .to_arc();
 
     let main = WorkBuilder::new()
       .name("gc main")
@@ -78,29 +73,15 @@ impl GarbageCollector {
       )
       .to_box();
 
-    Self {
+    let this = Arc::new(Self {
       queue,
       main,
       entry,
       table,
-    }
-  }
-
-  pub fn new(
-    block_cache: Arc<BlockCache>,
-    version_visibility: Arc<VersionVisibility>,
-    recorder: Arc<PageRecorder>,
-    mapper: Arc<TableMapper>,
-    config: GarbageCollectionConfig,
-  ) -> Self {
-    Self::from_queue(
-      block_cache,
-      version_visibility,
-      recorder,
-      mapper,
-      SegQueue::new().to_arc(),
-      config,
-    )
+    });
+    event_bus.register(&this.table);
+    event_bus.register(&this);
+    this
   }
 
   pub fn close(&self) {
@@ -261,16 +242,31 @@ const fn run_entry(
   }
 }
 
+pub struct DropTableCommitted {
+  handle: TableHandleRef,
+  owner: TxId,
+  commit_version: TxId,
+}
+impl DropTableCommitted {
+  pub const fn new(handle: TableHandleRef, owner: TxId, commit_version: TxId) -> Self {
+    Self {
+      handle,
+      owner,
+      commit_version,
+    }
+  }
+}
+
 const fn run_release_table(
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-) -> impl FnMut(Option<(TableHandleRef, TxId, TxId)>) {
+) -> impl FnMut(Option<DropTableCommitted>) {
   let mut tables = LinkedList::new();
   let mut unpinned = LinkedList::new();
   let mut unreachable = LinkedList::new();
   move |recv| {
-    if let Some((table, tx_id, version)) = recv {
-      tables.push_back((table, tx_id, version));
+    if let Some(committed) = recv {
+      tables.push_back((committed.handle, committed.owner, committed.commit_version));
     }
 
     let min_version = version_visibility.min_version();
@@ -377,3 +373,9 @@ const fn wait_gc(
     Ok(())
   }
 }
+impl OwnedSubscription<GCMark> for GarbageCollector {
+  fn handle(&self, event: GCMark) {
+    self.queue.push(event);
+  }
+}
+binding_events!(GarbageCollector { owned: [GCMark] });

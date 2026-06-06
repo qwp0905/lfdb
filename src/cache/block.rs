@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
+  background::TaskHandle,
   disk::{PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  thread::TaskHandle,
   utils::{AtomicSBox, SBox, ShortenedMutex},
   Result,
 };

@@ -4,9 +4,9 @@ use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
+  background::{BackgroundThread, WorkBuilder},
   disk::{IOPool, Pointer},
   error,
-  thread::{BackgroundThread, WorkBuilder},
   utils::{ToArc, ToBox},
   Result,
 };

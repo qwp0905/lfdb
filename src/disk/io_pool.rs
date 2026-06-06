@@ -14,9 +14,9 @@ use super::{
   create_io_thread, DirectIO, HandleState, IOThread, Pread, TaskPublisher, WriteTask,
 };
 use crate::{
+  background::{TaskHandle, WorkBuilder},
   disk::Fallocate,
   metrics::MetricsRegistry,
-  thread::{TaskHandle, WorkBuilder},
   utils::{SBox, ShortenedMutex, ToArc},
   Error, Result,
 };

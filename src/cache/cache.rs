@@ -7,12 +7,12 @@ use super::{
   MappingTable,
 };
 use crate::{
+  background::{BackgroundThread, WorkBuilder},
   debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
   error::Result,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  thread::{BackgroundThread, WorkBuilder},
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
 };
 

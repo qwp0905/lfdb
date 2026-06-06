@@ -3,16 +3,16 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, GCQueue, MergeSortable,
-  ReadonlyPolicy, RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, MergeSortable, ReadonlyPolicy,
+  RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
+  background::{once, EventBus},
   cache::BlockCache,
   debug,
   disk::Pointer,
   info,
   table::{MutationHandle, TableHandleRef, TableMapper, TableMetadata},
-  thread::once,
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
   Result,
@@ -129,7 +129,7 @@ pub fn open_tables(
 
 pub fn recovery(
   block_cache: Arc<BlockCache>,
-  gc_queue: Arc<GCQueue>,
+  event_bus: Arc<EventBus>,
   tables: &TableMapper,
 ) -> Result {
   let open_handles = Arc::new(SegQueue::new());
@@ -141,7 +141,7 @@ pub fn recovery(
   let threads = (0..5)
     .map(|_| {
       let block_cache = block_cache.clone();
-      let gc = gc_queue.clone();
+      let event_bus = event_bus.clone();
       let open_handles = open_handles.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
@@ -149,7 +149,7 @@ pub fn recovery(
             "table {} start to collect orphaned blocks.",
             table.get_name(),
           );
-          release_orphaned(&block_cache, &gc, table)?;
+          release_orphaned(&block_cache, &event_bus, table)?;
         }
         Ok(())
       })
@@ -167,7 +167,7 @@ pub fn recovery(
 
 fn release_orphaned(
   block_cache: &BlockCache,
-  gc: &GCQueue,
+  event_bus: &EventBus,
   table: TableHandleRef,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
@@ -202,7 +202,7 @@ fn release_orphaned(
   }
 
   for &ptr in entry_stack.iter() {
-    gc.push(GCMark::new(ptr, table.clone(), RESERVED_TX));
+    event_bus.publish(GCMark::new(ptr, table.clone(), RESERVED_TX));
   }
 
   while let Some(ptr) = entry_stack.pop() {
