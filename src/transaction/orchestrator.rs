@@ -124,7 +124,7 @@ impl TxOrchestrator {
   pub fn fetch(
     &self,
     pointer: Pointer,
-    handle: TableHandleRef,
+    handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     self.block_cache.read(pointer, handle)
   }
@@ -132,7 +132,7 @@ impl TxOrchestrator {
   pub fn alloc(
     &self,
     pointer: Pointer,
-    handle: TableHandleRef,
+    handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     self.block_cache.alloc(pointer, handle)
   }

@@ -13,7 +13,7 @@ use crate::{
   background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
+    initialize, open_tables, recovery, CompactionPublished, Compactor,
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{IOPool, Pointer, PAGE_SIZE},
@@ -39,10 +39,10 @@ where
   pub wal_segment_flush_delay: Duration,
   pub wal_segment_flush_count: usize,
   pub gc_trigger_interval: Duration,
+  pub gc_key_count: usize,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
-  pub compaction_check_interval: Duration,
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
@@ -84,11 +84,9 @@ impl Engine {
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
       interval: config.gc_trigger_interval,
-    };
-    let compaction_config = CompactionConfig {
-      threshold: config.compaction_threshold,
-      min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
-      check_interval: config.compaction_check_interval,
+      key_count: config.gc_key_count,
+      compact_threshold: config.compaction_threshold,
+      compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
@@ -123,9 +121,10 @@ impl Engine {
         version_visibility.clone(),
         recorder.clone(),
         tables.clone(),
-        &event_bus,
+        event_bus.clone(),
         gc_config,
-      );
+      )
+      .to_arc();
 
       let compactor = Compactor::new(
         block_cache.clone(),
@@ -134,7 +133,6 @@ impl Engine {
         version_visibility.clone(),
         wal.clone(),
         event_bus.clone(),
-        compaction_config,
       );
 
       let orchestrator = TxOrchestrator::new(
@@ -170,7 +168,7 @@ impl Engine {
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
       block_cache
-        .read_unchecked(*ptr, meta_table.clone())?
+        .read_unchecked(*ptr, &meta_table)?
         .for_write()
         .as_mut()
         .writer()
@@ -198,7 +196,7 @@ impl Engine {
         None => continue,
       };
       block_cache
-        .read_unchecked(*ptr, handle)?
+        .read_unchecked(*ptr, &handle)?
         .for_write()
         .as_mut()
         .writer()
@@ -207,16 +205,17 @@ impl Engine {
 
     block_cache.flush()?;
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), event_bus.clone(), &tables)?;
+    recovery(block_cache.clone(), &tables)?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),
       version_visibility.clone(),
       recorder.clone(),
       tables.clone(),
-      &event_bus,
+      event_bus.clone(),
       gc_config,
-    );
+    )
+    .to_arc();
 
     let compactor = Compactor::new(
       block_cache.clone(),
@@ -225,7 +224,6 @@ impl Engine {
       version_visibility.clone(),
       wal.clone(),
       event_bus.clone(),
-      compaction_config,
     );
 
     let events = compactions

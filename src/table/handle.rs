@@ -1,13 +1,12 @@
 use std::{
   mem::{forget, transmute, ManuallyDrop},
   ops::Deref,
-  sync::atomic::{AtomicBool, Ordering},
 };
 
 use super::{TableId, TableMetadata, TableName};
 use crate::{
   disk::{BlockIOHandle, FreeList, PAGE_SIZE},
-  utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
+  utils::{ExclusivePin, SBox, SharedToken},
   Result,
 };
 
@@ -19,10 +18,9 @@ pub struct TableHandle {
   disk: BlockIOHandle<PAGE_SIZE>,
   free_list: FreeList,
   /**
-   * pin for background mutation (eg. compaction / gc)
+   * pin to protect background mutation (eg. compaction / gc) from drop
    */
   pin: ExclusivePin,
-  closed: AtomicBool,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: BlockIOHandle<PAGE_SIZE>) -> Self {
@@ -32,7 +30,6 @@ impl TableHandle {
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
-      closed: AtomicBool::new(false),
     }
   }
 
@@ -67,12 +64,7 @@ impl TableHandle {
     if self.pin.try_exclusive().map(forget).is_none() {
       return false;
     }
-    self.closed.fetch_or(true, Ordering::Release);
     true
-  }
-
-  pub fn is_closed(&self) -> bool {
-    self.closed.load(Ordering::Acquire)
   }
 
   #[inline]
@@ -90,15 +82,6 @@ impl TableHandleRef {
       token: ManuallyDrop::new(unsafe { transmute(token) }),
     })
   }
-
-  pub fn try_mutation(&self) -> Option<MutationHandle> {
-    let token = self.pin.try_exclusive()?;
-    // transmute allowed since sbox guarantees the lifespan
-    Some(MutationHandle {
-      handle: self.clone(),
-      token: ManuallyDrop::new(unsafe { transmute(token) }),
-    })
-  }
 }
 
 pub struct PinnedHandle {
@@ -107,7 +90,11 @@ pub struct PinnedHandle {
 }
 impl PinnedHandle {
   #[inline]
-  pub fn handle(&self) -> TableHandleRef {
+  pub fn handle(&self) -> &TableHandleRef {
+    &self.handle
+  }
+
+  pub fn into_inner(self) -> TableHandleRef {
     self.handle.clone()
   }
 }
@@ -121,35 +108,6 @@ impl Deref for PinnedHandle {
   }
 }
 impl Drop for PinnedHandle {
-  fn drop(&mut self) {
-    unsafe { ManuallyDrop::drop(&mut self.token) };
-  }
-}
-
-pub struct MutationHandle {
-  handle: TableHandleRef,
-  token: ManuallyDrop<ExclusiveToken<'static>>,
-}
-impl MutationHandle {
-  #[inline]
-  pub fn handle(&self) -> &TableHandleRef {
-    &self.handle
-  }
-
-  pub fn into_inner(self) -> TableHandleRef {
-    self.handle.clone()
-  }
-}
-
-impl Deref for MutationHandle {
-  type Target = TableHandle;
-
-  #[inline]
-  fn deref(&self) -> &Self::Target {
-    &self.handle
-  }
-}
-impl Drop for MutationHandle {
   fn drop(&mut self) {
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }

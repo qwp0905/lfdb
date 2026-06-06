@@ -10,7 +10,7 @@ use std::{
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, CreatablePolicy, DropTableCommitted, GCMark, ReadonlyPolicy, WritablePolicy,
+  BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, WritablePolicy,
 };
 use crate::{
   background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
@@ -19,22 +19,13 @@ use crate::{
   disk::Pointer,
   info,
   serialize::Serializable,
-  table::{
-    MutationHandle, PinnedHandle, TableHandleRef, TableMapper, TableMetadata,
-    META_TABLE_ID,
-  },
+  table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox},
   wal::{TxId, RESERVED_TX, WAL},
   warn, Result,
 };
-
-pub struct CompactionConfig {
-  pub threshold: f64,
-  pub min_size: Pointer,
-  pub check_interval: Duration,
-}
 
 struct MiniTx<'a> {
   state: TxState<'a>,
@@ -43,7 +34,6 @@ struct MiniTx<'a> {
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
-  event_bus: &'a EventBus,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -53,7 +43,6 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
-    event_bus: &'a EventBus,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
     wal.append_start(state.get_id())?;
@@ -64,7 +53,6 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
-      event_bus,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -108,7 +96,7 @@ impl<'a> ReadonlyPolicy for &MiniTx<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.read(pointer, table.clone())
+    self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
     self.snapshot.is_aborted(&owner)
@@ -142,13 +130,7 @@ impl<'a> WritablePolicy for &MiniTx<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.alloc(pointer, table.clone())
-  }
-
-  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
-    self
-      .event_bus
-      .publish(GCMark::new(pointer, table.clone(), self.state.get_id()));
+    self.block_cache.alloc(pointer, &table)
   }
 }
 impl<'a> CreatablePolicy for &MiniTx<'a> {
@@ -183,7 +165,7 @@ impl<'a> ReadonlyPolicy for CompactionReadPolicy<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.read(pointer, table.clone())
+    self.block_cache.read(pointer, table)
   }
 }
 
@@ -191,7 +173,6 @@ struct CompactionWritePolicy<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  event_bus: &'a EventBus,
 }
 impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
   fn fetch_slot(
@@ -199,7 +180,7 @@ impl<'a> ReadonlyPolicy for CompactionWritePolicy<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.read(pointer, table.clone())
+    self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
     self.version_visibility.is_aborted(&owner)
@@ -231,13 +212,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.alloc(pointer, table.clone())
-  }
-
-  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
-    self
-      .event_bus
-      .publish(GCMark::new(pointer, table.clone(), RESERVED_TX))
+    self.block_cache.alloc(pointer, table)
   }
 }
 
@@ -265,23 +240,23 @@ fn wait_compaction(
           committed.metadata,
           committed.commit_version,
         )),
-        CompactTask::New(old) => {
+        CompactTask::New(trigger) => {
+          let old = trigger.old;
           let table_name = old.get_name();
           let (new_table, wait_until, metadata) = {
-            let mut tx =
-              MiniTx::start(&versions, &wal, &block_cache, &recorder, &event_bus)?;
+            let mut tx = MiniTx::start(&versions, &wal, &block_cache, &recorder)?;
 
             let index = BTreeIndex::new(&tx);
 
             let mut metadata =
               match index.get(table_name.as_bytes(), &meta_table)?.flatten() {
                 Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-                None => return Ok(()),
+                None => continue,
               };
 
             if metadata.get_compaction_id().is_some() {
               trace!("table {table_name} compacting skipped since already compacted.");
-              return Ok(());
+              continue;
             }
 
             info!("table {table_name} compacting triggered.");
@@ -294,7 +269,7 @@ fn wait_compaction(
               &meta_table,
             )?;
 
-            let new_table = tables.create_handle(&table_meta)?.try_mutation().unwrap();
+            let new_table = tables.create_handle(&table_meta)?.try_pin().unwrap();
 
             tables.insert(new_table.handle().clone());
 
@@ -305,7 +280,7 @@ fn wait_compaction(
           };
 
           info!("table {table_name} compacting wait until another tx close.");
-          triggered.push_back((old.handle(), new_table, metadata, wait_until));
+          triggered.push_back((old.clone(), new_table, metadata, wait_until));
         }
       }
     }
@@ -317,9 +292,9 @@ fn wait_compaction(
     }
 
     for (old, new, metadata) in take(&mut waited) {
-      match old.try_mutation() {
+      match old.try_pin() {
         Some(old) => event_bus.publish(CompactionPublished::new(old, new, metadata)),
-        None => waited.push_back((old, new, metadata)),
+        None => continue,
       }
     }
 
@@ -357,8 +332,8 @@ fn do_compaction(
   wal: &WAL,
   recorder: &PageRecorder,
   meta_table: &TableHandleRef,
-  old_table: MutationHandle,
-  new: MutationHandle,
+  old_table: PinnedHandle,
+  new: PinnedHandle,
   new_metadata: TableMetadata,
   event_bus: &EventBus,
 ) -> Result {
@@ -379,7 +354,6 @@ fn do_compaction(
       block_cache,
       version_visibility,
       recorder,
-      event_bus,
     });
 
     'compaction: loop {
@@ -393,7 +367,7 @@ fn do_compaction(
         }
       }
 
-      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, event_bus)?;
+      let tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
       if !BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)? {
         warn!("table {table_name} already dropped.");
         return Ok(());
@@ -404,8 +378,7 @@ fn do_compaction(
   info!("table {table_name} compacting copied {moved_count} count record complete.");
 
   let (tx_id, version) = {
-    let mut tx =
-      MiniTx::start(version_visibility, wal, block_cache, recorder, event_bus)?;
+    let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
     let index = BTreeIndex::new(&tx);
 
     if !index.contains(table_name.as_bytes(), meta_table)? {
@@ -457,14 +430,14 @@ const fn after_compaction(
 
 pub struct CompactionCommitted {
   old: TableHandleRef,
-  new: MutationHandle,
+  new: PinnedHandle,
   metadata: TableMetadata,
   commit_version: TxId,
 }
 impl CompactionCommitted {
   pub const fn new(
     old: TableHandleRef,
-    new: MutationHandle,
+    new: PinnedHandle,
     metadata: TableMetadata,
     commit_version: TxId,
   ) -> Self {
@@ -479,26 +452,34 @@ impl CompactionCommitted {
 
 enum CompactTask {
   Committed(CompactionCommitted),
-  New(PinnedHandle),
+  New(CompactionTriggered),
 }
 
+pub struct CompactionTriggered {
+  old: TableHandleRef,
+}
+impl CompactionTriggered {
+  pub const fn new(old: TableHandleRef) -> Self {
+    Self { old }
+  }
+}
 pub struct CompactionPublished {
-  old: MutationHandle,
-  new: MutationHandle,
+  old: PinnedHandle,
+  new: PinnedHandle,
   metadata: TableMetadata,
 }
 impl CompactionPublished {
   pub const fn new(
-    old: MutationHandle,
-    new: MutationHandle,
+    old: PinnedHandle,
+    new: PinnedHandle,
     metadata: TableMetadata,
   ) -> Self {
     Self { old, new, metadata }
   }
 }
 struct CompactionCompleted {
-  old: MutationHandle,
-  _new: MutationHandle,
+  old: PinnedHandle,
+  _new: PinnedHandle,
   owner: TxId,
   commit_version: TxId,
 }
@@ -508,7 +489,6 @@ pub struct Compactor {
   wait_compaction: Box<dyn BackgroundThread<(), Result>>,
   do_compaction: Arc<dyn BackgroundThread<CompactionPublished, Result>>,
   after_compaction: Arc<dyn BackgroundThread<CompactionCompleted>>,
-  check: Box<dyn BackgroundThread<(), Result>>,
 }
 impl Compactor {
   pub fn new(
@@ -518,7 +498,6 @@ impl Compactor {
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
     event_bus: Arc<EventBus>,
-    config: CompactionConfig,
   ) -> Arc<Self> {
     let after_compaction = WorkBuilder::new()
       .name("tree after compaction")
@@ -560,28 +539,11 @@ impl Compactor {
       )
       .to_box();
 
-    let check = WorkBuilder::new()
-      .name("check compaction ratio")
-      .single()
-      .interval(
-        config.check_interval,
-        check_compaction(
-          block_cache,
-          version_visibility,
-          tables,
-          queue.clone(),
-          config.threshold,
-          config.min_size,
-        ),
-      )
-      .to_box();
-
     let this = Arc::new(Self {
       queue,
       wait_compaction,
       do_compaction,
       after_compaction,
-      check,
     });
     event_bus.register(&this.after_compaction);
     event_bus.register(&this.do_compaction);
@@ -590,49 +552,22 @@ impl Compactor {
   }
 
   pub fn close(&self) {
-    self.check.close();
     self.wait_compaction.close();
     self.do_compaction.close();
     self.after_compaction.close();
   }
 }
 
-const fn check_compaction(
-  block_cache: Arc<BlockCache>,
-  version_visibility: Arc<VersionVisibility>,
-  tables: Arc<TableMapper>,
-  queue: Arc<SegQueue<CompactTask>>,
-  compaction_threshold: f64,
-  compaction_min_size: Pointer,
-) -> impl Fn(Option<()>) -> Result {
-  move |_| {
-    for table in tables
-      .get_all()
-      .into_iter()
-      .filter(|table| table.get_id() != META_TABLE_ID)
-      .filter(|table| table.free().file_len() > compaction_min_size)
-      .flat_map(|table| table.try_pin())
-    {
-      let index = BTreeIndex::new(CompactionReadPolicy {
-        block_cache: &block_cache,
-        version_visibility: &version_visibility,
-      });
-
-      let (live, dead) = index.key_count(&table.handle())?;
-      let ratio = dead as f64 / live as f64;
-      if ratio > compaction_threshold {
-        queue.push(CompactTask::New(table));
-      }
-    }
-
-    Ok(())
-  }
-}
 impl OwnedSubscription<CompactionCommitted> for Compactor {
   fn handle(&self, event: CompactionCommitted) {
     self.queue.push(CompactTask::Committed(event));
   }
 }
+impl OwnedSubscription<CompactionTriggered> for Compactor {
+  fn handle(&self, event: CompactionTriggered) {
+    self.queue.push(CompactTask::New(event))
+  }
+}
 binding_events!(Compactor {
-  owned: [CompactionCommitted]
+  owned: [CompactionCommitted, CompactionTriggered]
 });

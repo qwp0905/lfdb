@@ -5,7 +5,7 @@ use crate::{
   background::EventBus,
   cursor::{CompactionCommitted, Cursor, DropTableCommitted},
   metrics::MetricsRegistry,
-  table::{MutationHandle, TableHandleRef, TableMetadata, TableName},
+  table::{PinnedHandle, TableHandleRef, TableMetadata, TableName},
   Error, Result,
 };
 
@@ -20,7 +20,7 @@ pub struct Transaction<'a> {
   tx_start: Option<Instant>,
   created_tables: Vec<TableHandleRef>,
   dropped_tables: Vec<TableHandleRef>,
-  compacted_tables: Vec<(TableHandleRef, MutationHandle, TableMetadata)>,
+  compacted_tables: Vec<(TableHandleRef, PinnedHandle, TableMetadata)>,
 }
 impl<'a> Transaction<'a> {
   pub fn new(
@@ -173,7 +173,7 @@ impl<'a> Transaction<'a> {
     let new_table = self
       .orchestrator
       .open_table(&table_meta)?
-      .try_mutation()
+      .try_pin()
       .unwrap();
 
     Cursor::initialize(new_table.handle().clone(), &self.context, &self.metrics)?;
