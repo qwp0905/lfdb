@@ -20,7 +20,6 @@ where
       wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
-      compaction_check_interval: DEFAULT_COMPACTION_CHECK_INTERVAL,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
       block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
@@ -134,14 +133,6 @@ where
     self
   }
 
-  /**
-   * Compaction ratio measurement interval.
-   */
-  pub const fn compaction_check_interval(mut self, interval: Duration) -> Self {
-    self.0.compaction_check_interval = interval;
-    self
-  }
-
   pub fn build(&self) -> Result<Engine> {
     Engine::bootstrap(&self.0)
   }
@@ -151,7 +142,7 @@ const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(30);
 const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 16;
-const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(120);
+const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_secs(180);
 const DEFAULT_GC_THREAD_COUNT: usize = 5;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
@@ -159,4 +150,3 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_IO_THREAD_COUNT: usize = 32;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
-const DEFAULT_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(180);
