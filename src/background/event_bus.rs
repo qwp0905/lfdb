@@ -326,6 +326,16 @@ impl EventBus {
     self.queue.push(EventMsg::Publish(Box::new(event)));
     self.waker.unpark();
   }
+  pub fn batch_publish<E, I>(&self, events: I)
+  where
+    E: Any + Send + Sync,
+    I: Iterator<Item = E>,
+  {
+    for event in events {
+      self.queue.push(EventMsg::Publish(Box::new(event)));
+    }
+    self.waker.unpark();
+  }
 
   pub fn close(&self) {
     if let Some(handle) = unsafe { (*self.handle.get()).take() } {

@@ -52,8 +52,8 @@ impl<'a> TxContext<'a> {
     &self.state
   }
 
-  pub fn publish<T: Send + Sync + 'static>(&self, v: T) {
-    self.event_bus.publish(v);
+  pub const fn event_bus(&self) -> &'_ EventBus {
+    self.event_bus
   }
 }
 

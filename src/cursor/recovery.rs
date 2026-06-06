@@ -201,9 +201,10 @@ fn release_orphaned(
     };
   }
 
-  for &ptr in entry_stack.iter() {
-    event_bus.publish(GCMark::new(ptr, table.clone(), RESERVED_TX));
-  }
+  let events = entry_stack
+    .iter()
+    .map(|&ptr| GCMark::new(ptr, table.clone(), RESERVED_TX));
+  event_bus.batch_publish(events);
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);

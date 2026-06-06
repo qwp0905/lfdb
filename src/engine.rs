@@ -228,9 +228,12 @@ impl Engine {
       compaction_config,
     );
 
-    for ((table, _), (c_table, c_meta)) in compactions {
-      event_bus.publish(CompactionPublished::new(table, c_table, c_meta));
-    }
+    let events = compactions
+      .into_iter()
+      .map(|((table, _), (c_table, c_meta))| {
+        CompactionPublished::new(table, c_table, c_meta)
+      });
+    event_bus.batch_publish(events);
 
     let orchestrator = TxOrchestrator::initial_checkpoint(
       tx_config,
