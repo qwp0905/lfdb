@@ -165,12 +165,12 @@ impl BlockCache {
   pub fn alloc(
     &self,
     pointer: Pointer,
-    handle: TableHandleRef,
+    handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
     let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
 
-    let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle);
+    let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
     self.handle_eviction(guard, new_block)
   }
 
@@ -181,7 +181,7 @@ impl BlockCache {
   pub fn read_unchecked(
     &self,
     pointer: Pointer,
-    handle: TableHandleRef,
+    handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
@@ -191,11 +191,11 @@ impl BlockCache {
 
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
-    let new_block = CachedBlock::new(pointer, new, handle);
+    let new_block = CachedBlock::new(pointer, new, handle.clone());
     self.handle_eviction(guard, new_block)
   }
 
-  fn __read(&self, pointer: Pointer, handle: TableHandleRef) -> Result<CachedSlot<'_>> {
+  fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
     let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
       Acquired::Hit(block_id, token) => {
@@ -207,16 +207,20 @@ impl BlockCache {
 
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
-    let new_block = CachedBlock::new(pointer, new, handle);
+    let new_block = CachedBlock::new(pointer, new, handle.clone());
     self.handle_eviction(guard, new_block)
   }
 
   #[inline]
-  pub fn read(&self, pointer: Pointer, handle: TableHandleRef) -> Result<CachedSlot<'_>> {
+  pub fn read(
+    &self,
+    pointer: Pointer,
+    handle: &TableHandleRef,
+  ) -> Result<CachedSlot<'_>> {
     self
       .metrics
       .block_cache_read
-      .measure(|| self.__read(pointer, handle))
+      .measure(|| self.__read(pointer, &handle))
   }
 
   pub fn flush(&self) -> Result {

@@ -3,16 +3,16 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, GCMark, MergeSortable, ReadonlyPolicy,
+  BTreeIndex, BTreeNodeView, DataEntryView, MergeSortable, ReadonlyPolicy,
   RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
-  background::{once, EventBus},
+  background::once,
   cache::BlockCache,
   debug,
   disk::Pointer,
   info,
-  table::{MutationHandle, TableHandleRef, TableMapper, TableMetadata},
+  table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
   Result,
@@ -42,7 +42,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.read(pointer, table.clone())
+    self.block_cache.read(pointer, table)
   }
 }
 
@@ -63,10 +63,8 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.alloc(pointer, table.clone())
+    self.block_cache.alloc(pointer, table)
   }
-
-  fn after_update_hook(&self, _pointer: Pointer, _table: &TableHandleRef) {}
 }
 
 pub fn initialize(
@@ -90,10 +88,7 @@ pub fn open_tables(
   version_visibility: &VersionVisibility,
 ) -> Result<(
   Vec<(TableHandleRef, TableMetadata)>,
-  Vec<(
-    (MutationHandle, TableMetadata),
-    (MutationHandle, TableMetadata),
-  )>,
+  Vec<((PinnedHandle, TableMetadata), (PinnedHandle, TableMetadata))>,
 )> {
   let mut handles = vec![];
   let mut compactions = vec![];
@@ -112,13 +107,10 @@ pub fn open_tables(
     match metadata.get_compaction_metadata() {
       Some(c_meta) => compactions.push((
         (
-          tables.create_handle(&metadata)?.try_mutation().unwrap(),
+          tables.create_handle(&metadata)?.try_pin().unwrap(),
           metadata,
         ),
-        (
-          tables.create_handle(&c_meta)?.try_mutation().unwrap(),
-          c_meta,
-        ),
+        (tables.create_handle(&c_meta)?.try_pin().unwrap(), c_meta),
       )),
       None => handles.push((tables.create_handle(&metadata)?, metadata)),
     }
@@ -127,11 +119,7 @@ pub fn open_tables(
   Ok((handles, compactions))
 }
 
-pub fn recovery(
-  block_cache: Arc<BlockCache>,
-  event_bus: Arc<EventBus>,
-  tables: &TableMapper,
-) -> Result {
+pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   let open_handles = Arc::new(SegQueue::new());
   tables
     .get_all()
@@ -141,7 +129,6 @@ pub fn recovery(
   let threads = (0..5)
     .map(|_| {
       let block_cache = block_cache.clone();
-      let event_bus = event_bus.clone();
       let open_handles = open_handles.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
@@ -149,7 +136,7 @@ pub fn recovery(
             "table {} start to collect orphaned blocks.",
             table.get_name(),
           );
-          release_orphaned(&block_cache, &event_bus, table)?;
+          release_orphaned(&block_cache, &table)?;
         }
         Ok(())
       })
@@ -165,14 +152,10 @@ pub fn recovery(
   Ok(())
 }
 
-fn release_orphaned(
-  block_cache: &BlockCache,
-  event_bus: &EventBus,
-  table: TableHandleRef,
-) -> Result {
+fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
-    .read(HEADER_POINTER, table.clone())?
+    .read(HEADER_POINTER, table)?
     .for_read()
     .as_ref()
     .deserialize::<TreeHeader>()?
@@ -183,7 +166,7 @@ fn release_orphaned(
   while let Some(ptr) = node_stack.pop() {
     visited.insert(ptr);
     match block_cache
-      .read(ptr, table.clone())?
+      .read(ptr, table)?
       .for_read()
       .as_ref()
       .view::<BTreeNodeView>()?
@@ -201,14 +184,9 @@ fn release_orphaned(
     };
   }
 
-  let events = entry_stack
-    .iter()
-    .map(|&ptr| GCMark::new(ptr, table.clone(), RESERVED_TX));
-  event_bus.batch_publish(events);
-
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
-    let slot = block_cache.read(ptr, table.clone())?.for_read();
+    let slot = block_cache.read(ptr, table)?.for_read();
     let entry: DataEntryView = slot.as_ref().view()?;
     let mut iter = entry.get_versions();
     while let Some(record) = iter.try_next()? {

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
   background::EventBus,
   cache::RefedSlot,
-  cursor::{CreatablePolicy, GCMark, ReadonlyPolicy, WritablePolicy},
+  cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   serialize::Serializable,
   table::TableHandleRef,
@@ -75,7 +75,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.orchestrator.fetch(pointer, table.clone())
+    self.orchestrator.fetch(pointer, table)
   }
 }
 impl<'a> WritablePolicy for &TxContext<'a> {
@@ -100,13 +100,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.orchestrator.alloc(pointer, table.clone())
-  }
-
-  fn after_update_hook(&self, pointer: Pointer, table: &TableHandleRef) {
-    self
-      .event_bus
-      .publish(GCMark::new(pointer, table.clone(), self.state.get_id()));
+    self.orchestrator.alloc(pointer, table)
   }
 }
 impl<'a> CreatablePolicy for &TxContext<'a> {

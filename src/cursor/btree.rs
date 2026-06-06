@@ -98,41 +98,6 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     Ok(None)
   }
 
-  pub fn key_count(&self, table: &TableHandleRef) -> Result<(usize, usize)> {
-    let mut ptr = self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
-    let mut total = 0;
-    let mut dead = 0;
-    loop {
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.first_child()?,
-        BTreeNodeView::Leaf(node) => {
-          let mut iter = node.get_entries();
-          while let Some((_, _, record, _)) = iter.try_next()? {
-            total += 1;
-            if record.data.is_tombstone()
-              || !self.0.is_visible(record.owner, record.version)
-            {
-              dead += 1;
-            }
-          }
-
-          match node.get_next() {
-            Some(i) => ptr = i,
-            None => return Ok((total, dead)),
-          }
-        }
-      }
-    }
-  }
-
   pub fn contains(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<bool> {
     let mut ptr = self
       .0
@@ -396,7 +361,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           entry.set_next(new_ptr);
         }
 
-        self.0.after_update_hook(entry_ptr, table);
         Ok(())
       })
   }
@@ -426,7 +390,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         Ok(())
       })?;
 
-    self.0.after_update_hook(entry_ptr, table);
     Ok(())
   }
 
@@ -543,7 +506,6 @@ where
 
             let mut node = leaf.writable()?;
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
-            self.0.after_update_hook(entry_ptr, table);
 
             let new_record = VersionRecord::new(
               self.0.current_owner(),

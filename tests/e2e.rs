@@ -39,7 +39,6 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
     .gc_trigger_interval(Duration::from_secs(5))
-    .compaction_check_interval(Duration::from_secs(10))
     .wal_segment_flush_delay(Duration::from_secs(2))
 }
 
