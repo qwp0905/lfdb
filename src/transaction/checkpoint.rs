@@ -2,20 +2,21 @@ use std::{sync::Arc, time::Duration};
 
 use crossbeam::queue::SegQueue;
 
+use super::VersionVisibility;
+
 use crate::{
+  background::{BackgroundThread, EventBus, WorkBuilder},
   cache::BlockCache,
   debug,
   disk::IOPool,
   error, info,
-  thread::{BackgroundThread, WorkBuilder},
-  transaction::VersionVisibility,
-  utils::ToBox,
-  wal::{WALSegment, WAL},
+  utils::ToArc,
+  wal::{WALSegmentRotated, WAL},
   Result,
 };
 
 pub struct Checkpoint {
-  thread: Box<dyn BackgroundThread<WALSegment>>,
+  thread: Arc<dyn BackgroundThread<WALSegmentRotated>>,
 }
 impl Checkpoint {
   pub fn new(
@@ -23,10 +24,11 @@ impl Checkpoint {
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
+    event_bus: &EventBus,
     interval: Duration,
     max_count: usize,
   ) -> Self {
-    let thread = WorkBuilder::new()
+    let thread: Arc<dyn BackgroundThread<WALSegmentRotated>> = WorkBuilder::new()
       .name("checkpoint")
       .single()
       .lazy_buffering(
@@ -34,12 +36,9 @@ impl Checkpoint {
         max_count,
         handle_thread(wal, block_cache, version_visibility, io_pool),
       )
-      .to_box();
+      .to_arc();
+    event_bus.register(&thread);
     Self { thread }
-  }
-
-  pub fn dispatch(&self, segment: WALSegment) {
-    self.thread.dispatch(segment);
   }
 
   pub fn run(
@@ -74,18 +73,18 @@ const fn handle_thread(
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
-) -> impl Fn(Vec<WALSegment>) {
+) -> impl Fn(Vec<WALSegmentRotated>) {
   let failed = SegQueue::new();
   move |segments| {
     debug!("{} segment buffered for checkpoint.", segments.len());
     if let Err(err) = Checkpoint::run(&wal, &block_cache, &version, &io_pool) {
       error!("checkpoint failed: {err}");
-      return segments.into_iter().for_each(|s| failed.push(s));
+      return segments.into_iter().for_each(|s| failed.push(s.0));
     }
 
     while let Some(buffered) = failed.pop() {
       wal.reuse(buffered);
     }
-    segments.into_iter().for_each(|s| wal.reuse(s));
+    segments.into_iter().for_each(|s| wal.reuse(s.0));
   }
 }
