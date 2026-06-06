@@ -41,14 +41,10 @@ impl Operation {
     }
   }
 
-  fn byte_len(&self) -> u16 {
+  fn byte_len(&self) -> usize {
     1 + match self {
-      Self::Insert(_, _, data) => {
-        POINTER_BYTES as u16 + TABLE_ID_BYTES as u16 + data.len() as u16
-      }
-      Self::Checkpoint(_, _, path) => {
-        TX_ID_BYTES as u16 + LOG_ID_BYTES as u16 + path.as_os_str().len() as u16
-      }
+      Self::Insert(_, _, data) => POINTER_BYTES + TABLE_ID_BYTES + data.len(),
+      Self::Checkpoint(_, _, path) => TX_ID_BYTES + LOG_ID_BYTES + path.as_os_str().len(),
       _ => 0,
     }
   }
@@ -68,44 +64,6 @@ impl LogRecord {
       operation,
       log_id,
     }
-  }
-  pub const fn new_insert(
-    log_id: LogId,
-    tx_id: TxId,
-    table_id: TableId,
-    page_pointer: Pointer,
-    data: Vec<u8>,
-  ) -> Self {
-    Self::new(
-      log_id,
-      tx_id,
-      Operation::Insert(table_id, page_pointer, data),
-    )
-  }
-
-  pub const fn new_start(log_id: LogId, tx_id: TxId) -> Self {
-    Self::new(log_id, tx_id, Operation::Start)
-  }
-
-  pub const fn new_commit(log_id: LogId, tx_id: TxId) -> Self {
-    Self::new(log_id, tx_id, Operation::Commit)
-  }
-
-  pub const fn new_abort(log_id: LogId, tx_id: TxId) -> Self {
-    Self::new(log_id, tx_id, Operation::Abort)
-  }
-
-  pub const fn new_checkpoint(
-    log_id: LogId,
-    last_log_id: LogId,
-    current_version: TxId,
-    snapshot_path: PathBuf,
-  ) -> Self {
-    Self::new(
-      log_id,
-      0,
-      Operation::Checkpoint(last_log_id, current_version, snapshot_path),
-    )
   }
 
   fn read_from(buf: &[u8]) -> Option<Self> {
@@ -171,16 +129,62 @@ impl LogRecord {
     let checksum = hasher.finalize().to_le_bytes();
     buf[..4].copy_from_slice(&checksum);
   }
-
-  fn byte_len(&self) -> u16 {
-    self.operation.byte_len() + 4 + LOG_ID_BYTES as u16 + TX_ID_BYTES as u16
+}
+pub struct LogRecordUninit {
+  buf: Vec<u8>,
+  tx_id: TxId,
+  operation: Operation,
+}
+impl LogRecordUninit {
+  fn new(tx_id: TxId, operation: Operation) -> Self {
+    let len = operation.byte_len() + 4 + LOG_ID_BYTES + TX_ID_BYTES;
+    let mut buf = vec![0; len + 2];
+    buf[..2].copy_from_slice(&(len as u16).to_le_bytes());
+    Self {
+      buf,
+      tx_id,
+      operation,
+    }
   }
-  pub fn to_bytes_with_len(&self) -> Vec<u8> {
-    let len = self.byte_len();
-    let mut vec = vec![0; (len + 2) as usize];
-    vec[..2].copy_from_slice(&(len as u16).to_le_bytes());
-    self.write_at(&mut vec[2..]);
-    vec
+  pub const fn len(&self) -> usize {
+    self.buf.len()
+  }
+  pub fn init(mut self, log_id: LogId) -> Vec<u8> {
+    let record = LogRecord::new(log_id, self.tx_id, self.operation);
+    record.write_at(&mut self.buf[2..]);
+    self.buf
+  }
+
+  pub fn new_insert(
+    tx_id: TxId,
+    table_id: TableId,
+    page_pointer: Pointer,
+    data: Vec<u8>,
+  ) -> Self {
+    Self::new(tx_id, Operation::Insert(table_id, page_pointer, data))
+  }
+
+  pub fn new_start(tx_id: TxId) -> Self {
+    Self::new(tx_id, Operation::Start)
+  }
+
+  pub fn new_commit(tx_id: TxId) -> Self {
+    Self::new(tx_id, Operation::Commit)
+  }
+
+  pub fn new_abort(tx_id: TxId) -> Self {
+    Self::new(tx_id, Operation::Abort)
+  }
+
+  pub fn new_checkpoint(
+    last_log_id: LogId,
+    current_version: TxId,
+    snapshot_path: PathBuf,
+  ) -> Self {
+    Self::new(
+      0,
+      Operation::Checkpoint(last_log_id, current_version, snapshot_path),
+    )
   }
 }
 
