@@ -1,6 +1,9 @@
 use std::{
-  iter::Enumerate,
-  sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+  ops::Deref,
+  sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
+  },
 };
 
 // use crate::utils::Vector;
@@ -72,50 +75,47 @@ impl AtomicBitmap {
     self.len.load(Ordering::Relaxed)
   }
 
-  pub fn iter(&self) -> BitMapIter<impl Iterator<Item = u64> + '_> {
-    BitMapIter::new(
-      self
-        .bits
-        .iter()
-        .map(|bit| bit.load(Ordering::Acquire))
-        .enumerate(),
-    )
+  pub fn static_iter(self: &Arc<Self>) -> BitmapIter<Arc<Self>> {
+    BitmapIter::new(Arc::clone(self))
+  }
+  pub const fn iter(&self) -> BitmapIter<&'_ Self> {
+    BitmapIter::new(self)
   }
 }
 
-pub struct BitMapIter<I> {
-  bits: Enumerate<I>,
+pub struct BitmapIter<T> {
+  inner: T,
   index: usize,
   remaining: u64,
 }
-impl<'a, I> BitMapIter<I>
-where
-  I: Iterator<Item = u64>,
-{
-  pub fn new(mut bits: Enumerate<I>) -> Self {
-    let (index, remaining) = bits.next().unwrap_or((0, 0));
+impl<T> BitmapIter<T> {
+  pub const fn new(inner: T) -> Self {
     Self {
-      bits,
-      index,
-      remaining,
+      inner,
+      index: 0,
+      remaining: 0,
     }
   }
 }
-
-impl<'a, I> Iterator for BitMapIter<I>
+impl<T> Iterator for BitmapIter<T>
 where
-  I: Iterator<Item = u64>,
+  T: Deref<Target = AtomicBitmap>,
 {
   type Item = usize;
 
   fn next(&mut self) -> Option<Self::Item> {
+    let bits = &(*self.inner).bits;
     while self.remaining == 0 {
-      (self.index, self.remaining) = self.bits.next()?;
+      if self.index >= bits.len() {
+        return None;
+      }
+      self.remaining = bits[self.index].load(Ordering::Acquire);
+      self.index += 1;
     }
 
     let bit = self.remaining.trailing_zeros() as usize;
     self.remaining &= self.remaining - 1;
-    Some((self.index << SHIFT) + bit)
+    Some(((self.index - 1) << SHIFT) + bit)
   }
 }
 

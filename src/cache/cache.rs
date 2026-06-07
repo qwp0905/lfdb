@@ -1,5 +1,6 @@
 use std::{
-  cell::UnsafeCell, mem::MaybeUninit, panic::RefUnwindSafe, sync::Arc, time::Duration,
+  cell::UnsafeCell, collections::LinkedList, mem::MaybeUninit, panic::RefUnwindSafe,
+  sync::Arc, time::Duration,
 };
 
 use super::{
@@ -249,8 +250,8 @@ impl Drop for BlockCache {
   }
 }
 
-const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
-const PRE_FLUSH_THRESHOLD: usize = 100;
+const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+const PRE_FLUSH_THRESHOLD: usize = 256;
 const PRE_FLUSH_CONCURRENCY: usize = 4;
 
 enum FlushTask {
@@ -293,44 +294,43 @@ const fn handle_execute(
   }
 }
 
-const fn handle_flush(
+fn handle_flush(
   executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
-) -> impl Fn(Option<()>) -> Result {
+) -> impl FnMut(Option<()>) -> Result {
+  let mut waits = LinkedList::new();
+  let mut iter = dirty_blocks.static_iter().peekable();
   move |trigger| {
-    let mut waits = Vec::new();
     if trigger.is_none() {
       // periodical pre flush. it does not trigger fsync of a table.
-      for id in dirty_blocks.iter().take(PRE_FLUSH_THRESHOLD) {
-        waits.push(executor.execute(FlushTask::Write(id)));
+      if iter.peek().is_none() {
+        iter = dirty_blocks.static_iter().peekable();
       }
 
-      waits
-        .drain(..)
-        .map(|done| done.wait().flatten())
-        .collect::<Result>()?;
+      for id in (&mut iter).take(PRE_FLUSH_THRESHOLD) {
+        waits.push_back(executor.execute(FlushTask::Write(id)));
+      }
+      while let Some(done) = waits.pop_front() {
+        done.wait().flatten()?;
+      }
       return Ok(());
     }
 
     for id in dirty_blocks.iter() {
-      waits.push(executor.execute(FlushTask::Write(id)));
+      waits.push_back(executor.execute(FlushTask::Write(id)));
     }
-
-    waits
-      .drain(..)
-      .map(|done| done.wait().flatten())
-      .collect::<Result>()?;
+    while let Some(done) = waits.pop_front() {
+      done.wait().flatten()?;
+    }
 
     for table in dirty_tables.drain() {
-      waits.push(executor.execute(FlushTask::Fsync(table)));
+      waits.push_back(executor.execute(FlushTask::Fsync(table)));
     }
-
-    waits
-      .into_iter()
-      .map(|done| done.wait().flatten())
-      .collect::<Result>()?;
-
+    while let Some(done) = waits.pop_front() {
+      done.wait().flatten()?;
+    }
+    iter = dirty_blocks.static_iter().peekable();
     Ok(())
   }
 }
