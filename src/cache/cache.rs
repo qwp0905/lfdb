@@ -250,8 +250,8 @@ impl Drop for BlockCache {
   }
 }
 
-const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-const PRE_FLUSH_THRESHOLD: usize = 256;
+const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+const PRE_FLUSH_THRESHOLD: usize = 512;
 const PRE_FLUSH_CONCURRENCY: usize = 4;
 
 enum FlushTask {
