@@ -261,9 +261,9 @@ impl CacheFlusher {
     Ok(())
   }
 
-  pub fn flush_hard(self) -> Result {
+  pub fn flush_hard(mut self) -> Result {
     let mut waiting = Vec::with_capacity(self.dirty_blocks.len());
-    for id in self.dirty_blocks {
+    for id in self.dirty_blocks.drain(..) {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
     }
 
@@ -271,13 +271,7 @@ impl CacheFlusher {
       done.wait().flatten()?;
     }
 
-    for table in self.dirty_tables.drain() {
-      waiting.push(self.executor.execute(FlushTask::Fsync(table)));
-    }
-    for done in waiting {
-      done.wait().flatten()?;
-    }
-    Ok(())
+    self.finish()
   }
 
   pub fn is_done(&self) -> bool {
