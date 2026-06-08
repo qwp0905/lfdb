@@ -1,6 +1,9 @@
 use std::{
-  cell::UnsafeCell, collections::VecDeque, panic::RefUnwindSafe, sync::Arc,
-  time::Duration,
+  cell::UnsafeCell,
+  collections::VecDeque,
+  panic::RefUnwindSafe,
+  sync::Arc,
+  time::{Duration, Instant},
 };
 
 use crossbeam::queue::SegQueue;
@@ -13,7 +16,9 @@ use crate::{
   cache::{BlockCache, CacheFlusher},
   debug,
   disk::{IOPool, PAGE_SIZE},
-  info, trace,
+  info,
+  metrics::MetricsRegistry,
+  trace,
   utils::{ToArc, ToBox},
   wal::{LogId, SegmentReuseable, WALSegment, WALSegmentRotated, WAL},
   Result,
@@ -26,9 +31,15 @@ struct CheckpointCycle {
   segments: VecDeque<WALSegment>,
   flusher: CacheFlusher,
   log_id: LogId,
+  start: Option<Instant>,
 }
 impl CheckpointCycle {
-  fn new<T>(segments: T, flusher: CacheFlusher, log_id: LogId) -> Self
+  fn new<T>(
+    segments: T,
+    flusher: CacheFlusher,
+    log_id: LogId,
+    start: Option<Instant>,
+  ) -> Self
   where
     T: Iterator<Item = WALSegment>,
   {
@@ -36,6 +47,7 @@ impl CheckpointCycle {
       segments: segments.collect(),
       flusher,
       log_id,
+      start,
     }
   }
   fn flush_hard(&mut self) -> Result {
@@ -61,6 +73,10 @@ impl CheckpointCycle {
   }
   fn segments_len(&self) -> usize {
     self.segments.len()
+  }
+
+  fn take_start(&mut self) -> Option<Instant> {
+    self.start.take()
   }
 }
 
@@ -97,6 +113,7 @@ impl Checkpoint {
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
     event_bus: Arc<EventBus>,
+    metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
@@ -114,6 +131,7 @@ impl Checkpoint {
           io_pool.clone(),
           event_bus.clone(),
           cycle.clone(),
+          metrics,
           flush_factor,
         ),
       )
@@ -138,6 +156,7 @@ impl Checkpoint {
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
     event_bus: Arc<EventBus>,
+    metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
   ) -> Result<Arc<Self>> {
     Self::run_hard(&wal, &block_cache, &version_visibility, &io_pool)?;
@@ -148,6 +167,7 @@ impl Checkpoint {
       version_visibility,
       io_pool,
       event_bus,
+      metrics,
       flush_factor,
     ))
   }
@@ -233,6 +253,7 @@ fn checkpoint_loop(
   io_pool: Arc<IOPool>,
   event_bus: Arc<EventBus>,
   cycle: Arc<CheckpointCell>,
+  metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
 ) -> impl FnMut(Option<()>) -> Result {
   let mut calculated = [0f64; 20];
@@ -259,6 +280,7 @@ fn checkpoint_loop(
           (0..).map_while(|_| incoming.pop()),
           block_cache.create_flusher(),
           log_id,
+          metrics.checkpoint_cycle.start(),
         ));
         return Ok(());
       }
@@ -277,6 +299,8 @@ fn checkpoint_loop(
     debug!("block cache all flushed.");
 
     finalize_checkpoint(&version, &io_pool, &wal, current.get_log_id())?;
+    metrics.checkpoint_cycle.record(current.take_start());
+
     let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
 

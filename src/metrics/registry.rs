@@ -39,11 +39,11 @@ pub struct EngineMetrics {
   /**
    * Number of block cache flush triggered counts.
    */
-  pub block_cache_flush_count: u64,
+  pub checkpoint_cycle_count: u64,
   /**
-   * Average block cache flush latency in milliseconds.
+   * Average block checkpoint cycle time in milliseconds.
    */
-  pub block_cache_flush_latency_ms_avg: f64,
+  pub checkpoint_cycle_time_ms_avg: f64,
 
   /**
    * Number of disk read io counts.
@@ -188,7 +188,8 @@ pub struct EngineMetrics {
 pub struct MetricsRegistry {
   pub block_cache_read: Histogram,
   pub block_cache_hit: Counter,
-  pub block_cache_flush: Histogram,
+
+  pub checkpoint_cycle: Histogram,
 
   pub disk_read: Histogram,
   pub disk_write: Histogram,
@@ -209,7 +210,7 @@ impl MetricsRegistry {
     Self {
       block_cache_read: Histogram::new(10_000, Duration::from_nanos(100)),
       block_cache_hit: Counter::new(),
-      block_cache_flush: Histogram::new(10, Duration::from_millis(1)),
+      checkpoint_cycle: Histogram::new(10, Duration::from_millis(1)),
       transaction_start: Histogram::new(1000, Duration::from_micros(10)),
       transaction_commit: Histogram::new(1000, Duration::from_micros(10)),
       transaction_abort_count: Counter::new(),
@@ -227,7 +228,7 @@ impl MetricsRegistry {
     let transaction_start = self.transaction_start.snapshot();
     let transaction_commit = self.transaction_commit.snapshot();
     let block_cache_read = self.block_cache_read.snapshot();
-    let block_cache_flush = self.block_cache_flush.snapshot();
+    let checkpoint_cycle = self.checkpoint_cycle.snapshot();
     let disk_read = self.disk_read.snapshot();
     let disk_write = self.disk_write.snapshot();
     let operation_get = self.operation_get.snapshot();
@@ -245,8 +246,8 @@ impl MetricsRegistry {
 
       block_cache_hit: self.block_cache_hit.load(),
 
-      block_cache_flush_count: block_cache_flush.total_count(),
-      block_cache_flush_latency_ms_avg: block_cache_flush.average(),
+      checkpoint_cycle_count: checkpoint_cycle.total_count(),
+      checkpoint_cycle_time_ms_avg: checkpoint_cycle.average(),
 
       disk_read_count: disk_read.total_count(),
       disk_read_latency_micros_avg: disk_read.average() / 10.0,

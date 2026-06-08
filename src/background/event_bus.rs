@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use crate::utils::SBox;
+use crate::{error, utils::SBox};
 
 pub trait SharedSubscription<E> {
   fn handle(&self, event: Arc<E>);
@@ -247,13 +247,13 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
             EventMsg::Publish(event) => map.route(event),
             EventMsg::SubOwned(id, handler) => {
               if !map.register_owned(id, handler) {
-                crate::error!("error to register {:?} as owned event subscriber", id);
+                error!("error to register {:?} as owned event subscriber", id);
                 std::process::abort();
               };
             }
             EventMsg::SubShared(id, handler) => {
               if !map.register_shared(id, handler) {
-                crate::error!("error to register {:?} as owned event subscriber", id);
+                error!("error to register {:?} as owned event subscriber", id);
                 std::process::abort();
               };
             }

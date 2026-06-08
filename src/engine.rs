@@ -140,6 +140,7 @@ impl Engine {
         version_visibility.clone(),
         io_pool.clone(),
         event_bus.clone(),
+        metrics_registry.clone(),
         config.checkpoint_flush_factor,
       );
 
@@ -247,6 +248,7 @@ impl Engine {
       version_visibility.clone(),
       io_pool.clone(),
       event_bus.clone(),
+      metrics_registry.clone(),
       config.checkpoint_flush_factor,
     )?;
     replay

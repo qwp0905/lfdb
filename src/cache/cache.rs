@@ -10,10 +10,11 @@ use super::{
 use crate::{
   background::{BackgroundThread, WorkBuilder},
   disk::{PagePool, Pointer, PAGE_SIZE},
-  error::Result,
+  error,
   metrics::MetricsRegistry,
   table::TableHandleRef,
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc},
+  Result,
 };
 
 pub struct BlockCacheConfig {
@@ -288,7 +289,7 @@ impl CacheFlusher {
     }
     for (table, done) in waiting {
       if let Err(err) = done.wait().flatten() {
-        crate::error!("error occurs in flush table: {err}");
+        error!("error occurs in flush table: {err}");
         self.dirty_tables.mark(&table);
       };
     }
