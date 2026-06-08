@@ -183,17 +183,17 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     debug_assert_eq!(height, stack.len() as u16);
     Ok((ptr, stack))
   }
-}
-impl<'a, Policy: ReadonlyPolicy> BTreeIndex<&'a Policy> {
+
   pub fn scan(
     &self,
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
-  ) -> Result<BTreeIterator<&'a Policy>> {
-    BTreeIterator::open(self.0, table, start, end)
+  ) -> Result<BTreeIterator<&'_ Policy>> {
+    BTreeIterator::open(&self.0, table, start, end)
   }
 }
+
 impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
   pub fn snapshot(&self, table: &TableHandleRef) -> Result<Snapshotter<Policy>> {
     Snapshotter::open(self.0.clone(), table)
