@@ -145,7 +145,7 @@ where
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
-const DEFAULT_FLUSH_FACTOR: f64 = 1.1;
+const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_GC_KEY_COUNT: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;

@@ -10,7 +10,7 @@ use crate::{
   cache::{BlockCache, CacheFlusher},
   debug,
   disk::{IOPool, PAGE_SIZE},
-  info,
+  info, trace,
   utils::{ToArc, ToBox},
   wal::{LogId, SegmentReuseable, WALSegment, WALSegmentRotated, WAL},
   Result,
@@ -147,6 +147,7 @@ fn checkpoint_loop(
 
     if !current.flusher.is_done() {
       let batch_size = calc_batch_size(current.reuse_target.len() + income.len());
+      trace!("checkpoint flush {} blocks", batch_size);
       current.flusher.advance(batch_size)?;
       return Ok(());
     }
