@@ -94,11 +94,12 @@ pub fn open_tables(
   let mut compactions = vec![];
   let meta_table = tables.meta_table();
 
-  let index = BTreeIndex::new(TableOpenPolicy {
+  let policy = TableOpenPolicy {
     block_cache,
     version_visibility,
     recorder: (),
-  });
+  };
+  let index = BTreeIndex::new(&policy);
 
   let mut iter = index.scan(&meta_table, &Bound::Unbounded, &Bound::Unbounded)?;
 

@@ -90,7 +90,7 @@ pub struct PinnedHandle {
 }
 impl PinnedHandle {
   #[inline]
-  pub fn handle(&self) -> &TableHandleRef {
+  pub const fn handle(&self) -> &TableHandleRef {
     &self.handle
   }
 
