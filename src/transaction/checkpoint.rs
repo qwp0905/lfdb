@@ -1,7 +1,5 @@
 use std::{
-  cell::UnsafeCell,
   collections::VecDeque,
-  panic::RefUnwindSafe,
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -19,7 +17,7 @@ use crate::{
   info,
   metrics::MetricsRegistry,
   trace,
-  utils::{ToArc, ToBox},
+  utils::{ToArc, ToBox, UnsafeOption},
   wal::{LogId, SegmentReuseable, WALSegment, WALSegmentRotated, WAL},
   Result,
 };
@@ -80,27 +78,10 @@ impl CheckpointCycle {
   }
 }
 
-struct CheckpointCell(UnsafeCell<Option<CheckpointCycle>>);
-impl CheckpointCell {
-  const fn as_mut(&self) -> &mut Option<CheckpointCycle> {
-    unsafe { &mut *self.0.get() }
-  }
-  fn set(&self, cycle: CheckpointCycle) {
-    unsafe { self.0.get().replace(Some(cycle)) };
-  }
-  fn clear(&self) {
-    unsafe { self.0.get().replace(None) };
-  }
-}
-
-unsafe impl Send for CheckpointCell {}
-unsafe impl Sync for CheckpointCell {}
-impl RefUnwindSafe for CheckpointCell {}
-
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
   ticker: Box<dyn BackgroundThread<(), Result>>,
-  cycle: Arc<CheckpointCell>,
+  cycle: Arc<UnsafeOption<CheckpointCycle>>,
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
@@ -117,7 +98,7 @@ impl Checkpoint {
     flush_factor: f64,
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
-    let cycle = CheckpointCell(UnsafeCell::new(None)).to_arc();
+    let cycle = UnsafeOption::none().to_arc();
     let ticker = WorkBuilder::new()
       .name("checkpoint")
       .single()
@@ -196,7 +177,7 @@ impl Checkpoint {
     self.ticker.close();
 
     if self.incoming.is_empty() {
-      let mut cycle = match self.cycle.as_mut().take() {
+      let mut cycle = match self.cycle.get_mut().take() {
         Some(cycle) => cycle,
         None => return Ok(()),
       };
@@ -223,7 +204,7 @@ impl Checkpoint {
       segment.truncate()?;
     }
 
-    if let Some(cycle) = self.cycle.as_mut().take() {
+    if let Some(cycle) = self.cycle.get_mut().take() {
       cycle.truncate_all()?;
     }
 
@@ -252,7 +233,7 @@ fn checkpoint_loop(
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
   event_bus: Arc<EventBus>,
-  cycle: Arc<CheckpointCell>,
+  cycle: Arc<UnsafeOption<CheckpointCycle>>,
   metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
 ) -> impl FnMut(Option<()>) -> Result {
@@ -272,11 +253,11 @@ fn checkpoint_loop(
   };
 
   move |_| {
-    let current = match cycle.as_mut() {
+    let current = match cycle.get_mut() {
       Some(v) => v,
       None => {
         let log_id = wal.current_log_id();
-        cycle.set(CheckpointCycle::new(
+        *cycle.get_mut() = Some(CheckpointCycle::new(
           (0..).map_while(|_| incoming.pop()),
           block_cache.create_flusher(),
           log_id,
@@ -304,7 +285,7 @@ fn checkpoint_loop(
     let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
 
-    return Ok(cycle.clear());
+    return Ok(*cycle.get_mut() = None);
   }
 }
 

@@ -1,8 +1,7 @@
-use crate::{background::SingleFn, utils::UnsafeBorrowMut};
+use crate::{background::SingleFn, utils::UnsafeOption};
 
 use super::{BackgroundThread, Context};
 use std::{
-  cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
   thread::{Builder, JoinHandle},
   time::Duration,
@@ -12,7 +11,7 @@ use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
 
 pub struct PreloadThread<T> {
   channel: Sender<Context<(), T>>,
-  thread: UnsafeCell<Option<JoinHandle<()>>>,
+  handle: UnsafeOption<JoinHandle<()>>,
 }
 impl<T> PreloadThread<T>
 where
@@ -50,7 +49,7 @@ where
 
     Self {
       channel: tx,
-      thread: UnsafeCell::new(Some(handle)),
+      handle: UnsafeOption::some(handle),
     }
   }
 }
@@ -68,7 +67,7 @@ impl<T> BackgroundThread<(), T> for PreloadThread<T> {
   }
 
   fn close(&self) {
-    if let Some(v) = self.thread.get().borrow_mut_unsafe().take() {
+    if let Some(v) = self.handle.get_mut().take() {
       self.channel.send(Context::Term).unwrap();
       let _ = v.join();
     }

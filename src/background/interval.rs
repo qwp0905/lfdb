@@ -1,11 +1,10 @@
 use std::{
-  cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
   thread::{Builder, JoinHandle},
   time::Duration,
 };
 
-use crate::utils::{UnsafeBorrowMut, UnwrappedSender};
+use crate::utils::{UnsafeOption, UnwrappedSender};
 
 use super::{BackgroundThread, Context, SingleFn};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
@@ -16,8 +15,8 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendE
  * the timeout — useful for recurring maintenance tasks like GC or flush.
  */
 pub struct IntervalWorkThread<T, R> {
-  threads: UnsafeCell<Option<JoinHandle<()>>>,
   channel: Sender<Context<T, R>>,
+  handle: UnsafeOption<JoinHandle<()>>,
 }
 impl<T, R> IntervalWorkThread<T, R>
 where
@@ -32,7 +31,7 @@ where
     channel: Sender<Context<T, R>>,
     receiver: Receiver<Context<T, R>>,
   ) -> Self {
-    let th = Builder::new()
+    let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
       .spawn(move || loop {
@@ -49,7 +48,7 @@ where
       })
       .unwrap();
     Self {
-      threads: UnsafeCell::new(Some(th)),
+      handle: UnsafeOption::some(handle),
       channel,
     }
   }
@@ -76,7 +75,7 @@ impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
   }
 
   fn close(&self) {
-    if let Some(v) = self.threads.get().borrow_mut_unsafe().take() {
+    if let Some(v) = self.handle.get_mut().take() {
       self.channel.must_send(Context::Term);
       let _ = v.join();
     }
