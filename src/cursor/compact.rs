@@ -216,7 +216,7 @@ impl WritablePolicy for CompactionWritePolicy {
   }
 }
 
-const COMPACTION_INTERVAL: Duration = Duration::from_millis(500);
+const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
 fn create_compaction(
   version_visibility: &VersionVisibility,
