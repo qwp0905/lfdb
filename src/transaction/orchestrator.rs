@@ -5,10 +5,9 @@ use super::{
 };
 
 use crate::{
-  background::EventBus,
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GarbageCollector},
-  disk::{IOHandle, IOPool, Pointer},
+  disk::{IOPool, Pointer},
   error::Result,
   info,
   metrics::MetricsRegistry,
@@ -52,19 +51,10 @@ impl TxOrchestrator {
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
-    event_bus: Arc<EventBus>,
+    checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
-    let checkpoint = Checkpoint::new(
-      wal.clone(),
-      block_cache.clone(),
-      version_visibility.clone(),
-      io_pool.clone(),
-      event_bus.clone(),
-      config.checkpoint_flush_factor,
-    );
     let timeout_thread = TimeoutThread::new(version_visibility.clone());
-
     Self {
       wal,
       tables,
@@ -79,41 +69,6 @@ impl TxOrchestrator {
       tx_timeout: config.timeout,
       metrics,
     }
-  }
-
-  pub fn initial_checkpoint(
-    config: TransactionConfig,
-    wal: Arc<WAL>,
-    block_cache: Arc<BlockCache>,
-    tables: Arc<TableMapper>,
-    version_visibility: Arc<VersionVisibility>,
-    gc: Arc<GarbageCollector>,
-    recorder: Arc<PageRecorder>,
-    compactor: Arc<Compactor>,
-    io_pool: Arc<IOPool>,
-    event_bus: Arc<EventBus>,
-    metrics: Arc<MetricsRegistry>,
-    segments: Vec<IOHandle>,
-  ) -> Result<Self> {
-    Checkpoint::run_hard(&wal, &block_cache, &version_visibility, &io_pool)?;
-    segments
-      .into_iter()
-      .map(|seg| seg.truncate())
-      .collect::<Result>()?;
-
-    Ok(Self::new(
-      config,
-      wal,
-      block_cache,
-      tables,
-      version_visibility,
-      gc,
-      recorder,
-      compactor,
-      io_pool,
-      event_bus,
-      metrics,
-    ))
   }
 
   #[inline]
@@ -219,7 +174,7 @@ impl TxOrchestrator {
     self.gc.close();
     info!("gc closed.");
     self.timeout_thread.close();
-    self.checkpoint.close();
+    let _ = self.checkpoint.close();
     info!("last checkpoint completed.");
 
     self.block_cache.close();

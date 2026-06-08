@@ -21,7 +21,8 @@ use crate::{
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableMapper, META_TABLE_ID},
   transaction::{
-    PageRecorder, Transaction, TransactionConfig, TxOrchestrator, VersionVisibility,
+    Checkpoint, PageRecorder, Transaction, TransactionConfig, TxOrchestrator,
+    VersionVisibility,
   },
   utils::ToArc,
   wal::{WALConfig, WAL},
@@ -133,6 +134,15 @@ impl Engine {
         event_bus.clone(),
       );
 
+      let checkpoint = Checkpoint::new(
+        wal.clone(),
+        block_cache.clone(),
+        version_visibility.clone(),
+        io_pool.clone(),
+        event_bus.clone(),
+        config.checkpoint_flush_factor,
+      );
+
       let orchestrator = TxOrchestrator::new(
         tx_config,
         wal,
@@ -143,7 +153,7 @@ impl Engine {
         recorder,
         compactor,
         io_pool,
-        event_bus.clone(),
+        checkpoint,
         metrics_registry.clone(),
       );
 
@@ -231,7 +241,21 @@ impl Engine {
       });
     event_bus.batch_publish(events);
 
-    let orchestrator = TxOrchestrator::initial_checkpoint(
+    let checkpoint = Checkpoint::initial_checkpoint(
+      wal.clone(),
+      block_cache.clone(),
+      version_visibility.clone(),
+      io_pool.clone(),
+      event_bus.clone(),
+      config.checkpoint_flush_factor,
+    )?;
+    replay
+      .segments
+      .into_iter()
+      .map(|seg| seg.truncate())
+      .collect::<Result>()?;
+
+    let orchestrator = TxOrchestrator::new(
       tx_config,
       wal,
       block_cache,
@@ -241,10 +265,9 @@ impl Engine {
       recorder,
       compactor,
       io_pool,
-      event_bus.clone(),
+      checkpoint.clone(),
       metrics_registry.clone(),
-      replay.segments,
-    )?;
+    );
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
     Ok(Self {
