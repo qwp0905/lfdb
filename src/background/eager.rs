@@ -1,12 +1,11 @@
 use std::{
-  cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
   sync::Arc,
   thread::{park, Builder, JoinHandle, Thread},
 };
 
 use crate::{
-  utils::{ToArc, UnsafeBorrow, UnsafeBorrowMut},
+  utils::{ToArc, UnsafeOption},
   Result,
 };
 
@@ -58,7 +57,7 @@ pub struct EagerBufferingThread<T, R> {
    * UnsafeCell allows taking the JoinHandle in close(&self).
    * Safe because close() is called at most once during shutdown.
    */
-  handle: UnsafeCell<Option<JoinHandle<()>>>,
+  handle: UnsafeOption<JoinHandle<()>>,
 }
 impl<T, R> EagerBufferingThread<T, R>
 where
@@ -112,7 +111,7 @@ where
     Self {
       queue,
       waker,
-      handle: UnsafeCell::new(Some(handle)),
+      handle: UnsafeOption::some(handle),
     }
   }
 }
@@ -123,7 +122,7 @@ unsafe impl<T, R> Sync for EagerBufferingThread<T, R> {}
 
 impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
   fn register(&self, ctx: Context<T, R>) -> bool {
-    if self.handle.get().borrow_unsafe().is_none() {
+    if self.handle.get().is_none() {
       return false;
     }
     self.queue.push(ctx);
@@ -132,7 +131,7 @@ impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
   }
 
   fn close(&self) {
-    if let Some(th) = self.handle.get().borrow_mut_unsafe().take() {
+    if let Some(th) = self.handle.get_mut().take() {
       self.queue.push(Context::Term);
       self.waker.unpark();
       let _ = th.join();

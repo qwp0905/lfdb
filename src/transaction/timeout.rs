@@ -1,5 +1,4 @@
 use std::{
-  cell::UnsafeCell,
   mem::replace,
   sync::Arc,
   thread::{Builder, JoinHandle},
@@ -13,7 +12,7 @@ use crossbeam::{
 
 use crate::{
   debug,
-  utils::{UnsafeBorrowMut, UnwrappedSender},
+  utils::{UnsafeOption, UnwrappedSender},
   wal::TxId,
   warn,
 };
@@ -211,8 +210,8 @@ enum Msg {
  * The thread idles when no transactions are registered, waking on the first registration.
  */
 pub struct TimeoutThread {
-  handle: UnsafeCell<Option<JoinHandle<()>>>,
   channel: Sender<Msg>,
+  handle: UnsafeOption<JoinHandle<()>>,
 }
 impl TimeoutThread {
   pub fn new(version_visibility: Arc<VersionVisibility>) -> Self {
@@ -257,7 +256,7 @@ impl TimeoutThread {
       .unwrap();
 
     Self {
-      handle: UnsafeCell::new(Some(th)),
+      handle: UnsafeOption::some(th),
       channel: tx,
     }
   }
@@ -267,7 +266,7 @@ impl TimeoutThread {
   }
 
   pub fn close(&self) {
-    if let Some(th) = self.handle.get().borrow_mut_unsafe().take() {
+    if let Some(th) = self.handle.get_mut().take() {
       let _ = self.channel.send(Msg::Term);
       let _ = th.join();
     }

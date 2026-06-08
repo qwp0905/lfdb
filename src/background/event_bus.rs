@@ -1,6 +1,5 @@
 use std::{
   any::{Any, TypeId},
-  cell::UnsafeCell,
   collections::HashMap,
   marker::PhantomData,
   panic::RefUnwindSafe,
@@ -10,7 +9,10 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use crate::{error, utils::SBox};
+use crate::{
+  error,
+  utils::{SBox, UnsafeOption},
+};
 
 pub trait SharedSubscription<E> {
   fn handle(&self, event: Arc<E>);
@@ -275,7 +277,7 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
 pub struct EventBus {
   queue: SBox<SegQueue<EventMsg>>,
   waker: Thread,
-  handle: UnsafeCell<Option<JoinHandle<()>>>,
+  handle: UnsafeOption<JoinHandle<()>>,
 }
 impl EventBus {
   pub fn new() -> Self {
@@ -288,7 +290,7 @@ impl EventBus {
     Self {
       queue,
       waker,
-      handle: UnsafeCell::new(Some(handle)),
+      handle: UnsafeOption::some(handle),
     }
   }
 
@@ -338,7 +340,7 @@ impl EventBus {
   }
 
   pub fn close(&self) {
-    if let Some(handle) = unsafe { (*self.handle.get()).take() } {
+    if let Some(handle) = self.handle.get_mut().take() {
       self.queue.push(EventMsg::Terminate);
       self.waker.unpark();
       let _ = handle.join();
