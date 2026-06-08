@@ -36,8 +36,7 @@ where
   pub io_thread_count: usize,
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
-  pub wal_segment_flush_delay: Duration,
-  pub wal_segment_flush_count: usize,
+  pub checkpoint_flush_factor: f64,
   pub gc_trigger_interval: Duration,
   pub gc_key_count: usize,
   pub gc_thread_count: usize,
@@ -90,8 +89,7 @@ impl Engine {
     };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
-      segment_flush_count: config.wal_segment_flush_count,
-      segment_flush_delay: config.wal_segment_flush_delay,
+      checkpoint_flush_factor: config.checkpoint_flush_factor,
     };
 
     let block_cache =
@@ -145,7 +143,7 @@ impl Engine {
         recorder,
         compactor,
         io_pool,
-        &event_bus,
+        event_bus.clone(),
         metrics_registry.clone(),
       );
 
@@ -203,7 +201,7 @@ impl Engine {
         .write(data)?;
     }
 
-    block_cache.flush()?;
+    block_cache.create_flusher().flush_hard()?;
     tables.replay(handles.into_values())?;
     recovery(block_cache.clone(), &tables)?;
 
@@ -243,7 +241,7 @@ impl Engine {
       recorder,
       compactor,
       io_pool,
-      &event_bus,
+      event_bus.clone(),
       metrics_registry.clone(),
       replay.segments,
     )?;

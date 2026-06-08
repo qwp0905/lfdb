@@ -14,14 +14,12 @@ use crate::{
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
-  utils::ToArc,
   wal::{TxId, WAL},
 };
 
 pub struct TransactionConfig {
   pub timeout: Duration,
-  pub segment_flush_delay: Duration,
-  pub segment_flush_count: usize,
+  pub checkpoint_flush_factor: f64,
 }
 
 /**
@@ -54,7 +52,7 @@ impl TxOrchestrator {
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
-    event_bus: &EventBus,
+    event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
     let checkpoint = Checkpoint::new(
@@ -62,11 +60,9 @@ impl TxOrchestrator {
       block_cache.clone(),
       version_visibility.clone(),
       io_pool.clone(),
-      &event_bus,
-      config.segment_flush_delay,
-      config.segment_flush_count,
-    )
-    .to_arc();
+      event_bus.clone(),
+      config.checkpoint_flush_factor,
+    );
     let timeout_thread = TimeoutThread::new(version_visibility.clone());
 
     Self {
@@ -95,11 +91,11 @@ impl TxOrchestrator {
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
-    event_bus: &EventBus,
+    event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
     segments: Vec<IOHandle>,
   ) -> Result<Self> {
-    Checkpoint::run(&wal, &block_cache, &version_visibility, &io_pool)?;
+    Checkpoint::run_hard(&wal, &block_cache, &version_visibility, &io_pool)?;
     segments
       .into_iter()
       .map(|seg| seg.truncate())
