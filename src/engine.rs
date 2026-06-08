@@ -13,7 +13,7 @@ use crate::{
   background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionPublished, Compactor,
+    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{IOPool, Pointer, PAGE_SIZE},
@@ -43,6 +43,7 @@ where
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
+  pub compaction_batch_size: usize,
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
@@ -88,6 +89,9 @@ impl Engine {
       compact_threshold: config.compaction_threshold,
       compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
     };
+    let compaction_config = CompactionConfig {
+      batch_size: config.compaction_batch_size,
+    };
     let tx_config = TransactionConfig {
       timeout: config.transaction_timeout,
       checkpoint_flush_factor: config.checkpoint_flush_factor,
@@ -132,6 +136,7 @@ impl Engine {
         version_visibility.clone(),
         wal.clone(),
         event_bus.clone(),
+        compaction_config,
       );
 
       let checkpoint = Checkpoint::new(
@@ -233,6 +238,7 @@ impl Engine {
       version_visibility.clone(),
       wal.clone(),
       event_bus.clone(),
+      compaction_config,
     );
 
     let events = compactions
