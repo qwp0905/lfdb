@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  BackgroundThread, EagerBufferingThread, IntervalWorkThread, LazyBufferingThread,
-  OnceHandle, PreloadThread, SharedWorkThread, SingleFn,
+  BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
+  SharedWorkThread, SingleFn,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
@@ -106,26 +106,6 @@ impl SingleThreadBuilder {
       self.builder.name,
       self.builder.stack_size,
       count,
-      SingleFn::new(when_buffered),
-    )
-  }
-
-  pub fn lazy_buffering<T, R, F>(
-    self,
-    timeout: Duration,
-    count: usize,
-    when_buffered: F,
-  ) -> impl BackgroundThread<T, R>
-  where
-    T: Send + UnwindSafe + RefUnwindSafe + 'static,
-    R: Send + Clone + 'static,
-    F: FnMut(Vec<T>) -> R + Send + RefUnwindSafe + Sync + 'static,
-  {
-    LazyBufferingThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      count,
-      timeout,
       SingleFn::new(when_buffered),
     )
   }
