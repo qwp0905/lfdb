@@ -16,8 +16,7 @@ where
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
-      wal_segment_flush_count: DEFAULT_WAL_SEGMENT_FLUSH_COUNT,
-      wal_segment_flush_delay: DEFAULT_WAL_SEGMENT_FLUSH_DELAY,
+      checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       gc_key_count: DEFAULT_GC_KEY_COUNT,
@@ -55,23 +54,21 @@ where
     self
   }
   /**
-   * WAL segment reuse requires a checkpoint to confirm durability.
-   * A checkpoint fires when either the commit count or the delay is reached,
-   * after which the segment is reused.
-   * Maximum time to wait before triggering a checkpoint for segment reuse.
+   * Determines the growth factor at which to flush the block cache at the checkpoint.
+   * In environments with frequent WAL segment replacement,
+   * such as write-heavy workloads, pressure increases exponentially at the set ratio.
+   *
    */
-  pub const fn wal_segment_flush_delay(mut self, delay: Duration) -> Self {
-    self.0.wal_segment_flush_delay = delay;
-    self
-  }
-  /**
-   * WAL segment reuse requires a checkpoint to confirm durability.
-   * A checkpoint fires when either the commit count or the delay is reached,
-   * after which the segment is reused.
-   * Maximum number of commits to buffer before triggering a checkpoint for segment reuse.
-   */
-  pub const fn wal_segment_flush_count(mut self, count: usize) -> Self {
-    self.0.wal_segment_flush_count = count;
+  pub const fn checkpoint_flush_factor(mut self, factor: f64) -> Self {
+    assert!(
+      factor.is_finite(),
+      "checkpoint flush pressure must be finite"
+    );
+    assert!(
+      factor >= 1.0,
+      "checkpoint flush pressure must be gte then 1.0"
+    );
+    self.0.checkpoint_flush_factor = factor;
     self
   }
   /**
@@ -148,8 +145,7 @@ where
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
-const DEFAULT_WAL_SEGMENT_FLUSH_DELAY: Duration = Duration::from_secs(30);
-const DEFAULT_WAL_SEGMENT_FLUSH_COUNT: usize = 16;
+const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_GC_KEY_COUNT: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;

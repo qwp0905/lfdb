@@ -4,7 +4,8 @@ use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  background::{BackgroundThread, WorkBuilder},
+  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  binding_events,
   disk::{IOPool, Pointer},
   error,
   utils::{ToArc, ToBox},
@@ -13,6 +14,13 @@ use crate::{
 
 const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
 const SEGMENT_MAX_BATCH: usize = 10;
+
+pub struct SegmentReuseable(WALSegment);
+impl SegmentReuseable {
+  pub const fn new(segment: WALSegment) -> Self {
+    Self(segment)
+  }
+}
 
 /**
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
@@ -23,12 +31,12 @@ const SEGMENT_MAX_BATCH: usize = 10;
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  reuse: Box<dyn BackgroundThread<WALSegment, ()>>,
+  reuse: Arc<dyn BackgroundThread<WALSegment, ()>>,
   preload: Box<dyn BackgroundThread<(), Result<WALSegment>>>,
   ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
-  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>) -> Self {
+  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>, event_bus: &EventBus) -> Arc<Self> {
     let ready = SegQueue::new().to_arc();
     let reuse = WorkBuilder::new()
       .name("wal segment reuse")
@@ -37,7 +45,7 @@ impl SegmentPreload {
         SEGMENT_MAX_BATCH,
         handle_reuse(ready.clone(), io_pool.clone()),
       )
-      .to_box();
+      .to_arc();
     let preload = WorkBuilder::new()
       .name("wal segment preload")
       .single()
@@ -47,11 +55,14 @@ impl SegmentPreload {
         handle_fallback(ready.clone()),
       )
       .to_box();
-    Self {
+    let this = Arc::new(Self {
       reuse,
       preload,
       ready,
-    }
+    });
+
+    event_bus.register(&this);
+    this
   }
 
   pub fn load(&self) -> Result<WALSegment> {
@@ -73,6 +84,15 @@ impl SegmentPreload {
     self.reuse.dispatch(segment);
   }
 }
+
+impl OwnedSubscription<SegmentReuseable> for SegmentPreload {
+  fn handle(&self, event: SegmentReuseable) {
+    self.reuse(event.0);
+  }
+}
+binding_events!(SegmentPreload {
+  owned: [SegmentReuseable]
+});
 
 fn handle_reuse(
   ready: Arc<SegQueue<WALSegment>>,

@@ -1,6 +1,6 @@
 use std::{
   cell::UnsafeCell, collections::VecDeque, mem::MaybeUninit, panic::RefUnwindSafe,
-  sync::Arc, time::Duration,
+  sync::Arc,
 };
 
 use super::{
@@ -9,12 +9,12 @@ use super::{
 };
 use crate::{
   background::{BackgroundThread, WorkBuilder},
-  debug,
   disk::{PagePool, Pointer, PAGE_SIZE},
-  error::Result,
+  error,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc, ToBox},
+  utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc},
+  Result,
 };
 
 pub struct BlockCacheConfig {
@@ -57,7 +57,6 @@ pub struct BlockCache {
   batch_handles: Box<[BatchHandle]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  pre_flush: Box<dyn BackgroundThread<(), Result>>,
   flush_executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
@@ -96,19 +95,6 @@ impl BlockCache {
       ))
       .to_arc();
 
-    let pre_flush = WorkBuilder::new()
-      .name("block cache pre-flush")
-      .single()
-      .interval(
-        PRE_FLUSH_INTERVAL,
-        handle_flush(
-          flush_executor.clone(),
-          dirty_blocks.clone(),
-          dirty_tables.clone(),
-        ),
-      )
-      .to_box();
-
     Ok(Self {
       cached_blocks,
       pins,
@@ -116,7 +102,6 @@ impl BlockCache {
       table: MappingTable::new(config.shard_count, block_cap),
       dirty_blocks,
       page_pool,
-      pre_flush,
       flush_executor,
       metrics,
       dirty_tables,
@@ -224,18 +209,15 @@ impl BlockCache {
       .measure(|| self.__read(pointer, &handle))
   }
 
-  pub fn flush(&self) -> Result {
-    debug!("block cache flush triggered.");
-    self
-      .metrics
-      .block_cache_flush
-      .measure(|| self.pre_flush.execute(()).wait().flatten())?;
-    debug!("block cache synced.");
-    Ok(())
+  pub fn create_flusher(&self) -> CacheFlusher {
+    CacheFlusher::new(
+      self.dirty_blocks.iter().collect(),
+      self.flush_executor.clone(),
+      self.dirty_tables.clone(),
+    )
   }
 
   pub fn close(&self) {
-    self.pre_flush.close();
     self.flush_executor.close();
   }
 }
@@ -250,8 +232,71 @@ impl Drop for BlockCache {
   }
 }
 
-const PRE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
-const PRE_FLUSH_THRESHOLD: usize = 512;
+pub struct CacheFlusher {
+  dirty_blocks: VecDeque<BlockId>,
+  executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
+  dirty_tables: Arc<DirtyTables>,
+}
+impl CacheFlusher {
+  const fn new(
+    dirty_blocks: VecDeque<BlockId>,
+    executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
+    dirty_tables: Arc<DirtyTables>,
+  ) -> Self {
+    Self {
+      dirty_blocks,
+      executor,
+      dirty_tables,
+    }
+  }
+
+  pub fn advance(&mut self, count: usize) -> Result {
+    let mut waiting = Vec::with_capacity(count);
+    for id in (0..count).map_while(|_| self.dirty_blocks.pop_front()) {
+      waiting.push(self.executor.execute(FlushTask::Write(id)));
+    }
+
+    for done in waiting {
+      done.wait().flatten()?;
+    }
+    Ok(())
+  }
+
+  pub fn flush_hard(&mut self) -> Result {
+    let mut waiting = Vec::with_capacity(self.dirty_blocks.len());
+    for id in self.dirty_blocks.drain(..) {
+      waiting.push(self.executor.execute(FlushTask::Write(id)));
+    }
+
+    for done in waiting.drain(..) {
+      done.wait().flatten()?;
+    }
+
+    self.finish()
+  }
+
+  pub fn is_done(&self) -> bool {
+    self.dirty_blocks.is_empty()
+  }
+
+  pub fn finish(&self) -> Result {
+    let mut waiting = Vec::new();
+    for table in self.dirty_tables.drain() {
+      waiting.push((
+        table.clone(),
+        self.executor.execute(FlushTask::Fsync(table)),
+      ));
+    }
+    for (table, done) in waiting {
+      if let Err(err) = done.wait().flatten() {
+        error!("error occurs in flush table: {err}");
+        self.dirty_tables.mark(&table);
+      };
+    }
+    Ok(())
+  }
+}
+
 const PRE_FLUSH_CONCURRENCY: usize = 4;
 
 enum FlushTask {
@@ -291,47 +336,5 @@ const fn handle_execute(
       Ok(())
     }
     FlushTask::Fsync(table) => table.disk().fsync(),
-  }
-}
-
-fn handle_flush(
-  executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
-  dirty_blocks: Arc<AtomicBitmap>,
-  dirty_tables: Arc<DirtyTables>,
-) -> impl FnMut(Option<()>) -> Result {
-  let mut waiting = VecDeque::new();
-  let mut peeked = VecDeque::new();
-  move |trigger| {
-    if trigger.is_none() {
-      if peeked.is_empty() {
-        for id in dirty_blocks.iter() {
-          peeked.push_back(id);
-        }
-      }
-      // periodical pre flush. it does not trigger fsync of a table.
-      for id in (0..PRE_FLUSH_THRESHOLD).map_while(|_| peeked.pop_front()) {
-        waiting.push_back(executor.execute(FlushTask::Write(id)));
-      }
-      while let Some(done) = waiting.pop_front() {
-        done.wait().flatten()?;
-      }
-      return Ok(());
-    }
-
-    for id in dirty_blocks.iter() {
-      waiting.push_back(executor.execute(FlushTask::Write(id)));
-    }
-    while let Some(done) = waiting.pop_front() {
-      done.wait().flatten()?;
-    }
-
-    for table in dirty_tables.drain() {
-      waiting.push_back(executor.execute(FlushTask::Fsync(table)));
-    }
-    while let Some(done) = waiting.pop_front() {
-      done.wait().flatten()?;
-    }
-    peeked.clear();
-    Ok(())
   }
 }

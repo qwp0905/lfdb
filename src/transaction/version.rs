@@ -187,9 +187,10 @@ impl VersionVisibility {
     Ok((active, aborted))
   }
 
-  pub fn persist_snapshot(&self, tx_id: TxId) -> Result<PathBuf> {
+  pub fn persist_snapshot(&self) -> Result<(TxId, PathBuf)> {
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
     let mut file = self.io_pool.open_append_io(current)?;
+    let tx_id = self.current_version();
 
     let active = self
       .active
@@ -213,7 +214,9 @@ impl VersionVisibility {
     for bytes in aborted {
       file.append(&bytes)?;
     }
-    file.flush()
+
+    let path = file.flush()?;
+    Ok((tx_id, path))
   }
 
   pub fn clear(&self, current: &Path) -> Result {

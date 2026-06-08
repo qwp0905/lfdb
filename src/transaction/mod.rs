@@ -20,4 +20,4 @@ mod active;
 use active::*;
 
 mod checkpoint;
-use checkpoint::*;
+pub use checkpoint::*;

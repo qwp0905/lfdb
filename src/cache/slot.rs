@@ -94,12 +94,11 @@ impl<'a> CachedSlot<'a> {
   {
     let mut shadow = self.page_pool.acquire();
     let latch = self.block.latch();
+    self.dirty.insert(self.block_id);
     shadow.copy_from(&**self.block.load_page());
     WritableSlot {
       shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
 
-      dirty: self.dirty,
-      block_id: self.block_id,
       latch,
       _token: self.token,
     }
@@ -121,8 +120,6 @@ impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
 }
 pub struct WritableSlot<'a> {
   shadow: ManuallyDrop<RefedSlot>,
-  dirty: &'a AtomicBitmap,
-  block_id: BlockId,
   latch: BlockLatch<'a>,
   _token: SharedToken<'a>,
 }
@@ -142,7 +139,6 @@ impl<'a> DerefMut for WritableSlot<'a> {
 impl<'a> Drop for WritableSlot<'a> {
   fn drop(&mut self) {
     let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
-    self.dirty.insert(self.block_id);
     self.latch.apply(shadow.into_inner());
   }
 }
@@ -164,15 +160,13 @@ impl<'a> BatchSlot<'a> {
 
     loop {
       let mut page = self.page_pool.acquire();
-
       {
         let mut latch = self.block.latch();
+        self.dirty.insert(self.block_id);
         page.copy_from(&**self.block.load_page());
 
         let mut slot = RefedSlot::new(self.block.get_pointer(), page);
         self.batch.flush_with(&mut slot);
-
-        self.dirty.insert(self.block_id);
 
         latch.apply(slot.into_inner());
       }

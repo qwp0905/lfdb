@@ -109,8 +109,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `wal_file_size` | Size limit of a single WAL segment file. When exceeded, a new segment is created. Larger segments improve write throughput by reducing rotation/checkpoint frequency, but extend recovery time on crash since more records must be replayed before the engine becomes available. |
 | `wal_buffer_size` | Soft limit of WAL buffer size. |
 | `io_thread_count` | Number of background IO worker threads shared across tables for write batching. Each table holds at most one worker at a time. |
-| `wal_segment_flush_delay` | Maximum time to wait before triggering a checkpoint for WAL segment reuse. |
-| `wal_segment_flush_count` | Maximum number of commits to buffer before triggering a checkpoint for WAL segment reuse. |
+| `checkpoint_flush_factor` | Determines the growth factor at which to flush the block cache at the checkpoint. In environments with frequent WAL segment replacement, such as write-heavy workloads, pressure increases exponentially at the set ratio. |
 | `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
 | `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
 | `gc_trigger_interval` | Interval at which garbage collection runs. Run more frequently when removes are heavy, less frequently when removes are rare. |
