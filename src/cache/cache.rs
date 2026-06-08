@@ -261,7 +261,7 @@ impl CacheFlusher {
     Ok(())
   }
 
-  pub fn flush_hard(mut self) -> Result {
+  pub fn flush_hard(&mut self) -> Result {
     let mut waiting = Vec::with_capacity(self.dirty_blocks.len());
     for id in self.dirty_blocks.drain(..) {
       waiting.push(self.executor.execute(FlushTask::Write(id)));

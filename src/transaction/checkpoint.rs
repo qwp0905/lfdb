@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, mem::take, sync::Arc, time::Duration};
+use std::{
+  cell::UnsafeCell, collections::VecDeque, panic::RefUnwindSafe, sync::Arc,
+  time::Duration,
+};
 
 use crossbeam::queue::SegQueue;
 
@@ -19,9 +22,73 @@ use crate::{
 const CHECKPOINT_TICK: Duration = Duration::from_millis(500);
 const BATCH_SIZE: f64 = ((1 << 20) / PAGE_SIZE / 2) as f64; // convert from mib/sec
 
+struct CheckpointCycle {
+  segments: VecDeque<WALSegment>,
+  flusher: CacheFlusher,
+  log_id: LogId,
+}
+impl CheckpointCycle {
+  fn new<T>(segments: T, flusher: CacheFlusher, log_id: LogId) -> Self
+  where
+    T: Iterator<Item = WALSegment>,
+  {
+    Self {
+      segments: segments.collect(),
+      flusher,
+      log_id,
+    }
+  }
+  fn flush_hard(&mut self) -> Result {
+    self.flusher.flush_hard()
+  }
+  fn finish_flush(&self) -> Result {
+    self.flusher.finish()
+  }
+  fn advance_flush(&mut self, count: usize) -> Result {
+    self.flusher.advance(count)
+  }
+  fn truncate_all(mut self) -> Result {
+    for segment in self.drain_all() {
+      segment.truncate()?;
+    }
+    Ok(())
+  }
+  fn drain_all(&mut self) -> impl Iterator<Item = WALSegment> + '_ {
+    self.segments.drain(..)
+  }
+  const fn get_log_id(&self) -> LogId {
+    self.log_id
+  }
+  fn segments_len(&self) -> usize {
+    self.segments.len()
+  }
+}
+
+struct CheckpointCell(UnsafeCell<Option<CheckpointCycle>>);
+impl CheckpointCell {
+  const fn as_mut(&self) -> &mut Option<CheckpointCycle> {
+    unsafe { &mut *self.0.get() }
+  }
+  fn set(&self, cycle: CheckpointCycle) {
+    unsafe { self.0.get().replace(Some(cycle)) };
+  }
+  fn clear(&self) {
+    unsafe { self.0.get().replace(None) };
+  }
+}
+
+unsafe impl Send for CheckpointCell {}
+unsafe impl Sync for CheckpointCell {}
+impl RefUnwindSafe for CheckpointCell {}
+
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
   ticker: Box<dyn BackgroundThread<(), Result>>,
+  cycle: Arc<CheckpointCell>,
+  wal: Arc<WAL>,
+  block_cache: Arc<BlockCache>,
+  version_visibility: Arc<VersionVisibility>,
+  io_pool: Arc<IOPool>,
 }
 impl Checkpoint {
   pub fn new(
@@ -33,6 +100,7 @@ impl Checkpoint {
     flush_factor: f64,
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
+    let cycle = CheckpointCell(UnsafeCell::new(None)).to_arc();
     let ticker = WorkBuilder::new()
       .name("checkpoint")
       .single()
@@ -40,22 +108,51 @@ impl Checkpoint {
         CHECKPOINT_TICK,
         checkpoint_loop(
           incoming.clone(),
-          wal,
-          block_cache,
-          version_visibility,
-          io_pool,
+          wal.clone(),
+          block_cache.clone(),
+          version_visibility.clone(),
+          io_pool.clone(),
           event_bus.clone(),
+          cycle.clone(),
           flush_factor,
         ),
       )
       .to_box();
 
-    let this = Arc::new(Self { incoming, ticker });
+    let this = Arc::new(Self {
+      incoming,
+      ticker,
+      cycle,
+      wal,
+      block_cache,
+      version_visibility,
+      io_pool,
+    });
     event_bus.register(&this);
     this
   }
 
-  pub fn run_hard(
+  pub fn initial_checkpoint(
+    wal: Arc<WAL>,
+    block_cache: Arc<BlockCache>,
+    version_visibility: Arc<VersionVisibility>,
+    io_pool: Arc<IOPool>,
+    event_bus: Arc<EventBus>,
+    flush_factor: f64,
+  ) -> Result<Arc<Self>> {
+    Self::run_hard(&wal, &block_cache, &version_visibility, &io_pool)?;
+
+    Ok(Self::new(
+      wal,
+      block_cache,
+      version_visibility,
+      io_pool,
+      event_bus,
+      flush_factor,
+    ))
+  }
+
+  fn run_hard(
     wal: &WAL,
     block_cache: &BlockCache,
     version: &VersionVisibility,
@@ -75,8 +172,42 @@ impl Checkpoint {
     Ok(())
   }
 
-  pub fn close(&self) {
+  pub fn close(&self) -> Result {
     self.ticker.close();
+
+    if self.incoming.is_empty() {
+      let mut cycle = match self.cycle.as_mut().take() {
+        Some(cycle) => cycle,
+        None => return Ok(()),
+      };
+
+      cycle.flush_hard()?;
+      finalize_checkpoint(
+        &self.version_visibility,
+        &self.io_pool,
+        &self.wal,
+        cycle.get_log_id(),
+      )?;
+      cycle.truncate_all()?;
+      return Ok(());
+    }
+
+    Self::run_hard(
+      &self.wal,
+      &self.block_cache,
+      &self.version_visibility,
+      &self.io_pool,
+    )?;
+
+    while let Some(segment) = self.incoming.pop() {
+      segment.truncate()?;
+    }
+
+    if let Some(cycle) = self.cycle.as_mut().take() {
+      cycle.truncate_all()?;
+    }
+
+    Ok(())
   }
 }
 
@@ -88,12 +219,6 @@ impl OwnedSubscription<WALSegmentRotated> for Checkpoint {
 binding_events!(Checkpoint {
   owned: [WALSegmentRotated]
 });
-
-struct CheckpointCycle {
-  reuse_target: VecDeque<WALSegment>,
-  flusher: CacheFlusher,
-  log_id: LogId,
-}
 
 /**
  * Adaptive incremental checkpoint.
@@ -107,11 +232,9 @@ fn checkpoint_loop(
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
   event_bus: Arc<EventBus>,
+  cycle: Arc<CheckpointCell>,
   flush_factor: f64,
 ) -> impl FnMut(Option<()>) -> Result {
-  let mut income = VecDeque::new();
-  let mut state: Option<CheckpointCycle> = None;
-
   let mut calculated = [0f64; 20];
   calculated[0] = BATCH_SIZE;
   for i in 1..calculated.len() {
@@ -128,47 +251,52 @@ fn checkpoint_loop(
   };
 
   move |_| {
-    while let Some(segment) = incoming.pop() {
-      income.push_back(segment);
-    }
-
-    let current = match state.as_mut() {
+    let current = match cycle.as_mut() {
       Some(v) => v,
       None => {
         let log_id = wal.current_log_id();
-        state = Some(CheckpointCycle {
-          reuse_target: take(&mut income),
-          flusher: block_cache.create_flusher(),
+        cycle.set(CheckpointCycle::new(
+          (0..).map_while(|_| incoming.pop()),
+          block_cache.create_flusher(),
           log_id,
-        });
+        ));
         return Ok(());
       }
     };
 
     if !current.flusher.is_done() {
-      let batch_size = calc_batch_size(current.reuse_target.len() + income.len());
+      let batch_size = calc_batch_size(current.segments_len() + incoming.len());
       trace!("checkpoint flush {} blocks", batch_size);
-      current.flusher.advance(batch_size)?;
+      current.advance_flush(batch_size)?;
       return Ok(());
     }
 
-    info!("checkpoint id {} trying to finish.", current.log_id);
+    info!("checkpoint id {} trying to finish.", current.get_log_id());
 
-    current.flusher.finish()?;
+    current.finish_flush()?;
     debug!("block cache all flushed.");
 
-    let (current_version, path) = version.persist_snapshot()?;
-    debug!("checkpoint snapshot persisted.");
-    io_pool.sync_dir()?;
-
-    wal.checkpoint_and_flush(current.log_id, current_version, path.clone())?;
-    info!("checkpoint complete id {}", current.log_id);
-
-    version.clear(&path)?;
-
-    let events = current.reuse_target.drain(..).map(SegmentReuseable::new);
+    finalize_checkpoint(&version, &io_pool, &wal, current.get_log_id())?;
+    let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
 
-    return Ok(state = None);
+    return Ok(cycle.clear());
   }
+}
+
+fn finalize_checkpoint(
+  version: &VersionVisibility,
+  io_pool: &IOPool,
+  wal: &WAL,
+  log_id: LogId,
+) -> Result {
+  let (current_version, path) = version.persist_snapshot()?;
+  debug!("checkpoint snapshot persisted.");
+  io_pool.sync_dir()?;
+
+  wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
+  info!("checkpoint complete id {}", log_id);
+
+  version.clear(&path)?;
+  Ok(())
 }
