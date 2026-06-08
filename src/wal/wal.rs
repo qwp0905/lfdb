@@ -20,7 +20,7 @@ use crate::{
   error::Result,
   info,
   table::TableId,
-  utils::{ToBox, UnsafeBorrow},
+  utils::UnsafeBorrow,
 };
 
 use super::{
@@ -33,7 +33,12 @@ pub struct WALConfig {
   pub max_buffer_size: usize,
 }
 
-pub struct WALSegmentRotated(pub WALSegment);
+pub struct WALSegmentRotated(WALSegment);
+impl WALSegmentRotated {
+  pub fn into_inner(self) -> WALSegment {
+    self.0
+  }
+}
 
 /**
  * Lock-free, group-commit write-ahead log.
@@ -51,11 +56,6 @@ pub struct WALSegmentRotated(pub WALSegment);
  */
 pub struct WAL {
   /**
-   *  preload wal segment
-   *  reuse synced + checkpoint complete segment
-   */
-  preloader: Box<SegmentPreload>,
-  /**
    * last log id (LSN)
    */
   last_log_id: AtomicLogId,
@@ -69,6 +69,12 @@ pub struct WAL {
    * wal segment max size
    */
   max_len: Pointer,
+
+  /**
+   *  preload wal segment
+   *  reuse synced + checkpoint complete segment
+   */
+  preloader: Arc<SegmentPreload>,
   /**
    * preloaded data block.
    */
@@ -111,7 +117,7 @@ impl WAL {
       replay_result.last_snapshot,
     );
 
-    let preloader = SegmentPreload::new(max_len, io_pool).to_box();
+    let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
     let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
 
     Ok((
@@ -317,9 +323,9 @@ impl WAL {
     self.append(|| LogRecordUninit::new_abort(tx_id), false)
   }
 
-  pub fn reuse(&self, segment: WALSegment) {
-    self.preloader.reuse(segment);
-  }
+  // pub fn reuse(&self, segment: WALSegment) {
+  //   self.preloader.reuse(segment);
+  // }
 
   pub fn close(&self) {
     while let Some(f) = self.fsync_queue.pop() {

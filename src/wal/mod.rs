@@ -14,7 +14,7 @@ mod buffer;
 use buffer::*;
 
 mod preload;
-use preload::*;
+pub use preload::*;
 
 mod types;
 pub use types::*;
