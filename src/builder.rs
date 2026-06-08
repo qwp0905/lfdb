@@ -22,6 +22,7 @@ where
       gc_key_count: DEFAULT_GC_KEY_COUNT,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
+      compaction_batch_size: DEFAULT_COMPACTION_BATCH_SIZE,
       block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
       block_cache_memory_capacity: DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY,
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
@@ -138,6 +139,14 @@ where
     self
   }
 
+  /**
+   * Number of keys to copy per compaction tick.
+   */
+  pub const fn compaction_batch_size(mut self, size: usize) -> Self {
+    self.0.compaction_batch_size = size;
+    self
+  }
+
   pub fn build(&self) -> Result<Engine> {
     Engine::bootstrap(&self.0)
   }
@@ -155,3 +164,4 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_IO_THREAD_COUNT: usize = 32;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
+const DEFAULT_COMPACTION_BATCH_SIZE: usize = 128;

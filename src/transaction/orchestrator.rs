@@ -170,7 +170,7 @@ impl TxOrchestrator {
    * performs the final checkpoint; step 2 wal.close() finalizes the WAL.
    */
   pub fn close(&self) -> Result {
-    self.compactor.close();
+    let _ = self.compactor.close();
     self.gc.close();
     info!("gc closed.");
     self.timeout_thread.close();

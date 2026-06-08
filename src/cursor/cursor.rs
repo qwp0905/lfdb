@@ -132,7 +132,7 @@ impl<'a> Cursor<'a> {
 
 pub struct CursorIterator<'a> {
   context: &'a TxContext<'a>,
-  iter: MergeSorted<BTreeIterator<'a, &'a TxContext<'a>>>,
+  iter: MergeSorted<BTreeIterator<&'a &'a TxContext<'a>>>,
 }
 impl<'a> CursorIterator<'a> {
   pub fn new(

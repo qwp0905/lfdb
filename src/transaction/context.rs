@@ -57,7 +57,7 @@ impl<'a> TxContext<'a> {
   }
 }
 
-impl<'a> ReadonlyPolicy for &TxContext<'a> {
+impl<'a> ReadonlyPolicy for TxContext<'a> {
   fn is_aborted(&self, owner: TxId) -> bool {
     self.snapshot.is_aborted(&owner)
   }
@@ -78,7 +78,7 @@ impl<'a> ReadonlyPolicy for &TxContext<'a> {
     self.orchestrator.fetch(pointer, table)
   }
 }
-impl<'a> WritablePolicy for &TxContext<'a> {
+impl<'a> WritablePolicy for TxContext<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,
@@ -103,7 +103,7 @@ impl<'a> WritablePolicy for &TxContext<'a> {
     self.orchestrator.alloc(pointer, table)
   }
 }
-impl<'a> CreatablePolicy for &TxContext<'a> {
+impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_owner(&self) -> TxId {
     self.state.get_id()
   }
