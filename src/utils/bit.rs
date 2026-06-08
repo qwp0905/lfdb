@@ -1,14 +1,6 @@
-use std::{
-  ops::Deref,
-  sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-    Arc,
-  },
-};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-// use crate::utils::Vector;
-
-const SHIFT: usize = 6;
+const SHIFT: u64 = 6;
 const MAX_BIT: usize = 1 << SHIFT;
 const MASK: usize = MAX_BIT - 1;
 
@@ -75,9 +67,6 @@ impl AtomicBitmap {
     self.len.load(Ordering::Relaxed)
   }
 
-  pub fn static_iter(self: &Arc<Self>) -> BitmapIter<Arc<Self>> {
-    BitmapIter::new(Arc::clone(self))
-  }
   pub const fn iter(&self) -> BitmapIter<&'_ Self> {
     BitmapIter::new(self)
   }
@@ -96,15 +85,18 @@ impl<T> BitmapIter<T> {
       remaining: 0,
     }
   }
+
+  pub fn get_next(&mut self) -> usize {
+    let bit = self.remaining.trailing_zeros() as usize;
+    self.remaining &= self.remaining - 1;
+    ((self.index - 1) << SHIFT) + bit
+  }
 }
-impl<T> Iterator for BitmapIter<T>
-where
-  T: Deref<Target = AtomicBitmap>,
-{
+impl<'a> Iterator for BitmapIter<&'a AtomicBitmap> {
   type Item = usize;
 
   fn next(&mut self) -> Option<Self::Item> {
-    let bits = &(*self.inner).bits;
+    let bits = &self.inner.bits;
     while self.remaining == 0 {
       if self.index >= bits.len() {
         return None;
@@ -113,9 +105,7 @@ where
       self.index += 1;
     }
 
-    let bit = self.remaining.trailing_zeros() as usize;
-    self.remaining &= self.remaining - 1;
-    Some(((self.index - 1) << SHIFT) + bit)
+    Some(self.get_next() as usize)
   }
 }
 
