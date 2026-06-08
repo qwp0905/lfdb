@@ -1,5 +1,5 @@
 use std::{
-  cell::UnsafeCell, collections::LinkedList, mem::MaybeUninit, panic::RefUnwindSafe,
+  cell::UnsafeCell, collections::VecDeque, mem::MaybeUninit, panic::RefUnwindSafe,
   sync::Arc, time::Duration,
 };
 
@@ -299,38 +299,39 @@ fn handle_flush(
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
 ) -> impl FnMut(Option<()>) -> Result {
-  let mut waits = LinkedList::new();
-  let mut iter = dirty_blocks.static_iter().peekable();
+  let mut waiting = VecDeque::new();
+  let mut peeked = VecDeque::new();
   move |trigger| {
     if trigger.is_none() {
+      if peeked.is_empty() {
+        for id in dirty_blocks.iter() {
+          peeked.push_back(id);
+        }
+      }
       // periodical pre flush. it does not trigger fsync of a table.
-      if iter.peek().is_none() {
-        iter = dirty_blocks.static_iter().peekable();
+      for id in (0..PRE_FLUSH_THRESHOLD).map_while(|_| peeked.pop_front()) {
+        waiting.push_back(executor.execute(FlushTask::Write(id)));
       }
-
-      for id in (&mut iter).take(PRE_FLUSH_THRESHOLD) {
-        waits.push_back(executor.execute(FlushTask::Write(id)));
-      }
-      while let Some(done) = waits.pop_front() {
+      while let Some(done) = waiting.pop_front() {
         done.wait().flatten()?;
       }
       return Ok(());
     }
 
     for id in dirty_blocks.iter() {
-      waits.push_back(executor.execute(FlushTask::Write(id)));
+      waiting.push_back(executor.execute(FlushTask::Write(id)));
     }
-    while let Some(done) = waits.pop_front() {
+    while let Some(done) = waiting.pop_front() {
       done.wait().flatten()?;
     }
 
     for table in dirty_tables.drain() {
-      waits.push_back(executor.execute(FlushTask::Fsync(table)));
+      waiting.push_back(executor.execute(FlushTask::Fsync(table)));
     }
-    while let Some(done) = waits.pop_front() {
+    while let Some(done) = waiting.pop_front() {
       done.wait().flatten()?;
     }
-    iter = dirty_blocks.static_iter().peekable();
+    peeked.clear();
     Ok(())
   }
 }
