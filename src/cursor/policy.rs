@@ -26,6 +26,27 @@ pub trait ReadonlyPolicy {
     self.is_readable(version) && !self.is_active(owner) && !self.is_aborted(owner)
   }
 }
+impl<'a, Policy: ReadonlyPolicy> ReadonlyPolicy for &'a Policy {
+  fn is_aborted(&self, owner: TxId) -> bool {
+    (*self).is_aborted(owner)
+  }
+  fn is_owned(&self, owner: TxId) -> bool {
+    (*self).is_owned(owner)
+  }
+  fn is_readable(&self, version: TxId) -> bool {
+    (*self).is_readable(version)
+  }
+  fn is_active(&self, owner: TxId) -> bool {
+    (*self).is_active(owner)
+  }
+  fn fetch_slot(
+    &self,
+    pointer: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<CachedSlot<'_>> {
+    (*self).fetch_slot(pointer, table)
+  }
+}
 
 pub trait WritablePolicy: ReadonlyPolicy {
   fn serialize_and_log<T: Serializable>(
@@ -54,6 +75,23 @@ pub trait WritablePolicy: ReadonlyPolicy {
     Ok(slot.get_pointer())
   }
 }
+impl<'a, Policy: WritablePolicy> WritablePolicy for &'a Policy {
+  fn serialize_and_log<T: Serializable>(
+    &self,
+    slot: &mut RefedSlot,
+    data: &T,
+    table: &TableHandleRef,
+  ) -> Result {
+    (*self).serialize_and_log(slot, data, table)
+  }
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<CachedSlot<'_>> {
+    (*self).alloc_slot(pointer, table)
+  }
+}
 
 pub trait CreatablePolicy: WritablePolicy {
   fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
@@ -62,4 +100,15 @@ pub trait CreatablePolicy: WritablePolicy {
   fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
+}
+impl<'a, Policy: CreatablePolicy> CreatablePolicy for &'a Policy {
+  fn wait_close(&self, owner: TxId) {
+    (*self).wait_close(owner)
+  }
+  fn current_owner(&self) -> TxId {
+    (*self).current_owner()
+  }
+  fn current_version(&self) -> TxId {
+    (*self).current_version()
+  }
 }
