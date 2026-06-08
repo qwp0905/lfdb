@@ -323,10 +323,6 @@ impl WAL {
     self.append(|| LogRecordUninit::new_abort(tx_id), false)
   }
 
-  // pub fn reuse(&self, segment: WALSegment) {
-  //   self.preloader.reuse(segment);
-  // }
-
   pub fn close(&self) {
     while let Some(f) = self.fsync_queue.pop() {
       let _ = f.wait();
