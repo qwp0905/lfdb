@@ -216,7 +216,7 @@ impl<'a> WritablePolicy for CompactionWritePolicy<'a> {
   }
 }
 
-pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
+pub const COMPACTION_INTERVAL: Duration = Duration::from_secs(5);
 
 fn wait_compaction(
   queue: Arc<SegQueue<CompactTask>>,
