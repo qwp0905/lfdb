@@ -30,7 +30,7 @@ fn make_value(i: usize) -> Vec<u8> {
   v
 }
 
-fn pre_load<E: BenchmarkDB>(engine: &E, count: usize) {
+fn pre_load<E: BenchmarkDB>(engine: E, count: usize) {
   engine.ensure_table(TABLE);
   let kvs = (0..count).map(|i| (make_key(i), make_value(i)));
   engine.bulk(TABLE, kvs.collect());
@@ -97,10 +97,12 @@ pub fn workload_a<F, E>(
   F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
+  {
+    let engine = new();
+    pre_load(engine, record_count);
+  }
 
   let engine = Arc::new(new());
-  pre_load(&*engine, record_count);
-
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -142,10 +144,12 @@ pub fn workload_b<E, F>(
   F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
+  {
+    let engine = new();
+    pre_load(engine, record_count);
+  }
 
   let engine = Arc::new(new());
-  pre_load(&*engine, record_count);
-
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -187,10 +191,12 @@ pub fn workload_d<E, F>(
   F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
+  {
+    let engine = new();
+    pre_load(engine, record_count);
+  }
 
   let engine = Arc::new(new());
-  pre_load(&*engine, record_count);
-
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -233,10 +239,12 @@ pub fn workload_e<E, F>(
   F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
+  {
+    let engine = new();
+    pre_load(engine, record_count);
+  }
 
   let engine = Arc::new(new());
-  pre_load(&*engine, record_count);
-
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -282,10 +290,12 @@ pub fn workload_f<E, F>(
   F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
+  {
+    let engine = new();
+    pre_load(engine, record_count);
+  }
 
   let engine = Arc::new(new());
-  pre_load(&*engine, record_count);
-
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
