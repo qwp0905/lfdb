@@ -13,8 +13,8 @@ use block::*;
 mod dirty;
 use dirty::*;
 
-mod shard;
-use shard::*;
+mod node;
+use node::*;
 
 mod batch;
 pub use batch::*;

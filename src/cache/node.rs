@@ -91,7 +91,7 @@ impl<K, V> CacheEntry<K, V> {
 const MAX_FREQ: u8 = 3;
 
 /**
- * A single shard of the block cache.
+ * A single node of the block cache.
  * It implements a S3-FIFO algorithm, which divides entries into three
  * categories: small, main, and ghost.
  * New entries are inserted into the small category, and if the small
@@ -105,7 +105,7 @@ const MAX_FREQ: u8 = 3;
  * capacities, entries in the ghost category are evicted until the total
  * number of entries is within the limit.
  */
-pub struct CacheShard<K, V> {
+pub struct CacheNode<K, V> {
   table: RawTable<*mut CacheEntry<K, V>>,
   small: VecDeque<*mut CacheEntry<K, V>>,
   main: VecDeque<*mut CacheEntry<K, V>>,
@@ -116,7 +116,7 @@ pub struct CacheShard<K, V> {
   main_count: usize,
   ghost_cap: usize,
 }
-impl<K, V> CacheShard<K, V>
+impl<K, V> CacheNode<K, V>
 where
   K: Eq + Hash,
 {
@@ -393,7 +393,7 @@ where
   }
 }
 
-impl<K, V> Drop for CacheShard<K, V> {
+impl<K, V> Drop for CacheNode<K, V> {
   fn drop(&mut self) {
     for ptr in self
       .main
@@ -440,5 +440,5 @@ impl<K, V, R> Reserved<K, V, R> {
 }
 
 #[cfg(test)]
-#[path = "tests/shard.rs"]
-mod tests;
+#[path = "tests/node.rs"]
+mod node;
