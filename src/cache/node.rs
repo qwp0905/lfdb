@@ -440,5 +440,5 @@ impl<K, V, R> Reserved<K, V, R> {
 }
 
 #[cfg(test)]
-#[path = "tests/shard.rs"]
-mod tests;
+#[path = "tests/node.rs"]
+mod node;
