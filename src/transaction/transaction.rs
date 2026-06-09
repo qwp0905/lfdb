@@ -202,7 +202,6 @@ impl<'a> Transaction<'a> {
     state.deactive();
     let version = self.orchestrator.current_version();
 
-    for _ in self.created_tables.drain(..) {}
     let events = self
       .dropped_tables
       .drain(..)
@@ -214,6 +213,7 @@ impl<'a> Transaction<'a> {
       .drain(..)
       .map(|(old, new, metadata)| CompactionCommitted::new(old, new, metadata, version));
     self.context.event_bus().batch_publish(events);
+    self.created_tables.clear();
 
     Ok(())
   }

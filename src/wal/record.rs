@@ -223,11 +223,7 @@ pub fn read_page(value: &Page<WAL_BLOCK_SIZE>) -> (Vec<LogRecord>, bool) {
       Ok(s) => s as usize,
       Err(_) => return (data, true), // ignore error cause of partial write
     };
-    match scanner
-      .read_n(size)
-      .ok()
-      .and_then(|p| LogRecord::read_from(p))
-    {
+    match scanner.read_n(size).ok().and_then(LogRecord::read_from) {
       Some(record) => data.push(record),
       None => return (data, true), // ignore error cause of partial write
     }

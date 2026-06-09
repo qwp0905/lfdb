@@ -79,7 +79,6 @@ impl VersionVisibility {
   pub fn replay(
     io_pool: Arc<IOPool>,
     last_tx_id: TxId,
-    aborted: BTreeSet<TxId>,
     started: BTreeSet<TxId>,
     closed: BTreeSet<TxId>,
     last_snapshot: Option<PathBuf>,
@@ -94,7 +93,6 @@ impl VersionVisibility {
         .into_iter()
         .chain(started)
         .chain(aborted_s)
-        .chain(aborted)
         .filter(|c| !closed.contains(c))
         .collect(),
       active: ActiveSet::new(),
