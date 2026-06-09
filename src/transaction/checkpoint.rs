@@ -5,7 +5,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::VersionVisibility;
 
@@ -18,7 +18,7 @@ use crate::{
   info,
   metrics::MetricsRegistry,
   trace,
-  utils::{ToArc, ToBox, UnsafeOption},
+  utils::{ToArc, ToBox, UnsafeBorrowMut},
   wal::{LogId, SegmentReuseable, WALSegment, WALSegmentRotated, WAL},
   Result,
 };
@@ -84,7 +84,7 @@ impl CheckpointCycle {
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
   ticker: Box<dyn BackgroundThread<(), Result>>,
-  cycle: Arc<UnsafeOption<CheckpointCycle>>,
+  cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
@@ -101,7 +101,7 @@ impl Checkpoint {
     flush_factor: f64,
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
-    let cycle = UnsafeOption::none().to_arc();
+    let cycle = AtomicCell::new(None).to_arc();
     let ticker = WorkBuilder::new()
       .name("checkpoint")
       .single()
@@ -180,7 +180,7 @@ impl Checkpoint {
     self.ticker.close();
 
     if self.incoming.is_empty() {
-      let mut cycle = match self.cycle.get_mut().take() {
+      let mut cycle = match self.cycle.take() {
         Some(cycle) => cycle,
         None => return Ok(()),
       };
@@ -207,7 +207,7 @@ impl Checkpoint {
       segment.truncate()?;
     }
 
-    if let Some(cycle) = self.cycle.get_mut().take() {
+    if let Some(cycle) = self.cycle.take() {
       cycle.truncate_all()?;
     }
 
@@ -236,7 +236,7 @@ fn checkpoint_loop(
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
   event_bus: Arc<EventBus>,
-  cycle: Arc<UnsafeOption<CheckpointCycle>>,
+  cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
 ) -> impl FnMut(Option<()>) -> Result {
@@ -256,11 +256,12 @@ fn checkpoint_loop(
   };
 
   move |_| {
-    let current = match cycle.get_mut() {
+    let cycle = cycle.as_ptr().borrow_mut_unsafe();
+    let current = match cycle {
       Some(v) => v,
       None => {
         let log_id = wal.current_log_id();
-        let new = cycle.get_mut().insert(CheckpointCycle::new(
+        let new = cycle.insert(CheckpointCycle::new(
           repeat_with(|| incoming.pop()).map_while(|v| v),
           block_cache.create_flusher(),
           log_id,
@@ -294,7 +295,7 @@ fn checkpoint_loop(
     let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
 
-    return Ok(*cycle.get_mut() = None);
+    return Ok(*cycle = None);
   }
 }
 
