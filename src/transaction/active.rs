@@ -9,7 +9,7 @@ use std::{
 use crate::{
   background::OnceParker,
   utils::{OffsetBitmap, SBox, ShortenedRwLock},
-  wal::TxId,
+  wal::{AtomicTxId, TxId},
 };
 
 const STATUS_AVAILABLE: u8 = 0;
@@ -88,15 +88,31 @@ impl ActiveState {
 
 pub struct ActiveSet {
   inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
+  last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
-  pub const fn new() -> Self {
+  pub const fn new(last_tx_id: TxId) -> Self {
     Self {
       inner: RwLock::new(BTreeMap::new()),
+      last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
-  pub fn insert(&self, state: SBox<ActiveState>) {
-    self.inner.wl().insert(state.tx_id, state);
+  pub fn current_version(&self) -> TxId {
+    self.last_tx_id.load(Ordering::Acquire)
+  }
+  pub fn new_state(&self) -> SBox<ActiveState> {
+    let mut uninit = SBox::new_uninit();
+    let mut inner = self.inner.wl();
+
+    let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
+    SBox::get_mut(&mut uninit)
+      .unwrap()
+      .write(ActiveState::new(tx_id));
+
+    inner
+      .entry(tx_id)
+      .or_insert(unsafe { uninit.assume_init() })
+      .clone()
   }
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
     let inner = self.inner.rl();

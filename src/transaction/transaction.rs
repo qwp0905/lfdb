@@ -200,7 +200,7 @@ impl<'a> Transaction<'a> {
     }
 
     state.deactive();
-    let version = self.orchestrator.current_version();
+    let version = self.context.state().current_version();
 
     let events = self
       .dropped_tables
@@ -238,7 +238,7 @@ impl<'a> Transaction<'a> {
 
   fn clear(&mut self) {
     let id = self.context.state().get_id();
-    let version = self.orchestrator.current_version();
+    let version = self.context.state().current_version();
 
     let events = self
       .created_tables
