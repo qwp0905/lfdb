@@ -1,15 +1,12 @@
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
   sync::Arc,
-  thread::{park, Builder, JoinHandle, Thread},
+  thread::{park, Builder, Thread},
 };
 
-use crate::{
-  utils::{ToArc, UnsafeOption},
-  Result,
-};
+use super::{BackgroundThread, Context, OneshotFulfill, SingleFn, ThreadSlot};
+use crate::{utils::ToArc, Result};
 
-use super::{BackgroundThread, Context, OneshotFulfill, SingleFn};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 /**
@@ -29,7 +26,7 @@ where
     }
 
     let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
-    let result = when_buffered.call(values).map(Ok).unwrap_or_else(Err);
+    let result = when_buffered.call(values);
     waiting
       .into_iter()
       .flatten()
@@ -53,11 +50,7 @@ where
 pub struct EagerBufferingThread<T, R> {
   queue: Arc<SegQueue<Context<T, R>>>,
   waker: Thread,
-  /**
-   * UnsafeCell allows taking the JoinHandle in close(&self).
-   * Safe because close() is called at most once during shutdown.
-   */
-  handle: UnsafeOption<JoinHandle<()>>,
+  slot: ThreadSlot,
 }
 impl<T, R> EagerBufferingThread<T, R>
 where
@@ -111,7 +104,7 @@ where
     Self {
       queue,
       waker,
-      handle: UnsafeOption::some(handle),
+      slot: ThreadSlot::new(handle),
     }
   }
 }
@@ -122,7 +115,7 @@ unsafe impl<T, R> Sync for EagerBufferingThread<T, R> {}
 
 impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
   fn register(&self, ctx: Context<T, R>) -> bool {
-    if self.handle.get().is_none() {
+    if self.slot.is_closed() {
       return false;
     }
     self.queue.push(ctx);
@@ -131,7 +124,7 @@ impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
   }
 
   fn close(&self) {
-    if let Some(th) = self.handle.get_mut().take() {
+    if let Some(th) = self.slot.close() {
       self.queue.push(Context::Term);
       self.waker.unpark();
       let _ = th.join();

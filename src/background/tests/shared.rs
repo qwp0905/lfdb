@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -26,8 +26,12 @@ fn test_no_timeout() {
   };
 
   let thread_count = 4;
-  let thread =
-    SharedWorkThread::new("test-no-timeout", DEFAULT_STACK_SIZE, thread_count, work);
+  let thread = SharedWorkThread::new(
+    "test-no-timeout",
+    DEFAULT_STACK_SIZE,
+    thread_count,
+    SharedFn::new(Arc::new(work)),
+  );
 
   // Send multiple tasks
   let receivers: Vec<_> = (1..=thread_count).map(|i| thread.execute(i)).collect();
@@ -59,8 +63,12 @@ fn test_multiple_threads() {
   };
 
   let thread_count = 4;
-  let thread =
-    SharedWorkThread::new("test-multi", DEFAULT_STACK_SIZE, thread_count, work);
+  let thread = SharedWorkThread::new(
+    "test-multi",
+    DEFAULT_STACK_SIZE,
+    thread_count,
+    SharedFn::new(Arc::new(work)),
+  );
 
   let receivers: Vec<_> = (0..(thread_count << 1))
     .map(|i| thread.execute(i))
@@ -80,8 +88,12 @@ fn test_multiple_threads() {
 fn test_multiple_close() {
   let thread_count = 4;
   let work = |_: ()| {};
-  let thread =
-    SharedWorkThread::new("test-multi-close", DEFAULT_STACK_SIZE, thread_count, work);
+  let thread = SharedWorkThread::new(
+    "test-multi-close",
+    DEFAULT_STACK_SIZE,
+    thread_count,
+    SharedFn::new(Arc::new(work)),
+  );
 
   thread.close();
   thread.close();

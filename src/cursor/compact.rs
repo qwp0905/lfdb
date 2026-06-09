@@ -6,7 +6,7 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{
   BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, Snapshotter,
@@ -22,7 +22,7 @@ use crate::{
   table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
-  utils::{ToArc, ToBox, UnsafeOption},
+  utils::{ToArc, ToBox, UnsafeBorrowMut},
   wal::{TxId, RESERVED_TX, WAL},
   warn, Error, Result,
 };
@@ -325,7 +325,7 @@ pub struct CompactionConfig {
 pub struct Compactor {
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
-  cycle: Arc<UnsafeOption<CompactionCycle>>,
+  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   ticker: Box<dyn BackgroundThread<(), Result>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
@@ -345,7 +345,7 @@ impl Compactor {
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
     let in_progress = SegQueue::new().to_arc();
-    let cycle = UnsafeOption::none().to_arc();
+    let cycle = AtomicCell::new(None).to_arc();
     let ticker = WorkBuilder::new()
       .name("compaction")
       .single()
@@ -384,7 +384,8 @@ impl Compactor {
   pub fn close(&self) -> Result {
     self.ticker.close();
 
-    if self.in_progress.is_empty() && self.cycle.get().is_none() {
+    let mut cycle = self.cycle.take();
+    if self.in_progress.is_empty() && cycle.is_none() {
       return Ok(());
     }
 
@@ -406,12 +407,7 @@ impl Compactor {
       recorder: self.recorder.clone(),
     });
 
-    while let Some(mut cycle) = self
-      .cycle
-      .get_mut()
-      .take()
-      .or_else(|| self.in_progress.pop())
-    {
+    while let Some(mut cycle) = cycle.take().or_else(|| self.in_progress.pop()) {
       if !check_compaction(
         &self.version_visibility,
         &self.wal,
@@ -544,7 +540,7 @@ fn compaction_loop(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   event_bus: Arc<EventBus>,
-  cycle: Arc<UnsafeOption<CompactionCycle>>,
+  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
 ) -> impl FnMut(Option<()>) -> Result {
   let meta_table = tables.meta_table();
@@ -565,6 +561,7 @@ fn compaction_loop(
   });
 
   move |_| {
+    let cycle_ref = cycle.as_ptr().borrow_mut_unsafe();
     while let Some(task) = incoming.pop() {
       match task {
         CompactTask::Committed(committed) => waiting_publish.push_back((
@@ -609,11 +606,11 @@ fn compaction_loop(
       }
     }
 
-    let current = match cycle
-      .get_mut()
-      .as_mut()
-      .or_else(|| in_progress.pop().map(|v| cycle.get_mut().insert(v)))
-    {
+    let current = match cycle_ref.as_mut().or_else(|| {
+      in_progress
+        .pop()
+        .map(|v| cycle.as_ptr().borrow_mut_unsafe().insert(v))
+    }) {
       Some(v) => v,
       None => return Ok(()),
     };
@@ -651,7 +648,7 @@ fn compaction_loop(
         owner,
         version,
       ));
-      return Ok(*cycle.get_mut() = None);
+      return Ok(*cycle_ref = None);
     }
 
     if !check_compaction(

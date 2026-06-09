@@ -27,3 +27,6 @@ pub use preload::*;
 
 mod event_bus;
 pub use event_bus::*;
+
+mod slot;
+pub use slot::*;

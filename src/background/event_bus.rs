@@ -2,17 +2,14 @@ use std::{
   any::{Any, TypeId},
   collections::HashMap,
   marker::PhantomData,
-  panic::RefUnwindSafe,
   sync::{Arc, Weak},
-  thread::{park, Builder, JoinHandle, Thread},
+  thread::{park, Builder, Thread},
 };
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use crate::{
-  error,
-  utils::{SBox, UnsafeOption},
-};
+use super::ThreadSlot;
+use crate::{error, utils::SBox};
 
 pub trait SharedSubscription<E> {
   fn handle(&self, event: Arc<E>);
@@ -277,7 +274,7 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
 pub struct EventBus {
   queue: SBox<SegQueue<EventMsg>>,
   waker: Thread,
-  handle: UnsafeOption<JoinHandle<()>>,
+  slot: ThreadSlot,
 }
 impl EventBus {
   pub fn new() -> Self {
@@ -290,7 +287,7 @@ impl EventBus {
     Self {
       queue,
       waker,
-      handle: UnsafeOption::some(handle),
+      slot: ThreadSlot::new(handle),
     }
   }
 
@@ -303,6 +300,7 @@ impl EventBus {
     self
       .queue
       .push(EventMsg::SubShared(TypeId::of::<E>(), Box::new(adapter)));
+    self.waker.unpark();
   }
   fn bind_owned<E, S>(&self, subscriber: Weak<S>)
   where
@@ -313,6 +311,7 @@ impl EventBus {
     self
       .queue
       .push(EventMsg::SubOwned(TypeId::of::<E>(), Box::new(adapter)));
+    self.waker.unpark();
   }
 
   pub fn register<S>(&self, subscriber: &Arc<S>)
@@ -340,17 +339,13 @@ impl EventBus {
   }
 
   pub fn close(&self) {
-    if let Some(handle) = self.handle.get_mut().take() {
+    if let Some(handle) = self.slot.close() {
       self.queue.push(EventMsg::Terminate);
       self.waker.unpark();
       let _ = handle.join();
     }
   }
 }
-
-unsafe impl Send for EventBus {}
-unsafe impl Sync for EventBus {}
-impl RefUnwindSafe for EventBus {}
 
 #[cfg(test)]
 #[path = "tests/event_bus.rs"]

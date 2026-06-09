@@ -4,9 +4,11 @@ use std::{
   time::Duration,
 };
 
+use crate::utils::ToArc;
+
 use super::{
   BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
-  SharedWorkThread, SingleFn,
+  SharedFn, SharedWorkThread, SingleFn,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
@@ -69,7 +71,7 @@ impl MultiThreadBuilder {
       self.builder.name,
       self.builder.stack_size,
       self.count,
-      build,
+      SharedFn::new(build.to_arc()),
     )
   }
 }

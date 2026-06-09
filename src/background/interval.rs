@@ -1,13 +1,13 @@
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
-  thread::{Builder, JoinHandle},
+  thread::Builder,
   time::Duration,
 };
 
-use crate::utils::{UnsafeOption, UnwrappedSender};
+use crate::{error, utils::UnwrappedSender};
 
-use super::{BackgroundThread, Context, SingleFn};
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+use super::{BackgroundThread, Context, SingleFn, ThreadSlot};
+use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
 
 /**
  * A background thread that processes work items on demand, and also calls
@@ -16,21 +16,20 @@ use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendE
  */
 pub struct IntervalWorkThread<T, R> {
   channel: Sender<Context<T, R>>,
-  handle: UnsafeOption<JoinHandle<()>>,
+  slot: ThreadSlot,
 }
 impl<T, R> IntervalWorkThread<T, R>
 where
   T: Send + UnwindSafe + 'static,
   R: Send + 'static,
 {
-  fn build<S: ToString>(
+  pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
     mut work: SingleFn<'static, Option<T>, R>,
-    channel: Sender<Context<T, R>>,
-    receiver: Receiver<Context<T, R>>,
   ) -> Self {
+    let (channel, receiver) = unbounded();
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
@@ -38,28 +37,23 @@ where
         match receiver.recv_timeout(timeout) {
           Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
           Ok(Context::Dispatch(v)) => {
-            let _ = work.call(Some(v));
+            if let Err(err) = work.call(Some(v)) {
+              error!("error occurs in thread {}: {}", name.to_string(), err);
+            }
           }
           Err(RecvTimeoutError::Timeout) => {
-            let _ = work.call(None);
+            if let Err(err) = work.call(None) {
+              error!("error occurs in thread {}: {}", name.to_string(), err);
+            }
           }
           Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => return,
         }
       })
       .unwrap();
     Self {
-      handle: UnsafeOption::some(handle),
       channel,
+      slot: ThreadSlot::new(handle),
     }
-  }
-  pub fn new<S: ToString>(
-    name: S,
-    size: usize,
-    timeout: Duration,
-    work: SingleFn<'static, Option<T>, R>,
-  ) -> Self {
-    let (tx, rx) = unbounded();
-    Self::build(name, size, timeout, work, tx, rx)
   }
 }
 unsafe impl<T, R> Send for IntervalWorkThread<T, R> {}
@@ -75,7 +69,7 @@ impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
   }
 
   fn close(&self) {
-    if let Some(v) = self.handle.get_mut().take() {
+    if let Some(v) = self.slot.close() {
       self.channel.must_send(Context::Term);
       let _ = v.join();
     }

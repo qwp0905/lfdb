@@ -34,6 +34,11 @@ where
     self.0.as_ref().safe_call(v).map_err(Error::panic)
   }
 }
+impl<'a, T, R> Clone for SharedFn<'a, T, R> {
+  fn clone(&self) -> Self {
+    Self(self.0.clone())
+  }
+}
 
 /**
  * A panic-safe wrapper around a mutable function for single-threaded use.
