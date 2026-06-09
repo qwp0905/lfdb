@@ -29,6 +29,7 @@ impl PageRecorder {
     &self,
     tx_id: TxId,
     table_id: TableId,
+    current_version: TxId,
     slot: &mut RefedSlot,
     data: &T,
   ) -> Result
@@ -38,8 +39,12 @@ impl PageRecorder {
     let ptr = slot.get_pointer();
     let page = slot.as_mut();
     let byte_len = page.serialize_from(data)?;
-    self
-      .wal
-      .append_insert(tx_id, table_id, ptr, page.copy_range(0..byte_len))
+    self.wal.append_insert(
+      tx_id,
+      table_id,
+      ptr,
+      current_version,
+      page.copy_range(0..byte_len),
+    )
   }
 }

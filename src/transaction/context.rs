@@ -88,6 +88,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
     self.orchestrator.serialize_and_log(
       self.state.get_id(),
       table.get_id(),
+      self.current_version(),
       slot,
       data,
     )?;

@@ -117,7 +117,7 @@ fn release_entry(
   };
 
   let serialize_and_log = |slot: &mut RefedSlot, entry: &DataEntry| {
-    recorder.serialize_and_log(RESERVED_TX, table_id, slot, entry)
+    recorder.serialize_and_log(RESERVED_TX, table_id, RESERVED_TX, slot, entry)
   };
 
   while let Some(ptr) = next.take() {
