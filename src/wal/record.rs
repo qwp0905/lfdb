@@ -10,41 +10,42 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Operation {
-  Insert(
-    TableId,
-    Pointer, // disk pointer of the page
-    Vec<u8>, // data
-  ),
-  Start,
+  Insert {
+    table_id: TableId,
+    pointer: Pointer,      // disk pointer of the page
+    current_version: TxId, // current version at the time the wal record was written
+    data: Vec<u8>,         // data
+  },
   Commit,
-  Abort,
   /**
    * Records the last stable log_id and the minimum active transaction version.
    * During recovery, min_active bounds the abort set — transactions that started
    * before min_active can be discarded, preventing the abort set from growing
    * unboundedly.
    */
-  Checkpoint(
-    LogId,   // last log id
-    TxId,    // current version
-    PathBuf, // mvcc snapshot path
-  ),
+  Checkpoint {
+    last_log_id: LogId,    // last log id
+    current_version: TxId, // current version
+    snapshot: PathBuf,     // mvcc snapshot path
+  },
 }
 impl Operation {
   const fn type_byte(&self) -> u8 {
     match self {
-      Self::Insert(..) => 1,
-      Self::Start => 2,
-      Self::Commit => 3,
-      Self::Abort => 4,
-      Self::Checkpoint(..) => 5,
+      Self::Insert { .. } => 1,
+      Self::Commit => 2,
+      Self::Checkpoint { .. } => 3,
     }
   }
 
   fn byte_len(&self) -> usize {
     1 + match self {
-      Self::Insert(_, _, data) => POINTER_BYTES + TABLE_ID_BYTES + data.len(),
-      Self::Checkpoint(_, _, path) => TX_ID_BYTES + LOG_ID_BYTES + path.as_os_str().len(),
+      Self::Insert { data, .. } => {
+        POINTER_BYTES + TABLE_ID_BYTES + TX_ID_BYTES + data.len()
+      }
+      Self::Checkpoint { snapshot, .. } => {
+        TX_ID_BYTES + LOG_ID_BYTES + snapshot.as_os_str().len()
+      }
       _ => 0,
     }
   }
@@ -82,18 +83,26 @@ impl LogRecord {
     let operation = match reader.read_byte()? {
       1 => {
         let table_id = reader.read_u32()?;
-        let page_ptr = reader.read_u64()?;
+        let pointer = reader.read_u64()?;
+        let current_version = reader.read_u64()?;
         let data = reader.read_all()?;
-        Operation::Insert(table_id, page_ptr, data.to_vec())
+        Operation::Insert {
+          table_id,
+          pointer,
+          current_version,
+          data: data.to_vec(),
+        }
       }
-      2 => (reader.is_eof()).then(|| Operation::Start)?,
-      3 => (reader.is_eof()).then(|| Operation::Commit)?,
-      4 => (reader.is_eof()).then(|| Operation::Abort)?,
-      5 => {
+      2 => (reader.is_eof()).then(|| Operation::Commit)?,
+      3 => {
         let log_id = reader.read_u64()?;
         let current_version = reader.read_u64()?;
         let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read_all()?) };
-        Operation::Checkpoint(log_id, current_version, path.into())
+        Operation::Checkpoint {
+          last_log_id: log_id,
+          current_version,
+          snapshot: path.into(),
+        }
       }
       _ => return None,
     };
@@ -108,19 +117,27 @@ impl LogRecord {
     writer.write_u8(self.operation.type_byte());
 
     match &self.operation {
-      Operation::Insert(table_id, page_ptr, data) => {
+      Operation::Insert {
+        table_id,
+        pointer,
+        data,
+        current_version: record_version,
+      } => {
         writer.write_u32(*table_id);
-        writer.write_u64(*page_ptr);
+        writer.write_u64(*pointer);
+        writer.write_u64(*record_version);
         writer.write(data);
       }
-      Operation::Checkpoint(log_id, current_version, path) => {
-        writer.write_u64(*log_id);
+      Operation::Checkpoint {
+        last_log_id,
+        current_version,
+        snapshot,
+      } => {
+        writer.write_u64(*last_log_id);
         writer.write_u64(*current_version);
-        writer.write(path.as_os_str().as_encoded_bytes());
+        writer.write(snapshot.as_os_str().as_encoded_bytes());
       }
-      Operation::Start => {}
       Operation::Commit => {}
-      Operation::Abort => {}
     }
     debug_assert_eq!(writer.written_bytes(), buf.len() - 4);
 
@@ -158,22 +175,23 @@ impl LogRecordUninit {
   pub fn new_insert(
     tx_id: TxId,
     table_id: TableId,
-    page_pointer: Pointer,
+    pointer: Pointer,
+    current_version: TxId,
     data: Vec<u8>,
   ) -> Self {
-    Self::new(tx_id, Operation::Insert(table_id, page_pointer, data))
-  }
-
-  pub fn new_start(tx_id: TxId) -> Self {
-    Self::new(tx_id, Operation::Start)
+    Self::new(
+      tx_id,
+      Operation::Insert {
+        table_id,
+        pointer,
+        data,
+        current_version,
+      },
+    )
   }
 
   pub fn new_commit(tx_id: TxId) -> Self {
     Self::new(tx_id, Operation::Commit)
-  }
-
-  pub fn new_abort(tx_id: TxId) -> Self {
-    Self::new(tx_id, Operation::Abort)
   }
 
   pub fn new_checkpoint(
@@ -183,7 +201,11 @@ impl LogRecordUninit {
   ) -> Self {
     Self::new(
       0,
-      Operation::Checkpoint(last_log_id, current_version, snapshot_path),
+      Operation::Checkpoint {
+        last_log_id,
+        current_version,
+        snapshot: snapshot_path,
+      },
     )
   }
 }
