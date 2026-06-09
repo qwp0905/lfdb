@@ -24,7 +24,7 @@ use crate::{
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox, UnsafeOption},
   wal::{TxId, RESERVED_TX, WAL},
-  warn, Result,
+  warn, Error, Result,
 };
 
 struct MiniTx<'a> {
@@ -244,7 +244,15 @@ fn create_compaction(
   let table_meta = tables.create_metadata(table_name);
   metadata.set_compaction(&table_meta);
 
-  index.insert_if_matched(table_name.as_bytes(), Some(metadata.to_vec()), &meta_table)?;
+  if let Err(err) =
+    index.insert_if_matched(table_name.as_bytes(), Some(metadata.to_vec()), &meta_table)
+  {
+    if matches!(err, Error::WriteConflict) {
+      info!("table {table_name} already set compaction state");
+      return Ok(None);
+    }
+    return Err(err);
+  };
 
   let new_table = tables.create_handle(&table_meta)?.try_pin().unwrap();
   tables.insert(new_table.handle().clone());
@@ -477,11 +485,17 @@ fn remove_compaction(
     return Ok(None);
   }
 
-  index.insert_if_matched(
+  if let Err(err) = index.insert_if_matched(
     table_name.as_bytes(),
     Some(table_metadata.to_vec()),
     &meta_table,
-  )?;
+  ) {
+    if matches!(err, Error::WriteConflict) {
+      warn!("table {table_name} already dropped.");
+      return Ok(None);
+    }
+    return Err(err);
+  };
 
   tx.commit()?;
   Ok(Some((

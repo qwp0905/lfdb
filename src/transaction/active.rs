@@ -23,7 +23,7 @@ pub struct ActiveState {
   parker: OnceParker,
 }
 impl ActiveState {
-  pub fn new(tx_id: TxId) -> Self {
+  pub const fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
@@ -33,7 +33,7 @@ impl ActiveState {
   pub fn is_available(&self) -> bool {
     self.status.load(Ordering::Acquire) == STATUS_AVAILABLE
   }
-  pub fn get_id(&self) -> TxId {
+  pub const fn get_id(&self) -> TxId {
     self.tx_id
   }
 

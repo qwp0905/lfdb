@@ -15,10 +15,10 @@ enum Type {
 
 pub struct VecRef(Type);
 impl VecRef {
-  pub fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
+  pub const fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
     Self(Type::Refed(page, start, end))
   }
-  pub fn copied(data: Vec<u8>) -> Self {
+  pub const fn copied(data: Vec<u8>) -> Self {
     Self(Type::Copied(data))
   }
 

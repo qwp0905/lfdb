@@ -39,7 +39,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
     .gc_trigger_interval(Duration::from_millis(50))
-    .gc_key_count(1024)
+    .gc_batch_size(1024)
     .compaction_batch_size(usize::MAX)
 }
 

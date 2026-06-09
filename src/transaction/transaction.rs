@@ -44,7 +44,7 @@ impl<'a> Transaction<'a> {
   }
 
   #[inline]
-  fn open_cursor(
+  const fn open_cursor(
     &self,
     table: TableHandleRef,
     compaction: Option<TableHandleRef>,

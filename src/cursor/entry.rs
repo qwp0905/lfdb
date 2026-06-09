@@ -13,8 +13,6 @@ use crate::{
 pub const MAX_KEY: usize = 1 << 8;
 pub const MAX_VALUE: usize = 1 << 16;
 
-pub const CHUNK_SIZE: usize = SERIALIZABLE_BYTES - 2;
-
 /**
  * MVCC version chain for a single key, stored as a linked list of pages.
  * When a page fills up with version records, overflow continues on the next page
@@ -95,25 +93,6 @@ impl Deserializable for DataEntry {
   }
 }
 
-pub struct DataChunk {
-  chunk: Vec<u8>,
-}
-impl DataChunk {
-  pub const fn new(chunk: Vec<u8>) -> Self {
-    Self { chunk }
-  }
-}
-impl TypedObject for DataChunk {
-  const TYPE: SerializeType = SerializeType::DataChunk;
-}
-impl Serializable for DataChunk {
-  fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
-    writer.write_u16(self.chunk.len() as u16)?;
-    writer.write(&self.chunk)?;
-    Ok(())
-  }
-}
-
 pub struct DataEntryView<'a> {
   page: &'a Page,
   next: Option<Pointer>,
@@ -186,35 +165,6 @@ impl<'a> DataEntryIter<'a> {
     Ok(Some(record))
   }
 }
-
-pub struct DataChunkView<'a> {
-  page: &'a Page,
-  start: usize,
-  end: usize,
-}
-impl<'a> DataChunkView<'a> {
-  pub fn get_data(&self) -> &[u8] {
-    self.page.range(self.start..self.end)
-  }
-}
-impl<'a> TypedObject for DataChunkView<'a> {
-  const TYPE: SerializeType = DataChunk::TYPE;
-}
-impl<'a> Viewable<'a> for DataChunkView<'a> {
-  fn read_from(
-    page: &'a Page,
-    reader: &mut crate::disk::PageScanner<'a>,
-  ) -> crate::Result<Self> {
-    let len = reader.read_u16()? as usize;
-    let offset = reader.advance(len)?;
-    Ok(Self {
-      page,
-      start: offset,
-      end: offset + len,
-    })
-  }
-}
-
 #[cfg(test)]
 #[path = "tests/entry.rs"]
 mod tests;
