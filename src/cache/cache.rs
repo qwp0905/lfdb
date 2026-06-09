@@ -247,11 +247,6 @@ impl BlockCache {
 const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
 const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
 
-#[test]
-fn sdf() {
-  println!("{}", BUCKET_SHIFT)
-}
-
 impl Drop for BlockCache {
   fn drop(&mut self) {
     for (len, offset) in self.table.len_per_shard() {
