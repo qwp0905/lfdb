@@ -75,7 +75,6 @@ impl<'a> TxSnapshot<'a> {
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
-  // last_tx_id: AtomicTxId,
   io_pool: Arc<IOPool>,
 }
 impl VersionVisibility {
@@ -99,7 +98,6 @@ impl VersionVisibility {
         .filter(|c| !closed.contains(c))
         .collect(),
       active: ActiveSet::new(last_tx_id),
-      // last_tx_id: AtomicTxId::new(last_tx_id),
     })
   }
 
