@@ -19,7 +19,7 @@ where
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
       gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
-      gc_key_count: DEFAULT_GC_KEY_COUNT,
+      gc_batch_size: DEFAULT_GC_BATCH_SIZE,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
       compaction_batch_size: DEFAULT_COMPACTION_BATCH_SIZE,
@@ -99,10 +99,10 @@ where
     self
   }
   /**
-   *
+   * Number of keys to advance per gc tick.
    */
-  pub const fn gc_key_count(mut self, count: usize) -> Self {
-    self.0.gc_key_count = count;
+  pub const fn gc_batch_size(mut self, count: usize) -> Self {
+    self.0.gc_batch_size = count;
     self
   }
   /**
@@ -156,7 +156,7 @@ const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_millis(500);
-const DEFAULT_GC_KEY_COUNT: usize = 32;
+const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
