@@ -294,10 +294,11 @@ impl WAL {
     tx_id: TxId,
     table_id: TableId,
     ptr: Pointer,
+    record_version: TxId,
     data: Vec<u8>,
   ) -> Result {
     self.append(
-      || LogRecordUninit::new_insert(tx_id, table_id, ptr, data),
+      || LogRecordUninit::new_insert(tx_id, table_id, ptr, record_version, data),
       false,
     )
   }
@@ -313,15 +314,15 @@ impl WAL {
       true,
     )
   }
-  pub fn append_start(&self, tx_id: TxId) -> Result {
-    self.append(|| LogRecordUninit::new_start(tx_id), false)
-  }
+  // pub fn append_start(&self, tx_id: TxId) -> Result {
+  //   self.append(|| LogRecordUninit::new_start(tx_id), false)
+  // }
   pub fn commit_and_flush(&self, tx_id: TxId) -> Result {
     self.append(|| LogRecordUninit::new_commit(tx_id), true)
   }
-  pub fn append_abort(&self, tx_id: TxId) -> Result {
-    self.append(|| LogRecordUninit::new_abort(tx_id), false)
-  }
+  // pub fn append_abort(&self, tx_id: TxId) -> Result {
+  //   self.append(|| LogRecordUninit::new_abort(tx_id), false)
+  // }
 
   pub fn close(&self) {
     while let Some(f) = self.fsync_queue.pop() {

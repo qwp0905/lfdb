@@ -81,53 +81,56 @@ pub fn replay(
     let segment = io_pool.open_direct_io(path)?;
     let len = segment.len()?;
     let mut offset = 0;
-    let mut records = vec![];
 
     while offset < len {
       let mut page = page_pool.acquire();
       segment.read(page.as_mut(), offset)?;
       offset += WAL_BLOCK_SIZE as u64;
 
-      let (r, complete) = read_page(&page);
-      records.extend(r.into_iter());
+      let (records, complete) = read_page(&page);
+
+      for record in records {
+        tx_id = tx_id.max(record.tx_id + 1);
+
+        if last_checkpoint.is_some_and(|c| c > record.log_id) {
+          continue;
+        }
+        log_id = record.log_id.max(log_id);
+
+        match record.operation {
+          Operation::Insert {
+            table_id,
+            pointer,
+            data,
+            current_version,
+          } => {
+            redo.insert(record.log_id, (table_id, pointer, data));
+            started.insert(record.log_id, record.tx_id);
+            tx_id = tx_id.max(current_version);
+          }
+          Operation::Commit => {
+            closed.insert(record.log_id, record.tx_id);
+          }
+          Operation::Checkpoint {
+            last_log_id,
+            current_version,
+            snapshot,
+          } => {
+            tx_id = tx_id.max(current_version);
+
+            redo = redo.split_off(&last_log_id);
+            aborted = aborted.split_off(&last_log_id);
+            started = started.split_off(&last_log_id);
+            closed = closed.split_off(&last_log_id);
+
+            last_checkpoint = Some(last_log_id);
+            last_snapshot = Some(snapshot);
+          }
+        };
+      }
       if complete {
         break;
       }
-    }
-
-    for record in records {
-      log_id = record.log_id.max(log_id);
-      tx_id = tx_id.max(record.tx_id);
-
-      if last_checkpoint.is_some_and(|c| c > record.log_id) {
-        continue;
-      }
-
-      match record.operation {
-        Operation::Insert(table_id, ptr, page) => {
-          redo.insert(record.log_id, (table_id, ptr, page));
-        }
-        Operation::Start => {
-          started.insert(record.log_id, record.tx_id);
-        }
-        Operation::Commit => {
-          closed.insert(record.log_id, record.tx_id);
-        }
-        Operation::Abort => {
-          aborted.insert(record.log_id, record.tx_id);
-        }
-        Operation::Checkpoint(last_log_id, current_version, path) => {
-          tx_id = tx_id.max(current_version);
-
-          redo = redo.split_off(&last_log_id);
-          aborted = aborted.split_off(&last_log_id);
-          started = started.split_off(&last_log_id);
-          closed = closed.split_off(&last_log_id);
-
-          last_checkpoint = Some(last_log_id);
-          last_snapshot = Some(path);
-        }
-      };
     }
 
     segments.push(segment);
@@ -135,7 +138,7 @@ pub fn replay(
 
   Ok(ReplayResult {
     last_log_id: log_id + 1,
-    last_tx_id: tx_id + 1,
+    last_tx_id: tx_id,
     aborted: aborted.into_values().collect(),
     started: started.into_values().collect(),
     closed: closed.into_values().collect(),
