@@ -14,7 +14,7 @@ use crate::{
   debug,
   disk::IOPool,
   info,
-  utils::{uuid_simple, OffsetBitmap},
+  utils::{uuid_simple, OffsetBitmap, SBox},
   wal::{TxId, TX_ID_BYTES},
   Result,
 };
@@ -22,11 +22,11 @@ use crate::{
 const FILE_EXT: &str = "snap";
 
 pub struct TxState<'a> {
-  state: Arc<ActiveState>,
+  state: SBox<ActiveState>,
   set: &'a ActiveSet,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
+  const fn new(state: SBox<ActiveState>, set: &'a ActiveSet) -> Self {
     Self { state, set }
   }
   pub fn deactive(&self) {

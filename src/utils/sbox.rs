@@ -1,4 +1,5 @@
 use std::{
+  mem::MaybeUninit,
   ops::Deref,
   sync::atomic::{fence, AtomicUsize, Ordering},
 };
@@ -28,6 +29,14 @@ impl<T> SBox<T> {
     Self {
       inner: Box::into_raw(Box::new(Inner::new(data))),
     }
+  }
+
+  pub fn get_mut(this: &mut SBox<T>) -> Option<&mut T> {
+    let inner = unsafe { &mut *this.inner };
+    if inner.count.load(Ordering::Acquire) > 1 {
+      return None;
+    }
+    Some(&mut inner.data)
   }
 }
 impl<T: ?Sized> Clone for SBox<T> {
@@ -66,6 +75,20 @@ impl<T: ?Sized> Deref for SBox<T> {
 
   fn deref(&self) -> &T {
     unsafe { &(*self.inner).data }
+  }
+}
+impl<T> SBox<T> {
+  pub fn new_uninit() -> SBox<MaybeUninit<T>> {
+    SBox::new(MaybeUninit::uninit())
+  }
+}
+impl<T> SBox<MaybeUninit<T>> {
+  pub unsafe fn assume_init(self) -> SBox<T> {
+    let inner = self.inner;
+    std::mem::forget(self);
+    SBox {
+      inner: inner.cast(),
+    }
   }
 }
 
