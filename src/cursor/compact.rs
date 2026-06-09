@@ -44,7 +44,7 @@ impl<'a> MiniTx<'a> {
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
   ) -> Result<Self> {
-    let (state, snapshot) = version_visibility.new_transaction();
+    let (snapshot, state) = version_visibility.new_transaction();
     Ok(Self {
       state,
       snapshot,
@@ -140,7 +140,7 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
     self.state.get_id()
   }
   fn current_version(&self) -> TxId {
-    self.version_visibility.current_version()
+    self.state.current_version()
   }
   fn wait_close(&self, _owner: TxId) {}
 }
@@ -261,11 +261,7 @@ fn create_compaction(
   index.initialize(new_table.handle())?;
 
   tx.commit()?;
-  Ok(Some((
-    new_table,
-    version_visibility.current_version(),
-    table_meta,
-  )))
+  Ok(Some((new_table, tx.current_version(), table_meta)))
 }
 
 pub struct CompactionCommitted {
@@ -496,10 +492,7 @@ fn remove_compaction(
   };
 
   tx.commit()?;
-  Ok(Some((
-    tx.state.get_id(),
-    version_visibility.current_version(),
-  )))
+  Ok(Some((tx.state.get_id(), tx.current_version())))
 }
 
 struct CompactionCycle {

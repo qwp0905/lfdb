@@ -3,7 +3,7 @@ use std::{
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::{atomic::Ordering, Arc},
+  sync::Arc,
 };
 
 use crossbeam_skiplist::SkipSet;
@@ -14,23 +14,26 @@ use crate::{
   debug,
   disk::IOPool,
   info,
-  utils::{uuid_simple, OffsetBitmap, SBox},
-  wal::{AtomicTxId, TxId, TX_ID_BYTES},
+  utils::{uuid_simple, OffsetBitmap},
+  wal::{TxId, TX_ID_BYTES},
   Result,
 };
 
 const FILE_EXT: &str = "snap";
 
 pub struct TxState<'a> {
-  state: SBox<ActiveState>,
+  state: Arc<ActiveState>,
   set: &'a ActiveSet,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: SBox<ActiveState>, set: &'a ActiveSet) -> Self {
+  const fn new(state: Arc<ActiveState>, set: &'a ActiveSet) -> Self {
     Self { state, set }
   }
   pub fn deactive(&self) {
     self.set.remove(&self.state.get_id());
+  }
+  pub fn current_version(&self) -> TxId {
+    self.set.current_version()
   }
 }
 impl<'a> Deref for TxState<'a> {
@@ -72,7 +75,7 @@ impl<'a> TxSnapshot<'a> {
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
-  last_tx_id: AtomicTxId,
+  // last_tx_id: AtomicTxId,
   io_pool: Arc<IOPool>,
 }
 impl VersionVisibility {
@@ -95,8 +98,8 @@ impl VersionVisibility {
         .chain(aborted_s)
         .filter(|c| !closed.contains(c))
         .collect(),
-      active: ActiveSet::new(),
-      last_tx_id: AtomicTxId::new(last_tx_id),
+      active: ActiveSet::new(last_tx_id),
+      // last_tx_id: AtomicTxId::new(last_tx_id),
     })
   }
 
@@ -132,24 +135,18 @@ impl VersionVisibility {
     self
       .active
       .min_version()
-      .unwrap_or_else(|| self.current_version())
+      .unwrap_or_else(|| self.active.current_version())
   }
   #[inline]
   pub fn set_abort(&self, tx_id: TxId) {
     self.aborted.insert(tx_id);
   }
-  pub fn new_transaction(&self) -> (TxState<'_>, TxSnapshot<'_>) {
-    let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
-    let state = SBox::new(ActiveState::new(tx_id));
-    self.active.insert(state.clone());
+  pub fn new_transaction(&self) -> (TxSnapshot<'_>, TxState<'_>) {
+    let state = self.active.new_state();
     (
+      TxSnapshot::new(self.active.snapshot_until(state.get_id()), &self.aborted),
       TxState::new(state, &self.active),
-      TxSnapshot::new(self.active.snapshot_until(tx_id), &self.aborted),
     )
-  }
-  #[inline]
-  pub fn current_version(&self) -> TxId {
-    self.last_tx_id.load(Ordering::Acquire)
   }
   #[inline]
   pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
@@ -188,7 +185,7 @@ impl VersionVisibility {
   pub fn persist_snapshot(&self) -> Result<(TxId, PathBuf)> {
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
     let mut file = self.io_pool.open_append_io(current)?;
-    let tx_id = self.current_version();
+    let tx_id = self.active.current_version();
 
     let active = self
       .active

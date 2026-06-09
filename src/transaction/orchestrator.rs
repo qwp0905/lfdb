@@ -110,11 +110,10 @@ impl TxOrchestrator {
     &self,
     timeout: Option<Duration>,
   ) -> Result<(TxState<'_>, TxSnapshot<'_>)> {
-    let (state, snapshot) = self.version_visibility.new_transaction();
-    let tx_id = state.get_id();
+    let (snapshot, state) = self.version_visibility.new_transaction();
     self
       .timeout_thread
-      .register(tx_id, timeout.unwrap_or(self.tx_timeout));
+      .register(state.get_id(), timeout.unwrap_or(self.tx_timeout));
     Ok((state, snapshot))
   }
 
@@ -132,11 +131,6 @@ impl TxOrchestrator {
     self.version_visibility.set_abort(tx_id);
     self.metrics.transaction_abort_count.inc();
     Ok(())
-  }
-
-  #[inline]
-  pub fn current_version(&self) -> TxId {
-    self.version_visibility.current_version()
   }
 
   #[inline]

@@ -2,14 +2,14 @@ use std::{
   collections::BTreeMap,
   sync::{
     atomic::{AtomicU8, Ordering},
-    RwLock,
+    Arc, RwLock,
   },
 };
 
 use crate::{
   background::OnceParker,
-  utils::{OffsetBitmap, SBox, ShortenedRwLock},
-  wal::TxId,
+  utils::{OffsetBitmap, ShortenedRwLock},
+  wal::{AtomicTxId, TxId},
 };
 
 const STATUS_AVAILABLE: u8 = 0;
@@ -87,16 +87,32 @@ impl ActiveState {
 }
 
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
+  inner: RwLock<BTreeMap<TxId, Arc<ActiveState>>>,
+  last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
-  pub const fn new() -> Self {
+  pub const fn new(last_tx_id: TxId) -> Self {
     Self {
       inner: RwLock::new(BTreeMap::new()),
+      last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
-  pub fn insert(&self, state: SBox<ActiveState>) {
-    self.inner.wl().insert(state.tx_id, state);
+  pub fn current_version(&self) -> TxId {
+    self.last_tx_id.load(Ordering::Acquire)
+  }
+  pub fn new_state(&self) -> Arc<ActiveState> {
+    let mut uninit = Arc::<ActiveState>::new_uninit();
+    let mut inner = self.inner.wl();
+
+    let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
+    Arc::get_mut(&mut uninit)
+      .unwrap()
+      .write(ActiveState::new(tx_id));
+
+    inner
+      .entry(tx_id)
+      .or_insert(unsafe { uninit.assume_init() })
+      .clone()
   }
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
     let inner = self.inner.rl();
@@ -120,8 +136,8 @@ impl ActiveSet {
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
   }
-  pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.rl().get(tx_id).map(SBox::clone)
+  pub fn get(&self, tx_id: &TxId) -> Option<Arc<ActiveState>> {
+    self.inner.rl().get(tx_id).map(Arc::clone)
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
