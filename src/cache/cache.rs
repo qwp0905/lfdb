@@ -1,5 +1,8 @@
 use std::{
-  cell::UnsafeCell, collections::VecDeque, mem::MaybeUninit, panic::RefUnwindSafe,
+  cell::UnsafeCell,
+  collections::{HashMap, VecDeque},
+  mem::MaybeUninit,
+  panic::RefUnwindSafe,
   sync::Arc,
 };
 
@@ -210,8 +213,27 @@ impl BlockCache {
   }
 
   pub fn create_flusher(&self) -> CacheFlusher {
+    let mut buckets = HashMap::<_, Vec<_>>::new();
+    let mut len = 0;
+    for id in self.dirty_blocks.iter() {
+      if let Some(_token) = self.pins[id].try_shared() {
+        let block = self.cached_blocks[id].get();
+        let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
+        buckets.entry(key).or_default().push(id);
+        len += 1;
+      }
+    }
+
+    let mut dirty = vec![0; len];
+    let mut offset = 0;
+    for bucket in buckets.into_values() {
+      let end = offset + bucket.len();
+      dirty[offset..end].copy_from_slice(&bucket);
+      offset = end;
+    }
+
     CacheFlusher::new(
-      self.dirty_blocks.iter().collect(),
+      VecDeque::from(dirty),
       self.flush_executor.clone(),
       self.dirty_tables.clone(),
     )
@@ -220,6 +242,14 @@ impl BlockCache {
   pub fn close(&self) {
     self.flush_executor.close();
   }
+}
+
+const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
+const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
+
+#[test]
+fn sdf() {
+  println!("{}", BUCKET_SHIFT)
 }
 
 impl Drop for BlockCache {
@@ -273,6 +303,10 @@ impl CacheFlusher {
     }
 
     self.finish()
+  }
+
+  pub fn len(&self) -> usize {
+    self.dirty_blocks.len()
   }
 
   pub fn is_done(&self) -> bool {
