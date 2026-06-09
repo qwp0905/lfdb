@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheShard, GetOrReserve};
+use super::{CacheNode, GetOrReserve};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -27,7 +27,7 @@ const U32_MASK: u64 = u32::MAX as u64;
  * at any given time, the performance difference is negligible.
  */
 struct Shard {
-  inner: CacheShard<Key, BlockId>,
+  node: CacheNode<Key, BlockId>,
   eviction: BTreeSet<Key>, // evicting pointers
   allocated: BlockId,
   aborted: VecDeque<(BlockId, Option<Key>)>,
@@ -105,7 +105,7 @@ impl<'a> Drop for EvictionGuard<'a> {
       } else {
         shard.aborted.push_back((self.block_id, None));
       }
-      shard.inner.remove(&self.new_pointer, self.new_pointer_hash);
+      shard.node.remove(&self.new_pointer, self.new_pointer_hash);
     }
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
@@ -129,7 +129,7 @@ impl MappingTable {
     let mut offset = Vec::with_capacity(shard_count);
     for i in 0..shard_count {
       let shard = Shard {
-        inner: CacheShard::new(cap_per_shard),
+        node: CacheNode::new(cap_per_shard),
         eviction: BTreeSet::new(),
         allocated: 0,
         aborted: VecDeque::new(),
@@ -176,7 +176,7 @@ impl MappingTable {
         continue;
       }
 
-      let mut reserved = match shard.inner.reserve(&key, hash, hasher, &try_evict) {
+      let mut reserved = match shard.node.reserve(&key, hash, hasher, &try_evict) {
         Ok(reserved) => reserved,
         Err(_) => {
           drop(shard);
@@ -192,7 +192,7 @@ impl MappingTable {
             let id = shard.allocated;
             shard.allocated += 1;
             debug_assert!(
-              shard.allocated <= shard.inner.capacity(),
+              shard.allocated <= shard.node.capacity(),
               "capacity exceeded"
             );
             (id + offset, None)
@@ -245,8 +245,7 @@ impl MappingTable {
         continue;
       }
 
-      let mut reserved = match shard.inner.get_or_reserve(&key, hash, hasher, &try_evict)
-      {
+      let mut reserved = match shard.node.get_or_reserve(&key, hash, hasher, &try_evict) {
         Ok(GetOrReserve::Hit(&bid)) => {
           if let Some(token) = get_pin(bid).try_shared() {
             return Acquired::Hit(bid, token);
@@ -270,7 +269,7 @@ impl MappingTable {
             let id = shard.allocated;
             shard.allocated += 1;
             debug_assert!(
-              shard.allocated <= shard.inner.capacity(),
+              shard.allocated <= shard.node.capacity(),
               "capacity exceeded"
             );
             (id + offset, None)

@@ -10,12 +10,7 @@ fn never_fail<V>(_: &V) -> Option<()> {
   Some(())
 }
 
-fn insert(
-  shard: &mut CacheShard<usize, usize>,
-  hasher: &RandomState,
-  k: usize,
-  v: usize,
-) {
+fn insert(shard: &mut CacheNode<usize, usize>, hasher: &RandomState, k: usize, v: usize) {
   let reserved = shard
     .get_or_reserve(&k, h(hasher, k), hasher, never_fail)
     .unwrap();
@@ -27,7 +22,7 @@ fn insert(
   }
 }
 fn get<'a>(
-  shard: &'a mut CacheShard<usize, usize>,
+  shard: &'a mut CacheNode<usize, usize>,
   hasher: &'a RandomState,
   k: usize,
 ) -> GetOrReserve<'a, usize, usize, ()> {
@@ -38,7 +33,7 @@ fn get<'a>(
 
 #[test]
 fn test_basic_reserve_and_get() {
-  let mut shard = CacheShard::<usize, usize>::new(20);
+  let mut shard = CacheNode::<usize, usize>::new(20);
   let hasher = RandomState::new();
 
   insert(&mut shard, &hasher, 1, 100);
@@ -60,7 +55,7 @@ fn test_basic_reserve_and_get() {
 
 #[test]
 fn test_remove() {
-  let mut shard = CacheShard::<usize, usize>::new(20);
+  let mut shard = CacheNode::<usize, usize>::new(20);
   let hasher = RandomState::new();
 
   insert(&mut shard, &hasher, 1, 100);
