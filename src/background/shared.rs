@@ -1,7 +1,6 @@
 use std::{
-  cell::UnsafeCell,
   panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
+  sync::Mutex,
   thread::{Builder, JoinHandle},
 };
 
@@ -11,13 +10,14 @@ use crossbeam::{
 };
 
 use crate::{
-  error::Result,
-  utils::{ToArc, UnsafeBorrowMut, UnwrappedSender},
+  error,
+  utils::{ShortenedMutex, UnwrappedSender},
 };
 
 use super::{BackgroundThread, Context, SharedFn};
 
 const fn worker_loop<T, R>(
+  name: String,
   receiver: Receiver<Context<T, R>>,
   work: SharedFn<'static, T, R>,
 ) -> impl Fn()
@@ -32,7 +32,9 @@ where
       match ctx {
         Context::Work(v, done) => done.fulfill(work.call(v)),
         Context::Dispatch(v) => {
-          let _ = work.call(v);
+          if let Err(err) = work.call(v) {
+            error!("error occurs in thread {}: {}", &name, err);
+          }
         }
         Context::Term => return,
       }
@@ -45,7 +47,9 @@ where
             backoff.reset();
           }
           Ok(Context::Dispatch(v)) => {
-            let _ = work.call(v);
+            if let Err(err) = work.call(v) {
+              error!("error occurs in thread {}: {}", &name, err);
+            }
             backoff.reset();
           }
           Ok(Context::Term) | Err(TryRecvError::Disconnected) => return,
@@ -61,48 +65,37 @@ where
  * Suitable for tasks that require burst throughput but have long idle periods.
  */
 pub struct SharedWorkThread<T, R = ()> {
-  threads: UnsafeCell<Vec<JoinHandle<()>>>,
   queue: Sender<Context<T, R>>,
+  threads: Mutex<Vec<JoinHandle<()>>>,
 }
 impl<T, R> SharedWorkThread<T, R>
 where
   T: Send + UnwindSafe + 'static,
   R: Send + 'static,
 {
-  fn build__<S: ToString, F, E, W>(
+  pub fn new<S: ToString>(
     name: S,
     size: usize,
     count: usize,
-    build: F,
-  ) -> std::result::Result<Self, E>
-  where
-    F: Fn(usize) -> std::result::Result<Arc<W>, E>,
-    W: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
-  {
+    work: SharedFn<'static, T, R>,
+  ) -> Self {
     let (tx, rx) = unbounded();
     let mut threads = Vec::with_capacity(count);
     let name = name.to_string();
-    for i in 0..count {
+    for _ in 0..count {
       let thread = Builder::new()
         .name(name.clone())
         .stack_size(size)
-        .spawn(worker_loop(rx.clone(), SharedFn::new(build(i)?)))
+        .spawn(worker_loop(name.clone(), rx.clone(), work.clone()))
         .unwrap();
 
       threads.push(thread);
     }
 
-    Ok(Self {
+    Self {
       queue: tx,
-      threads: UnsafeCell::new(threads),
-    })
-  }
-  pub fn new<S: ToString, F>(name: S, size: usize, count: usize, build: F) -> Self
-  where
-    F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
-  {
-    let build = build.to_arc();
-    Self::build__(name, size, count, |_| Ok(build.clone()) as Result<Arc<F>>).unwrap()
+      threads: Mutex::new(threads),
+    }
   }
 }
 
@@ -119,7 +112,7 @@ impl<T, R> BackgroundThread<T, R> for SharedWorkThread<T, R> {
     }
   }
   fn close(&self) {
-    let threads = self.threads.get().borrow_mut_unsafe();
+    let mut threads = self.threads.l();
     for _ in 0..threads.len() {
       self.queue.must_send(Context::Term);
     }

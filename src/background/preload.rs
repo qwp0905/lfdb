@@ -1,9 +1,9 @@
-use crate::{background::SingleFn, utils::UnsafeOption};
+use crate::{background::SingleFn, error};
 
-use super::{BackgroundThread, Context};
+use super::{BackgroundThread, Context, ThreadSlot};
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
-  thread::{Builder, JoinHandle},
+  thread::Builder,
   time::Duration,
 };
 
@@ -11,13 +11,13 @@ use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
 
 pub struct PreloadThread<T> {
   channel: Sender<Context<(), T>>,
-  handle: UnsafeOption<JoinHandle<()>>,
+  slot: ThreadSlot,
 }
 impl<T> PreloadThread<T>
 where
   T: Send + UnwindSafe + 'static,
 {
-  pub fn new<S: ToString>(
+  pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
@@ -35,11 +35,15 @@ where
           match rx.recv_timeout(timeout) {
             Ok(Context::Work(_, done)) => done.fulfill(result),
             Ok(Context::Dispatch(_)) | Err(RecvTimeoutError::Timeout) => {
-              let _ = fallback.call(None);
+              if let Err(err) = fallback.call(None) {
+                error!("error occurs in thread {}: {}", name.to_string(), err);
+              }
               preloaded = Some(result);
             }
             Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
-              let _ = result.and_then(|r| fallback.call(Some(r)));
+              if let Err(err) = result.and_then(|r| fallback.call(Some(r))) {
+                error!("error occurs in thread {}: {}", name.to_string(), err);
+              }
               return;
             }
           }
@@ -49,7 +53,7 @@ where
 
     Self {
       channel: tx,
-      handle: UnsafeOption::some(handle),
+      slot: ThreadSlot::new(handle),
     }
   }
 }
@@ -67,7 +71,7 @@ impl<T> BackgroundThread<(), T> for PreloadThread<T> {
   }
 
   fn close(&self) {
-    if let Some(v) = self.handle.get_mut().take() {
+    if let Some(v) = self.slot.close() {
       self.channel.send(Context::Term).unwrap();
       let _ = v.join();
     }

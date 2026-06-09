@@ -1,7 +1,7 @@
 use std::{
   mem::replace,
   sync::Arc,
-  thread::{Builder, JoinHandle},
+  thread::Builder,
   time::{Duration, Instant},
 };
 
@@ -10,12 +10,7 @@ use crossbeam::{
   select,
 };
 
-use crate::{
-  debug,
-  utils::{UnsafeOption, UnwrappedSender},
-  wal::TxId,
-  warn,
-};
+use crate::{background::ThreadSlot, debug, utils::UnwrappedSender, wal::TxId, warn};
 
 use super::VersionVisibility;
 
@@ -211,7 +206,7 @@ enum Msg {
  */
 pub struct TimeoutThread {
   channel: Sender<Msg>,
-  handle: UnsafeOption<JoinHandle<()>>,
+  slot: ThreadSlot,
 }
 impl TimeoutThread {
   pub fn new(version_visibility: Arc<VersionVisibility>) -> Self {
@@ -256,8 +251,8 @@ impl TimeoutThread {
       .unwrap();
 
     Self {
-      handle: UnsafeOption::some(th),
       channel: tx,
+      slot: ThreadSlot::new(th),
     }
   }
 
@@ -266,11 +261,9 @@ impl TimeoutThread {
   }
 
   pub fn close(&self) {
-    if let Some(th) = self.handle.get_mut().take() {
+    if let Some(th) = self.slot.close() {
       let _ = self.channel.send(Msg::Term);
       let _ = th.join();
     }
   }
 }
-unsafe impl Send for TimeoutThread {}
-unsafe impl Sync for TimeoutThread {}
