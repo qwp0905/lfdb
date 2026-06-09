@@ -26,7 +26,6 @@ pub const RESERVED_TX: TxId = 0;
 pub struct ReplayResult {
   pub last_log_id: LogId,
   pub last_tx_id: TxId,
-  pub aborted: BTreeSet<TxId>,
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
@@ -38,7 +37,6 @@ impl ReplayResult {
     Self {
       last_log_id: 0,
       last_tx_id: RESERVED_TX + 1,
-      aborted: BTreeSet::new(),
       started: BTreeSet::new(),
       closed: BTreeSet::new(),
       redo: Vec::new(),
@@ -62,28 +60,27 @@ pub fn replay(
     files.push(filename)
   }
 
-  if files.len() == 0 {
+  if files.is_empty() {
     return Ok(ReplayResult::empty());
   }
 
+  let mut page = page_pool.acquire();
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
   let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
-  let mut aborted = BTreeMap::<LogId, TxId>::new();
   let mut started = BTreeMap::<LogId, TxId>::new();
   let mut closed = BTreeMap::<LogId, TxId>::new();
   let mut last_snapshot = None;
 
   let mut segments = Vec::new();
 
-  let mut last_checkpoint = None as Option<LogId>;
-  for path in files.into_iter() {
+  let mut last_checkpoint: Option<LogId> = None;
+  for path in files {
     let segment = io_pool.open_direct_io(path)?;
     let len = segment.len()?;
     let mut offset = 0;
 
     while offset < len {
-      let mut page = page_pool.acquire();
       segment.read(page.as_mut(), offset)?;
       offset += WAL_BLOCK_SIZE as u64;
 
@@ -95,7 +92,7 @@ pub fn replay(
         if last_checkpoint.is_some_and(|c| c > record.log_id) {
           continue;
         }
-        log_id = record.log_id.max(log_id);
+        log_id = log_id.max(record.log_id + 1);
 
         match record.operation {
           Operation::Insert {
@@ -119,7 +116,6 @@ pub fn replay(
             tx_id = tx_id.max(current_version);
 
             redo = redo.split_off(&last_log_id);
-            aborted = aborted.split_off(&last_log_id);
             started = started.split_off(&last_log_id);
             closed = closed.split_off(&last_log_id);
 
@@ -137,9 +133,8 @@ pub fn replay(
   }
 
   Ok(ReplayResult {
-    last_log_id: log_id + 1,
+    last_log_id: log_id,
     last_tx_id: tx_id,
-    aborted: aborted.into_values().collect(),
     started: started.into_values().collect(),
     closed: closed.into_values().collect(),
     redo: redo.into_values().collect::<Vec<_>>(),

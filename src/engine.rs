@@ -108,7 +108,6 @@ impl Engine {
     let version_visibility = VersionVisibility::replay(
       io_pool.clone(),
       replay.last_tx_id,
-      replay.aborted,
       replay.started,
       replay.closed,
       replay.last_snapshot,

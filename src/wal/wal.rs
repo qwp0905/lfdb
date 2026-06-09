@@ -108,10 +108,9 @@ impl WAL {
     let replay_result = replay(&page_pool, &io_pool)?;
 
     info!(
-      "wal replay result: last_log_id {} last_tx_id {} aborted {} redo {} segments {} last snapshot {:?}",
+      "wal replay result: last_log_id {} last_tx_id {} redo {} segments {} last snapshot {:?}",
       replay_result.last_log_id,
       replay_result.last_tx_id,
-      replay_result.aborted.len(),
       replay_result.redo.len(),
       replay_result.segments.len(),
       replay_result.last_snapshot,
