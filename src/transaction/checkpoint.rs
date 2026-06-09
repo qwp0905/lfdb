@@ -1,5 +1,6 @@
 use std::{
   collections::VecDeque,
+  iter::repeat_with,
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -72,7 +73,9 @@ impl CheckpointCycle {
   fn segments_len(&self) -> usize {
     self.segments.len()
   }
-
+  fn dirty_len(&self) -> usize {
+    self.flusher.len()
+  }
   fn take_start(&mut self) -> Option<Instant> {
     self.start.take()
   }
@@ -257,12 +260,18 @@ fn checkpoint_loop(
       Some(v) => v,
       None => {
         let log_id = wal.current_log_id();
-        *cycle.get_mut() = Some(CheckpointCycle::new(
-          (0..).map_while(|_| incoming.pop()),
+        let new = cycle.get_mut().insert(CheckpointCycle::new(
+          repeat_with(|| incoming.pop()).map_while(|v| v),
           block_cache.create_flusher(),
           log_id,
           metrics.checkpoint_cycle.start(),
         ));
+
+        info!(
+          "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
+          new.dirty_len(),
+          new.segments_len(),
+        );
         return Ok(());
       }
     };
