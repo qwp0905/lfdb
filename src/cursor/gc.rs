@@ -24,7 +24,7 @@ use crate::{
 
 pub struct GarbageCollectionConfig {
   pub interval: Duration,
-  pub key_count: usize,
+  pub batch_size: usize,
   pub thread_count: usize,
   pub compact_threshold: f64,
   pub compact_min_size: Pointer,
@@ -76,7 +76,7 @@ impl GarbageCollector {
           version_visibility,
           entry.clone(),
           event_bus.clone(),
-          config.key_count,
+          config.batch_size,
           config.compact_threshold,
           config.compact_min_size,
         ),
