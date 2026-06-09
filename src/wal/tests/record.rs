@@ -16,24 +16,10 @@ fn assert_roundtrip(record: LogRecordUninit, log_id: LogId) -> LogRecord {
 }
 
 #[test]
-fn test_start_roundtrip() {
-  let r = LogRecordUninit::new_start(42);
-  let parsed = assert_roundtrip(r, 1);
-  assert!(matches!(parsed.operation, Operation::Start));
-}
-
-#[test]
 fn test_commit_roundtrip() {
   let r = LogRecordUninit::new_commit(42);
   let parsed = assert_roundtrip(r, 2);
   assert!(matches!(parsed.operation, Operation::Commit));
-}
-
-#[test]
-fn test_abort_roundtrip() {
-  let r = LogRecordUninit::new_abort(42);
-  let parsed = assert_roundtrip(r, 3);
-  assert!(matches!(parsed.operation, Operation::Abort));
 }
 
 #[test]
@@ -42,14 +28,20 @@ fn test_insert_roundtrip() {
   page[0] = 0xAB;
   page[99] = 0xCD;
 
-  let r = LogRecordUninit::new_insert(42, 1, 99, page);
+  let r = LogRecordUninit::new_insert(42, 1, 99, 11, page);
   let parsed = assert_roundtrip(r, 4);
   match parsed.operation {
-    Operation::Insert(table_id, ptr, data) => {
+    Operation::Insert {
+      table_id,
+      pointer,
+      data,
+      current_version,
+    } => {
       assert_eq!(table_id, 1);
-      assert_eq!(ptr, 99);
+      assert_eq!(pointer, 99);
       assert_eq!(data[0], 0xAB);
       assert_eq!(data[99], 0xCD);
+      assert_eq!(current_version, 11);
     }
     _ => panic!("expected Insert"),
   }
@@ -57,16 +49,20 @@ fn test_insert_roundtrip() {
 
 #[test]
 fn test_checkpoint_roundtrip() {
-  let last_log_id = 200;
-  let current_version = 10;
+  let i = 200;
+  let cv = 10;
   let path: PathBuf = format!("sdfsdf").into();
-  let r = LogRecordUninit::new_checkpoint(last_log_id, current_version, path.clone());
+  let r = LogRecordUninit::new_checkpoint(i, cv, path.clone());
   let parsed = assert_roundtrip(r, 5);
   match parsed.operation {
-    Operation::Checkpoint(id, v, p) => {
-      assert_eq!(last_log_id, id);
-      assert_eq!(current_version, v);
-      assert_eq!(path, p);
+    Operation::Checkpoint {
+      last_log_id,
+      current_version,
+      snapshot,
+    } => {
+      assert_eq!(last_log_id, i);
+      assert_eq!(current_version, cv);
+      assert_eq!(path, snapshot);
     }
     _ => panic!("expected Checkpoint"),
   }
@@ -77,13 +73,11 @@ fn test_entry_roundtrip() {
   let mut page = Page::new();
   let mut writer = page.writer();
 
-  writer.write(&(4 as u16).to_le_bytes()).unwrap();
-  let r1 = LogRecordUninit::new_start(1);
-  let r2 = LogRecordUninit::new_insert(1, 0, 10, vec![1]);
+  writer.write(&(3 as u16).to_le_bytes()).unwrap();
+  let r2 = LogRecordUninit::new_insert(1, 0, 10, 12, vec![1]);
   let r4 = LogRecordUninit::new_checkpoint(456, 123, format!("sdlfkj").into());
   let r3 = LogRecordUninit::new_commit(1);
 
-  writer.write(&r1.init(1)).unwrap();
   writer.write(&r2.init(2)).unwrap();
   writer.write(&r4.init(3)).unwrap();
   writer.write(&r3.init(4)).unwrap();
@@ -91,26 +85,30 @@ fn test_entry_roundtrip() {
   let (d, complete) = read_page(&page);
   assert_eq!(complete, false);
 
-  assert_eq!(d.len(), 4);
+  assert_eq!(d.len(), 3);
 
-  assert_eq!(d[0].log_id, 1);
+  assert_eq!(d[0].log_id, 2);
   assert_eq!(d[0].tx_id, 1);
-  assert!(matches!(d[0].operation, Operation::Start));
-
-  assert_eq!(d[1].log_id, 2);
-  assert_eq!(d[1].tx_id, 1);
-  assert!(matches!(d[1].operation, Operation::Insert(0, 10, _)));
-
-  assert_eq!(d[2].log_id, 3);
   assert!(matches!(
-    &d[2].operation,
-    Operation::Checkpoint(456, 123, s) if
-    *s == PathBuf::from("sdlfkj"),
+    &d[0].operation,
+    Operation::Insert {
+      table_id: 0,
+      pointer: 10,
+      current_version: 12,
+      ..
+    }
   ));
 
-  assert_eq!(d[3].log_id, 4);
-  assert_eq!(d[3].tx_id, 1);
-  assert!(matches!(d[3].operation, Operation::Commit));
+  assert_eq!(d[1].log_id, 3);
+  assert!(matches!(
+    &d[1].operation,
+    Operation::Checkpoint{ last_log_id:456, current_version:123, snapshot } if
+    *snapshot == PathBuf::from("sdlfkj"),
+  ));
+
+  assert_eq!(d[2].log_id, 4);
+  assert_eq!(d[2].tx_id, 1);
+  assert!(matches!(d[2].operation, Operation::Commit));
 }
 
 #[test]

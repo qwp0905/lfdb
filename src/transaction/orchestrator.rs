@@ -93,13 +93,16 @@ impl TxOrchestrator {
     &self,
     tx_id: TxId,
     table_id: TableId,
+    current_version: TxId,
     slot: &mut RefedSlot,
     data: &T,
   ) -> Result
   where
     T: Serializable,
   {
-    self.recorder.serialize_and_log(tx_id, table_id, slot, data)
+    self
+      .recorder
+      .serialize_and_log(tx_id, table_id, current_version, slot, data)
   }
 
   #[inline]
@@ -109,7 +112,6 @@ impl TxOrchestrator {
   ) -> Result<(TxState<'_>, TxSnapshot<'_>)> {
     let (state, snapshot) = self.version_visibility.new_transaction();
     let tx_id = state.get_id();
-    self.wal.append_start(tx_id)?;
     self
       .timeout_thread
       .register(tx_id, timeout.unwrap_or(self.tx_timeout));
@@ -128,7 +130,6 @@ impl TxOrchestrator {
   #[inline]
   pub fn abort_tx(&self, tx_id: TxId) -> Result {
     self.version_visibility.set_abort(tx_id);
-    self.wal.append_abort(tx_id)?;
     self.metrics.transaction_abort_count.inc();
     Ok(())
   }

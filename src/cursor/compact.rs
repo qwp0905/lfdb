@@ -45,7 +45,6 @@ impl<'a> MiniTx<'a> {
     recorder: &'a PageRecorder,
   ) -> Result<Self> {
     let (state, snapshot) = version_visibility.new_transaction();
-    wal.append_start(state.get_id())?;
     Ok(Self {
       state,
       snapshot,
@@ -64,7 +63,6 @@ impl<'a> MiniTx<'a> {
     }
 
     if self.modified.get() {
-      self.wal.append_abort(self.state.get_id())?;
       self.version_visibility.set_abort(self.state.get_id());
     }
     self.committed.set(true);
@@ -118,9 +116,13 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
-    self
-      .recorder
-      .serialize_and_log(self.state.get_id(), table.get_id(), slot, data)?;
+    self.recorder.serialize_and_log(
+      self.state.get_id(),
+      table.get_id(),
+      self.current_version(),
+      slot,
+      data,
+    )?;
     self.modified.set(true);
     Ok(())
   }
@@ -204,7 +206,7 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.get_id(), slot, data)
+      .serialize_and_log(RESERVED_TX, table.get_id(), RESERVED_TX, slot, data)
   }
 
   fn alloc_slot(
