@@ -61,6 +61,9 @@ pub enum Error {
   #[error("exceeded maximum value length. maximum {0}, received {1}")]
   ValueExceeded(usize, usize),
 
+  #[error("wal unavailable to write. please drop engine and restart.")]
+  WALUnavailable,
+
   #[error("thread panic: {0:?}")]
   Panic(Arc<dyn Any + Send>),
 
@@ -99,6 +102,7 @@ impl Clone for Error {
       Self::NotAllowedChar(char) => Self::NotAllowedChar(char.clone()),
       Self::KeyExceeded(e, r) => Self::KeyExceeded(*e, *r),
       Self::ValueExceeded(e, r) => Self::ValueExceeded(*e, *r),
+      Self::WALUnavailable => Self::WALUnavailable,
       Self::Panic(err) => Self::Panic(err.clone()),
     }
   }
