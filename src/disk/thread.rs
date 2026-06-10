@@ -1,5 +1,4 @@
 use std::{
-  fs::File,
   io::IoSlice,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,7 +8,7 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
-use super::{max_iov, Pwrite, Pwritev};
+use super::{max_iov, IOBackend};
 use crate::{
   background::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle},
   metrics::MetricsRegistry,
@@ -66,7 +65,7 @@ impl SBox<TaskPublisher<WriteTask>> {
     &self,
     state: &SBox<HandleState>,
     thread: &IOThread,
-    file: &SBox<File>,
+    backend: &Arc<dyn IOBackend>,
     task: WriteTask,
   ) -> TaskHandle<()> {
     if state.is_closed() {
@@ -80,7 +79,7 @@ impl SBox<TaskPublisher<WriteTask>> {
       return handle;
     }
 
-    thread.dispatch((file.clone(), IOTask::Write(self.clone()), state.clone()));
+    thread.dispatch((backend.clone(), IOTask::Write(self.clone()), state.clone()));
     handle
   }
 }
@@ -89,7 +88,7 @@ impl SBox<TaskPublisher<()>> {
     &self,
     state: &SBox<HandleState>,
     thread: &IOThread,
-    file: &SBox<File>,
+    backend: &Arc<dyn IOBackend>,
   ) -> TaskHandle<()> {
     if state.is_closed() {
       return TaskHandle::fulfilled(Ok(()));
@@ -102,7 +101,7 @@ impl SBox<TaskPublisher<()>> {
       return handle;
     }
 
-    thread.dispatch((file.clone(), IOTask::Sync(self.clone()), state.clone()));
+    thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
     handle
   }
 }
@@ -110,13 +109,13 @@ pub enum IOTask {
   Write(SBox<TaskPublisher<WriteTask>>),
   Sync(SBox<TaskPublisher<()>>),
 }
-type ThreadArg = (SBox<File>, IOTask, SBox<HandleState>);
+type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
 pub type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 
 const MAX_FLUSH_COUNT: usize = 512;
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   let count = max_iov();
-  move |(file, task, state)| {
+  move |(backend, task, state)| {
     metrics.active_io_threads.inc();
 
     match task {
@@ -128,7 +127,7 @@ pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
             buffered.push(task);
           }
 
-          flush_write(&metrics, &file, &state, &mut buffered);
+          flush_write(&metrics, &*backend, &state, &mut buffered);
           handle.occupied.fetch_and(false, Ordering::Release);
           if handle.queue.is_empty() {
             break;
@@ -146,7 +145,7 @@ pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
             buffered.push(fulfill);
           }
 
-          flush_fdatasync(&file, &state, &mut buffered);
+          flush_fdatasync(&*backend, &state, &mut buffered);
           handle.occupied.fetch_and(false, Ordering::Release);
           if handle.queue.is_empty() {
             break;
@@ -164,7 +163,7 @@ pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
 
 fn flush_write(
   metrics: &MetricsRegistry,
-  file: &File,
+  backend: &dyn IOBackend,
   state: &HandleState,
   buffered: &mut Vec<(WriteTask, OneshotFulfill<Result>)>,
 ) {
@@ -174,7 +173,7 @@ fn flush_write(
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
   let result = match state.pin.try_shared() {
-    Some(_t) => write_exec(metrics, file, values).map_err(Error::IO),
+    Some(_t) => write_exec(metrics, backend, values).map_err(Error::IO),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
@@ -187,14 +186,14 @@ fn flush_write(
 
 fn write_exec(
   metrics: &MetricsRegistry,
-  file: &File,
+  backend: &dyn IOBackend,
   mut buffered: Vec<WriteTask>,
 ) -> std::io::Result<()> {
   if buffered.len() == 1 {
     let (p, buf) = &buffered[0];
     return metrics
       .disk_write
-      .measure(|| file.pwrite_all(buf, *p))
+      .measure(|| backend.pwrite_all(buf, *p))
       .map(|_| ());
   }
 
@@ -211,19 +210,19 @@ fn write_exec(
     if bufs.len() == 1 {
       metrics
         .disk_write
-        .measure(|| file.pwrite_all(&bufs[0], offset))?;
+        .measure(|| backend.pwrite_all(&bufs[0], offset))?;
       continue;
     }
 
     metrics
       .disk_write
-      .measure(|| file.pwritev_all(&mut bufs, offset))?;
+      .measure(|| backend.pwritev_all(&mut bufs, offset))?;
   }
   Ok(())
 }
 
 fn flush_fdatasync(
-  file: &File,
+  backend: &dyn IOBackend,
   state: &HandleState,
   waiting: &mut Vec<OneshotFulfill<Result>>,
 ) {
@@ -232,7 +231,7 @@ fn flush_fdatasync(
   }
 
   let result = match state.pin.try_shared() {
-    Some(_t) => file.sync_data().map_err(Error::IO),
+    Some(_t) => backend.fdatasync().map_err(Error::IO),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
