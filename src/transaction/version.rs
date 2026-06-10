@@ -178,15 +178,15 @@ impl VersionVisibility {
     let mut active = BTreeSet::new();
     let mut aborted = BTreeSet::new();
 
-    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
+    let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
     for _ in 0..len {
-      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
+      let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
       active.insert(id);
     }
 
-    let len = u32::from_le_bytes(file.read(4)?.try_into().unwrap());
+    let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
     for _ in 0..len {
-      let id = TxId::from_le_bytes(file.read(TX_ID_BYTES)?.try_into().unwrap());
+      let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
       aborted.insert(id);
     }
     debug!("snapshot replay completed.");

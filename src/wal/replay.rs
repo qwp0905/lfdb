@@ -5,7 +5,7 @@ use std::{
 
 use super::{read_page, LogId, Operation, TxId, FILE_EXT, WAL_BLOCK_SIZE};
 use crate::{
-  disk::{IOHandle, IOPool, PagePool, Pointer},
+  disk::{IOPool, PagePool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
 };
@@ -29,7 +29,7 @@ pub struct ReplayResult {
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
-  pub segments: Vec<IOHandle>,
+  pub segments: Vec<ScanIOHandle>,
   pub last_snapshot: Option<PathBuf>,
 }
 impl ReplayResult {
@@ -76,12 +76,12 @@ pub fn replay(
 
   let mut last_checkpoint: Option<LogId> = None;
   for path in files {
-    let segment = io_pool.open_direct_io(path)?;
-    let len = segment.len()?;
+    let mut segment = io_pool.open_scan_io(path)?;
+    let len = segment.len();
     let mut offset = 0;
 
     while offset < len {
-      segment.read(page.as_mut(), offset)?;
+      segment.read(page.as_mut())?;
       offset += WAL_BLOCK_SIZE as u64;
 
       let (records, complete) = read_page(&page);

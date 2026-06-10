@@ -1,4 +1,5 @@
 use std::{
+  io::ErrorKind,
   mem::forget,
   panic::RefUnwindSafe,
   path::PathBuf,
@@ -154,7 +155,7 @@ impl WAL {
     ))
   }
 
-  fn failover(&self, err: Error) -> Error {
+  fn failover(&self, err: ErrorKind) -> Error {
     if !self.state.swap(State::Failed).is_available() {
       return Error::WALUnavailable;
     }
@@ -163,7 +164,7 @@ impl WAL {
     error!("it does not recover automatically, please drop engine and restart.");
     self.preloader.failover();
     self.event_bus.publish(WALFailed);
-    err
+    Error::WALFailed(err)
   }
 
   /**
@@ -241,8 +242,8 @@ impl WAL {
         buffer.apply_record_count(order + 1);
         buffer.commit_entry();
 
-        if let Err(err) = buffer.write_to_disk() {
-          return Err(self.failover(err));
+        if let Err(err) = buffer.write_to_disk()? {
+          return Err(self.failover(err.kind()));
         };
         while !buffer.is_ready_to_flush() {
           backoff.snooze();
@@ -254,9 +255,9 @@ impl WAL {
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           match self.fsync_queue.pop() {
             Some(f) => {
-              if let Err(err) = f.wait() {
+              if let Err(err) = f.wait()? {
                 self.synced_count.fetch_add(1, Ordering::Release);
-                return Err(self.failover(err));
+                return Err(self.failover(err.kind()));
               }
               self.synced_count.fetch_add(1, Ordering::Release);
             }
@@ -264,7 +265,7 @@ impl WAL {
           }
         }
 
-        return f.wait().map_err(|err| self.failover(err));
+        return f.wait()?.map_err(|err| self.failover(err.kind()));
       }
 
       if offset >= WAL_BLOCK_SIZE {
@@ -276,7 +277,8 @@ impl WAL {
       let replacement = if buffer.get_pointer() + 1 >= self.max_len {
         let new = match self.preloader.load() {
           Ok(v) => v,
-          Err(err) => return Err(self.failover(err)),
+          Err(Error::IO(err)) => return Err(self.failover(err.kind())),
+          Err(err) => return Err(err),
         };
         LogBuffer::init_new(self.page_pool.acquire(), new, buffer.get_generation() + 1)
       } else {
@@ -309,9 +311,9 @@ impl WAL {
       }
 
       buffer.apply_record_count(order);
-      if let Err(err) = buffer.write_to_disk() {
+      if let Err(err) = buffer.write_to_disk()? {
         buffer.increase_written_count();
-        return Err(self.failover(err));
+        return Err(self.failover(err.kind()));
       };
 
       buffer.increase_written_count();

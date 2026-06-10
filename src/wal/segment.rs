@@ -1,16 +1,16 @@
-use std::{mem::transmute, path::PathBuf};
+use std::{io::Result as IOResult, mem::transmute, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
-  background::TaskHandle,
+  background::Oneshot,
   disk::{IOHandle, IOPool, Page, Pointer},
-  error::Result,
   utils::uuid_simple,
+  Error, Result,
 };
 
 pub const FILE_EXT: &str = "log";
 
-pub type FsyncResult = TaskHandle<()>;
+pub type FsyncResult = Oneshot<IOResult<()>>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
@@ -26,12 +26,16 @@ impl WALSegment {
     // they are almost always reused via rename(). Paying the allocation cost once
     // at creation avoids metadata updates on every subsequent write.
     let file_len = max_len * SIZE;
-    handle.fallocate(0, file_len)?;
-    handle.fsync()?;
+    handle.fallocate(0, file_len).map_err(Error::IO)?;
+    handle.fsync().map_err(Error::IO)?;
 
     Ok(Self { handle })
   }
-  pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> Result {
+  pub fn write(
+    &self,
+    pointer: Pointer,
+    page: &Page<WAL_BLOCK_SIZE>,
+  ) -> Result<IOResult<()>> {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
@@ -45,7 +49,7 @@ impl WALSegment {
    * Repurposes this segment for a new generation by renaming it in place.
    * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
    */
-  pub fn reuse(&self) -> Result {
+  pub fn reuse(&self) -> IOResult<()> {
     let new_path = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
     self.handle.rename(new_path)
   }
@@ -57,7 +61,7 @@ impl WALSegment {
 
   #[inline]
   pub fn truncate(self) -> Result {
-    self.handle.truncate()?;
+    self.handle.truncate().map_err(Error::IO)?;
     Ok(())
   }
 }

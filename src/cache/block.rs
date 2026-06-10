@@ -4,8 +4,7 @@ use std::{
 };
 
 use crate::{
-  background::TaskHandle,
-  disk::{PageRef, Pointer, PAGE_SIZE},
+  disk::{AsyncIO, PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
   utils::{AtomicSBox, SBox, ShortenedMutex},
   Result,
@@ -48,7 +47,7 @@ impl<'a> BlockFlusher<'a> {
 }
 pub struct BlockFlushResult {
   epoch: u64,
-  handle: TaskHandle<()>,
+  handle: AsyncIO,
   _page: SBox<PageRef<PAGE_SIZE>>,
 }
 impl BlockFlushResult {

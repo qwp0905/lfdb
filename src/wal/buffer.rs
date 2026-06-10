@@ -1,5 +1,6 @@
 use std::{
   cell::Cell,
+  io::Result as IOResult,
   mem::MaybeUninit,
   ptr::copy_nonoverlapping,
   sync::atomic::{AtomicU32, AtomicU64, Ordering},
@@ -166,7 +167,7 @@ impl LogBuffer {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn write_to_disk(&self) -> Result {
+  pub fn write_to_disk(&self) -> Result<IOResult<()>> {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
       .write(self.segment_ptr, &self.entry)
