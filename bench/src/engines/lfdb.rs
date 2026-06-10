@@ -7,7 +7,7 @@ use crate::BenchmarkDB;
 pub fn new(cache_size: usize, dir: &Path) -> impl BenchmarkDB + 'static {
   EngineBuilder::new(dir)
     .block_cache_memory_capacity(cache_size)
-    .build()
+    .boot()
     .unwrap()
 }
 

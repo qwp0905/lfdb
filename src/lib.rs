@@ -24,6 +24,7 @@ pub use error::*;
 mod utils;
 
 mod disk;
+pub use disk::{DefaultIOBackend, DiskBackend, IOBackend};
 
 mod metrics;
 pub use metrics::EngineMetrics;
