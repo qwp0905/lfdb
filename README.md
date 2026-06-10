@@ -214,7 +214,7 @@ On startup, the engine replays the WAL and redoes all committed transactions sin
 
 **Durability guarantee**: `commit()` returns only after the WAL record has been fsynced to disk. If `commit()` returned `Ok`, the transaction will survive a crash.
 
-**Disk failures:** If `commit()` returns a disk I/O error while writing
+**Disk failures:** If `commit()` returns a `WALFailed` error while writing
 or synchronizing the WAL, the commit outcome is unknown. Applications must not
 retry the transaction under the assumption that it was aborted. LFDB makes the
 engine unavailable and rejects further operations to preserve the last
