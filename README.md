@@ -214,6 +214,15 @@ On startup, the engine replays the WAL and redoes all committed transactions sin
 
 **Durability guarantee**: `commit()` returns only after the WAL record has been fsynced to disk. If `commit()` returned `Ok`, the transaction will survive a crash.
 
+**Disk failures:** If `commit()` returns a disk I/O error while writing
+or synchronizing the WAL, the commit outcome is unknown. Applications must not
+retry the transaction under the assumption that it was aborted. LFDB makes the
+engine unavailable and rejects further operations to preserve the last
+recoverable WAL state. The application is responsible for resolving the
+underlying storage failure and restarting the engine. After recovery, the
+application must verify whether the transaction was committed before retrying
+it.
+
 ### Logging
 
 LFDB emits logs through the [`log`](https://crates.io/crates/log) crate facade. Refer to its documentation for backend setup and filter configuration.
