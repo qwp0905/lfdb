@@ -1,5 +1,5 @@
 use std::{
-  io::IoSlice,
+  io::{Error, IoSlice, Result},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -10,10 +10,9 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{oneshot, BackgroundThread, OneshotFulfill, TaskHandle},
+  background::{oneshot, BackgroundThread, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
-  Error, Result,
 };
 
 pub type WriteTask = (u64, IoSlice<'static>);
@@ -49,7 +48,7 @@ impl HandleState {
 }
 
 pub struct TaskPublisher<T> {
-  queue: SegQueue<(T, OneshotFulfill<Result>)>,
+  queue: SegQueue<(T, OneshotFulfill<Result<()>>)>,
   occupied: AtomicBool,
 }
 impl<T> TaskPublisher<T> {
@@ -67,20 +66,19 @@ impl SBox<TaskPublisher<WriteTask>> {
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
     task: WriteTask,
-  ) -> TaskHandle<()> {
+  ) -> Oneshot<Result<()>> {
     if state.is_closed() {
-      return TaskHandle::fulfilled(Ok(()));
+      return Oneshot::fulfilled(Ok(()));
     }
 
     let (o, f) = oneshot();
-    let handle = TaskHandle::new(o);
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return handle;
+      return o;
     }
 
     thread.dispatch((backend.clone(), IOTask::Write(self.clone()), state.clone()));
-    handle
+    o
   }
 }
 impl SBox<TaskPublisher<()>> {
@@ -89,20 +87,19 @@ impl SBox<TaskPublisher<()>> {
     state: &SBox<HandleState>,
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
-  ) -> TaskHandle<()> {
+  ) -> Oneshot<Result<()>> {
     if state.is_closed() {
-      return TaskHandle::fulfilled(Ok(()));
+      return Oneshot::fulfilled(Ok(()));
     }
 
     let (o, f) = oneshot();
-    let handle = TaskHandle::new(o);
     self.queue.push(((), f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return handle;
+      return o;
     }
 
     thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
-    handle
+    o
   }
 }
 pub enum IOTask {
@@ -165,7 +162,7 @@ fn flush_write(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
   state: &HandleState,
-  buffered: &mut Vec<(WriteTask, OneshotFulfill<Result>)>,
+  buffered: &mut Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
 ) {
   if buffered.is_empty() {
     return;
@@ -173,15 +170,18 @@ fn flush_write(
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
   let result = match state.pin.try_shared() {
-    Some(_t) => write_exec(metrics, backend, values).map_err(Error::IO),
+    Some(_t) => write_exec(metrics, backend, values),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
     }
   };
-  waiting
-    .into_iter()
-    .for_each(|done| done.fulfill(result.clone()));
+  match result {
+    Ok(_) => waiting.into_iter().for_each(|done| done.fulfill(Ok(()))),
+    Err(err) => waiting
+      .into_iter()
+      .for_each(|done| done.fulfill(Err(Error::from(err.kind())))),
+  };
 }
 
 fn write_exec(
@@ -224,20 +224,24 @@ fn write_exec(
 fn flush_fdatasync(
   backend: &dyn IOBackend,
   state: &HandleState,
-  waiting: &mut Vec<OneshotFulfill<Result>>,
+  waiting: &mut Vec<OneshotFulfill<Result<()>>>,
 ) {
   if waiting.is_empty() {
     return;
   }
 
   let result = match state.pin.try_shared() {
-    Some(_t) => backend.fdatasync().map_err(Error::IO),
+    Some(_t) => backend.fdatasync(),
     None => {
       state.closed.fetch_or(true, Ordering::Release);
       return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
     }
   };
-  waiting
-    .drain(..)
-    .for_each(|done| done.fulfill(result.clone()))
+
+  match result {
+    Ok(_) => waiting.drain(..).for_each(|done| done.fulfill(Ok(()))),
+    Err(err) => waiting
+      .drain(..)
+      .for_each(|done| done.fulfill(Err(Error::from(err.kind())))),
+  }
 }
