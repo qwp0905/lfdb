@@ -13,17 +13,19 @@ use super::{
   WritablePolicy,
 };
 use crate::{
-  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  background::{
+    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, WorkBuilder,
+  },
   binding_events,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
-  info,
+  error, info,
   serialize::Serializable,
   table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox, UnsafeBorrowMut},
-  wal::{TxId, RESERVED_TX, WAL},
+  wal::{TxId, WALFailed, RESERVED_TX, WAL},
   warn, Error, Result,
 };
 
@@ -44,7 +46,10 @@ impl<'a> MiniTx<'a> {
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
   ) -> Result<Self> {
-    let (snapshot, state) = version_visibility.new_transaction();
+    let (snapshot, state) = match version_visibility.new_transaction() {
+      Some(v) => v,
+      None => return Err(Error::EngineUnavailable),
+    };
     Ok(Self {
       state,
       snapshot,
@@ -378,6 +383,10 @@ impl Compactor {
   }
 
   pub fn close(&self) -> Result {
+    if !self.wal.is_available() {
+      self.failover();
+      return Ok(());
+    }
     self.ticker.close();
 
     let mut cycle = self.cycle.take();
@@ -435,6 +444,12 @@ impl Compactor {
     }
     Ok(())
   }
+
+  fn failover(&self) {
+    self.ticker.close();
+    let _ = self.cycle.take();
+    while let Some(_) = self.in_progress.pop() {}
+  }
 }
 
 impl OwnedSubscription<CompactionCommitted> for Compactor {
@@ -454,12 +469,19 @@ impl OwnedSubscription<CompactionPublished> for Compactor {
       .push(CompactionCycle::new(event.old, event.new, event.metadata))
   }
 }
+impl SharedSubscription<WALFailed> for Compactor {
+  fn handle(&self, _: Arc<WALFailed>) {
+    error!("compactor stopped since wal failure detected.");
+    self.failover();
+  }
+}
 binding_events!(Compactor {
   owned: [
     CompactionCommitted,
     CompactionTriggered,
     CompactionPublished
-  ]
+  ],
+  shared: [WALFailed]
 });
 
 fn remove_compaction(

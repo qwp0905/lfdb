@@ -3,7 +3,10 @@ use std::{
   ops::Deref,
   panic::RefUnwindSafe,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
 };
 
 use crossbeam_skiplist::SkipSet;
@@ -11,11 +14,12 @@ use crossbeam_skiplist::SkipSet;
 use super::{ActiveSet, ActiveState};
 
 use crate::{
-  debug,
+  background::{EventBus, SharedSubscription},
+  binding_events, debug,
   disk::IOPool,
-  info,
+  error, info,
   utils::{uuid_simple, OffsetBitmap, SBox},
-  wal::{TxId, TX_ID_BYTES},
+  wal::{TxId, WALFailed, TX_ID_BYTES},
   Result,
 };
 
@@ -76,6 +80,7 @@ pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
   io_pool: Arc<IOPool>,
+  closed: AtomicBool,
 }
 impl VersionVisibility {
   pub fn replay(
@@ -84,12 +89,14 @@ impl VersionVisibility {
     started: BTreeSet<TxId>,
     closed: BTreeSet<TxId>,
     last_snapshot: Option<PathBuf>,
-  ) -> Result<Self> {
+    event_bus: &EventBus,
+  ) -> Result<Arc<Self>> {
     let (active_s, aborted_s) = match last_snapshot {
       Some(path) => Self::replay_snapshot(path, &io_pool)?,
       None => (BTreeSet::new(), BTreeSet::new()),
     };
-    Ok(Self {
+
+    let this = Arc::new(Self {
       io_pool,
       aborted: active_s
         .into_iter()
@@ -98,7 +105,10 @@ impl VersionVisibility {
         .filter(|c| !closed.contains(c))
         .collect(),
       active: ActiveSet::new(last_tx_id),
-    })
+      closed: AtomicBool::new(false),
+    });
+    event_bus.register(&this);
+    Ok(this)
   }
 
   /**
@@ -139,12 +149,15 @@ impl VersionVisibility {
   pub fn set_abort(&self, tx_id: TxId) {
     self.aborted.insert(tx_id);
   }
-  pub fn new_transaction(&self) -> (TxSnapshot<'_>, TxState<'_>) {
+  pub fn new_transaction(&self) -> Option<(TxSnapshot<'_>, TxState<'_>)> {
+    if self.closed.load(Ordering::Acquire) {
+      return None;
+    }
     let state = self.active.new_state();
-    (
+    Some((
       TxSnapshot::new(self.active.snapshot_until(state.get_id()), &self.aborted),
       TxState::new(state, &self.active),
-    )
+    ))
   }
   #[inline]
   pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
@@ -226,4 +239,19 @@ impl VersionVisibility {
     Ok(())
   }
 }
+impl SharedSubscription<WALFailed> for VersionVisibility {
+  fn handle(&self, _: Arc<WALFailed>) {
+    if self.closed.fetch_or(true, Ordering::Release) {
+      return;
+    }
+    for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
+      self.active.remove(&state.get_id());
+    }
+    error!("all versions transit to abort since wal failure detected.");
+  }
+}
+binding_events!(VersionVisibility {
+  shared: [WALFailed]
+});
+
 impl RefUnwindSafe for VersionVisibility {}

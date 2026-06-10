@@ -147,4 +147,7 @@ impl ActiveSet {
       state.parker.park();
     }
   }
+  pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
+    self.inner.rl().values().map(SBox::clone).collect()
+  }
 }

@@ -113,8 +113,8 @@ impl Engine {
       replay.started,
       replay.closed,
       replay.last_snapshot,
-    )?
-    .to_arc();
+      &event_bus,
+    )?;
 
     if tables.is_new() {
       info!("engine initial state.");
@@ -127,8 +127,7 @@ impl Engine {
         tables.clone(),
         event_bus.clone(),
         gc_config,
-      )
-      .to_arc();
+      );
 
       let compactor = Compactor::new(
         block_cache.clone(),
@@ -229,8 +228,7 @@ impl Engine {
       tables.clone(),
       event_bus.clone(),
       gc_config,
-    )
-    .to_arc();
+    );
 
     let compactor = Compactor::new(
       block_cache.clone(),
@@ -294,7 +292,10 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let (state, snapshot) = self.orchestrator.start_tx(None)?;
+    let (state, snapshot) = match self.orchestrator.start_tx(None) {
+      Some(v) => v,
+      None => return Err(Error::EngineUnavailable),
+    };
     Ok(Transaction::new(
       &self.orchestrator,
       state,
@@ -311,7 +312,10 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let (state, snapshot) = self.orchestrator.start_tx(Some(timeout))?;
+    let (state, snapshot) = match self.orchestrator.start_tx(Some(timeout)) {
+      Some(v) => v,
+      None => return Err(Error::EngineUnavailable),
+    };
     Ok(Transaction::new(
       &self.orchestrator,
       state,
