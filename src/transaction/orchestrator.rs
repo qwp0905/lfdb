@@ -109,12 +109,12 @@ impl TxOrchestrator {
   pub fn start_tx(
     &self,
     timeout: Option<Duration>,
-  ) -> Result<(TxState<'_>, TxSnapshot<'_>)> {
-    let (snapshot, state) = self.version_visibility.new_transaction();
+  ) -> Option<(TxState<'_>, TxSnapshot<'_>)> {
+    let (snapshot, state) = self.version_visibility.new_transaction()?;
     self
       .timeout_thread
       .register(state.get_id(), timeout.unwrap_or(self.tx_timeout));
-    Ok((state, snapshot))
+    Some((state, snapshot))
   }
 
   #[inline]
@@ -170,7 +170,6 @@ impl TxOrchestrator {
     info!("gc closed.");
     self.timeout_thread.close();
     let _ = self.checkpoint.close();
-    info!("last checkpoint completed.");
 
     self.block_cache.close();
     info!("block cache closed.");
