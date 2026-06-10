@@ -157,7 +157,8 @@ impl DiskBackend for DefaultIOBackend {
     options: &mut OpenOptions,
     path: &Path,
   ) -> Result<Box<dyn IOBackend>> {
-    options.custom_flags(libc::O_DIRECT).open(path)
+    let file = options.custom_flags(libc::O_DIRECT).open(path)?;
+    Ok(Box::new(file))
   }
   #[cfg(windows)]
   fn open_direct_io(
