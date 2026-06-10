@@ -207,6 +207,12 @@ macro_rules! binding_events {
   }) => {
     $crate::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
   };
+  ($subscriber:ty {
+    owned: [$($owned:ty),* $(,)?],
+    shared: [$($shared:ty),* $(,)?] $(,)?
+  }) => {
+    $crate::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
+  };
 
   ($subscriber:ty {
     shared: [$($shared:ty),* $(,)?] $(,)?

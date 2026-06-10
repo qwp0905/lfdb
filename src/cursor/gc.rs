@@ -5,21 +5,26 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::epoch;
+use crossbeam::{epoch, queue::SegQueue};
 
 use super::{
   BTreeNodeView, CompactionTriggered, DataEntry, DataEntryView, RecordData, TreeHeader,
   VersionRecord, HEADER_POINTER,
 };
 use crate::{
-  background::{BackgroundThread, EventBus, TaskHandle, WorkBuilder},
+  background::{
+    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, TaskHandle,
+    WorkBuilder,
+  },
+  binding_events,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
-  error::Result,
+  error,
   table::{TableHandleRef, TableMapper, META_TABLE_ID},
   transaction::{PageRecorder, VersionVisibility},
   utils::{ToArc, ToBox},
-  wal::{TxId, RESERVED_TX},
+  wal::{TxId, WALFailed, RESERVED_TX},
+  Result,
 };
 
 pub struct GarbageCollectionConfig {
@@ -33,9 +38,10 @@ pub struct GarbageCollectionConfig {
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct GarbageCollector {
+  release_queue: Arc<SegQueue<DropTableCommitted>>,
   main: Box<dyn BackgroundThread<(), Result>>,
   entry: Arc<dyn BackgroundThread<(TableHandleRef, Pointer), Result<Pointer>>>,
-  table: Arc<dyn BackgroundThread<DropTableCommitted>>,
+  table: Arc<dyn BackgroundThread<()>>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -45,7 +51,8 @@ impl GarbageCollector {
     mapper: Arc<TableMapper>,
     event_bus: Arc<EventBus>,
     config: GarbageCollectionConfig,
-  ) -> Self {
+  ) -> Arc<Self> {
+    let release_queue = SegQueue::new().to_arc();
     let entry = WorkBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
@@ -56,12 +63,16 @@ impl GarbageCollector {
       ))
       .to_arc();
 
-    let table: Arc<dyn BackgroundThread<DropTableCommitted>> = WorkBuilder::new()
+    let table = WorkBuilder::new()
       .name("gc release tables")
       .single()
       .interval(
         RELEASE_CHECK_INTERVAL,
-        run_release_table(mapper.clone(), version_visibility.clone()),
+        run_release_table(
+          release_queue.clone(),
+          mapper.clone(),
+          version_visibility.clone(),
+        ),
       )
       .to_arc();
 
@@ -83,8 +94,14 @@ impl GarbageCollector {
       )
       .to_box();
 
-    event_bus.register(&table);
-    Self { main, entry, table }
+    let this = Arc::new(Self {
+      release_queue,
+      main,
+      entry,
+      table,
+    });
+    event_bus.register(&this);
+    this
   }
 
   pub fn close(&self) {
@@ -93,6 +110,22 @@ impl GarbageCollector {
     self.entry.close();
   }
 }
+
+impl OwnedSubscription<DropTableCommitted> for GarbageCollector {
+  fn handle(&self, event: DropTableCommitted) {
+    self.release_queue.push(event);
+  }
+}
+impl SharedSubscription<WALFailed> for GarbageCollector {
+  fn handle(&self, _: Arc<WALFailed>) {
+    error!("garbage collector stopped since wal failure detected.");
+    self.close();
+  }
+}
+binding_events!(GarbageCollector {
+  owned: [DropTableCommitted],
+  shared: [WALFailed]
+});
 
 fn release_entry(
   block_cache: &BlockCache,
@@ -258,14 +291,15 @@ impl DropTableCommitted {
 }
 
 const fn run_release_table(
+  queue: Arc<SegQueue<DropTableCommitted>>,
   mapper: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-) -> impl FnMut(Option<DropTableCommitted>) {
+) -> impl FnMut(Option<()>) {
   let mut tables = LinkedList::new();
   let mut unpinned = LinkedList::new();
   let mut unreachable = LinkedList::new();
-  move |recv| {
-    if let Some(committed) = recv {
+  move |_| {
+    while let Some(committed) = queue.pop() {
       tables.push_back((committed.handle, committed.owner, committed.commit_version));
     }
 

@@ -9,6 +9,7 @@ use std::{
 };
 
 use crossbeam::{
+  atomic::AtomicCell,
   epoch::{self, Atomic, Owned},
   queue::SegQueue,
   utils::Backoff,
@@ -17,10 +18,10 @@ use crossbeam::{
 use crate::{
   background::EventBus,
   disk::{IOPool, PagePool, Pointer},
-  error::Result,
-  info,
+  error, info,
   table::TableId,
   utils::UnsafeBorrow,
+  Error, Result,
 };
 
 use super::{
@@ -37,6 +38,19 @@ pub struct WALSegmentRotated(WALSegment);
 impl WALSegmentRotated {
   pub fn into_inner(self) -> WALSegment {
     self.0
+  }
+}
+
+pub struct WALFailed;
+
+#[derive(Clone, Copy, Debug)]
+enum State {
+  Available,
+  Failed,
+}
+impl State {
+  fn is_available(&self) -> bool {
+    matches!(self, Self::Available)
   }
 }
 
@@ -69,6 +83,11 @@ pub struct WAL {
    * wal segment max size
    */
   max_len: Pointer,
+
+  /**
+   * A state of wal. If wal io fails, it switches to the failed state and requires a restart.
+   */
+  state: AtomicCell<State>,
 
   /**
    *  preload wal segment
@@ -125,6 +144,7 @@ impl WAL {
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
+        state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
         fsync_queue: SegQueue::new(),
@@ -132,6 +152,18 @@ impl WAL {
       },
       replay_result,
     ))
+  }
+
+  fn failover(&self, err: Error) -> Error {
+    if !self.state.swap(State::Failed).is_available() {
+      return Error::WALUnavailable;
+    }
+
+    error!("error occurs in wal: {err}");
+    error!("it does not recover automatically, please drop engine and restart.");
+    self.preloader.failover();
+    self.event_bus.publish(WALFailed);
+    err
   }
 
   /**
@@ -178,6 +210,10 @@ impl WAL {
     let backoff = Backoff::new();
 
     loop {
+      if !self.state.load().is_available() {
+        return Err(Error::WALUnavailable);
+      }
+
       let guard = epoch::pin();
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
@@ -205,7 +241,9 @@ impl WAL {
         buffer.apply_record_count(order + 1);
         buffer.commit_entry();
 
-        buffer.write_to_disk()?;
+        if let Err(err) = buffer.write_to_disk() {
+          return Err(self.failover(err));
+        };
         while !buffer.is_ready_to_flush() {
           backoff.snooze();
         }
@@ -216,13 +254,17 @@ impl WAL {
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
           match self.fsync_queue.pop() {
             Some(f) => {
-              f.wait()?;
+              if let Err(err) = f.wait() {
+                self.synced_count.fetch_add(1, Ordering::Release);
+                return Err(self.failover(err));
+              }
               self.synced_count.fetch_add(1, Ordering::Release);
             }
             None => backoff.snooze(),
           }
         }
-        return f.wait();
+
+        return f.wait().map_err(|err| self.failover(err));
       }
 
       if offset >= WAL_BLOCK_SIZE {
@@ -232,11 +274,11 @@ impl WAL {
       }
 
       let replacement = if buffer.get_pointer() + 1 >= self.max_len {
-        LogBuffer::init_new(
-          self.page_pool.acquire(),
-          self.preloader.load()?,
-          buffer.get_generation() + 1,
-        )
+        let new = match self.preloader.load() {
+          Ok(v) => v,
+          Err(err) => return Err(self.failover(err)),
+        };
+        LogBuffer::init_new(self.page_pool.acquire(), new, buffer.get_generation() + 1)
       } else {
         buffer.init_next(self.page_pool.acquire())
       };
@@ -267,9 +309,12 @@ impl WAL {
       }
 
       buffer.apply_record_count(order);
-      buffer.write_to_disk()?;
-      buffer.increase_written_count();
+      if let Err(err) = buffer.write_to_disk() {
+        buffer.increase_written_count();
+        return Err(self.failover(err));
+      };
 
+      buffer.increase_written_count();
       if buffer.get_pointer() + 1 < self.max_len {
         drop(token);
         backoff.snooze();
@@ -313,17 +358,20 @@ impl WAL {
       true,
     )
   }
-  // pub fn append_start(&self, tx_id: TxId) -> Result {
-  //   self.append(|| LogRecordUninit::new_start(tx_id), false)
-  // }
+
   pub fn commit_and_flush(&self, tx_id: TxId) -> Result {
     self.append(|| LogRecordUninit::new_commit(tx_id), true)
   }
-  // pub fn append_abort(&self, tx_id: TxId) -> Result {
-  //   self.append(|| LogRecordUninit::new_abort(tx_id), false)
-  // }
+
+  pub fn is_available(&self) -> bool {
+    self.state.load().is_available()
+  }
 
   pub fn close(&self) {
+    if !self.state.load().is_available() {
+      return;
+    }
+
     while let Some(f) = self.fsync_queue.pop() {
       let _ = f.wait();
       self.synced_count.fetch_add(1, Ordering::Release);

@@ -10,16 +10,18 @@ use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 use super::VersionVisibility;
 
 use crate::{
-  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  background::{
+    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, WorkBuilder,
+  },
   binding_events,
   cache::{BlockCache, CacheFlusher},
   debug,
   disk::{IOPool, PAGE_SIZE},
-  info,
+  error, info,
   metrics::MetricsRegistry,
   trace,
   utils::{ToArc, ToBox, UnsafeBorrowMut},
-  wal::{LogId, SegmentReuseable, WALSegment, WALSegmentRotated, WAL},
+  wal::{LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WAL},
   Result,
 };
 
@@ -176,7 +178,17 @@ impl Checkpoint {
     Ok(())
   }
 
+  fn failover(&self) {
+    self.ticker.close();
+    let _ = self.cycle.take();
+    while let Some(_) = self.incoming.pop() {}
+  }
+
   pub fn close(&self) -> Result {
+    if !self.wal.is_available() {
+      self.failover();
+      return Ok(());
+    }
     self.ticker.close();
 
     if self.incoming.is_empty() {
@@ -211,6 +223,7 @@ impl Checkpoint {
       cycle.truncate_all()?;
     }
 
+    info!("last checkpoint completed.");
     Ok(())
   }
 }
@@ -220,8 +233,15 @@ impl OwnedSubscription<WALSegmentRotated> for Checkpoint {
     self.incoming.push(event.into_inner())
   }
 }
+impl SharedSubscription<WALFailed> for Checkpoint {
+  fn handle(&self, _: Arc<WALFailed>) {
+    error!("checkpoint stopped since wal failure detected.");
+    self.failover();
+  }
+}
 binding_events!(Checkpoint {
-  owned: [WALSegmentRotated]
+  owned: [WALSegmentRotated],
+  shared: [WALFailed]
 });
 
 /**

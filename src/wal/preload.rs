@@ -69,6 +69,12 @@ impl SegmentPreload {
     self.preload.execute(()).wait().flatten()
   }
 
+  pub fn failover(&self) {
+    self.reuse.close();
+    self.preload.close();
+    while let Some(_) = self.ready.pop() {}
+  }
+
   /**
    * must call after close segment rotate thread
    */
@@ -91,7 +97,7 @@ impl OwnedSubscription<SegmentReuseable> for SegmentPreload {
   }
 }
 binding_events!(SegmentPreload {
-  owned: [SegmentReuseable]
+  owned: [SegmentReuseable],
 });
 
 fn handle_reuse(
