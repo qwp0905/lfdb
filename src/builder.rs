@@ -1,6 +1,7 @@
 use std::{path::Path, time::Duration};
 
-use crate::{Engine, EngineConfig, Result};
+use crate::disk::DiskBackend;
+use crate::{disk::DefaultIOBackend, Engine, EngineConfig, Result};
 
 pub struct EngineBuilder<T>(EngineConfig<T>)
 where
@@ -147,8 +148,12 @@ where
     self
   }
 
-  pub fn build(&self) -> Result<Engine> {
-    Engine::bootstrap(&self.0)
+  pub fn boot(&self) -> Result<Engine> {
+    Engine::bootstrap(DefaultIOBackend, &self.0)
+  }
+
+  pub fn with_backend<B: DiskBackend>(&self, backend: B) -> Result<Engine> {
+    Engine::bootstrap(backend, &self.0)
   }
 }
 

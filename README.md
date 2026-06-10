@@ -15,7 +15,7 @@ use lfdb::EngineBuilder;
 
 let engine = EngineBuilder::new("./data")
     .block_cache_memory_capacity(128 << 20) // 128MB
-    .build()?;
+    .boot()?;
 ```
 
 ### Create Table

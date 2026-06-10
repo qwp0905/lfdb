@@ -25,7 +25,7 @@ fn main() {
       .block_cache_shard_count(1 << 8)
       .wal_file_size(32 << 20)
       .gc_thread_count(5)
-      .build()
+      .boot()
       .expect("bootstrap error"),
   );
 

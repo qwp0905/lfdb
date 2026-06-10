@@ -16,7 +16,7 @@ use crate::{
     initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
     GarbageCollectionConfig, GarbageCollector,
   },
-  disk::{IOPool, Pointer, PAGE_SIZE},
+  disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableMapper, META_TABLE_ID},
@@ -56,9 +56,10 @@ pub struct Engine {
   metrics_registry: Arc<MetricsRegistry>,
 }
 impl Engine {
-  pub fn bootstrap<T>(config: &EngineConfig<T>) -> Result<Self>
+  pub fn bootstrap<T, B>(backend: B, config: &EngineConfig<T>) -> Result<Self>
   where
     T: AsRef<Path>,
+    B: DiskBackend,
   {
     let st = Instant::now();
     let metrics_registry = MetricsRegistry::new().to_arc();
@@ -67,7 +68,8 @@ impl Engine {
 
     info!("start engine");
 
-    let io_pool = IOPool::new(
+    let io_pool = IOPool::with_backend(
+      backend,
       config.io_thread_count,
       config.base_path.as_ref(),
       metrics_registry.clone(),

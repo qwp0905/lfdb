@@ -44,7 +44,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
 }
 
 fn build_engine(dir: &TempDir) -> Engine {
-  default_options(dir).build().unwrap()
+  default_options(dir).boot().unwrap()
 }
 
 const TEST_TABLE: &str = "test";
@@ -439,7 +439,7 @@ fn test_snapshot_isolation() {
 #[test]
 fn test_entry_split() {
   let dir = tempdir_in(".").unwrap();
-  let engine = default_options(&dir).build().unwrap();
+  let engine = default_options(&dir).boot().unwrap();
   create_table(&engine, TEST_TABLE);
 
   let key = b"hot-key".to_vec();
@@ -600,7 +600,7 @@ fn test_btree_node_split_and_recovery() {
 fn crash_writer() {
   let dir = std::env::var("CRASH_DIR").expect("CRASH_DIR not set");
   let engine = EngineBuilder::new(std::path::Path::new(&dir))
-    .build()
+    .boot()
     .expect("engine bootstrap failed");
   let rng = &mut rng();
 
@@ -832,7 +832,7 @@ fn test_hard_workload() {
 #[test]
 fn test_heavy_gc_single_key() {
   let dir = tempdir_in(".").unwrap();
-  let engine = Arc::new(default_options(&dir).build().unwrap());
+  let engine = Arc::new(default_options(&dir).boot().unwrap());
 
   create_table(&engine, TEST_TABLE);
 
@@ -999,7 +999,7 @@ fn write_not_commit() {
   let dir = std::env::var("CRASH_DIR").expect("CRASH_DIR not set");
   let key = std::env::var("CRASH_KEY").expect("CRASH_KEY not set");
   let engine = EngineBuilder::new(std::path::Path::new(&dir))
-    .build()
+    .boot()
     .expect("engine bootstrap failed");
   create_table(&engine, TEST_TABLE);
 
@@ -1060,7 +1060,7 @@ fn test_timeout() {
   let dir = tempdir_in(".").unwrap();
   let engine = default_options(&dir)
     .transaction_timeout(Duration::from_millis(500))
-    .build()
+    .boot()
     .unwrap();
   {
     let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
@@ -1588,7 +1588,7 @@ fn test_auto_compaction() {
     default_options(&dir)
       .compaction_threshold(0.1)
       .compaction_min_size(100 << 10)
-      .build()
+      .boot()
       .unwrap(),
   );
   let seed = [0; 32];

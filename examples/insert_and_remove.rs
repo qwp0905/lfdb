@@ -20,7 +20,7 @@ fn build() -> Engine {
   let _ = log::set_logger(&DebugLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new("./.local")
-    .build()
+    .boot()
     .expect("bootstrap error")
 }
 fn main() {
