@@ -1,6 +1,9 @@
 use std::{
   fs::{DirEntry, OpenOptions},
-  io::{BufReader, BufWriter, Error as IoError, ErrorKind, IoSlice, Read, Write},
+  io::{
+    BufReader, BufWriter, Error as IoError, ErrorKind, IoSlice, Read, Result as IOResult,
+    Write,
+  },
   mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -13,11 +16,22 @@ use super::{
   WriteTask,
 };
 use crate::{
-  background::{TaskHandle, WorkBuilder},
+  background::{Oneshot, WorkBuilder},
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex, ToArc},
   Error, Result,
 };
+
+pub struct AsyncIO<T = ()>(Oneshot<IOResult<T>>);
+impl<T> AsyncIO<T> {
+  pub const fn new(inner: Oneshot<IOResult<T>>) -> Self {
+    Self(inner)
+  }
+
+  pub fn wait(self) -> Result<T> {
+    self.0.wait()?.map_err(Error::IO)
+  }
+}
 
 pub struct IOPool {
   thread: Arc<IOThread>,
@@ -36,11 +50,10 @@ impl IOPool {
       .multi(thread_count)
       .shared(create_io_thread(metrics.clone()))
       .to_arc();
-    let base_dir = SBox::new(DirHandle::ensure(
-      base_path,
-      Box::new(backend),
-      thread.clone(),
-    )?);
+    let base_dir = SBox::new(
+      DirHandle::ensure(base_path, Box::new(backend), thread.clone())
+        .map_err(Error::IO)?,
+    );
     Ok(Self {
       thread,
       metrics,
@@ -53,7 +66,8 @@ impl IOPool {
     let mut options = OpenOptions::new();
     let file = self
       .base_dir
-      .open(options.write(true).append(true).create(true), &path)?;
+      .open(options.write(true).append(true).create(true), &path)
+      .map_err(Error::IO)?;
     Ok(AppendIOHandle {
       file: BufWriter::new(file),
       filename,
@@ -62,9 +76,16 @@ impl IOPool {
   pub fn open_scan_io(&self, filename: PathBuf) -> Result<ScanIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
     let mut options = OpenOptions::new();
-    let file = self.base_dir.open(options.read(true), &path)?;
+    let file = self
+      .base_dir
+      .open(options.read(true), &path)
+      .map_err(Error::IO)?;
+    let len = file.metadata().map_err(Error::IO)?.len();
     Ok(ScanIOHandle {
       file: BufReader::new(file),
+      len,
+      base_dir: self.base_dir.clone(),
+      filename,
     })
   }
   pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
@@ -76,7 +97,8 @@ impl IOPool {
     let mut options = OpenOptions::new();
     let file = self
       .base_dir
-      .open_direct_io(options.read(true).write(true).create(true), &path)?;
+      .open_direct_io(options.read(true).write(true).create(true), &path)
+      .map_err(Error::IO)?;
     Ok(IOHandle {
       backend: file,
       write_handle: SBox::new(TaskPublisher::new()),
@@ -90,16 +112,16 @@ impl IOPool {
   }
 
   pub fn sync_dir(&self) -> Result {
-    self.base_dir.fdatasync()
+    self.base_dir.fdatasync().wait()?.map_err(Error::IO)
   }
   pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
-    self.base_dir.read()
+    self.base_dir.read().map_err(Error::IO)
   }
-  pub fn remove(&self, filename: &Path) -> Result {
-    self.base_dir.remove(filename)
+  pub fn remove(&self, filename: &Path) -> Result<()> {
+    self.base_dir.remove(filename).map_err(Error::IO)
   }
   pub fn exists(&self, filename: &Path) -> Result<bool> {
-    self.base_dir.exists(filename)
+    self.base_dir.exists(filename).map_err(Error::IO)
   }
 
   pub fn close(&self) {
@@ -118,35 +140,34 @@ pub struct IOHandle {
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {
-  pub fn read(&self, buf: &mut [u8], offset: u64) -> Result {
+  pub fn read(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
     // SAFETY: Since the removed table cannot access this path, a pin guarantee is not required.
     // If a path for read access to the removed table is established, pin guarantees are required.
     self
       .metrics
       .disk_read
       .measure(|| self.backend.pread_exact(buf, offset))
-      .map_err(Error::IO)
   }
 
-  pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> Result {
+  pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> IOResult<()> {
     let full = buf.len();
     while !buf.is_empty() {
       match self.backend.pread(buf, offset) {
         Ok(0) if buf.len() == full => break, // allow only empty, not partial.
-        Ok(0) => return Err(Error::IO(IoError::from(ErrorKind::UnexpectedEof))),
+        Ok(0) => return Err(IoError::from(ErrorKind::UnexpectedEof)),
         Ok(n) => {
           let tmp = buf;
           buf = &mut tmp[n..];
           offset += n as u64;
         }
         Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) => return Err(Error::IO(e)),
+        Err(e) => return Err(e),
       }
     }
     Ok(())
   }
 
-  pub fn write_async(&self, buf: &'static [u8], offset: u64) -> TaskHandle<()> {
+  pub fn write_async(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
     self.write_handle.publish_write(
       &self.state,
       &*self.thread,
@@ -155,26 +176,26 @@ impl IOHandle {
     )
   }
 
-  pub fn fdatasync(&self) -> TaskHandle<()> {
+  pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
       .publish_sync(&self.state, &*self.thread, &self.backend)
   }
 
-  pub fn fsync(&self) -> Result {
+  pub fn fsync(&self) -> IOResult<()> {
     let _token = match self.state.try_shared() {
       Some(token) => token,
       None => return Ok(()),
     };
 
-    self.backend.fsync().map_err(Error::IO)
+    self.backend.fsync()
   }
 
-  pub fn len(&self) -> Result<u64> {
-    Ok(self.backend.metadata().map_err(Error::IO)?.len())
+  pub fn len(&self) -> IOResult<u64> {
+    Ok(self.backend.metadata()?.len())
   }
 
-  pub fn truncate(&self) -> Result {
+  pub fn truncate(&self) -> IOResult<()> {
     let backoff = Backoff::new();
     while self.state.try_exclusive().map(forget).is_none() {
       backoff.snooze();
@@ -183,7 +204,7 @@ impl IOHandle {
     self.base_dir.remove(&*self.filename.l())
   }
 
-  pub fn rename(&self, new_filename: PathBuf) -> Result {
+  pub fn rename(&self, new_filename: PathBuf) -> IOResult<()> {
     {
       let mut filename = self.filename.l();
       self.base_dir.rename(&*filename, &new_filename)?;
@@ -192,8 +213,8 @@ impl IOHandle {
     Ok(())
   }
 
-  pub fn fallocate(&self, offset: u64, len: u64) -> Result {
-    self.backend.fallocate(offset, len).map_err(Error::IO)
+  pub fn fallocate(&self, offset: u64, len: u64) -> IOResult<()> {
+    self.backend.fallocate(offset, len)
   }
   pub fn filename(&self) -> PathBuf {
     self.filename.l().clone()
@@ -213,7 +234,7 @@ impl DirHandle {
     path: &Path,
     disk_backend: Box<dyn DiskBackend>,
     thread: Arc<IOThread>,
-  ) -> Result<Self> {
+  ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
     let (file, path) = disk_backend
       .ensure_dir(path)
@@ -222,8 +243,7 @@ impl DirHandle {
         disk_backend
           .open(options.read(true), &path)
           .map(|f| (f, path))
-      })
-      .map_err(Error::IO)?;
+      })?;
     Ok(Self {
       io_backend: Arc::from(file),
       disk_backend,
@@ -233,56 +253,46 @@ impl DirHandle {
       path,
     })
   }
-  fn fdatasync(&self) -> Result {
+  fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
       .publish_sync(&self.state, &*self.thread, &self.io_backend)
-      .wait()
   }
   fn get_path(&self) -> &Path {
     self.path.as_path()
   }
-  fn read(&self) -> Result<Vec<DirEntry>> {
+  fn read(&self) -> IOResult<Vec<DirEntry>> {
     let mut entries = Vec::new();
 
-    for entry in self.disk_backend.read_dir(&self.path).map_err(Error::IO)? {
-      let entry = entry.map_err(Error::IO)?;
-      entries.push(entry);
+    for entry in self.disk_backend.read_dir(&self.path)? {
+      entries.push(entry?);
     }
 
     Ok(entries)
   }
-  fn remove(&self, filename: &Path) -> Result {
-    self
-      .disk_backend
-      .remove_file(&self.path.join(filename))
-      .map_err(Error::IO)
+  fn remove(&self, filename: &Path) -> IOResult<()> {
+    self.disk_backend.remove_file(&self.path.join(filename))
   }
-  fn exists(&self, filename: &Path) -> Result<bool> {
-    self
-      .disk_backend
-      .exists(&self.path.join(filename))
-      .map_err(Error::IO)
+  fn exists(&self, filename: &Path) -> IOResult<bool> {
+    self.disk_backend.exists(&self.path.join(filename))
   }
-  fn rename(&self, from: &Path, to: &Path) -> Result {
+  fn rename(&self, from: &Path, to: &Path) -> IOResult<()> {
     self
       .disk_backend
       .rename(&self.path.join(from), &self.path.join(to))
-      .map_err(Error::IO)
   }
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>> {
-    self.disk_backend.open(options, path).map_err(Error::IO)
+  fn open(&self, options: &mut OpenOptions, path: &Path) -> IOResult<Box<dyn IOBackend>> {
+    self.disk_backend.open(options, path)
   }
   fn open_direct_io(
     &self,
     options: &mut OpenOptions,
     path: &Path,
-  ) -> Result<Arc<dyn IOBackend>> {
+  ) -> IOResult<Arc<dyn IOBackend>> {
     self
       .disk_backend
       .open_direct_io(options, path)
       .map(Arc::from)
-      .map_err(Error::IO)
   }
 }
 
@@ -302,11 +312,23 @@ impl AppendIOHandle {
 }
 pub struct ScanIOHandle {
   file: BufReader<Box<dyn IOBackend>>,
+  len: u64,
+  base_dir: SBox<DirHandle>,
+  filename: PathBuf,
 }
 impl ScanIOHandle {
-  pub fn read(&mut self, bytes: usize) -> Result<Vec<u8>> {
+  pub fn read_to_vec(&mut self, bytes: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0; bytes];
-    self.file.read_exact(&mut buf).map_err(Error::IO)?;
+    self.read(&mut buf)?;
     Ok(buf)
+  }
+  pub fn read(&mut self, buf: &mut [u8]) -> Result {
+    self.file.read_exact(buf).map_err(Error::IO)
+  }
+  pub const fn len(&self) -> u64 {
+    self.len
+  }
+  pub fn truncate(&self) -> Result {
+    self.base_dir.remove(&self.filename).map_err(Error::IO)
   }
 }

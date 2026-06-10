@@ -318,7 +318,7 @@ fn wal_disk_full_is_returned_without_publishing_transaction() {
       let err = failed.commit().unwrap_err();
       assert!(matches!(
         err,
-        lfdb::Error::IO(ref err) if err.kind() == ErrorKind::StorageFull
+        lfdb::Error::WALFailed(err) if err == ErrorKind::StorageFull
       ));
     }
 

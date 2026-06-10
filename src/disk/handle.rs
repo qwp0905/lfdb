@@ -1,7 +1,7 @@
 use std::mem::transmute;
 
-use super::{IOHandle, Page, Pointer};
-use crate::{background::TaskHandle, error::Result};
+use super::{AsyncIO, IOHandle, Page, Pointer};
+use crate::{error::Result, Error};
 
 /**
  * Just a wrapper for IOHandle that provides a logical offset function.
@@ -17,13 +17,17 @@ impl<const N: usize> BlockIOHandle<N> {
   }
 
   pub fn read(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
-    self.handle.read(page.as_mut(), pointer * Self::SIZE)
+    self
+      .handle
+      .read(page.as_mut(), pointer * Self::SIZE)
+      .map_err(Error::IO)
   }
 
   pub fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
       .read_unchecked(page.as_mut(), pointer * Self::SIZE)
+      .map_err(Error::IO)
   }
 
   #[inline]
@@ -32,21 +36,21 @@ impl<const N: usize> BlockIOHandle<N> {
     self.write_async(pointer, unsafe { transmute(page) }).wait()
   }
 
-  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> TaskHandle<()> {
-    self.handle.write_async(page.as_ref(), pointer * Self::SIZE)
+  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
+    AsyncIO::new(self.handle.write_async(page.as_ref(), pointer * Self::SIZE))
   }
 
   #[inline]
   pub fn fsync(&self) -> Result {
-    self.handle.fsync()
+    self.handle.fsync().map_err(Error::IO)
   }
 
   #[inline]
   pub fn len(&self) -> Result<Pointer> {
-    Ok(self.handle.len()? / Self::SIZE)
+    Ok(self.handle.len().map_err(Error::IO)? / Self::SIZE)
   }
 
   pub fn truncate(&self) -> Result {
-    self.handle.truncate()
+    self.handle.truncate().map_err(Error::IO)
   }
 }
