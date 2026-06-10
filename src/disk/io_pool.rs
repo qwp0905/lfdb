@@ -1,7 +1,5 @@
 use std::{
-  fs::{
-    create_dir_all, exists, read_dir, remove_file, rename, DirEntry, File, OpenOptions,
-  },
+  fs::{DirEntry, OpenOptions},
   io::{BufReader, BufWriter, Error as IoError, ErrorKind, IoSlice, Read, Write},
   mem::forget,
   path::{Path, PathBuf},
@@ -11,11 +9,11 @@ use std::{
 use crossbeam::utils::Backoff;
 
 use super::{
-  create_io_thread, DirectIO, HandleState, IOThread, Pread, TaskPublisher, WriteTask,
+  create_io_thread, DiskBackend, HandleState, IOBackend, IOThread, TaskPublisher,
+  WriteTask,
 };
 use crate::{
   background::{TaskHandle, WorkBuilder},
-  disk::Fallocate,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex, ToArc},
   Error, Result,
@@ -27,7 +25,8 @@ pub struct IOPool {
   base_dir: SBox<DirHandle>,
 }
 impl IOPool {
-  pub fn new(
+  pub fn with_backend<T: DiskBackend>(
+    backend: T,
     thread_count: usize,
     base_path: &Path,
     metrics: Arc<MetricsRegistry>,
@@ -37,7 +36,11 @@ impl IOPool {
       .multi(thread_count)
       .shared(create_io_thread(metrics.clone()))
       .to_arc();
-    let base_dir = SBox::new(DirHandle::ensure(base_path, thread.clone())?);
+    let base_dir = SBox::new(DirHandle::ensure(
+      base_path,
+      Box::new(backend),
+      thread.clone(),
+    )?);
     Ok(Self {
       thread,
       metrics,
@@ -47,12 +50,10 @@ impl IOPool {
 
   pub fn open_append_io(&self, filename: PathBuf) -> Result<AppendIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
-    let file = OpenOptions::new()
-      .write(true)
-      .append(true)
-      .create(true)
-      .open(path)
-      .map_err(Error::IO)?;
+    let mut options = OpenOptions::new();
+    let file = self
+      .base_dir
+      .open(options.write(true).append(true).create(true), &path)?;
     Ok(AppendIOHandle {
       file: BufWriter::new(file),
       filename,
@@ -60,10 +61,8 @@ impl IOPool {
   }
   pub fn open_scan_io(&self, filename: PathBuf) -> Result<ScanIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
-    let file = OpenOptions::new()
-      .read(true)
-      .open(path)
-      .map_err(Error::IO)?;
+    let mut options = OpenOptions::new();
+    let file = self.base_dir.open(options.read(true), &path)?;
     Ok(ScanIOHandle {
       file: BufReader::new(file),
     })
@@ -74,14 +73,12 @@ impl IOPool {
     // accumulated and sorted in the eager_buffering layer, then
     // flushed as a single pwritev call per contiguous block.
     let path = self.base_dir.get_path().join(&filename);
-    let file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .direct_io(&path)
-      .map_err(Error::IO)?;
+    let mut options = OpenOptions::new();
+    let file = self
+      .base_dir
+      .open_direct_io(options.read(true).write(true).create(true), &path)?;
     Ok(IOHandle {
-      file: SBox::new(file),
+      backend: file,
       write_handle: SBox::new(TaskPublisher::new()),
       sync_handle: SBox::new(TaskPublisher::new()),
       state: SBox::new(HandleState::new()),
@@ -111,7 +108,7 @@ impl IOPool {
 }
 
 pub struct IOHandle {
-  file: SBox<File>,
+  backend: Arc<dyn IOBackend>,
   write_handle: SBox<TaskPublisher<WriteTask>>,
   sync_handle: SBox<TaskPublisher<()>>,
   thread: Arc<IOThread>,
@@ -127,14 +124,14 @@ impl IOHandle {
     self
       .metrics
       .disk_read
-      .measure(|| self.file.pread_exact(buf, offset))
+      .measure(|| self.backend.pread_exact(buf, offset))
       .map_err(Error::IO)
   }
 
   pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> Result {
     let full = buf.len();
     while !buf.is_empty() {
-      match self.file.pread(buf, offset) {
+      match self.backend.pread(buf, offset) {
         Ok(0) if buf.len() == full => break, // allow only empty, not partial.
         Ok(0) => return Err(Error::IO(IoError::from(ErrorKind::UnexpectedEof))),
         Ok(n) => {
@@ -153,7 +150,7 @@ impl IOHandle {
     self.write_handle.publish_write(
       &self.state,
       &*self.thread,
-      &self.file,
+      &self.backend,
       (offset, IoSlice::new(buf)),
     )
   }
@@ -161,7 +158,7 @@ impl IOHandle {
   pub fn fdatasync(&self) -> TaskHandle<()> {
     self
       .sync_handle
-      .publish_sync(&self.state, &*self.thread, &self.file)
+      .publish_sync(&self.state, &*self.thread, &self.backend)
   }
 
   pub fn fsync(&self) -> Result {
@@ -170,11 +167,11 @@ impl IOHandle {
       None => return Ok(()),
     };
 
-    self.file.sync_all().map_err(Error::IO)
+    self.backend.fsync().map_err(Error::IO)
   }
 
   pub fn len(&self) -> Result<u64> {
-    Ok(self.file.metadata().map_err(Error::IO)?.len())
+    Ok(self.backend.metadata().map_err(Error::IO)?.len())
   }
 
   pub fn truncate(&self) -> Result {
@@ -196,7 +193,7 @@ impl IOHandle {
   }
 
   pub fn fallocate(&self, offset: u64, len: u64) -> Result {
-    self.file.fallocate(offset, len).map_err(Error::IO)
+    self.backend.fallocate(offset, len).map_err(Error::IO)
   }
   pub fn filename(&self) -> PathBuf {
     self.filename.l().clone()
@@ -204,20 +201,32 @@ impl IOHandle {
 }
 
 struct DirHandle {
-  file: SBox<File>,
+  io_backend: Arc<dyn IOBackend>,
+  disk_backend: Box<dyn DiskBackend>,
   sync_handle: SBox<TaskPublisher<()>>,
   thread: Arc<IOThread>,
   state: SBox<HandleState>,
   path: PathBuf,
 }
 impl DirHandle {
-  fn ensure(path: &Path, thread: Arc<IOThread>) -> Result<Self> {
-    let (file, path) = create_dir_all(path)
+  fn ensure(
+    path: &Path,
+    disk_backend: Box<dyn DiskBackend>,
+    thread: Arc<IOThread>,
+  ) -> Result<Self> {
+    let mut options = OpenOptions::new();
+    let (file, path) = disk_backend
+      .ensure_dir(path)
       .and_then(|_| path.canonicalize())
-      .and_then(|path| File::open(&path).map(|f| (f, path)))
+      .and_then(|path| {
+        disk_backend
+          .open(options.read(true), &path)
+          .map(|f| (f, path))
+      })
       .map_err(Error::IO)?;
     Ok(Self {
-      file: SBox::new(file),
+      io_backend: Arc::from(file),
+      disk_backend,
       sync_handle: SBox::new(TaskPublisher::new()),
       thread,
       state: SBox::new(HandleState::new()),
@@ -227,7 +236,7 @@ impl DirHandle {
   fn fdatasync(&self) -> Result {
     self
       .sync_handle
-      .publish_sync(&self.state, &*self.thread, &self.file)
+      .publish_sync(&self.state, &*self.thread, &self.io_backend)
       .wait()
   }
   fn get_path(&self) -> &Path {
@@ -236,7 +245,7 @@ impl DirHandle {
   fn read(&self) -> Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
 
-    for entry in read_dir(&self.path).map_err(Error::IO)? {
+    for entry in self.disk_backend.read_dir(&self.path).map_err(Error::IO)? {
       let entry = entry.map_err(Error::IO)?;
       entries.push(entry);
     }
@@ -244,18 +253,41 @@ impl DirHandle {
     Ok(entries)
   }
   fn remove(&self, filename: &Path) -> Result {
-    remove_file(self.path.join(filename)).map_err(Error::IO)
+    self
+      .disk_backend
+      .remove_file(&self.path.join(filename))
+      .map_err(Error::IO)
   }
   fn exists(&self, filename: &Path) -> Result<bool> {
-    exists(self.path.join(filename)).map_err(Error::IO)
+    self
+      .disk_backend
+      .exists(&self.path.join(filename))
+      .map_err(Error::IO)
   }
   fn rename(&self, from: &Path, to: &Path) -> Result {
-    rename(self.path.join(from), self.path.join(to)).map_err(Error::IO)
+    self
+      .disk_backend
+      .rename(&self.path.join(from), &self.path.join(to))
+      .map_err(Error::IO)
+  }
+  fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>> {
+    self.disk_backend.open(options, path).map_err(Error::IO)
+  }
+  fn open_direct_io(
+    &self,
+    options: &mut OpenOptions,
+    path: &Path,
+  ) -> Result<Arc<dyn IOBackend>> {
+    self
+      .disk_backend
+      .open_direct_io(options, path)
+      .map(Arc::from)
+      .map_err(Error::IO)
   }
 }
 
 pub struct AppendIOHandle {
-  file: BufWriter<File>,
+  file: BufWriter<Box<dyn IOBackend>>,
   filename: PathBuf,
 }
 impl AppendIOHandle {
@@ -264,12 +296,12 @@ impl AppendIOHandle {
   }
   pub fn flush(mut self) -> Result<PathBuf> {
     self.file.flush().map_err(Error::IO)?;
-    self.file.get_ref().sync_all().map_err(Error::IO)?;
+    self.file.get_ref().fsync().map_err(Error::IO)?;
     Ok(self.filename)
   }
 }
 pub struct ScanIOHandle {
-  file: BufReader<File>,
+  file: BufReader<Box<dyn IOBackend>>,
 }
 impl ScanIOHandle {
   pub fn read(&mut self, bytes: usize) -> Result<Vec<u8>> {
