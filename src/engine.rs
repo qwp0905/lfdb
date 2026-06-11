@@ -205,12 +205,11 @@ impl Engine {
       .iter()
       .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
     {
-      let handle = match handles.get(table_id) {
-        Some((_, handle)) => handle.clone(),
-        None => continue,
+      let Some((_, handle)) = handles.get(table_id) else {
+        continue;
       };
       block_cache
-        .read_unchecked(*ptr, &handle)?
+        .read_unchecked(*ptr, handle)?
         .for_write()
         .as_mut()
         .writer()
@@ -292,9 +291,8 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let (state, snapshot) = match self.orchestrator.start_tx(None) {
-      Some(v) => v,
-      None => return Err(Error::EngineUnavailable),
+    let Some((state, snapshot)) = self.orchestrator.start_tx(None) else {
+      return Err(Error::EngineUnavailable);
     };
     Ok(Transaction::new(
       &self.orchestrator,
@@ -312,9 +310,8 @@ impl Engine {
     if !self.available.load(Ordering::Acquire) {
       return Err(Error::EngineUnavailable);
     }
-    let (state, snapshot) = match self.orchestrator.start_tx(Some(timeout)) {
-      Some(v) => v,
-      None => return Err(Error::EngineUnavailable),
+    let Some((state, snapshot)) = self.orchestrator.start_tx(Some(timeout)) else {
+      return Err(Error::EngineUnavailable);
     };
     Ok(Transaction::new(
       &self.orchestrator,

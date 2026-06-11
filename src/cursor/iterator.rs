@@ -62,28 +62,27 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
 
   pub fn next_snapshot(&mut self) -> Result<Option<KVSnapshot>> {
     loop {
-      match self.0.next_record()? {
-        Some((key, found)) => match found {
-          Some(record) => {
-            return Ok(Some(match record.data {
-              Buffered::Data(value) => KVSnapshot {
-                key,
-                value,
-                owner: record.owner,
-                version: record.version,
-              },
-              Buffered::Chunked(pointers) => KVSnapshot {
-                key,
-                value: self.0.read_chunk(&pointers)?,
-                owner: record.owner,
-                version: record.version,
-              },
-            }))
-          }
-          None => continue,
-        },
-        None => return Ok(None),
+      let Some((key, found)) = self.0.next_record()? else {
+        return Ok(None);
       };
+      let Some(record) = found else {
+        continue;
+      };
+
+      return Ok(Some(match record.data {
+        Buffered::Data(value) => KVSnapshot {
+          key,
+          value,
+          owner: record.owner,
+          version: record.version,
+        },
+        Buffered::Chunked(pointers) => KVSnapshot {
+          key,
+          value: self.0.read_chunk(&pointers)?,
+          owner: record.owner,
+          version: record.version,
+        },
+      }));
     }
   }
 
@@ -198,12 +197,9 @@ where
   fn fill_up(&mut self) -> Result {
     debug_assert!(self.buffered.is_empty());
 
-    let ptr = match self.next.take() {
-      Some(v) => v,
-      None => {
-        self.closed = true;
-        return Ok(());
-      }
+    let Some(ptr) = self.next.take() else {
+      self.closed = true;
+      return Ok(());
     };
 
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
@@ -247,17 +243,15 @@ where
   }
 
   fn next_kv(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
-    match self.next_record()? {
-      Some((key, found)) => match found {
-        Some(record) => match record.data {
-          Buffered::Data(data) => Ok(Some((key, Some(data)))),
-          Buffered::Chunked(pointers) => {
-            Ok(Some((key, Some(self.read_chunk(&pointers)?))))
-          }
-        },
-        None => Ok(Some((key, None))),
-      },
-      None => Ok(None),
+    let Some((key, found)) = self.next_record()? else {
+      return Ok(None);
+    };
+    let Some(record) = found else {
+      return Ok(Some((key, None)));
+    };
+    match record.data {
+      Buffered::Data(data) => Ok(Some((key, Some(data)))),
+      Buffered::Chunked(pointers) => Ok(Some((key, Some(self.read_chunk(&pointers)?)))),
     }
   }
 }

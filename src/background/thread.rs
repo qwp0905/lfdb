@@ -23,10 +23,7 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync + RefUnwindSafe + UnwindSafe 
       return TaskHandle::new(done_r);
     }
 
-    drop(done_r);
-    let (done_r, done_t) = oneshot();
-    done_t.fulfill(Err(Error::WorkerClosed));
-    TaskHandle::new(done_r)
+    TaskHandle::fulfilled(Err(Error::WorkerClosed))
   }
 
   fn dispatch(&self, v: T) {

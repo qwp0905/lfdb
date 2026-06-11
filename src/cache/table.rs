@@ -176,36 +176,29 @@ impl MappingTable {
         continue;
       }
 
-      let mut reserved = match shard.node.reserve(&key, hash, hasher, &try_evict) {
-        Ok(reserved) => reserved,
-        Err(_) => {
-          drop(shard);
-          backoff.snooze();
-          continue;
-        }
+      let Ok(mut reserved) = shard.node.reserve(&key, hash, hasher, &try_evict) else {
+        drop(shard);
+        backoff.snooze();
+        continue;
       };
+      if let Some((evicted, bid, token)) = reserved.take_evicted() {
+        shard.eviction.insert(evicted);
+        reserved.fulfill(bid);
+        return EvictionGuard::new(Some(evicted), bid, token, &s, key, hash);
+      }
 
-      let (evicted, bid, token) = match reserved.take_evicted() {
-        Some(evicted) => evicted,
-        None => {
-          let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
-            let id = shard.allocated;
-            shard.allocated += 1;
-            debug_assert!(
-              shard.allocated <= shard.node.capacity(),
-              "capacity exceeded"
-            );
-            (id + offset, None)
-          });
-          reserved.fulfill(bid);
-          let token = try_evict(&bid).unwrap();
-          return EvictionGuard::new(evicted, bid, token, &s, key, hash);
-        }
-      };
-
-      shard.eviction.insert(evicted);
+      let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+        let id = shard.allocated;
+        shard.allocated += 1;
+        debug_assert!(
+          shard.allocated <= shard.node.capacity(),
+          "capacity exceeded"
+        );
+        (id + offset, None)
+      });
       reserved.fulfill(bid);
-      return EvictionGuard::new(Some(evicted), bid, token, &s, key, hash);
+      let token = try_evict(&bid).unwrap();
+      return EvictionGuard::new(evicted, bid, token, &s, key, hash);
     }
   }
 
@@ -245,8 +238,13 @@ impl MappingTable {
         continue;
       }
 
-      let mut reserved = match shard.node.get_or_reserve(&key, hash, hasher, &try_evict) {
-        Ok(GetOrReserve::Hit(&bid)) => {
+      let Ok(result) = shard.node.get_or_reserve(&key, hash, hasher, &try_evict) else {
+        drop(shard);
+        backoff.snooze();
+        continue;
+      };
+      let mut reserved = match result {
+        GetOrReserve::Hit(&bid) => {
           if let Some(token) = get_pin(bid).try_shared() {
             return Acquired::Hit(bid, token);
           }
@@ -254,44 +252,34 @@ impl MappingTable {
           backoff.snooze();
           continue;
         }
-        Ok(GetOrReserve::Reserved(reserved)) => reserved,
-        Err(_) => {
-          drop(shard);
-          backoff.snooze();
-          continue;
-        }
+        GetOrReserve::Reserved(reserved) => reserved,
       };
 
-      let (evicted, bid, token) = match reserved.take_evicted() {
-        Some(evicted) => evicted,
-        None => {
-          let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
-            let id = shard.allocated;
-            shard.allocated += 1;
-            debug_assert!(
-              shard.allocated <= shard.node.capacity(),
-              "capacity exceeded"
-            );
-            (id + offset, None)
-          });
-          reserved.fulfill(bid);
-          let token = get_pin(bid).try_exclusive().unwrap();
-          return Acquired::Evicted(EvictionGuard::new(
-            evicted, bid, token, &s, key, hash,
-          ));
-        }
-      };
+      if let Some((evicted, bid, token)) = reserved.take_evicted() {
+        shard.eviction.insert(evicted);
+        reserved.fulfill(bid);
+        return Acquired::Evicted(EvictionGuard::new(
+          Some(evicted),
+          bid,
+          token,
+          &s,
+          key,
+          hash,
+        ));
+      }
 
-      shard.eviction.insert(evicted);
+      let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+        let id = shard.allocated;
+        shard.allocated += 1;
+        debug_assert!(
+          shard.allocated <= shard.node.capacity(),
+          "capacity exceeded"
+        );
+        (id + offset, None)
+      });
       reserved.fulfill(bid);
-      return Acquired::Evicted(EvictionGuard::new(
-        Some(evicted),
-        bid,
-        token,
-        &s,
-        key,
-        hash,
-      ));
+      let token = try_evict(&bid).unwrap();
+      return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
     }
   }
 

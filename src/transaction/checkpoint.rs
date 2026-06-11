@@ -192,9 +192,8 @@ impl Checkpoint {
     self.ticker.close();
 
     if self.incoming.is_empty() {
-      let mut cycle = match self.cycle.take() {
-        Some(cycle) => cycle,
-        None => return Ok(()),
+      let Some(mut cycle) = self.cycle.take() else {
+        return Ok(());
       };
 
       cycle.flush_hard()?;
@@ -277,24 +276,21 @@ fn checkpoint_loop(
 
   move |_| {
     let cycle = cycle.as_ptr().borrow_mut_unsafe();
-    let current = match cycle {
-      Some(v) => v,
-      None => {
-        let log_id = wal.current_log_id();
-        let new = cycle.insert(CheckpointCycle::new(
-          repeat_with(|| incoming.pop()).map_while(|v| v),
-          block_cache.create_flusher(),
-          log_id,
-          metrics.checkpoint_cycle.start(),
-        ));
+    let Some(current) = cycle else {
+      let log_id = wal.current_log_id();
+      let new = cycle.insert(CheckpointCycle::new(
+        repeat_with(|| incoming.pop()).map_while(|v| v),
+        block_cache.create_flusher(),
+        log_id,
+        metrics.checkpoint_cycle.start(),
+      ));
 
-        info!(
-          "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
-          new.dirty_len(),
-          new.segments_len(),
-        );
-        return Ok(());
-      }
+      info!(
+        "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
+        new.dirty_len(),
+        new.segments_len(),
+      );
+      return Ok(());
     };
 
     if !current.flusher.is_done() {

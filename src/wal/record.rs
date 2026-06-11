@@ -212,21 +212,25 @@ impl LogRecordUninit {
 
 pub fn read_page(value: &Page<WAL_BLOCK_SIZE>) -> (Vec<LogRecord>, bool) {
   let mut scanner = value.scanner();
-  let len = match scanner.read_u16() {
-    Ok(l) => l as usize,
-    Err(_) => return (vec![], true), // ignore error cause of partial write
+  let Ok(len) = scanner.read_u16() else {
+    // ignore error cause of partial write
+    return (vec![], true);
   };
 
-  let mut data = Vec::with_capacity(len);
+  let mut data = Vec::with_capacity(len as usize);
   for _ in 0..len {
-    let size = match scanner.read_u16() {
-      Ok(s) => s as usize,
-      Err(_) => return (data, true), // ignore error cause of partial write
+    let Ok(size) = scanner.read_u16() else {
+      return (data, true);
     };
-    match scanner.read_n(size).ok().and_then(LogRecord::read_from) {
-      Some(record) => data.push(record),
-      None => return (data, true), // ignore error cause of partial write
-    }
+    let Some(record) = scanner
+      .read_n(size as usize)
+      .ok()
+      .and_then(LogRecord::read_from)
+    else {
+      return (data, true);
+    };
+
+    data.push(record);
   }
   (data, false)
 }

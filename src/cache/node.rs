@@ -171,35 +171,35 @@ where
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
-    if let Some(bucket) = self.table.find(hash, equivalent(key)) {
-      let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
-      return match entry.get_state_mut() {
-        State::Small { freq } | State::Main { freq } => {
-          *freq = (*freq + 1).min(MAX_FREQ);
-          Ok(GetOrReserve::Hit(entry.get_value()))
-        }
-        State::Ghost => {
-          let (old, _) = unsafe { self.table.remove(bucket) };
-          old.borrow_mut_unsafe().set_state(State::Tombstone);
+    let Some(bucket) = self.table.find(hash, equivalent(key)) else {
+      return self
+        .reserve(key, hash, hash_builder, try_evict)
+        .map(GetOrReserve::Reserved);
+    };
 
-          let evicted = self.evict(hash_builder, &try_evict)?;
+    let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
+    match entry.get_state_mut() {
+      State::Small { freq } | State::Main { freq } => {
+        *freq = (*freq + 1).min(MAX_FREQ);
+        Ok(GetOrReserve::Hit(entry.get_value()))
+      }
+      State::Ghost => {
+        let (old, _) = unsafe { self.table.remove(bucket) };
+        old.borrow_mut_unsafe().set_state(State::Tombstone);
 
-          let ptr = CacheEntry::new_main(key.clone()).to_raw_ptr();
-          self.table.insert(hash, ptr, make_hasher(hash_builder));
-          self.main.push_back(ptr);
-          self.main_count += 1;
-          Ok(GetOrReserve::Reserved(Reserved::new(
-            evicted,
-            ptr.borrow_mut_unsafe().value_ptr(),
-          )))
-        }
-        State::Tombstone => unreachable!(),
-      };
+        let evicted = self.evict(hash_builder, &try_evict)?;
+
+        let ptr = CacheEntry::new_main(key.clone()).to_raw_ptr();
+        self.table.insert(hash, ptr, make_hasher(hash_builder));
+        self.main.push_back(ptr);
+        self.main_count += 1;
+        Ok(GetOrReserve::Reserved(Reserved::new(
+          evicted,
+          ptr.borrow_mut_unsafe().value_ptr(),
+        )))
+      }
+      State::Tombstone => unreachable!(),
     }
-
-    self
-      .reserve(key, hash, hash_builder, try_evict)
-      .map(GetOrReserve::Reserved)
   }
 
   fn evict<S, R, F>(
@@ -240,12 +240,9 @@ where
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
         State::Small { freq } if *freq > 1 => {
-          let evicted = match self.evict_main(hasher, try_evict) {
-            Ok(v) => v,
-            Err(_) => {
-              self.small.push_back(ptr);
-              return Err(());
-            }
+          let Ok(evicted) = self.evict_main(hasher, try_evict) else {
+            self.small.push_back(ptr);
+            return Err(());
           };
 
           entry.set_state(State::Main { freq: 0 });
@@ -258,12 +255,9 @@ where
           }
         }
         State::Small { .. } => {
-          let reserved = match try_evict(entry.get_value()) {
-            Some(v) => v,
-            None => {
-              self.small.push_back(ptr);
-              return Err(());
-            }
+          let Some(reserved) = try_evict(entry.get_value()) else {
+            self.small.push_back(ptr);
+            return Err(());
           };
 
           self.small_count -= 1;
@@ -298,12 +292,9 @@ where
           continue;
         }
         State::Main { .. } => {
-          let reserved = match try_evict(entry.get_value()) {
-            Some(v) => v,
-            None => {
-              self.main.push_back(ptr);
-              return Err(());
-            }
+          let Some(reserved) = try_evict(entry.get_value()) else {
+            self.main.push_back(ptr);
+            return Err(());
           };
 
           self
@@ -317,10 +308,7 @@ where
           return Ok(Some((entry.take_key(), value, reserved)));
         }
         State::Ghost | State::Small { .. } => unreachable!(),
-        State::Tombstone => {
-          ptr.drop_unsafe();
-          continue;
-        }
+        State::Tombstone => ptr.drop_unsafe(),
       }
     }
 
@@ -342,9 +330,7 @@ where
             .unwrap_or_else(|| unreachable!());
           ptr.drop_unsafe();
         }
-        State::Tombstone => {
-          ptr.drop_unsafe();
-        }
+        State::Tombstone => ptr.drop_unsafe(),
       }
     }
   }

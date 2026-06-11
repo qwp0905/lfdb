@@ -214,12 +214,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         };
 
         stop = true;
-        let (split_node, split_key) = match internal.split_if_needed() {
-          Some(v) => v,
-          None => {
-            self.0.serialize_and_log(slot, &internal.to_node(), table)?;
-            return Ok(());
-          }
+        let Some((split_node, split_key)) = internal.split_if_needed() else {
+          self.0.serialize_and_log(slot, &internal.to_node(), table)?;
+          return Ok(());
         };
 
         let split_ptr = self.0.alloc_and_log(&split_node.to_node(), table)?;
@@ -244,13 +241,14 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let old_height = stack.len() as u16;
       while let Some(ptr) = stack.pop() {
-        match self.apply_split(split_key.clone(), split_pointer, ptr, table)? {
-          Some((k, p)) => {
-            split_key = k;
-            split_pointer = p;
-          }
-          None => return Ok(()),
+        let Some((k, p)) =
+          self.apply_split(split_key.clone(), split_pointer, ptr, table)?
+        else {
+          return Ok(());
         };
+
+        split_key = k;
+        split_pointer = p;
       }
 
       let mut changed = None;
@@ -277,9 +275,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           Ok(())
         })?;
 
-      let (mut ptr, diff) = match changed {
-        Some(v) => v,
-        None => return Ok(()),
+      let Some((mut ptr, diff)) = changed else {
+        return Ok(());
       };
 
       while stack.len() < diff {
@@ -298,9 +295,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     data: Option<Vec<u8>>,
     table: &TableHandleRef,
   ) -> Result<RecordData> {
-    let mut data = match data {
-      Some(v) => v,
-      None => return Ok(RecordData::Tombstone),
+    let Some(mut data) = data else {
+      return Ok(RecordData::Tombstone);
     };
     if data.len() < LARGE_VALUE {
       return Ok(RecordData::Data(data));
@@ -422,12 +418,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           }
         };
 
-        let split = match node.split_if_needed() {
-          Some(split) => split,
-          None => {
-            self.0.serialize_and_log(slot, &node.to_node(), table)?;
-            return Ok(result = Some(Ok(None)));
-          }
+        let Some(split) = node.split_if_needed() else {
+          self.0.serialize_and_log(slot, &node.to_node(), table)?;
+          return Ok(result = Some(Ok(None)));
         };
 
         let mid_key = split.top().clone();
@@ -505,12 +498,9 @@ where
           }
         };
 
-        let split = match node.split_if_needed() {
-          Some(split) => split,
-          None => {
-            self.0.serialize_and_log(slot, &node.to_node(), table)?;
-            return Ok(state = LoopState::Break);
-          }
+        let Some(split) = node.split_if_needed() else {
+          self.0.serialize_and_log(slot, &node.to_node(), table)?;
+          return Ok(state = LoopState::Break);
         };
 
         let mid_key = split.top().clone();

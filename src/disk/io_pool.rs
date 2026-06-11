@@ -183,11 +183,9 @@ impl IOHandle {
   }
 
   pub fn fsync(&self) -> IOResult<()> {
-    let _token = match self.state.try_shared() {
-      Some(token) => token,
-      None => return Ok(()),
+    let Some(_token) = self.state.try_shared() else {
+      return Ok(());
     };
-
     self.backend.fsync()
   }
 
