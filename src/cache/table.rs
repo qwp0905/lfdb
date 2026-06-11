@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeSet, VecDeque},
+  collections::BTreeSet,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::Mutex,
@@ -11,7 +11,7 @@ use super::{CacheNode, GetOrReserve};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -30,7 +30,7 @@ struct Shard {
   node: CacheNode<Key, BlockId>,
   eviction: BTreeSet<Key>, // evicting pointers
   allocated: BlockId,
-  aborted: VecDeque<(BlockId, Option<Key>)>,
+  aborted: ChunkQueue<(BlockId, Option<Key>)>,
 }
 
 /**
@@ -101,9 +101,9 @@ impl<'a> Drop for EvictionGuard<'a> {
       let mut shard = self.guard.l();
       if let Some(i) = self.evicted {
         shard.eviction.remove(&i);
-        shard.aborted.push_back((self.block_id, Some(i)));
+        shard.aborted.push((self.block_id, Some(i)));
       } else {
-        shard.aborted.push_back((self.block_id, None));
+        shard.aborted.push((self.block_id, None));
       }
       shard.node.remove(&self.new_pointer, self.new_pointer_hash);
     }
@@ -132,7 +132,7 @@ impl MappingTable {
         node: CacheNode::new(cap_per_shard),
         eviction: BTreeSet::new(),
         allocated: 0,
-        aborted: VecDeque::new(),
+        aborted: ChunkQueue::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
@@ -187,7 +187,7 @@ impl MappingTable {
         return EvictionGuard::new(Some(evicted), bid, token, &s, key, hash);
       }
 
-      let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+      let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
         let id = shard.allocated;
         shard.allocated += 1;
         debug_assert!(
@@ -268,7 +268,7 @@ impl MappingTable {
         ));
       }
 
-      let (bid, evicted) = shard.aborted.pop_front().unwrap_or_else(|| {
+      let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
         let id = shard.allocated;
         shard.allocated += 1;
         debug_assert!(

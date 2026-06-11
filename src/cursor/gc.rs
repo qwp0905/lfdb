@@ -22,7 +22,7 @@ use crate::{
   error,
   table::{TableHandleRef, TableMapper, META_TABLE_ID},
   transaction::{PageRecorder, VersionVisibility},
-  utils::{ToArc, ToBox},
+  utils::{ChunkQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX},
   Result,
 };
@@ -327,13 +327,13 @@ where
 }
 
 struct GCState {
-  tasks: LinkedList<GCTask>,
+  tasks: ChunkQueue<GCTask>,
   min_version: TxId,
 }
 impl GCState {
   const fn new() -> Self {
     Self {
-      tasks: LinkedList::new(),
+      tasks: ChunkQueue::new(),
       min_version: 0,
     }
   }
@@ -377,11 +377,11 @@ fn gc_main_loop(
 
   move |_| {
     for _ in 0..key_count {
-      let Some(mut task) = state.tasks.pop_front() else {
+      let Some(mut task) = state.tasks.pop() else {
         version_visibility.remove_aborted(&state.min_version.min(flush(&mut buffered)?));
         state.min_version = version_visibility.min_version();
         for task in tables.get_all().into_iter().map(GCTask::new) {
-          state.tasks.push_back(task);
+          state.tasks.push(task);
         }
         return Ok(());
       };
@@ -407,7 +407,7 @@ fn gc_main_loop(
         }
 
         task.leaf_ptr = Some(ptr);
-        state.tasks.push_back(task);
+        state.tasks.push(task);
         continue;
       };
 
@@ -425,7 +425,7 @@ fn gc_main_loop(
 
       if let Some(i) = node.get_next() {
         task.leaf_ptr = Some(i);
-        state.tasks.push_back(task);
+        state.tasks.push(task);
         continue;
       }
 
