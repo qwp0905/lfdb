@@ -98,6 +98,7 @@ where
         }
       });
     });
+  group.finish();
 }
 
 pub fn concurrent_get<E, F>(mut group: BenchmarkGroup<WallTime>, new: F)
