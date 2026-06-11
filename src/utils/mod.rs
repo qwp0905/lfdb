@@ -29,3 +29,6 @@ pub use uuid::*;
 
 mod buffer;
 pub use buffer::*;
+
+mod chunk_queue;
+pub use chunk_queue::*;
