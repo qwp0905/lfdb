@@ -1,7 +1,7 @@
 use std::{
   cell::UnsafeCell,
   collections::{HashMap, VecDeque},
-  mem::MaybeUninit,
+  mem::{replace, MaybeUninit},
   panic::RefUnwindSafe,
   sync::Arc,
 };
@@ -216,20 +216,21 @@ impl BlockCache {
     let mut buckets = HashMap::<_, Vec<_>>::new();
     let mut len = 0;
     for id in self.dirty_blocks.iter() {
-      if let Some(_token) = self.pins[id].try_shared() {
-        let block = self.cached_blocks[id].get();
-        let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
-        buckets.entry(key).or_default().push(id);
-        len += 1;
-      }
+      let Some(_token) = self.pins[id].try_shared() else {
+        continue;
+      };
+
+      let block = self.cached_blocks[id].get();
+      let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
+      buckets.entry(key).or_default().push(id);
+      len += 1;
     }
 
     let mut dirty = vec![0; len];
     let mut offset = 0;
     for bucket in buckets.into_values() {
       let end = offset + bucket.len();
-      dirty[offset..end].copy_from_slice(&bucket);
-      offset = end;
+      dirty[replace(&mut offset, end)..end].copy_from_slice(&bucket);
     }
 
     CacheFlusher::new(
@@ -311,16 +312,16 @@ impl CacheFlusher {
   pub fn finish(&self) -> Result {
     let mut waiting = Vec::new();
     for table in self.dirty_tables.drain() {
-      waiting.push((
-        table.clone(),
-        self.executor.execute(FlushTask::Fsync(table)),
-      ));
+      let done = self.executor.execute(FlushTask::Fsync(table.clone()));
+      waiting.push((table, done));
     }
+
     for (table, done) in waiting {
-      if let Err(err) = done.wait().flatten() {
-        error!("error occurs in flush table: {err}");
-        self.dirty_tables.mark(&table);
+      let Err(err) = done.wait().flatten() else {
+        continue;
       };
+      error!("error occurs in flush table: {err}");
+      self.dirty_tables.mark(&table);
     }
     Ok(())
   }

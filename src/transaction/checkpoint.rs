@@ -1,6 +1,5 @@
 use std::{
-  collections::VecDeque,
-  iter::repeat_with,
+  iter::repeat,
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -29,7 +28,7 @@ const CHECKPOINT_TICK: Duration = Duration::from_millis(500);
 const BATCH_SIZE: f64 = ((1 << 20) / PAGE_SIZE / 2) as f64; // convert from mib/sec
 
 struct CheckpointCycle {
-  segments: VecDeque<WALSegment>,
+  segments: Vec<WALSegment>,
   flusher: CacheFlusher,
   log_id: LogId,
   start: Option<Instant>,
@@ -280,7 +279,7 @@ fn checkpoint_loop(
     let Some(current) = cycle else {
       let log_id = wal.current_log_id();
       let new = cycle.insert(CheckpointCycle::new(
-        repeat_with(|| incoming.pop()).map_while(|v| v),
+        repeat(()).map_while(|_| incoming.pop()),
         block_cache.create_flusher(),
         log_id,
         metrics.checkpoint_cycle.start(),
