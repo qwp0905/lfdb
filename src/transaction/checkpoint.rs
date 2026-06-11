@@ -106,6 +106,7 @@ impl Checkpoint {
     let cycle = AtomicCell::new(None).to_arc();
     let ticker = WorkBuilder::new()
       .name("checkpoint")
+      .stack_size(2 << 20)
       .single()
       .interval(
         CHECKPOINT_TICK,
