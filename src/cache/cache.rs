@@ -1,5 +1,8 @@
 use std::{
-  cell::UnsafeCell, collections::HashMap, mem::MaybeUninit, panic::RefUnwindSafe,
+  cell::UnsafeCell,
+  collections::{HashMap, VecDeque},
+  mem::MaybeUninit,
+  panic::RefUnwindSafe,
   sync::Arc,
 };
 
@@ -230,7 +233,7 @@ impl BlockCache {
     }
 
     CacheFlusher::new(
-      dirty,
+      VecDeque::from(dirty),
       self.flush_executor.clone(),
       self.dirty_tables.clone(),
     )
@@ -255,13 +258,13 @@ impl Drop for BlockCache {
 }
 
 pub struct CacheFlusher {
-  dirty_blocks: Vec<BlockId>,
+  dirty_blocks: VecDeque<BlockId>,
   executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
-    dirty_blocks: Vec<BlockId>,
+    dirty_blocks: VecDeque<BlockId>,
     executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
@@ -273,6 +276,7 @@ impl CacheFlusher {
   }
 
   pub fn advance(&mut self, count: usize) -> Result {
+    let count = count.min(self.dirty_blocks.len());
     let mut waiting = Vec::with_capacity(count);
     for &id in self.dirty_blocks.iter().take(count) {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
@@ -280,9 +284,7 @@ impl CacheFlusher {
     for done in waiting {
       done.wait().flatten()?;
     }
-    self.dirty_blocks = self
-      .dirty_blocks
-      .split_off(count.min(self.dirty_blocks.len()));
+    self.dirty_blocks.drain(..count);
     Ok(())
   }
 
