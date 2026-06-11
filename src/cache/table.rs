@@ -2,12 +2,12 @@ use std::{
   collections::BTreeSet,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
-  sync::Mutex,
+  sync::{Mutex, MutexGuard},
 };
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheNode, GetOrReserve};
+use super::{CacheNode, GetOrReserve, Reserved};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -97,16 +97,14 @@ impl<'a> Drop for EvictionGuard<'a> {
     }
 
     // rollback
-    {
-      let mut shard = self.guard.l();
-      if let Some(i) = self.evicted {
-        shard.eviction.remove(&i);
-        shard.aborted.push((self.block_id, Some(i)));
-      } else {
-        shard.aborted.push((self.block_id, None));
-      }
-      shard.node.remove(&self.new_pointer, self.new_pointer_hash);
+    let mut shard = self.guard.l();
+    if let Some(i) = self.evicted {
+      shard.eviction.remove(&i);
+      shard.aborted.push((self.block_id, Some(i)));
+    } else {
+      shard.aborted.push((self.block_id, None));
     }
+    shard.node.remove(&self.new_pointer, self.new_pointer_hash);
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }
@@ -176,29 +174,18 @@ impl MappingTable {
         continue;
       }
 
-      let Ok(mut reserved) = shard.node.reserve(&key, hash, hasher, &try_evict) else {
+      let Ok(reserved) = shard.node.reserve(&key, hash, hasher, &try_evict) else {
         drop(shard);
         backoff.snooze();
         continue;
       };
-      if let Some((evicted, bid, token)) = reserved.take_evicted() {
-        shard.eviction.insert(evicted);
-        reserved.fulfill(bid);
-        return EvictionGuard::new(Some(evicted), bid, token, &s, key, hash);
-      }
 
-      let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
-        let id = shard.allocated;
-        shard.allocated += 1;
-        debug_assert!(
-          shard.allocated <= shard.node.capacity(),
-          "capacity exceeded"
-        );
-        (id + offset, None)
-      });
-      reserved.fulfill(bid);
-      let token = try_evict(&bid).unwrap();
-      return EvictionGuard::new(evicted, bid, token, &s, key, hash);
+      if let Some(guard) =
+        self.handle_reserved(reserved, key, hash, shard, s, offset, try_evict)
+      {
+        return guard;
+      };
+      backoff.snooze();
     }
   }
 
@@ -243,7 +230,7 @@ impl MappingTable {
         backoff.snooze();
         continue;
       };
-      let mut reserved = match result {
+      let reserved = match result {
         GetOrReserve::Hit(&bid) => {
           if let Some(token) = get_pin(bid).try_shared() {
             return Acquired::Hit(bid, token);
@@ -255,32 +242,62 @@ impl MappingTable {
         GetOrReserve::Reserved(reserved) => reserved,
       };
 
-      if let Some((evicted, bid, token)) = reserved.take_evicted() {
-        shard.eviction.insert(evicted);
-        reserved.fulfill(bid);
-        return Acquired::Evicted(EvictionGuard::new(
-          Some(evicted),
-          bid,
-          token,
-          &s,
-          key,
-          hash,
-        ));
-      }
-
-      let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
-        let id = shard.allocated;
-        shard.allocated += 1;
-        debug_assert!(
-          shard.allocated <= shard.node.capacity(),
-          "capacity exceeded"
-        );
-        (id + offset, None)
-      });
-      reserved.fulfill(bid);
-      let token = try_evict(&bid).unwrap();
-      return Acquired::Evicted(EvictionGuard::new(evicted, bid, token, &s, key, hash));
+      if let Some(guard) =
+        self.handle_reserved(reserved, key, hash, shard, s, offset, try_evict)
+      {
+        return Acquired::Evicted(guard);
+      };
+      backoff.snooze();
     }
+  }
+
+  fn handle_reserved<'a, F>(
+    &'a self,
+    mut reserved: Reserved<Key, BlockId, ExclusiveToken<'a>>,
+    key: Key,
+    hash: u64,
+    mut shard: MutexGuard<'a, Shard>,
+    s: &'a Mutex<Shard>,
+    offset: usize,
+    try_evict: F,
+  ) -> Option<EvictionGuard<'a>>
+  where
+    F: Fn(&BlockId) -> Option<ExclusiveToken<'a>>,
+  {
+    if let Some((evicted, bid, token)) = reserved.take_evicted() {
+      reserved.fulfill(bid);
+      shard.eviction.insert(evicted);
+      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
+    }
+
+    let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
+      let id = shard.allocated;
+      shard.allocated += 1;
+      debug_assert!(
+        shard.allocated <= shard.node.capacity(),
+        "capacity exceeded"
+      );
+      (id + offset, None)
+    });
+    reserved.fulfill(bid);
+
+    let Some(evicted) = evicted else {
+      let token = try_evict(&bid).unwrap();
+      return Some(EvictionGuard::new(None, bid, token, s, key, hash));
+    };
+
+    if let Some(token) = try_evict(&bid) {
+      shard.eviction.insert(evicted);
+      return Some(EvictionGuard::new(Some(evicted), bid, token, &s, key, hash));
+    }
+
+    // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights
+    // due to contention with checkpoints or other reads.
+    // However, since this occurs very rarely due to reasons such as disk failure, it is fine to proceed with deleting the hash table.
+    shard.node.remove(&key, hash);
+    shard.aborted.push((bid, Some(evicted)));
+
+    None
   }
 
   pub fn len_per_shard(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
