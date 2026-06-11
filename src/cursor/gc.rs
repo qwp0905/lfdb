@@ -28,7 +28,6 @@ use crate::{
 };
 
 pub struct GarbageCollectionConfig {
-  pub interval: Duration,
   pub batch_size: usize,
   pub thread_count: usize,
   pub compact_threshold: f64,
@@ -36,6 +35,7 @@ pub struct GarbageCollectionConfig {
 }
 
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
@@ -81,7 +81,7 @@ impl GarbageCollector {
       .stack_size(2 << 20)
       .single()
       .interval(
-        config.interval,
+        GC_RUN_INTERVAL,
         gc_main_loop(
           block_cache,
           mapper,

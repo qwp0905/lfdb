@@ -18,7 +18,6 @@ where
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
-      gc_trigger_interval: DEFAULT_GC_TRIGGER_INTERVAL,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       gc_batch_size: DEFAULT_GC_BATCH_SIZE,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
@@ -92,14 +91,6 @@ where
     self
   }
   /**
-   * Interval at which garbage collection runs. Run more frequently when removes are
-   * heavy, less frequently when removes are rare, to maintain scan performance.
-   */
-  pub const fn gc_trigger_interval(mut self, interval: Duration) -> Self {
-    self.0.gc_trigger_interval = interval;
-    self
-  }
-  /**
    * Number of keys to advance per gc tick.
    */
   pub const fn gc_batch_size(mut self, count: usize) -> Self {
@@ -160,7 +151,6 @@ where
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
-const DEFAULT_GC_TRIGGER_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64

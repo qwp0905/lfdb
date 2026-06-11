@@ -38,7 +38,6 @@ where
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
   pub checkpoint_flush_factor: f64,
-  pub gc_trigger_interval: Duration,
   pub gc_batch_size: usize,
   pub gc_thread_count: usize,
   pub compaction_threshold: f64,
@@ -86,7 +85,6 @@ impl Engine {
     };
     let gc_config = GarbageCollectionConfig {
       thread_count: config.gc_thread_count,
-      interval: config.gc_trigger_interval,
       batch_size: config.gc_batch_size,
       compact_threshold: config.compaction_threshold,
       compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
