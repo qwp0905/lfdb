@@ -169,14 +169,12 @@ fn flush_write(
   }
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
-  let result = match state.pin.try_shared() {
-    Some(_t) => write_exec(metrics, backend, values),
-    None => {
-      state.closed.fetch_or(true, Ordering::Release);
-      return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-    }
+  let Some(_token) = state.pin.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Release);
+    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
   };
-  match result {
+
+  match write_exec(metrics, backend, values) {
     Ok(_) => waiting.into_iter().for_each(|done| done.fulfill(Ok(()))),
     Err(err) => waiting
       .into_iter()
@@ -230,15 +228,11 @@ fn flush_fdatasync(
     return;
   }
 
-  let result = match state.pin.try_shared() {
-    Some(_t) => backend.fdatasync(),
-    None => {
-      state.closed.fetch_or(true, Ordering::Release);
-      return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
-    }
+  let Some(_token) = state.pin.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Release);
+    return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
   };
-
-  match result {
+  match backend.fdatasync() {
     Ok(_) => waiting.drain(..).for_each(|done| done.fulfill(Ok(()))),
     Err(err) => waiting
       .drain(..)

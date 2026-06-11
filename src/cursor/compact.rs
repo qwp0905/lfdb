@@ -46,9 +46,8 @@ impl<'a> MiniTx<'a> {
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
   ) -> Result<Self> {
-    let (snapshot, state) = match version_visibility.new_transaction() {
-      Some(v) => v,
-      None => return Err(Error::EngineUnavailable),
+    let Some((snapshot, state)) = version_visibility.new_transaction() else {
+      return Err(Error::EngineUnavailable);
     };
     Ok(Self {
       state,
@@ -237,11 +236,11 @@ fn create_compaction(
   let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
   let index = BTreeIndex::new(&tx);
 
-  let mut metadata = match index.get(table_name.as_bytes(), meta_table)?.flatten() {
-    Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-    None => return Ok(None),
+  let Some(bytes) = index.get(table_name.as_bytes(), meta_table)?.flatten() else {
+    return Ok(None);
   };
 
+  let mut metadata = TableMetadata::from_bytes(&bytes)?;
   if metadata.get_compaction_id().is_some() {
     trace!("table {table_name} compacting skipped since already compacted.");
     return Ok(None);
@@ -589,7 +588,7 @@ fn compaction_loop(
         CompactTask::New(trigger) => {
           let old = trigger.old;
           let table_name = old.get_name();
-          let (new_table, wait_until, metadata) = match create_compaction(
+          let Some((new_table, wait_until, metadata)) = create_compaction(
             &version_visibility,
             &wal,
             &block_cache,
@@ -597,9 +596,9 @@ fn compaction_loop(
             &tables,
             &meta_table,
             table_name,
-          )? {
-            Some(v) => v,
-            None => continue,
+          )?
+          else {
+            continue;
           };
 
           info!("table {table_name} compacting wait until another tx close.");
@@ -616,44 +615,38 @@ fn compaction_loop(
     }
 
     for (old, new, metadata) in take(&mut waiting_pin) {
-      match old.try_pin() {
-        Some(old) => in_progress.push(CompactionCycle::new(old, new, metadata)),
-        None => continue,
-      }
+      let Some(old) = old.try_pin() else { continue };
+      in_progress.push(CompactionCycle::new(old, new, metadata));
     }
 
-    let current = match cycle_ref.as_mut().or_else(|| {
+    let Some(current) = cycle_ref.as_mut().or_else(|| {
       in_progress
         .pop()
         .map(|v| cycle.as_ptr().borrow_mut_unsafe().insert(v))
-    }) {
-      Some(v) => v,
-      None => return Ok(()),
+    }) else {
+      return Ok(());
     };
 
-    let snapshotter = match &mut current.snapshotter {
-      Some(v) => v,
-      None => {
-        info!(
-          "table {} compaction start to create snapshot.",
-          current.metadata.get_name()
-        );
-        current.snapshotter = Some(old_index.snapshot(current.old.handle())?);
-        return Ok(());
-      }
+    let Some(snapshotter) = &mut current.snapshotter else {
+      info!(
+        "table {} compaction start to create snapshot.",
+        current.metadata.get_name()
+      );
+      current.snapshotter = Some(old_index.snapshot(current.old.handle())?);
+      return Ok(());
     };
 
     if snapshotter.is_done() {
-      let (owner, version) = match remove_compaction(
+      let Some((owner, version)) = remove_compaction(
         &version_visibility,
         &wal,
         &block_cache,
         &recorder,
         &meta_table,
         &current.metadata,
-      )? {
-        Some(v) => v,
-        None => return Ok(()),
+      )?
+      else {
+        return Ok(());
       };
       info!(
         "table {} compacting copied record complete.",
@@ -680,13 +673,10 @@ fn compaction_loop(
     }
 
     for _ in 0..batch_size {
-      match snapshotter.next_snapshot()? {
-        Some(snap) => {
-          new_index.apply_snapshot(snap, current.new.handle())?;
-          continue;
-        }
-        None => break,
-      }
+      let Some(snap) = snapshotter.next_snapshot()? else {
+        break;
+      };
+      new_index.apply_snapshot(snap, current.new.handle())?;
     }
 
     Ok(())

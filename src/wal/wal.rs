@@ -219,12 +219,9 @@ impl WAL {
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
 
-      let token = match buffer.pin_segment() {
-        Some(v) => v,
-        None => {
-          backoff.snooze();
-          continue;
-        }
+      let Some(token) = buffer.pin_segment() else {
+        backoff.snooze();
+        continue;
       };
 
       let (offset, order) = buffer.reserve_entry(len);
@@ -253,15 +250,15 @@ impl WAL {
         drop(token);
 
         while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
-          match self.fsync_queue.pop() {
-            Some(f) => {
-              if let Err(err) = f.wait()? {
-                self.synced_count.fetch_add(1, Ordering::Release);
-                return Err(self.failover(err.kind()));
-              }
-              self.synced_count.fetch_add(1, Ordering::Release);
-            }
-            None => backoff.snooze(),
+          let Some(f) = self.fsync_queue.pop() else {
+            backoff.snooze();
+            continue;
+          };
+
+          let sync_r = f.wait()?;
+          self.synced_count.fetch_add(1, Ordering::Release);
+          if let Err(err) = sync_r {
+            return Err(self.failover(err.kind()));
           }
         }
 
@@ -311,12 +308,12 @@ impl WAL {
       }
 
       buffer.apply_record_count(order);
-      if let Err(err) = buffer.write_to_disk()? {
-        buffer.increase_written_count();
+      let write_r = buffer.write_to_disk()?;
+      buffer.increase_written_count();
+      if let Err(err) = write_r {
         return Err(self.failover(err.kind()));
       };
 
-      buffer.increase_written_count();
       if buffer.get_pointer() + 1 < self.max_len {
         drop(token);
         backoff.snooze();

@@ -141,9 +141,8 @@ fn release_entry(
   let min_version = version_visibility.min_version();
 
   let release = |record: VersionRecord| {
-    let pointers = match record.data {
-      RecordData::Chunked(pointers) => pointers,
-      _ => return,
+    let RecordData::Chunked(pointers) = record.data else {
+      return;
     };
 
     let handle = table.clone();
@@ -238,9 +237,8 @@ fn release_entry(
         return Ok(());
       }
 
-      let next_ptr = match entry.get_next() {
-        Some(ptr) => ptr,
-        None => return serialize_and_log(slot, &entry),
+      let Some(next_ptr) = entry.get_next() else {
+        return serialize_and_log(slot, &entry);
       };
 
       let next_entry = block_cache
@@ -379,46 +377,38 @@ fn gc_main_loop(
 
   move |_| {
     for _ in 0..key_count {
-      let mut task = match state.tasks.pop_front() {
-        Some(task) => task,
-        None => {
-          version_visibility
-            .remove_aborted(&state.min_version.min(flush(&mut buffered)?));
-          state.min_version = version_visibility.min_version();
-          for task in tables.get_all().into_iter().map(GCTask::new) {
-            state.tasks.push_back(task);
-          }
-          return Ok(());
-        }
-      };
-
-      let table = match task.table.try_pin() {
-        Some(table) => table,
-        None => continue,
-      };
-
-      let ptr = match task.leaf_ptr.take() {
-        Some(ptr) => ptr,
-        None => {
-          let mut ptr = block_cache
-            .read(HEADER_POINTER, table.handle())?
-            .for_read()
-            .as_ref()
-            .deserialize::<TreeHeader>()?
-            .get_root();
-
-          loop {
-            let slot = block_cache.read(ptr, table.handle())?.for_read();
-            match slot.as_ref().view::<BTreeNodeView>()? {
-              BTreeNodeView::Internal(node) => ptr = node.first_child()?,
-              BTreeNodeView::Leaf(_) => break,
-            }
-          }
-
-          task.leaf_ptr = Some(ptr);
+      let Some(mut task) = state.tasks.pop_front() else {
+        version_visibility.remove_aborted(&state.min_version.min(flush(&mut buffered)?));
+        state.min_version = version_visibility.min_version();
+        for task in tables.get_all().into_iter().map(GCTask::new) {
           state.tasks.push_back(task);
-          continue;
         }
+        return Ok(());
+      };
+
+      let Some(table) = task.table.try_pin() else {
+        continue;
+      };
+
+      let Some(ptr) = task.leaf_ptr.take() else {
+        let mut ptr = block_cache
+          .read(HEADER_POINTER, table.handle())?
+          .for_read()
+          .as_ref()
+          .deserialize::<TreeHeader>()?
+          .get_root();
+
+        loop {
+          let slot = block_cache.read(ptr, table.handle())?.for_read();
+          match slot.as_ref().view::<BTreeNodeView>()? {
+            BTreeNodeView::Internal(node) => ptr = node.first_child()?,
+            BTreeNodeView::Leaf(_) => break,
+          }
+        }
+
+        task.leaf_ptr = Some(ptr);
+        state.tasks.push_back(task);
+        continue;
       };
 
       let slot = block_cache.read(ptr, table.handle())?.for_read();

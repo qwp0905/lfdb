@@ -119,11 +119,11 @@ impl<'a> Transaction<'a> {
     let name = TableName::from_str(name)?;
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
-    let metadata = match cursor.get(&name.as_bytes())? {
-      Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-      None => return Ok(()),
+    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+      return Err(Error::TableNotFound(name.to_string()));
     };
 
+    let metadata = TableMetadata::from_bytes(&bytes)?;
     cursor.remove(&name.as_bytes())?;
 
     if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
@@ -151,18 +151,17 @@ impl<'a> Transaction<'a> {
     let name = TableName::from_str(name)?;
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
 
-    let mut metadata = match cursor.get(&name.as_bytes())? {
-      Some(bytes) => TableMetadata::from_bytes(&bytes)?,
-      None => return Err(Error::TableNotFound(name.to_string())),
+    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+      return Err(Error::TableNotFound(name.to_string()));
     };
 
+    let mut metadata = TableMetadata::from_bytes(&bytes)?;
     if metadata.get_compaction_id().is_some() {
       return Ok(());
     }
 
-    let old = match self.orchestrator.get_table(metadata.get_id()) {
-      Some(table) => table,
-      None => return Err(Error::TableNotFound(name.to_string())),
+    let Some(old) = self.orchestrator.get_table(metadata.get_id()) else {
+      return Err(Error::TableNotFound(name.to_string()));
     };
 
     let table_meta = self.orchestrator.create_table_metadata(&name);

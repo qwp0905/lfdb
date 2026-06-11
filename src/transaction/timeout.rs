@@ -216,9 +216,8 @@ impl TimeoutThread {
       .stack_size(2 << 20)
       .spawn(move || {
         let mut wheel = TimingWheel::new(move |tx_id: TxId| {
-          let state = match version_visibility.get_active_state(tx_id) {
-            Some(s) => s,
-            None => return,
+          let Some(state) = version_visibility.get_active_state(tx_id) else {
+            return;
           };
           if !state.try_timeout() {
             return;

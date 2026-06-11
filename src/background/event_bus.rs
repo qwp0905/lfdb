@@ -92,18 +92,18 @@ impl EventRouter {
   }
 
   fn register_owned(&mut self, id: TypeId, handler: Box<dyn OwnedEventAdapter>) -> bool {
-    match self.handlers.get_mut(&id) {
-      Some(route) => match route {
-        Route::Offline(queue) => {
-          handler.drain_events(queue);
-          *route = Route::Owned(handler);
-        }
-        Route::Tombstone => *route = Route::Owned(handler),
-        _ => return false,
-      },
-      None => {
-        self.handlers.insert(id, Route::Owned(handler));
+    let Some(route) = self.handlers.get_mut(&id) else {
+      self.handlers.insert(id, Route::Owned(handler));
+      return true;
+    };
+
+    match route {
+      Route::Offline(queue) => {
+        handler.drain_events(queue);
+        *route = Route::Owned(handler);
       }
+      Route::Tombstone => *route = Route::Owned(handler),
+      _ => return false,
     }
     true
   }
@@ -112,28 +112,26 @@ impl EventRouter {
     id: TypeId,
     handler: Box<dyn SharedEventAdapter>,
   ) -> bool {
-    match self.handlers.get_mut(&id) {
-      Some(route) => match route {
-        Route::Owned(_) => return false,
-        Route::Shared(handlers) => handlers.push(handler),
-        _ => *route = Route::Shared(vec![handler]),
-      },
-      None => {
-        self.handlers.insert(id, Route::Shared(vec![handler]));
-      }
+    let Some(route) = self.handlers.get_mut(&id) else {
+      self.handlers.insert(id, Route::Shared(vec![handler]));
+      return true;
+    };
+
+    match route {
+      Route::Owned(_) => return false,
+      Route::Shared(handlers) => handlers.push(handler),
+      _ => *route = Route::Shared(vec![handler]),
     }
     true
   }
 
   fn route(&mut self, event: OwnedEvent) {
     let id = (*event).type_id();
-    let route = match self.handlers.get_mut(&id) {
-      Some(route) => route,
-      None => {
-        self.handlers.insert(id, Route::Offline(vec![event]));
-        return;
-      }
+    let Some(route) = self.handlers.get_mut(&id) else {
+      self.handlers.insert(id, Route::Offline(vec![event]));
+      return;
     };
+
     match route {
       Route::Owned(owned) => {
         if owned.cast_event(event) {

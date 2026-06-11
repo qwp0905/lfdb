@@ -276,27 +276,27 @@ impl CacheFlusher {
   }
 
   pub fn advance(&mut self, count: usize) -> Result {
+    let count = count.min(self.dirty_blocks.len());
     let mut waiting = Vec::with_capacity(count);
-    for id in (0..count).map_while(|_| self.dirty_blocks.pop_front()) {
+    for &id in self.dirty_blocks.iter().take(count) {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
     }
-
     for done in waiting {
       done.wait().flatten()?;
     }
+    self.dirty_blocks.drain(..count);
     Ok(())
   }
 
   pub fn flush_hard(&mut self) -> Result {
     let mut waiting = Vec::with_capacity(self.dirty_blocks.len());
-    for id in self.dirty_blocks.drain(..) {
+    for &id in self.dirty_blocks.iter() {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
     }
-
-    for done in waiting.drain(..) {
+    for done in waiting {
       done.wait().flatten()?;
     }
-
+    self.dirty_blocks.clear();
     self.finish()
   }
 
@@ -341,9 +341,8 @@ const fn handle_execute(
 ) -> impl Fn(FlushTask) -> Result {
   move |task| match task {
     FlushTask::Write(id) => {
-      let _token = match pins[id].try_shared() {
-        Some(t) => t,
-        None => return Ok(()),
+      let Some(_token) = pins[id].try_shared() else {
+        return Ok(());
       };
 
       let block = blocks[id].get();
@@ -353,16 +352,16 @@ const fn handle_execute(
       }
 
       let result = flusher.submit();
-      if let (epoch, Err(err)) = result.finalize() {
-        let latch = block.latch();
-        if latch.epoch() == epoch {
-          dirty_blocks.insert(id);
-        }
-        return Err(err);
-      }
+      let (epoch, Err(err)) = result.finalize() else {
+        dirty_tables.mark(block.handle());
+        return Ok(());
+      };
 
-      dirty_tables.mark(block.handle());
-      Ok(())
+      let latch = block.latch();
+      if latch.epoch() == epoch {
+        dirty_blocks.insert(id);
+      }
+      Err(err)
     }
     FlushTask::Fsync(table) => table.disk().fsync(),
   }

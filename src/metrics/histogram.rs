@@ -83,10 +83,8 @@ impl Histogram {
 
   #[inline]
   pub fn record(&self, start: Option<Instant>) {
-    let elapsed = match start {
-      Some(s) => (s.elapsed().as_nanos() / self.unit) as u64,
-      None => return,
-    };
+    let Some(s) = start else { return };
+    let elapsed = (s.elapsed().as_nanos() / self.unit) as u64;
     self.sum_elapse.fetch_add(elapsed, Ordering::Relaxed);
     let i = BUCKET_BOUND.partition_point(|&b| elapsed > b);
     self.buckets[i].fetch_add(1, Ordering::Relaxed);

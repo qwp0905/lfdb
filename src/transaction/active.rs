@@ -116,9 +116,8 @@ impl ActiveSet {
   }
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
     let inner = self.inner.rl();
-    let offset = match inner.first_key_value() {
-      Some((k, _)) => *k,
-      None => return OffsetBitmap::new(0, 0),
+    let Some((&offset, _)) = inner.first_key_value() else {
+      return OffsetBitmap::new(0, 0);
     };
     let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
     for (id, _) in inner.range(..max) {
@@ -127,9 +126,8 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    let state = match self.inner.wl().remove(tx_id) {
-      Some(state) => state,
-      None => return,
+    let Some(state) = self.inner.wl().remove(tx_id) else {
+      return;
     };
     state.parker.wake_all();
   }
