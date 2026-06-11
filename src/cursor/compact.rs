@@ -349,6 +349,7 @@ impl Compactor {
     let cycle = AtomicCell::new(None).to_arc();
     let ticker = WorkBuilder::new()
       .name("compaction")
+      .stack_size(2 << 20)
       .single()
       .interval(
         COMPACTION_INTERVAL,
