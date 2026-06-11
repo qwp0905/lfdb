@@ -22,10 +22,6 @@ tempfile = "3.10.1"
 
 
 [[bench]]
-name = "throughput"
-harness = false
-
-[[bench]]
 name = "ycsb"
 harness = false
 

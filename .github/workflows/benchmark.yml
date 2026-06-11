@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       bench:
-        description: "Benchmark to profile (e.g. ycsb, throughput)"
+        description: "Benchmark to profile (e.g. ycsb)"
         required: true
         default: "ycsb"
       filter:
