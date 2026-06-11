@@ -285,6 +285,7 @@ impl EventBus {
     let queue = SBox::new(SegQueue::new());
     let handle = Builder::new()
       .name(format!("event bus"))
+      .stack_size(2 << 20)
       .spawn(handle_thread(queue.clone()))
       .unwrap();
     let waker = handle.thread().clone();

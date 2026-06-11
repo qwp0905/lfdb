@@ -78,6 +78,7 @@ impl GarbageCollector {
 
     let main = WorkBuilder::new()
       .name("gc main")
+      .stack_size(2 << 20)
       .single()
       .interval(
         config.interval,
