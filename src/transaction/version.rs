@@ -245,6 +245,7 @@ impl SharedSubscription<WALFailed> for VersionVisibility {
       return;
     }
     for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
+      self.aborted.insert(state.get_id());
       self.active.remove(&state.get_id());
     }
     error!("all versions transit to abort since wal failure detected.");
