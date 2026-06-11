@@ -3,16 +3,12 @@ use std::{
   mem::forget,
   panic::RefUnwindSafe,
   path::PathBuf,
-  sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-  },
+  sync::{atomic::Ordering, Arc},
 };
 
 use crossbeam::{
   atomic::AtomicCell,
   epoch::{self, Atomic, Owned},
-  queue::SegQueue,
   utils::Backoff,
 };
 
@@ -26,8 +22,8 @@ use crate::{
 };
 
 use super::{
-  replay, AtomicLogId, FsyncResult, LogBuffer, LogId, LogRecordUninit, ReplayResult,
-  SegmentPreload, TxId, WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, ReplayResult, SegmentPreload,
+  SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -80,6 +76,8 @@ pub struct WAL {
    * when the buffer is rotated and the old one is deferred-destroyed.
    */
   buffer: Atomic<LogBuffer>,
+
+  sync_queue: SyncQueue,
   /**
    * wal segment max size
    */
@@ -101,18 +99,6 @@ pub struct WAL {
   page_pool: PagePool<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
-  /**
-   * fsync results for rotated segments, pushed asynchronously at rotation time.
-   * commit_and_flush drains this queue to ensure all prior segments are durable.
-   * Without this, a commit written to segment N could be fsynced while segment N-1
-   * (containing the corresponding insert) has not — losing data on crash.
-   */
-  fsync_queue: SegQueue<FsyncResult>,
-  /**
-   * Number of segments whose fsync has completed. Used by commit_and_flush to
-   * verify that all segments up to the current generation have been persisted.
-   */
-  synced_count: AtomicU64,
 }
 impl WAL {
   pub fn replay(
@@ -145,11 +131,10 @@ impl WAL {
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
+        sync_queue: SyncQueue::new(),
         state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
-        fsync_queue: SegQueue::new(),
-        synced_count: AtomicU64::new(0),
       },
       replay_result,
     ))
@@ -249,17 +234,8 @@ impl WAL {
         let f = buffer.flush();
         drop(token);
 
-        while buffer.get_generation() > self.synced_count.load(Ordering::Acquire) {
-          let Some(f) = self.fsync_queue.pop() else {
-            backoff.snooze();
-            continue;
-          };
-
-          let sync_r = f.wait()?;
-          self.synced_count.fetch_add(1, Ordering::Release);
-          if let Err(err) = sync_r {
-            return Err(self.failover(err.kind()));
-          }
+        if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
+          return Err(self.failover(err.kind()));
         }
 
         return f.wait()?.map_err(|err| self.failover(err.kind()));
@@ -323,7 +299,7 @@ impl WAL {
       forget(token.upgrade());
 
       let segment = buffer.take_segment();
-      self.fsync_queue.push(segment.fsync());
+      self.sync_queue.push(segment.fsync());
       self.event_bus.publish(WALSegmentRotated(segment));
     }
   }
@@ -367,14 +343,11 @@ impl WAL {
   }
 
   pub fn close(&self) {
+    self.sync_queue.drain();
     if !self.state.load().is_available() {
       return;
     }
 
-    while let Some(f) = self.fsync_queue.pop() {
-      let _ = f.wait();
-      self.synced_count.fetch_add(1, Ordering::Release);
-    }
     let backoff = Backoff::new();
     loop {
       let guard = epoch::pin();
