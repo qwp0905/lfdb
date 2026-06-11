@@ -52,7 +52,7 @@ impl SegmentPreload {
       .preload(
         SEGMENT_MAX_LIFE,
         handle_preload(ready.clone(), io_pool, max_len),
-        handle_fallback(ready.clone()),
+        handle_fallback(),
       )
       .to_box();
     let this = Arc::new(Self {
@@ -135,18 +135,18 @@ const fn handle_preload(
   io_pool: Arc<IOPool>,
   max_len: Pointer,
 ) -> impl FnMut(()) -> Result<WALSegment> {
-  move |_| match ready.pop() {
-    Some(segment) => Ok(segment),
-    None => {
-      WALSegment::open(max_len, &io_pool).and_then(|seg| io_pool.sync_dir().map(|_| seg))
+  move |_| {
+    if let Some(segment) = ready.pop() {
+      return Ok(segment);
     }
+    let segment = WALSegment::open(max_len, &io_pool)?;
+    io_pool.sync_dir()?;
+    Ok(segment)
   }
 }
-const fn handle_fallback(
-  ready: Arc<SegQueue<WALSegment>>,
-) -> impl FnMut(Option<Result<WALSegment>>) {
+const fn handle_fallback() -> impl FnMut(Option<Result<WALSegment>>) {
   move |finalize| {
-    if let Some(Ok(segment)) = finalize.or_else(|| ready.pop().map(Ok)) {
+    if let Some(Ok(segment)) = finalize {
       let _ = segment.truncate();
     };
   }

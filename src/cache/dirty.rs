@@ -1,4 +1,4 @@
-use std::panic::RefUnwindSafe;
+use std::{iter::repeat, panic::RefUnwindSafe};
 
 use crossbeam_skiplist::SkipMap;
 
@@ -17,18 +17,7 @@ impl DirtyTables {
 
   #[inline]
   pub fn drain(&self) -> impl Iterator<Item = TableHandleRef> + '_ {
-    DirtyTablesIter { inner: self }
+    repeat(()).map_while(|_| self.0.pop_front().map(|v| v.value().clone()))
   }
 }
 impl RefUnwindSafe for DirtyTables {}
-
-pub struct DirtyTablesIter<'a> {
-  inner: &'a DirtyTables,
-}
-impl<'a> Iterator for DirtyTablesIter<'a> {
-  type Item = TableHandleRef;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    self.inner.0.pop_front().map(|v| v.value().clone())
-  }
-}

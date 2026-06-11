@@ -245,28 +245,28 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
 
     loop {
       while !backoff.is_completed() {
-        if let Some(msg) = queue.pop() {
-          match msg {
-            EventMsg::Publish(event) => map.route(event),
-            EventMsg::SubOwned(id, handler) => {
-              if !map.register_owned(id, handler) {
-                error!("error to register {:?} as owned event subscriber", id);
-                std::process::abort();
-              };
-            }
-            EventMsg::SubShared(id, handler) => {
-              if !map.register_shared(id, handler) {
-                error!("error to register {:?} as owned event subscriber", id);
-                std::process::abort();
-              };
-            }
-            EventMsg::Terminate => return,
-          }
-          backoff.reset();
+        let Some(msg) = queue.pop() else {
+          backoff.snooze();
           continue;
-        }
+        };
 
-        backoff.snooze();
+        match msg {
+          EventMsg::Publish(event) => map.route(event),
+          EventMsg::SubOwned(id, handler) => {
+            if !map.register_owned(id, handler) {
+              error!("error to register {:?} as owned event subscriber", id);
+              std::process::abort();
+            };
+          }
+          EventMsg::SubShared(id, handler) => {
+            if !map.register_shared(id, handler) {
+              error!("error to register {:?} as owned event subscriber", id);
+              std::process::abort();
+            };
+          }
+          EventMsg::Terminate => return,
+        }
+        backoff.reset();
       }
 
       park();
