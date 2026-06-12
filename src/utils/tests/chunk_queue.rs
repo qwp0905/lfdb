@@ -47,7 +47,9 @@ fn test_drop() {
     }
 
     for _ in 0..pop_count {
-      queue.pop().map(forget);
+      if let Some(v) = queue.pop() {
+        forget(v);
+      }
     }
   }
 

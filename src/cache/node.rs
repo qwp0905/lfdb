@@ -336,10 +336,10 @@ where
   }
 
   #[cold]
-  pub fn remove<Q: ?Sized>(&mut self, key: &Q, hash: u64) -> Option<V>
+  pub fn remove<Q>(&mut self, key: &Q, hash: u64) -> Option<V>
   where
     K: Borrow<Q>,
-    Q: Hash + Eq,
+    Q: Hash + Eq + ?Sized,
   {
     let entry = self
       .table
@@ -427,4 +427,4 @@ impl<K, V, R> Reserved<K, V, R> {
 
 #[cfg(test)]
 #[path = "tests/node.rs"]
-mod node;
+mod tests;

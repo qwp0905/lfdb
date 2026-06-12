@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-  disk::{AsyncIO, PageRef, Pointer, PAGE_SIZE},
+  disk::{AsyncIO, Page, PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
   utils::{AtomicSBox, SBox, ShortenedMutex},
   Result,
@@ -34,10 +34,8 @@ impl<'a> BlockFlusher<'a> {
   pub fn submit(self) -> BlockFlushResult {
     let page = self.pages.load();
     let epoch = *self.guard;
-    let handle = self
-      .handle
-      .disk()
-      .write_async(self.pointer, unsafe { transmute(&**page) });
+    let static_ref = unsafe { transmute::<&'_ Page, &'static Page>(&**page) };
+    let handle = self.handle.disk().write_async(self.pointer, static_ref);
     BlockFlushResult {
       epoch,
       handle,

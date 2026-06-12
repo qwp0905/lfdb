@@ -35,7 +35,7 @@ impl BenchmarkDB for Engine {
     let table = tx.table(table).unwrap();
     {
       let mut iter = table.scan(start..end).unwrap();
-      while let Some(_) = iter.try_next().unwrap() {}
+      while iter.try_next().unwrap().is_some() {}
     }
   }
 

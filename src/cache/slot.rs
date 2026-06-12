@@ -115,7 +115,7 @@ impl ReadonlySlot {
 }
 impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
-    &*self.page
+    &self.page
   }
 }
 pub struct WritableSlot<'a> {
@@ -153,7 +153,9 @@ pub struct BatchSlot<'a> {
 }
 impl<'a> BatchSlot<'a> {
   fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
-    let (occupied, o) = self.batch.register(unsafe { transmute(handler) });
+    let handler =
+      unsafe { transmute::<Box<BatchHandler<'_>>, Box<BatchHandler<'static>>>(handler) };
+    let (occupied, o) = self.batch.register(handler);
     if !occupied {
       return o.wait().flatten();
     }

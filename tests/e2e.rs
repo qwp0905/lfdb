@@ -1024,7 +1024,7 @@ fn test_start_not_commit() {
   use std::process::Command;
   let dir = tempdir_in(".").unwrap();
 
-  let key = format!("key");
+  let key = "key".to_string();
   // Phase 1: spawn child that writes concurrently then crashes
   if !Command::new(std::env::current_exe().unwrap())
     .arg("--ignored")
@@ -1094,8 +1094,8 @@ fn test_large_key_value() {
   let large_key = vec![0; 257];
   let large_value = vec![0; (1 << 16) + 1];
 
-  assert_eq!(table.insert(large_key, vec![]).is_err(), true);
-  assert_eq!(table.insert(vec![], large_value).is_err(), true);
+  assert!(table.insert(large_key, vec![]).is_err());
+  assert!(table.insert(vec![], large_value).is_err());
 }
 
 // ============================================================
@@ -1130,8 +1130,8 @@ fn test_large_key_value_gc() {
 
     let mut tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    for i in 0..(count / 2) {
-      table.remove(&keys[i]).unwrap();
+    for k in keys.iter().take(count / 2) {
+      table.remove(k).unwrap();
     }
     tx.commit().unwrap();
 
@@ -1495,8 +1495,8 @@ fn test_compaction() {
     let mut tx = engine.new_tx().unwrap();
 
     let table = tx.table(TEST_TABLE).unwrap();
-    for i in 0..remove_count {
-      table.remove(&keys[i]).unwrap();
+    for k in keys.iter().take(remove_count) {
+      table.remove(k).unwrap();
     }
     tx.commit().unwrap();
 

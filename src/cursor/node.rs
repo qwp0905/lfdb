@@ -30,14 +30,14 @@ impl<'a> Viewable<'a> for BTreeNodeView<'a> {
 
 impl<'a> BTreeNodeView<'a> {
   #[inline]
-  pub fn as_leaf(self) -> Result<LeafNodeView<'a>> {
+  pub fn into_leaf(self) -> Result<LeafNodeView<'a>> {
     match self {
       Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
       Self::Leaf(node) => Ok(node),
     }
   }
   #[inline]
-  pub fn as_internal(self) -> Result<InternalNodeView<'a>> {
+  pub fn into_internal(self) -> Result<InternalNodeView<'a>> {
     match self {
       Self::Internal(node) => Ok(node),
       Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
@@ -53,7 +53,7 @@ impl BTreeNode {
   pub const fn initial_state() -> Self {
     Self::Leaf(LeafNode::empty())
   }
-  pub fn as_internal(self) -> Result<InternalNode> {
+  pub fn into_internal(self) -> Result<InternalNode> {
     match self {
       Self::Internal(node) => Ok(node),
       Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
@@ -90,13 +90,13 @@ impl Deserializable for BTreeNode {
 
 impl LeafNode {
   #[inline]
-  pub const fn to_node(self) -> BTreeNode {
+  pub const fn into_node(self) -> BTreeNode {
     BTreeNode::Leaf(self)
   }
 }
 impl InternalNode {
   #[inline]
-  pub const fn to_node(self) -> BTreeNode {
+  pub const fn into_node(self) -> BTreeNode {
     BTreeNode::Internal(self)
   }
 }

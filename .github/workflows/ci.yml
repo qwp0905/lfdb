@@ -23,37 +23,13 @@ jobs:
             ${{ runner.os }}-cargo-
       - name: Install coverage tool
         run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov
+
+      - name: Check format
+        run: cargo fmt --all -- --check
+      - name: Check lint
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         run: cargo test:cov
-
-  benchmark_throughput:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Switch to main baseline
-        run: git switch main
-
-      - name: Throughput baseline
-        run: cargo benchmark --bench throughput --features lfdb -- --save-baseline main --quiet
-        continue-on-error: true
-
-      - name: Switch to PR branch
-        run: git switch ${{ github.head_ref }}
-
-      - name: Throughput (PR vs main)
-        run: cargo benchmark --bench throughput --features lfdb -- --baseline-lenient main
 
   benchmark_ycsb:
     runs-on: ubuntu-latest

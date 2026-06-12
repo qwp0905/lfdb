@@ -209,7 +209,7 @@ impl BlockCache {
     self
       .metrics
       .block_cache_read
-      .measure(|| self.__read(pointer, &handle))
+      .measure(|| self.__read(pointer, handle))
   }
 
   pub fn create_flusher(&self) -> CacheFlusher {
@@ -282,9 +282,9 @@ impl CacheFlusher {
     for &id in self.dirty_blocks.iter().take(count) {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
     }
-    for done in waiting {
-      done.wait().flatten()?;
-    }
+    waiting
+      .into_iter()
+      .try_for_each(|done| done.wait().flatten())?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }
@@ -294,9 +294,9 @@ impl CacheFlusher {
     for &id in self.dirty_blocks.iter() {
       waiting.push(self.executor.execute(FlushTask::Write(id)));
     }
-    for done in waiting {
-      done.wait().flatten()?;
-    }
+    waiting
+      .into_iter()
+      .try_for_each(|done| done.wait().flatten())?;
     self.dirty_blocks.clear();
     self.finish()
   }

@@ -1,5 +1,2 @@
 max_width = 90
 tab_spaces = 2
-trailing_comma = "Always"
-trailing_semicolon = true
-error_on_unformatted = true

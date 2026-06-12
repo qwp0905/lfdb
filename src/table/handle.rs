@@ -76,10 +76,12 @@ impl TableHandle {
 impl TableHandleRef {
   pub fn try_pin(&self) -> Option<PinnedHandle> {
     let token = self.pin.try_shared()?;
+    let static_token =
+      unsafe { transmute::<SharedToken<'_>, SharedToken<'static>>(token) };
     // transmute allowed since sbox guarantees the lifespan
     Some(PinnedHandle {
       handle: self.clone(),
-      token: ManuallyDrop::new(unsafe { transmute(token) }),
+      token: ManuallyDrop::new(static_token),
     })
   }
 }

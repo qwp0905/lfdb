@@ -177,7 +177,7 @@ impl WAL {
    *
    * 8.  if obtained offset exceed the threshold at first, then start to rotate current buffer.
    *   8-1. if current buffer segment pointer has been exceed the threshold(eg. max len),
-   *          then trying to rotate buffer with rotated segment.
+   *        then trying to rotate buffer with rotated segment.
    *
    * 9.  if failed to rotate buffer, then clear this buffer and reuse segment if the segment has been rotated.
    *
@@ -365,7 +365,7 @@ impl WAL {
 
       let taken = unsafe { ptr.into_owned() };
       let _ = taken.take_segment();
-      let _ = self.preloader.close();
+      self.preloader.close();
       return;
     }
   }

@@ -66,7 +66,7 @@ fn spawn_workers(
       let done = done.clone();
       let c = c.clone();
       std::thread::Builder::new()
-        .name(format!("worker"))
+        .name("worker".to_string())
         .spawn(move || {
           while let Ok(op) = rx.recv() {
             match op {

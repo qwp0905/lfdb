@@ -72,7 +72,7 @@ impl SegmentPreload {
   pub fn failover(&self) {
     self.reuse.close();
     self.preload.close();
-    while let Some(_) = self.ready.pop() {}
+    while self.ready.pop().is_some() {}
   }
 
   /**

@@ -96,7 +96,7 @@ impl TableMapper {
   }
 
   pub fn get(&self, id: TableId) -> Option<TableHandleRef> {
-    self.open_handles.rl().get(&id).map(|handle| handle.clone())
+    self.open_handles.rl().get(&id).cloned()
   }
 
   pub fn insert(&self, handle: TableHandleRef) {
@@ -120,7 +120,7 @@ impl TableMapper {
       .open_handles
       .rl()
       .values()
-      .map(|v| v.clone())
+      .cloned()
       .chain([self.metadata.clone()])
       .collect()
   }

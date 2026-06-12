@@ -174,7 +174,7 @@ impl MappingTable {
         continue;
       }
 
-      let Ok(reserved) = shard.node.reserve(&key, hash, hasher, &try_evict) else {
+      let Ok(reserved) = shard.node.reserve(&key, hash, hasher, try_evict) else {
         drop(shard);
         backoff.snooze();
         continue;
@@ -225,7 +225,7 @@ impl MappingTable {
         continue;
       }
 
-      let Ok(result) = shard.node.get_or_reserve(&key, hash, hasher, &try_evict) else {
+      let Ok(result) = shard.node.get_or_reserve(&key, hash, hasher, try_evict) else {
         drop(shard);
         backoff.snooze();
         continue;
@@ -288,7 +288,7 @@ impl MappingTable {
 
     if let Some(token) = try_evict(&bid) {
       shard.eviction.insert(evicted);
-      return Some(EvictionGuard::new(Some(evicted), bid, token, &s, key, hash));
+      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
     }
 
     // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights

@@ -136,7 +136,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
-    self.block_cache.alloc(pointer, &table)
+    self.block_cache.alloc(pointer, table)
   }
 }
 impl<'a> CreatablePolicy for MiniTx<'a> {
@@ -251,7 +251,7 @@ fn create_compaction(
   metadata.set_compaction(&table_meta);
 
   if let Err(err) =
-    index.insert_if_matched(table_name.as_bytes(), Some(metadata.to_vec()), &meta_table)
+    index.insert_if_matched(table_name.as_bytes(), Some(metadata.to_vec()), meta_table)
   {
     if matches!(err, Error::WriteConflict) {
       info!("table {table_name} already set compaction state");
@@ -448,7 +448,7 @@ impl Compactor {
   fn failover(&self) {
     self.ticker.close();
     let _ = self.cycle.take();
-    while let Some(_) = self.in_progress.pop() {}
+    while self.in_progress.pop().is_some() {}
   }
 }
 
@@ -504,7 +504,7 @@ fn remove_compaction(
   if let Err(err) = index.insert_if_matched(
     table_name.as_bytes(),
     Some(table_metadata.to_vec()),
-    &meta_table,
+    meta_table,
   ) {
     if matches!(err, Error::WriteConflict) {
       warn!("table {table_name} already dropped.");
@@ -657,7 +657,8 @@ fn compaction_loop(
         owner,
         version,
       ));
-      return Ok(*cycle_ref = None);
+      *cycle_ref = None;
+      return Ok(());
     }
 
     if !check_compaction(

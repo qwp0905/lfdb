@@ -62,10 +62,10 @@ impl<T, R> RefUnwindSafe for IntervalWorkThread<T, R> {}
 impl<T, R> UnwindSafe for IntervalWorkThread<T, R> {}
 impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
   fn register(&self, ctx: Context<T, R>) -> bool {
-    match self.channel.try_send(ctx) {
-      Err(TrySendError::Disconnected(_)) => false,
-      _ => true,
-    }
+    !matches!(
+      self.channel.try_send(ctx),
+      Err(TrySendError::Disconnected(_))
+    )
   }
 
   fn close(&self) {

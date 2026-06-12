@@ -21,7 +21,7 @@ fn test_compaction() {
   let name = TableName::from_str_unchecked("test");
   let path = PathBuf::from(&*name);
   let cid = 123123;
-  let cpath = PathBuf::from(format!("compaction"));
+  let cpath = PathBuf::from("compaction");
   let mut metadata = TableMetadata::new(id, name.clone(), path.clone());
   let cmeta = TableMetadata::new(cid, name.clone(), cpath.clone());
   metadata.set_compaction(&cmeta);

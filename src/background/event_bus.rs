@@ -284,7 +284,7 @@ impl EventBus {
   pub fn new() -> Self {
     let queue = SBox::new(SegQueue::new());
     let handle = Builder::new()
-      .name(format!("event bus"))
+      .name("event bus".to_string())
       .stack_size(2 << 20)
       .spawn(handle_thread(queue.clone()))
       .unwrap();

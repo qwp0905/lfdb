@@ -76,7 +76,7 @@ impl<'a> Cursor<'a> {
       return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
     }
 
-    let table = self.compaction.as_ref().unwrap_or_else(|| &self.table);
+    let table = self.compaction.as_ref().unwrap_or(&self.table);
     self
       .metrics
       .operation_insert

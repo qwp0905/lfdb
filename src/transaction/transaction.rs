@@ -49,7 +49,7 @@ impl<'a> Transaction<'a> {
     table: TableHandleRef,
     compaction: Option<TableHandleRef>,
   ) -> Cursor<'_> {
-    Cursor::new(table, compaction, &self.context, &self.metrics)
+    Cursor::new(table, compaction, &self.context, self.metrics)
   }
 
   pub fn table(&self, name: &str) -> Result<Cursor<'_>> {
@@ -105,7 +105,7 @@ impl<'a> Transaction<'a> {
     meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
 
     let table = self.orchestrator.open_table(&table_meta)?;
-    let cursor = Cursor::initialize(table.clone(), &self.context, &self.metrics)?;
+    let cursor = Cursor::initialize(table.clone(), &self.context, self.metrics)?;
     self.orchestrator.commit_table(table.clone());
     self.created_tables.push(table);
 
@@ -175,7 +175,7 @@ impl<'a> Transaction<'a> {
       .try_pin()
       .unwrap();
 
-    Cursor::initialize(new_table.handle().clone(), &self.context, &self.metrics)?;
+    Cursor::initialize(new_table.handle().clone(), &self.context, self.metrics)?;
     self.orchestrator.commit_table(new_table.handle().clone());
     self.compacted_tables.push((old, new_table, table_meta));
 

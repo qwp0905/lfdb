@@ -92,7 +92,7 @@ impl<T> BitmapIter<T> {
     ((self.index - 1) << SHIFT) + bit
   }
 }
-impl<'a> Iterator for BitmapIter<&'a AtomicBitmap> {
+impl Iterator for BitmapIter<&AtomicBitmap> {
   type Item = usize;
 
   fn next(&mut self) -> Option<Self::Item> {
@@ -105,7 +105,7 @@ impl<'a> Iterator for BitmapIter<&'a AtomicBitmap> {
       self.index += 1;
     }
 
-    Some(self.get_next() as usize)
+    Some(self.get_next())
   }
 }
 

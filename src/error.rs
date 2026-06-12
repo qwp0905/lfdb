@@ -102,7 +102,7 @@ impl Clone for Error {
       Self::ChannelDisconnected => Self::ChannelDisconnected,
       Self::TableNameExceeded(e, r) => Self::TableNameExceeded(*e, *r),
       Self::TableNameEmpty => Self::TableNameEmpty,
-      Self::NotAllowedChar(char) => Self::NotAllowedChar(char.clone()),
+      Self::NotAllowedChar(char) => Self::NotAllowedChar(*char),
       Self::KeyExceeded(e, r) => Self::KeyExceeded(*e, *r),
       Self::ValueExceeded(e, r) => Self::ValueExceeded(*e, *r),
       Self::WALUnavailable => Self::WALUnavailable,

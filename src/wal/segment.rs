@@ -39,10 +39,8 @@ impl WALSegment {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
-    self
-      .handle
-      .write_async(unsafe { transmute(page.as_ref()) }, pointer * SIZE)
-      .wait()
+    let static_ref = unsafe { transmute::<&[u8], &'static [u8]>(page.as_ref()) };
+    self.handle.write_async(static_ref, pointer * SIZE).wait()
   }
 
   /**

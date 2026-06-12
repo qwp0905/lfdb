@@ -4,9 +4,6 @@ use std::{
   path::Path,
 };
 
-#[cfg(unix)]
-use libc;
-
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -15,9 +12,6 @@ use std::{
   io::Error,
   os::{fd::AsRawFd, unix::fs::FileExt},
 };
-
-#[cfg(windows)]
-use winapi;
 
 #[cfg(windows)]
 use std::{

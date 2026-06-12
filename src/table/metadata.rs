@@ -140,7 +140,7 @@ impl TableMetadata {
 impl Clone for TableMetadata {
   fn clone(&self) -> Self {
     Self {
-      id: self.id.clone(),
+      id: self.id,
       name: self.name.clone(),
       filename: self.filename.clone(),
       compaction: self.compaction.clone(),
