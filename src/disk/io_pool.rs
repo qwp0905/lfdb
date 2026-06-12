@@ -145,12 +145,11 @@ impl IOPool {
 
   pub fn close(&self) {
     self.thread.close();
-    let _ = self.base_dir.unlock();
   }
 }
 impl Drop for IOPool {
   fn drop(&mut self) {
-    self.close();
+    let _ = self.base_dir.unlock();
   }
 }
 
