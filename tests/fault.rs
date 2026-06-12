@@ -129,6 +129,12 @@ impl IOBackend for FaultIO {
   fn metadata(&self) -> IoResult<Metadata> {
     self.inner.metadata()
   }
+  fn try_lock(&self) -> IoResult<bool> {
+    self.inner.try_lock()
+  }
+  fn unlock(&self) -> IoResult<()> {
+    self.inner.unlock()
+  }
 }
 
 struct FaultBackend {

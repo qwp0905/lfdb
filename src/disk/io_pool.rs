@@ -7,6 +7,8 @@ use std::{
   mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
+  thread::sleep,
+  time::Duration,
 };
 
 use crossbeam::utils::Backoff;
@@ -17,10 +19,14 @@ use super::{
 };
 use crate::{
   background::{Oneshot, WorkBuilder},
+  error,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex, ToArc},
   Error, Result,
 };
+
+const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_RETRY: u8 = 10;
 
 pub struct AsyncIO<T = ()>(Oneshot<IOResult<T>>);
 impl<T> AsyncIO<T> {
@@ -50,15 +56,28 @@ impl IOPool {
       .multi(thread_count)
       .shared(create_io_thread(metrics.clone()))
       .to_arc();
+
     let base_dir = SBox::new(
       DirHandle::ensure(base_path, Box::new(backend), thread.clone())
         .map_err(Error::IO)?,
     );
-    Ok(Self {
-      thread,
-      metrics,
-      base_dir,
-    })
+    for _ in 0..MAX_RETRY {
+      if base_dir.try_lock().map_err(Error::IO)? {
+        return Ok(Self {
+          thread,
+          metrics,
+          base_dir,
+        });
+      }
+
+      error!(
+        "dir {:?} are still in use. trying to retry in {} secs...",
+        base_dir.get_path(),
+        RETRY_INTERVAL.as_secs(),
+      );
+      sleep(RETRY_INTERVAL);
+    }
+    Err(Error::EngineAlreadyOpen)
   }
 
   pub fn open_append_io(&self, filename: PathBuf) -> Result<AppendIOHandle> {
@@ -126,6 +145,12 @@ impl IOPool {
 
   pub fn close(&self) {
     self.thread.close();
+    let _ = self.base_dir.unlock();
+  }
+}
+impl Drop for IOPool {
+  fn drop(&mut self) {
+    self.close();
   }
 }
 
@@ -234,14 +259,9 @@ impl DirHandle {
     thread: Arc<IOThread>,
   ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
-    let (file, path) = disk_backend
-      .ensure_dir(path)
-      .and_then(|_| path.canonicalize())
-      .and_then(|path| {
-        disk_backend
-          .open(options.read(true), &path)
-          .map(|f| (f, path))
-      })?;
+    disk_backend.ensure_dir(path)?;
+    let path = path.canonicalize()?;
+    let file = disk_backend.open(options.read(true), &path)?;
     Ok(Self {
       io_backend: Arc::from(file),
       disk_backend,
@@ -291,6 +311,12 @@ impl DirHandle {
       .disk_backend
       .open_direct_io(options, path)
       .map(Arc::from)
+  }
+  fn try_lock(&self) -> IOResult<bool> {
+    self.io_backend.try_lock()
+  }
+  fn unlock(&self) -> IOResult<()> {
+    self.io_backend.unlock()
   }
 }
 

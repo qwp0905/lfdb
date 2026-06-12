@@ -1,5 +1,8 @@
 use std::{
-  fs::{create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions},
+  fs::{
+    create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions,
+    TryLockError,
+  },
   io::{IoSlice, Result},
   path::Path,
 };
@@ -118,6 +121,16 @@ impl IOBackend for DefaultDiskBackend {
   }
   fn metadata(&self) -> Result<std::fs::Metadata> {
     DefaultDiskBackend::metadata(self)
+  }
+  fn try_lock(&self) -> Result<bool> {
+    match self.try_lock() {
+      Ok(_) => Ok(true),
+      Err(TryLockError::WouldBlock) => Ok(false),
+      Err(TryLockError::Error(err)) => Err(err),
+    }
+  }
+  fn unlock(&self) -> Result<()> {
+    File::unlock(self)
   }
 }
 

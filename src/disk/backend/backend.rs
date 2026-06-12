@@ -13,6 +13,8 @@ pub trait IOBackend: Send + Sync + RefUnwindSafe + Read + Write + 'static {
   fn fsync(&self) -> Result<()>;
   fn fdatasync(&self) -> Result<()>;
   fn metadata(&self) -> Result<Metadata>;
+  fn try_lock(&self) -> Result<bool>;
+  fn unlock(&self) -> Result<()>;
 
   fn pread_exact(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
     while !buf.is_empty() {

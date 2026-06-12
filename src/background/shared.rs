@@ -45,6 +45,27 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
   }
 }
 
+fn handle_task<T, R>(
+  ctx: Context<T, R>,
+  work: &SharedFn<'static, T, R>,
+  name: &String,
+) -> bool
+where
+  T: Send + UnwindSafe,
+  R: Send,
+{
+  match ctx {
+    Context::Work(v, done) => done.fulfill(work.call(v)),
+    Context::Dispatch(v) => {
+      if let Err(err) = work.call(v) {
+        error!("error occurs in thread {}: {}", name, err);
+      }
+    }
+    Context::Term => return false,
+  }
+  true
+}
+
 const fn work_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: Arc<Injector<Context<T, R>>>,
@@ -72,7 +93,7 @@ where
           continue;
         };
 
-        if !SharedWorkThread::handle_ctx(ctx, &work, &name) {
+        if !handle_task(ctx, &work, &name) {
           return drain_task(&global, &local);
         }
         backoff.reset();
@@ -96,7 +117,7 @@ where
       };
 
       // enqueued but tasks are left. state will be changed by producer.
-      if !SharedWorkThread::handle_ctx(ctx, &work, &name) {
+      if !handle_task(ctx, &work, &name) {
         return drain_task(&global, &local);
       }
     }
@@ -182,28 +203,6 @@ where
     }
   }
 }
-impl<T, R> SharedWorkThread<T, R>
-where
-  T: Send + UnwindSafe,
-  R: Send,
-{
-  fn handle_ctx(
-    ctx: Context<T, R>,
-    work: &SharedFn<'static, T, R>,
-    name: &String,
-  ) -> bool {
-    match ctx {
-      Context::Work(v, done) => done.fulfill(work.call(v)),
-      Context::Dispatch(v) => {
-        if let Err(err) = work.call(v) {
-          error!("error occurs in thread {}: {}", name, err);
-        }
-      }
-      Context::Term => return false,
-    }
-    true
-  }
-}
 
 unsafe impl<T, R> Send for SharedWorkThread<T, R> {}
 unsafe impl<T, R> Sync for SharedWorkThread<T, R> {}
@@ -246,7 +245,7 @@ where
     }
 
     while let Some(ctx) = self.global.steal().success() {
-      Self::handle_ctx(ctx, &self.work, &self.name);
+      handle_task(ctx, &self.work, &self.name);
     }
   }
 }
