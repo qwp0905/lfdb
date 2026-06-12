@@ -231,7 +231,7 @@ fn release_entry(
         return Ok(());
       }
 
-      if new_versions.len() > 0 {
+      if !new_versions.is_empty() {
         entry.set_versions(new_versions);
         serialize_and_log(slot, &entry)?;
         return Ok(());
@@ -412,7 +412,7 @@ fn gc_main_loop(
       };
 
       let slot = block_cache.read(ptr, table.handle())?.for_read();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+      let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
       let mut iter = node.get_entries();
       while let Some((_, _, record, p)) = iter.try_next()? {
         state.min_version = state.min_version.min(record.version);

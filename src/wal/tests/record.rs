@@ -51,7 +51,7 @@ fn test_insert_roundtrip() {
 fn test_checkpoint_roundtrip() {
   let i = 200;
   let cv = 10;
-  let path: PathBuf = format!("sdfsdf").into();
+  let path = PathBuf::from("sdfsdf");
   let r = LogRecordUninit::new_checkpoint(i, cv, path.clone());
   let parsed = assert_roundtrip(r, 5);
   match parsed.operation {
@@ -73,9 +73,9 @@ fn test_entry_roundtrip() {
   let mut page = Page::new();
   let mut writer = page.writer();
 
-  writer.write(&(3 as u16).to_le_bytes()).unwrap();
+  writer.write(&(3u16).to_le_bytes()).unwrap();
   let r2 = LogRecordUninit::new_insert(1, 0, 10, 12, vec![1]);
-  let r4 = LogRecordUninit::new_checkpoint(456, 123, format!("sdlfkj").into());
+  let r4 = LogRecordUninit::new_checkpoint(456, 123, "sdlfkj".into());
   let r3 = LogRecordUninit::new_commit(1);
 
   writer.write(&r2.init(2)).unwrap();
@@ -83,7 +83,7 @@ fn test_entry_roundtrip() {
   writer.write(&r3.init(4)).unwrap();
 
   let (d, complete) = read_page(&page);
-  assert_eq!(complete, false);
+  assert!(!complete);
 
   assert_eq!(d.len(), 3);
 
@@ -103,7 +103,7 @@ fn test_entry_roundtrip() {
   assert!(matches!(
     &d[1].operation,
     Operation::Checkpoint{ last_log_id:456, current_version:123, snapshot } if
-    *snapshot == PathBuf::from("sdlfkj"),
+    snapshot == PathBuf::from("sdlfkj").as_path(),
   ));
 
   assert_eq!(d[2].log_id, 4);

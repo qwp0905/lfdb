@@ -68,7 +68,7 @@ impl LogRecord {
   }
 
   fn read_from(buf: &[u8]) -> Option<Self> {
-    let mut reader = OffsetReader::new(&buf);
+    let mut reader = OffsetReader::new(buf);
     let checksum = reader.read_u32()?;
 
     let mut hasher = crc32fast::Hasher::new();
@@ -93,7 +93,7 @@ impl LogRecord {
           data: data.to_vec(),
         }
       }
-      2 => (reader.is_eof()).then(|| Operation::Commit)?,
+      2 => (reader.is_eof()).then_some(Operation::Commit)?,
       3 => {
         let log_id = reader.read_u64()?;
         let current_version = reader.read_u64()?;

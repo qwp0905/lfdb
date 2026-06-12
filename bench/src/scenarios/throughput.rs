@@ -46,8 +46,8 @@ where
     .throughput(Throughput::Elements(SEQ_SIZE as u64))
     .bench_function("bench", |b| {
       b.iter(|| {
-        for i in 0..SEQ_SIZE {
-          engine.get(TABLE, &keys[i]);
+        for k in &keys {
+          engine.get(TABLE, k);
         }
       });
     });
@@ -130,9 +130,9 @@ where
     .bench_function("bench", |b| {
       b.iter(|| {
         let mut waiting = Vec::with_capacity(CONC_SIZE);
-        for i in 0..CONC_SIZE {
+        for k in keys.iter().cloned() {
           let (t, r) = unbounded();
-          tx.send((keys[i].clone(), t)).unwrap();
+          tx.send((k, t)).unwrap();
           waiting.push(r);
         }
         waiting.into_iter().for_each(|r| r.recv().unwrap());

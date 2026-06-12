@@ -82,10 +82,6 @@ impl<T> OneshotInner<T> {
   const fn get_value(&self) -> &MaybeUninit<T> {
     unsafe { &*self.value.get() }
   }
-  #[inline]
-  const fn get_value_mut(&self) -> &mut MaybeUninit<T> {
-    unsafe { &mut *self.value.get() }
-  }
 }
 
 const MAX_YIELD: usize = 10;
@@ -127,7 +123,7 @@ impl<T> Oneshot<T> {
 impl<T> Drop for Oneshot<T> {
   fn drop(&mut self) {
     if let State::Fulfilled = self.0.state.swap(State::Disconnected) {
-      unsafe { self.0.get_value_mut().assume_init_drop() };
+      unsafe { (*self.0.value.get()).assume_init_drop() };
     }
   }
 }
@@ -135,7 +131,7 @@ impl<T> Drop for Oneshot<T> {
 pub struct OneshotFulfill<T>(Pair<OneshotInner<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
-    let value = self.0.get_value_mut();
+    let value = unsafe { &mut *self.0.value.get() };
     value.write(result);
     match self
       .0
@@ -143,10 +139,11 @@ impl<T> OneshotFulfill<T> {
       .compare_exchange(State::Waiting, State::Fulfilled)
       .unwrap_or_else(|s| s)
     {
-      State::Waiting => match self.0.caller.take() {
-        Some(th) => th.unpark(),
-        None => return,
-      },
+      State::Waiting => {
+        if let Some(th) = self.0.caller.take() {
+          th.unpark()
+        }
+      }
       State::Disconnected => unsafe { value.assume_init_drop() },
       State::Fulfilled => unreachable!(),
     }
@@ -154,13 +151,17 @@ impl<T> OneshotFulfill<T> {
 }
 impl<T> Drop for OneshotFulfill<T> {
   fn drop(&mut self) {
-    self
+    let Ok(_) = self
       .0
       .state
       .compare_exchange(State::Waiting, State::Disconnected)
-      .ok()
-      .and_then(|_| self.0.caller.take())
-      .map(|th| th.unpark());
+    else {
+      return;
+    };
+    let Some(th) = self.0.caller.take() else {
+      return;
+    };
+    th.unpark();
   }
 }
 

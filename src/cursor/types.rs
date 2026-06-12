@@ -63,7 +63,7 @@ impl Eq for VecRef {}
 
 impl PartialOrd for VecRef {
   fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-    Some(self.deref().cmp(other.deref()))
+    Some(self.cmp(other))
   }
 }
 impl Ord for VecRef {

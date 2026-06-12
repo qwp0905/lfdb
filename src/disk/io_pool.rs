@@ -199,13 +199,13 @@ impl IOHandle {
       backoff.snooze();
     }
 
-    self.base_dir.remove(&*self.filename.l())
+    self.base_dir.remove(&self.filename.l())
   }
 
   pub fn rename(&self, new_filename: PathBuf) -> IOResult<()> {
     {
       let mut filename = self.filename.l();
-      self.base_dir.rename(&*filename, &new_filename)?;
+      self.base_dir.rename(&filename, &new_filename)?;
       *filename = new_filename;
     }
     Ok(())

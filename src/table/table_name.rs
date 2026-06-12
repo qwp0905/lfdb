@@ -5,7 +5,7 @@ use std::{
 
 use crate::{Error, Result};
 
-const MAX_TABLE_NAME_LEN: usize = 256 as usize;
+const MAX_TABLE_NAME_LEN: usize = 256usize;
 pub const META_TABLE: &str = "__meta__";
 
 pub struct TableName(String);

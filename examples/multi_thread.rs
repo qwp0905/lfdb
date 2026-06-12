@@ -66,9 +66,9 @@ fn main() {
   }
 
   let start = Instant::now();
-  for i in 0..count {
+  for k in keys.iter().cloned() {
     let (t, r) = crossbeam::channel::unbounded();
-    tx.send((keys[i].clone(), t)).unwrap();
+    tx.send((k, t)).unwrap();
     v.push(r);
   }
 

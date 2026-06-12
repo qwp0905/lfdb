@@ -256,8 +256,7 @@ impl Engine {
     replay
       .segments
       .into_iter()
-      .map(|seg| seg.truncate())
-      .collect::<Result>()?;
+      .try_for_each(|seg| seg.truncate())?;
 
     let orchestrator = TxOrchestrator::new(
       tx_config,
@@ -327,10 +326,10 @@ impl Engine {
 
 impl Drop for Engine {
   fn drop(&mut self) {
-    if let Ok(_) =
-      self
-        .available
-        .compare_exchange(true, false, Ordering::Release, Ordering::Acquire)
+    if self
+      .available
+      .compare_exchange(true, false, Ordering::Release, Ordering::Acquire)
+      .is_ok()
     {
       info!("engine shutdown");
       if let Err(err) = self.orchestrator.close() {

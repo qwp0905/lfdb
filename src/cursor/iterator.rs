@@ -203,7 +203,7 @@ where
     };
 
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
-    let node = slot.as_ref().view::<BTreeNodeView>()?.as_leaf()?;
+    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
 
     let mut iter = node.range_entries(&Bound::Unbounded, &self.end);
     while let Some((s, e, record, p)) = iter.try_next()? {

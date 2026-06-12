@@ -71,7 +71,7 @@ impl LeafNode {
       let next = scanner.read_u64()?;
       entries.push(LeafEntry::new(key, record, next))
     }
-    Ok(Self::new(entries, (next != 0).then(|| next)))
+    Ok(Self::new(entries, (next != 0).then_some(next)))
   }
 
   pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
@@ -154,7 +154,7 @@ impl<'a> LeafNodeView<'a> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
     let offset = scanner.advance(0)?;
-    Ok(Self::new(page, offset, len, (next != 0).then(|| next)))
+    Ok(Self::new(page, offset, len, (next != 0).then_some(next)))
   }
 
   pub fn find(&self, key: StaticKeyRef) -> Result<NodeFindResult> {

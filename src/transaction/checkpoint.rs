@@ -181,7 +181,7 @@ impl Checkpoint {
   fn failover(&self) {
     self.ticker.close();
     let _ = self.cycle.take();
-    while let Some(_) = self.incoming.pop() {}
+    while self.incoming.pop().is_some() {}
   }
 
   pub fn close(&self) -> Result {
@@ -311,7 +311,7 @@ fn checkpoint_loop(
     let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
 
-    return Ok(*cycle = None);
+    Ok(*cycle = None)
   }
 }
 

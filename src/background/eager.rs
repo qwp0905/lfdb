@@ -9,13 +9,15 @@ use crate::{utils::ToArc, Result};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
+type Buffered<T, R> = Vec<(T, Option<OneshotFulfill<Result<R>>>)>;
+
 /**
  * The callback is called once per batch and the result is cloned to each
  * waiter — hence R: Clone.
  */
 const fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
-) -> impl FnMut(&mut Vec<(T, Option<OneshotFulfill<Result<R>>>)>) -> bool + 'a
+) -> impl FnMut(&mut Buffered<T, R>) -> bool + 'a
 where
   T: Send + UnwindSafe + 'static,
   R: Send + Clone + 'static,

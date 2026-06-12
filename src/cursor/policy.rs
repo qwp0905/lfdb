@@ -26,7 +26,7 @@ pub trait ReadonlyPolicy {
     self.is_readable(version) && !self.is_active(owner) && !self.is_aborted(owner)
   }
 }
-impl<'a, Policy: ReadonlyPolicy> ReadonlyPolicy for &'a Policy {
+impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
   fn is_aborted(&self, owner: TxId) -> bool {
     (*self).is_aborted(owner)
   }
@@ -75,7 +75,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
     Ok(slot.get_pointer())
   }
 }
-impl<'a, Policy: WritablePolicy> WritablePolicy for &'a Policy {
+impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,
@@ -101,7 +101,7 @@ pub trait CreatablePolicy: WritablePolicy {
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
 }
-impl<'a, Policy: CreatablePolicy> CreatablePolicy for &'a Policy {
+impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
   fn wait_close(&self, owner: TxId) {
     (*self).wait_close(owner)
   }

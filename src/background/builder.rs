@@ -19,7 +19,7 @@ where
   F: FnOnce() -> T + Send + 'static,
 {
   let handle = Builder::new()
-    .name(format!("once thread"))
+    .name("once thread".to_string())
     .stack_size(DEFAULT_STACK_SIZE)
     .spawn(f)
     .unwrap();

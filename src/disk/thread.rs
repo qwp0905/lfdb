@@ -203,7 +203,7 @@ fn write_exec(
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, mut bufs): (Vec<_>, Vec<_>) =
-      chunk.into_iter().map(|(o, b)| (*o, *b)).unzip();
+      chunk.iter().map(|(o, b)| (*o, *b)).unzip();
     let offset = offset[0];
     if bufs.len() == 1 {
       metrics

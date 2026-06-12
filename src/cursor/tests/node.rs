@@ -31,7 +31,7 @@ fn test_serialize_leaf() {
 
   let mut leaf = LeafNode::empty();
 
-  let entries = vec![(vec![49, 50, 51], (123, 456, vec![1, 2, 3]), 100)];
+  let entries = [(vec![49, 50, 51], (123, 456, vec![1, 2, 3]), 100)];
 
   for (i, (key, (o, v, d), p)) in entries.iter().enumerate() {
     leaf.insert_at(
@@ -49,7 +49,7 @@ fn test_serialize_leaf() {
   let d = page
     .view::<BTreeNodeView>()
     .expect("desiralize error")
-    .as_leaf()
+    .into_leaf()
     .expect("desirialize leaf error");
 
   let mut iter = d.get_entries();
@@ -88,8 +88,8 @@ fn test_serialize_internal_with_keys_and_right() {
     BTreeNodeView::Leaf(_) => panic!("must be internal"),
   };
 
-  assert_eq!(d.find(&vec![1, 1]).unwrap().unwrap(), children[0]);
-  assert_eq!(d.find(&vec![2, 2]).unwrap().unwrap(), children[1]);
-  assert_eq!(d.find(&vec![4, 4]).unwrap().unwrap(), children[2]);
-  assert_eq!(d.find(&vec![9, 9]).unwrap().err(), Some(99));
+  assert_eq!(d.find(&[1, 1]).unwrap().unwrap(), children[0]);
+  assert_eq!(d.find(&[2, 2]).unwrap().unwrap(), children[1]);
+  assert_eq!(d.find(&[4, 4]).unwrap().unwrap(), children[2]);
+  assert_eq!(d.find(&[9, 9]).unwrap().err(), Some(99));
 }

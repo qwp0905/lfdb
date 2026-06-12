@@ -62,10 +62,10 @@ fn test_iter() {
 #[test]
 fn test_offset_bit() {
   let mut bits = OffsetBitmap::new(100, 10);
-  assert_eq!(bits.insert(0), false);
-  assert_eq!(bits.insert(100), true);
-  assert_eq!(bits.insert(100), false);
-  assert_eq!(bits.contains(100), true);
-  assert_eq!(bits.contains(101), false);
-  assert_eq!(bits.insert(200), false);
+  assert!(!bits.insert(0));
+  assert!(bits.insert(100));
+  assert!(!bits.insert(100));
+  assert!(bits.contains(100),);
+  assert!(!bits.contains(101),);
+  assert!(!bits.insert(200),);
 }

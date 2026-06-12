@@ -56,8 +56,9 @@ impl<'a> SharedToken<'a> {
     let backoff = Backoff::new();
     let pin = self.0;
 
-    while let Err(_) =
-      pin.compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
+    while pin
+      .compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
+      .is_err()
     {
       backoff.snooze();
     }

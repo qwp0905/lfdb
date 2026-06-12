@@ -57,7 +57,7 @@ impl VersionRecord {
       RecordData::Data(data) => {
         writer.write(&[0])?;
         writer.write_u16(data.len() as u16)?;
-        writer.write(&data)?;
+        writer.write(data)?;
       }
       RecordData::Tombstone => writer.write(&[1])?,
       RecordData::Chunked(pointers) => {

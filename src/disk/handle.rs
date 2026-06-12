@@ -33,7 +33,8 @@ impl<const N: usize> BlockIOHandle<N> {
   #[inline]
   pub fn write(&self, pointer: Pointer, page: &Page<N>) -> Result {
     // transmute allowed since page lifetime available until wait called.
-    self.write_async(pointer, unsafe { transmute(page) }).wait()
+    let static_ref = unsafe { transmute::<&Page<N>, &'static Page<N>>(page) };
+    self.write_async(pointer, static_ref).wait()
   }
 
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {

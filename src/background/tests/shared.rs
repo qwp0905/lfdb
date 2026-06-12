@@ -76,7 +76,7 @@ fn test_multiple_threads() {
 
   // Collect all results
   for receiver in receivers.into_iter() {
-    let _ = receiver.wait().unwrap();
+    receiver.wait().unwrap();
   }
 
   assert_eq!(*max_c.lock().unwrap(), thread_count);
