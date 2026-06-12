@@ -4,7 +4,7 @@ use std::{
   ops::Deref,
   panic::{RefUnwindSafe, UnwindSafe},
   sync::atomic::{fence, AtomicBool, Ordering},
-  thread::{current, park, yield_now, Thread},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
@@ -88,8 +88,6 @@ impl<T> OneshotInner<T> {
   }
 }
 
-const MAX_YIELD: usize = 10;
-
 pub struct Oneshot<T>(Pair<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn fulfilled(value: T) -> Self {
@@ -98,7 +96,6 @@ impl<T> Oneshot<T> {
     Oneshot(inner)
   }
   pub fn wait(self) -> Result<T> {
-    let mut backoff = 0;
     // Register the caller thread before checking state. If fulfill() runs
     // first and finds caller as None, it won't call unpark() — causing park()
     // to block forever.
@@ -111,14 +108,7 @@ impl<T> Oneshot<T> {
         .unwrap_or_else(|s| s)
       {
         State::Fulfilled => return Ok(unsafe { self.0.get_value().assume_init_read() }),
-        State::Waiting if backoff < MAX_YIELD => {
-          yield_now();
-          backoff += 1;
-        }
-        State::Waiting => {
-          park();
-          backoff = 0;
-        }
+        State::Waiting => park(),
         State::Disconnected => return Err(Error::ChannelDisconnected),
       }
     }
