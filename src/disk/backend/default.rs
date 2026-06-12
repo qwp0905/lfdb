@@ -122,7 +122,7 @@ impl IOBackend for DefaultDiskBackend {
   fn metadata(&self) -> Result<std::fs::Metadata> {
     DefaultDiskBackend::metadata(self)
   }
-  fn try_lock(&self) -> Result<bool> {
+  fn try_flock(&self) -> Result<bool> {
     match self.try_lock() {
       Ok(_) => Ok(true),
       Err(TryLockError::WouldBlock) => Ok(false),
@@ -130,7 +130,7 @@ impl IOBackend for DefaultDiskBackend {
     }
   }
   fn unlock(&self) -> Result<()> {
-    File::unlock(self)
+    DefaultDiskBackend::unlock(self)
   }
 }
 

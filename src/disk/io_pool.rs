@@ -77,7 +77,7 @@ impl IOPool {
       );
       sleep(RETRY_INTERVAL);
     }
-    Err(Error::EngineAlreadyOpen)
+    Err(Error::DirOpenFailed)
   }
 
   pub fn open_append_io(&self, filename: PathBuf) -> Result<AppendIOHandle> {
@@ -312,7 +312,7 @@ impl DirHandle {
       .map(Arc::from)
   }
   fn try_lock(&self) -> IOResult<bool> {
-    self.io_backend.try_lock()
+    self.io_backend.try_flock()
   }
   fn unlock(&self) -> IOResult<()> {
     self.io_backend.unlock()

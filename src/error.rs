@@ -67,8 +67,8 @@ pub enum Error {
   #[error("wal failed since {0}. please drop engine and restart.")]
   WALFailed(io::ErrorKind),
 
-  #[error("engine already open.")]
-  EngineAlreadyOpen,
+  #[error("failed to open base dir.")]
+  DirOpenFailed,
 
   #[error("thread panic: {0:?}")]
   Panic(Arc<dyn Any + Send>),
@@ -109,7 +109,7 @@ impl Clone for Error {
       Self::KeyExceeded(e, r) => Self::KeyExceeded(*e, *r),
       Self::ValueExceeded(e, r) => Self::ValueExceeded(*e, *r),
       Self::WALUnavailable => Self::WALUnavailable,
-      Self::EngineAlreadyOpen => Self::EngineAlreadyOpen,
+      Self::DirOpenFailed => Self::DirOpenFailed,
       Self::WALFailed(kind) => Self::WALFailed(*kind),
       Self::Panic(err) => Self::Panic(err.clone()),
     }
