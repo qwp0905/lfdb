@@ -24,6 +24,8 @@ jobs:
       - name: Install coverage tool
         run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov
 
+      - name: Check format
+        run: cargo fmt --all -- --check
       - name: Check lint
         run: cargo clippy --all-targets -- -D warnings
       - name: Run tests

@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, mem::replace, ops::Bound};
+use std::{mem::replace, ops::Bound};
 
 use crate::{disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result};
 
@@ -329,7 +329,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         let mut entry: DataEntry = slot.as_ref().deserialize()?;
 
         let mut new_versions = entry.take_versions().chain([record]).collect::<Vec<_>>();
-        new_versions.sort_by_key(|v| Reverse(v.version));
+        new_versions.sort_by(|a, b| b.version.cmp(&a.version));
 
         loop {
           while let Some(r) = new_versions.pop_if(|r| entry.is_available(r)) {
