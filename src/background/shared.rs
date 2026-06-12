@@ -83,6 +83,7 @@ where
         .compare_exchange(State::Unqueued, State::Queued)
         .is_ok()
       {
+        // there are no state in idle queue.
         idle.push(Idle::new(state.clone(), id));
       }
 
@@ -90,9 +91,11 @@ where
         if state.compare_exchange(State::Queued, State::Parked).is_ok() {
           park();
         }
+        // if producer changed state, then never park.
         continue;
       };
 
+      // enqueued but tasks are left. state will be changed by producer.
       if !SharedWorkThread::handle_ctx(ctx, &work, &name) {
         return drain_task(&global, &local);
       }
@@ -102,9 +105,9 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-  Unqueued,
-  Queued,
-  Parked,
+  Unqueued, // out of idle queue.
+  Queued,   // in idle queue, but still working.
+  Parked,   // in idle queue and parked.
 }
 struct Idle {
   state: SBox<AtomicCell<State>>,
@@ -222,6 +225,7 @@ where
     if let State::Parked = idle.state.swap(State::Unqueued) {
       self.wakers[idle.id].unpark();
     }
+    // if does not matches parked, worker thread are already working.
     true
   }
 
