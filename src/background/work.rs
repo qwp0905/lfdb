@@ -8,10 +8,6 @@ pub enum Context<T, R> {
   Term,
 }
 
-/**
- * A panic-safe wrapper around a shared, immutable function.
- * Can be cloned and called concurrently across threads.
- */
 pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + Send + Sync + 'a>);
 impl<'a, T, R> SharedFn<'a, T, R>
 where
@@ -32,10 +28,6 @@ impl<'a, T, R> Clone for SharedFn<'a, T, R> {
   }
 }
 
-/**
- * A panic-safe wrapper around a mutable function for single-threaded use.
- * Allows the function to maintain state between calls via FnMut.
- */
 pub struct SingleFn<'a, T, R>(Box<dyn FnMut(T) -> R + Send + Sync + 'a>);
 impl<'a, T, R> SingleFn<'a, T, R>
 where
