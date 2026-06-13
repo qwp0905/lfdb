@@ -2,7 +2,6 @@ use std::{
   alloc::{alloc_zeroed, dealloc, Layout},
   marker::PhantomData,
   ops::Range,
-  panic::RefUnwindSafe,
   ptr::copy_nonoverlapping,
   slice::{from_raw_parts, from_raw_parts_mut},
 };
@@ -100,7 +99,6 @@ impl<const T: usize> From<&[u8]> for Page<T> {
 // Page itself is a plain byte buffer with no internal synchronization.
 unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}
-impl<const T: usize> RefUnwindSafe for Page<T> {}
 
 const EOF: Error = Error::EOF;
 

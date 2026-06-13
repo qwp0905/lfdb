@@ -9,7 +9,6 @@ use std::{
 use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
   disk::{PageRef, Pointer},
-  error::Result,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
@@ -167,7 +166,7 @@ impl LogBuffer {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn write_to_disk(&self) -> Result<IOResult<()>> {
+  pub fn write_to_disk(&self) -> IOResult<()> {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
       .write(self.segment_ptr, &self.entry)

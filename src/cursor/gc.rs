@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
   background::{
-    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, TaskHandle,
+    BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
     WorkBuilder,
   },
   binding_events,
@@ -367,10 +367,10 @@ fn gc_main_loop(
 ) -> impl FnMut(Option<()>) -> Result {
   let mut state = GCState::new();
   let mut buffered = VecDeque::new();
-  let flush = |buffered: &mut VecDeque<TaskHandle<Result<TxId>>>| -> Result<TxId> {
+  let flush = |buffered: &mut VecDeque<Oneshot<Result<TxId>>>| -> Result<TxId> {
     let mut min = TxId::MAX;
     while let Some(handle) = buffered.pop_front() {
-      min = min.min(handle.wait().flatten()?);
+      min = min.min(handle.wait().unwrap()?);
     }
     Ok(min)
   };

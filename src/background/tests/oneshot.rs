@@ -28,7 +28,7 @@ fn test_fulfill_before_wait() {
 fn test_disconnected_on_fulfill_drop() {
   let (rx, tx) = oneshot::<usize>();
   drop(tx);
-  assert!(matches!(rx.wait(), Err(Error::ChannelDisconnected)));
+  assert!(matches!(rx.wait(), Err(WaitDisconnectedError)));
 }
 
 #[test]
@@ -38,7 +38,7 @@ fn test_disconnected_on_fulfill_drop_async() {
     sleep(Duration::from_millis(100));
     drop(tx);
   });
-  assert!(matches!(rx.wait(), Err(Error::ChannelDisconnected)));
+  assert!(matches!(rx.wait(), Err(WaitDisconnectedError)));
 }
 
 #[test]

@@ -1,7 +1,6 @@
 use std::{
   collections::BTreeSet,
   ops::Deref,
-  panic::RefUnwindSafe,
   path::{Path, PathBuf},
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -254,5 +253,3 @@ impl SharedSubscription<WALFailed> for VersionVisibility {
 binding_events!(VersionVisibility {
   shared: [WALFailed]
 });
-
-impl RefUnwindSafe for VersionVisibility {}

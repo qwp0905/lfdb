@@ -35,7 +35,7 @@ impl<T> AsyncIO<T> {
   }
 
   pub fn wait(self) -> Result<T> {
-    self.0.wait()?.map_err(Error::IO)
+    self.0.wait().unwrap().map_err(Error::IO)
   }
 }
 
@@ -131,7 +131,7 @@ impl IOPool {
   }
 
   pub fn sync_dir(&self) -> Result {
-    self.base_dir.fdatasync().wait()?.map_err(Error::IO)
+    self.base_dir.fdatasync().wait().unwrap().map_err(Error::IO)
   }
   pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
     self.base_dir.read().map_err(Error::IO)

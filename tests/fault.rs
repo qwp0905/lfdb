@@ -1,7 +1,6 @@
 use std::{
   fs::{Metadata, OpenOptions, ReadDir},
   io::{Error as IoError, ErrorKind, IoSlice, Read, Result as IoResult, Write},
-  panic::RefUnwindSafe,
   path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -62,7 +61,6 @@ struct FaultIO {
   controller: FaultController,
   is_wal: bool,
 }
-impl RefUnwindSafe for FaultIO {}
 impl Read for FaultIO {
   fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
     self.inner.read(buf)
@@ -157,7 +155,6 @@ impl FaultBackend {
     })
   }
 }
-impl RefUnwindSafe for FaultBackend {}
 impl DiskBackend for FaultBackend {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> IoResult<Box<dyn IOBackend>> {
     self

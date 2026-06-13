@@ -1,7 +1,6 @@
 use std::{
   io::ErrorKind,
   mem::forget,
-  panic::RefUnwindSafe,
   path::PathBuf,
   sync::{atomic::Ordering, Arc},
 };
@@ -220,7 +219,7 @@ impl WAL {
         buffer.apply_record_count(order + 1);
         buffer.commit_entry();
 
-        if let Err(err) = buffer.write_to_disk()? {
+        if let Err(err) = buffer.write_to_disk() {
           return Err(self.failover(err.kind()));
         };
         while !buffer.is_ready_to_flush() {
@@ -234,7 +233,7 @@ impl WAL {
           return Err(self.failover(err.kind()));
         }
 
-        return f.wait()?.map_err(|err| self.failover(err.kind()));
+        return f.wait().unwrap().map_err(|err| self.failover(err.kind()));
       }
 
       if offset >= WAL_BLOCK_SIZE {
@@ -279,7 +278,7 @@ impl WAL {
       }
 
       buffer.apply_record_count(order);
-      let write_r = buffer.write_to_disk()?;
+      let write_r = buffer.write_to_disk();
       buffer.increase_written_count();
       if let Err(err) = write_r {
         return Err(self.failover(err.kind()));
@@ -373,4 +372,3 @@ impl WAL {
 }
 unsafe impl Send for WAL {}
 unsafe impl Sync for WAL {}
-impl RefUnwindSafe for WAL {}
