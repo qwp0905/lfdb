@@ -12,6 +12,6 @@ impl OnceParker {
   }
 
   pub fn wake_all(&self) {
-    self.0.call_once_force(|_| {});
+    self.0.call_once_force(|_| ());
   }
 }
