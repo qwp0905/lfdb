@@ -115,8 +115,13 @@ fn exclusive_drop_allows_another_exclusive() {
 #[test]
 fn upgrade_from_sole_shared() {
   let pin = ExclusivePin::new();
-  let s = pin.try_shared().unwrap();
-  let _e = s.upgrade();
+  let mut s = pin.try_shared().unwrap();
+  let _e = loop {
+    match s.try_upgrade() {
+      Ok(t) => break t,
+      Err(t) => s = t,
+    }
+  };
   assert!(pin.is_exclusive());
   assert!(pin.try_shared().is_none());
 }
@@ -125,8 +130,13 @@ fn upgrade_from_sole_shared() {
 fn upgraded_drop_clears_exclusive() {
   let pin = ExclusivePin::new();
   {
-    let s = pin.try_shared().unwrap();
-    let _e = s.upgrade();
+    let mut s = pin.try_shared().unwrap();
+    let _e = loop {
+      match s.try_upgrade() {
+        Ok(t) => break t,
+        Err(t) => s = t,
+      }
+    };
   }
   assert!(!pin.is_exclusive());
   assert!(pin.try_shared().is_some());
@@ -135,14 +145,19 @@ fn upgraded_drop_clears_exclusive() {
 #[test]
 fn upgrade_blocks_until_other_shared_drops() {
   let pin = ExclusivePin::new();
-  let s1 = pin.try_shared().unwrap();
+  let mut s1 = pin.try_shared().unwrap();
   let s2 = pin.try_shared().unwrap();
 
   let done = AtomicBool::new(false);
 
   thread::scope(|scope| {
     let handle = scope.spawn(|| {
-      let _e = s1.upgrade();
+      let _e = loop {
+        match s1.try_upgrade() {
+          Ok(t) => break t,
+          Err(t) => s1 = t,
+        }
+      };
       done.store(true, Ordering::Release);
     });
 
@@ -440,9 +455,14 @@ fn upgrade_preserves_happens_before() {
     // Reader: takes shared (Acquire), then upgrades (Acquire on CAS).
     scope.spawn(|| {
       assert!(ready.load(Ordering::Relaxed));
-      let s = pin.try_shared().unwrap();
+      let mut s = pin.try_shared().unwrap();
       assert_eq!(payload.load(Ordering::Relaxed), 123);
-      let _e = s.upgrade();
+      let _e = loop {
+        match s.try_upgrade() {
+          Ok(t) => break t,
+          Err(t) => s = t,
+        }
+      };
       // After upgrade (CAS Acquire), still see the write.
       assert_eq!(payload.load(Ordering::Relaxed), 123);
     });

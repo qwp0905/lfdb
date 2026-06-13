@@ -52,19 +52,17 @@ impl ExclusivePin {
 
 pub struct SharedToken<'a>(&'a AtomicU32);
 impl<'a> SharedToken<'a> {
-  pub fn upgrade(self) -> ExclusiveToken<'a> {
-    let backoff = Backoff::new();
+  pub fn try_upgrade(self) -> std::result::Result<ExclusiveToken<'a>, Self> {
     let pin = self.0;
-
-    while pin
+    if pin
       .compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
       .is_err()
     {
-      backoff.snooze();
+      return Err(self);
     }
 
     forget(self);
-    ExclusiveToken(pin)
+    Ok(ExclusiveToken(pin))
   }
 }
 impl<'a> Drop for SharedToken<'a> {
