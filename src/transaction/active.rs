@@ -146,6 +146,6 @@ impl ActiveSet {
     }
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
-    self.inner.rl().values().map(SBox::clone).collect()
+    self.inner.rl().values().cloned().collect()
   }
 }
