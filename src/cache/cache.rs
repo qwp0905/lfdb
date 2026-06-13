@@ -2,7 +2,6 @@ use std::{
   cell::UnsafeCell,
   collections::{HashMap, VecDeque},
   mem::{replace, MaybeUninit},
-  panic::RefUnwindSafe,
   sync::Arc,
 };
 
@@ -45,7 +44,6 @@ impl BlockCell {
 }
 unsafe impl Send for BlockCell {}
 unsafe impl Sync for BlockCell {}
-impl RefUnwindSafe for BlockCell {}
 
 pub struct BlockCache {
   table: MappingTable,
@@ -284,7 +282,7 @@ impl CacheFlusher {
     }
     waiting
       .into_iter()
-      .try_for_each(|done| done.wait().flatten())?;
+      .try_for_each(|done| done.wait().unwrap())?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }
@@ -296,7 +294,7 @@ impl CacheFlusher {
     }
     waiting
       .into_iter()
-      .try_for_each(|done| done.wait().flatten())?;
+      .try_for_each(|done| done.wait().unwrap())?;
     self.dirty_blocks.clear();
     self.finish()
   }
@@ -317,7 +315,7 @@ impl CacheFlusher {
     }
 
     for (table, done) in waiting {
-      let Err(err) = done.wait().flatten() else {
+      let Err(err) = done.wait().unwrap() else {
         continue;
       };
       error!("error occurs in flush table: {err}");

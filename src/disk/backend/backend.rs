@@ -1,11 +1,10 @@
 use std::{
   fs::{Metadata, OpenOptions, ReadDir},
   io::{Error, ErrorKind, IoSlice, Read, Result, Write},
-  panic::RefUnwindSafe,
   path::Path,
 };
 
-pub trait IOBackend: Send + Sync + RefUnwindSafe + Read + Write + 'static {
+pub trait IOBackend: Send + Sync + Read + Write + 'static {
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
   fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
   fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
@@ -67,7 +66,7 @@ pub trait IOBackend: Send + Sync + RefUnwindSafe + Read + Write + 'static {
   }
 }
 
-pub trait DiskBackend: Send + Sync + RefUnwindSafe + 'static {
+pub trait DiskBackend: Send + Sync + 'static {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>;
   fn open_direct_io(
     &self,

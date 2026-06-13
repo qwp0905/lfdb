@@ -157,7 +157,7 @@ impl<'a> BatchSlot<'a> {
       unsafe { transmute::<Box<BatchHandler<'_>>, Box<BatchHandler<'static>>>(handler) };
     let (occupied, o) = self.batch.register(handler);
     if !occupied {
-      return o.wait().flatten();
+      return o.wait().unwrap();
     }
 
     loop {
@@ -178,7 +178,7 @@ impl<'a> BatchSlot<'a> {
       }
     }
 
-    o.wait().flatten()
+    o.wait().unwrap()
   }
   pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
     self.__mutate(Box::new(handler))

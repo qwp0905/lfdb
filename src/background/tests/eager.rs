@@ -159,21 +159,6 @@ fn test_multiple_close() {
 }
 
 #[test]
-fn test_panic_recovery() {
-  let thread = EagerBufferingThread::new(
-    "test-panic",
-    DEFAULT_STACK_SIZE,
-    16,
-    SingleFn::new(|_: Vec<usize>| -> usize { panic!("intentional panic") }),
-  );
-
-  let result = thread.execute(1).wait();
-  assert!(result.is_err());
-
-  thread.close();
-}
-
-#[test]
 fn test_concurrent_senders() {
   let total = Arc::new(AtomicUsize::new(0));
   let total_c = total.clone();

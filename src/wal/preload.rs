@@ -66,7 +66,7 @@ impl SegmentPreload {
   }
 
   pub fn load(&self) -> Result<WALSegment> {
-    self.preload.execute(()).wait().flatten()
+    self.preload.execute(()).wait().unwrap()
   }
 
   pub fn failover(&self) {

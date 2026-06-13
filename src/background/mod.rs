@@ -30,3 +30,6 @@ pub use event_bus::*;
 
 mod slot;
 pub use slot::*;
+
+mod panic;
+pub use panic::*;

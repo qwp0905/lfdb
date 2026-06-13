@@ -1,7 +1,4 @@
-use std::{
-  cell::UnsafeCell,
-  panic::{RefUnwindSafe, UnwindSafe},
-};
+use std::cell::UnsafeCell;
 
 use crossbeam::utils::Backoff;
 
@@ -50,5 +47,3 @@ impl<T> AtomicSBox<T> {
 
 unsafe impl<T: Send> Send for AtomicSBox<T> {}
 unsafe impl<T: Send> Sync for AtomicSBox<T> {}
-impl<T: RefUnwindSafe> RefUnwindSafe for AtomicSBox<T> {}
-impl<T: UnwindSafe> UnwindSafe for AtomicSBox<T> {}

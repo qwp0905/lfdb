@@ -39,7 +39,7 @@ impl SyncQueue {
         continue;
       };
 
-      let sync_r = fsync.wait()?;
+      let sync_r = fsync.wait().unwrap();
       self.synced_count.fetch_add(1, Ordering::Release);
       if let Err(err) = sync_r {
         return Ok(Err(err));

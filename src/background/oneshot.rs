@@ -2,14 +2,11 @@ use std::{
   cell::UnsafeCell,
   mem::MaybeUninit,
   ops::Deref,
-  panic::{RefUnwindSafe, UnwindSafe},
   sync::atomic::{fence, AtomicBool, Ordering},
   thread::{current, park, yield_now, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
-
-use crate::{Error, Result};
 
 struct Pair<T: ?Sized>(*mut (AtomicBool, T));
 impl<T> Pair<T> {
@@ -36,6 +33,13 @@ impl<T: ?Sized> Deref for Pair<T> {
 }
 unsafe impl<T: Send + Sync + ?Sized> Send for Pair<T> {}
 unsafe impl<T: Send + Sync + ?Sized> Sync for Pair<T> {}
+
+pub enum TryWaitError<T> {
+  Disconnected,
+  Empty(Oneshot<T>),
+}
+#[derive(Debug)]
+pub struct WaitDisconnectedError;
 
 /**
  * Creates a single-use channel pair (Oneshot, OneshotFulfill).
@@ -93,30 +97,38 @@ impl<T> Oneshot<T> {
     let (inner, _) = Pair::new(inner);
     Oneshot(inner)
   }
-  pub fn wait(self) -> Result<T> {
+  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<T>> {
+    match self
+      .0
+      .state
+      .compare_exchange(State::Fulfilled, State::Disconnected)
+      .unwrap_or_else(|s| s)
+    {
+      State::Waiting => Err(TryWaitError::Empty(self)),
+      State::Fulfilled => Ok(unsafe { self.0.get_value().assume_init_read() }),
+      State::Disconnected => Err(TryWaitError::Disconnected),
+    }
+  }
+  pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
     let mut backoff = 0;
     // Register the caller thread before checking state. If fulfill() runs
     // first and finds caller as None, it won't call unpark() — causing park()
     // to block forever.
     self.0.caller.store(Some(current()));
     loop {
-      match self
-        .0
-        .state
-        .compare_exchange(State::Fulfilled, State::Disconnected)
-        .unwrap_or_else(|s| s)
-      {
-        State::Fulfilled => return Ok(unsafe { self.0.get_value().assume_init_read() }),
-        State::Waiting if backoff < MAX_YIELD => {
-          yield_now();
-          backoff += 1;
-        }
-        State::Waiting => {
-          park();
-          backoff = 0;
-        }
-        State::Disconnected => return Err(Error::ChannelDisconnected),
+      match self.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(this)) => self = this,
+      };
+      if backoff < MAX_YIELD {
+        backoff += 1;
+        yield_now();
+        continue;
       }
+
+      park();
+      backoff = 0;
     }
   }
 }
@@ -167,8 +179,6 @@ impl<T> Drop for OneshotFulfill<T> {
 
 unsafe impl<T: Send> Sync for OneshotInner<T> {}
 unsafe impl<T: Send> Send for OneshotInner<T> {}
-impl<T> UnwindSafe for OneshotInner<T> {}
-impl<T> RefUnwindSafe for OneshotInner<T> {}
 
 #[cfg(test)]
 #[path = "tests/oneshot.rs"]

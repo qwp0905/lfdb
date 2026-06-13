@@ -1,9 +1,6 @@
 mod lock;
 pub use lock::*;
 
-mod closure;
-pub use closure::*;
-
 mod pointer;
 pub use pointer::*;
 

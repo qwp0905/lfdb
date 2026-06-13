@@ -1,6 +1,5 @@
 use std::{
   mem::take,
-  panic::{RefUnwindSafe, UnwindSafe},
   sync::{Arc, Mutex},
   thread::{park, Builder, JoinHandle, Thread},
 };
@@ -12,12 +11,9 @@ use crossbeam::{
   utils::Backoff,
 };
 
-use crate::{
-  error,
-  utils::{SBox, ShortenedMutex},
-};
+use crate::utils::{SBox, ShortenedMutex};
 
-use super::{BackgroundThread, Context, SharedFn};
+use super::{BackgroundThread, Context, SharedFn, UnwindSpawner};
 
 fn pop_or_steal<'a, A: 'a>(
   local: &Worker<A>,
@@ -45,21 +41,15 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
   }
 }
 
-fn handle_task<T, R>(
-  ctx: Context<T, R>,
-  work: &SharedFn<'static, T, R>,
-  name: &String,
-) -> bool
+fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
 where
-  T: Send + UnwindSafe,
+  T: Send,
   R: Send,
 {
   match ctx {
     Context::Work(v, done) => done.fulfill(work.call(v)),
     Context::Dispatch(v) => {
-      if let Err(err) = work.call(v) {
-        error!("error occurs in thread {}: {}", name, err);
-      }
+      let _ = work.call(v);
     }
     Context::Term => return false,
   }
@@ -72,11 +62,11 @@ const fn worker_loop<T, R>(
   stealers: Arc<Vec<Stealer<Context<T, R>>>>,
   idle: Arc<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
-  name: String,
+
   id: usize,
 ) -> impl FnOnce()
 where
-  T: Send + UnwindSafe + 'static,
+  T: Send + 'static,
   R: Send + 'static,
 {
   move || {
@@ -93,7 +83,7 @@ where
           continue;
         };
 
-        if !handle_task(ctx, &work, &name) {
+        if !handle_task(ctx, &work) {
           return drain_task(&global, &local);
         }
         backoff.reset();
@@ -117,7 +107,7 @@ where
       };
 
       // enqueued but tasks are left. state will be changed by producer.
-      if !handle_task(ctx, &work, &name) {
+      if !handle_task(ctx, &work) {
         return drain_task(&global, &local);
       }
     }
@@ -149,12 +139,11 @@ pub struct SharedWorkThread<T, R = ()> {
   idle: Arc<SegQueue<Idle>>,
   wakers: Vec<Thread>,
   threads: Mutex<Vec<JoinHandle<()>>>,
-  name: String,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> SharedWorkThread<T, R>
 where
-  T: Send + UnwindSafe + 'static,
+  T: Send + 'static,
   R: Send + 'static,
 {
   pub fn new<S: ToString>(
@@ -178,27 +167,23 @@ where
       let thread = Builder::new()
         .name(name.clone())
         .stack_size(size)
-        .spawn(worker_loop(
+        .spawn_unwind(worker_loop(
           local,
           Arc::clone(&global),
           Arc::clone(&stealers),
           Arc::clone(&idle),
           work.clone(),
-          name.clone(),
           id,
-        ))
-        .unwrap();
+        ));
 
       wakers.push(thread.thread().clone());
       threads.push(thread);
     }
-
     Self {
       global,
       idle,
       wakers,
       threads: Mutex::new(threads),
-      name,
       work,
     }
   }
@@ -206,26 +191,23 @@ where
 
 unsafe impl<T, R> Send for SharedWorkThread<T, R> {}
 unsafe impl<T, R> Sync for SharedWorkThread<T, R> {}
-impl<T, R> RefUnwindSafe for SharedWorkThread<T, R> {}
-impl<T, R> UnwindSafe for SharedWorkThread<T, R> {}
 
 impl<T, R> BackgroundThread<T, R> for SharedWorkThread<T, R>
 where
-  T: Send + UnwindSafe,
+  T: Send,
   R: Send,
 {
-  fn register(&self, ctx: Context<T, R>) -> bool {
+  fn register(&self, ctx: Context<T, R>) {
     self.global.push(ctx);
 
     let Some(idle) = self.idle.pop() else {
-      return true;
+      return;
     };
 
+    // if does not matches parked, worker thread are already working.
     if let State::Parked = idle.state.swap(State::Unqueued) {
       self.wakers[idle.id].unpark();
     }
-    // if does not matches parked, worker thread are already working.
-    true
   }
 
   fn close(&self) {
@@ -241,11 +223,11 @@ where
       waker.unpark();
     }
     for th in threads {
-      let _ = th.join();
+      th.join().unwrap();
     }
 
     while let Some(ctx) = self.global.steal().success() {
-      handle_task(ctx, &self.work, &self.name);
+      handle_task(ctx, &self.work);
     }
   }
 }

@@ -1,4 +1,4 @@
-use std::{iter::repeat, panic::RefUnwindSafe};
+use std::iter::repeat;
 
 use crossbeam_skiplist::SkipMap;
 
@@ -20,4 +20,3 @@ impl DirtyTables {
     repeat(()).map_while(|_| self.0.pop_front().map(|v| v.value().clone()))
   }
 }
-impl RefUnwindSafe for DirtyTables {}

@@ -143,7 +143,7 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
     })
     .collect::<Vec<_>>();
 
-  threads.into_iter().try_for_each(|th| th.wait().flatten())?;
+  threads.into_iter().try_for_each(|th| th.wait())?;
   info!("orphaned block has released successfully.");
   Ok(())
 }
