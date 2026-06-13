@@ -1,9 +1,6 @@
 mod lock;
 pub use lock::*;
 
-mod channel;
-pub use channel::*;
-
 mod closure;
 pub use closure::*;
 
