@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{BackgroundThread, Context, OneshotFulfill, SingleFn, ThreadSlot};
-use crate::{utils::ToArc, Result};
+use crate::Result;
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
@@ -19,8 +19,8 @@ const fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
 ) -> impl FnMut(&mut Buffered<T, R>) -> bool + 'a
 where
-  T: Send + UnwindSafe + 'static,
-  R: Send + Clone + 'static,
+  T: Send + UnwindSafe + 'a,
+  R: Send + Clone + 'a,
 {
   move |buffered| {
     if buffered.is_empty() {
@@ -34,6 +34,46 @@ where
       .flatten()
       .for_each(|done| done.fulfill(result.clone()));
     true
+  }
+}
+
+const fn worker_loop<T, R>(
+  queue: Arc<SegQueue<Context<T, R>>>,
+  count: usize,
+  when_buffered: SingleFn<'static, Vec<T>, R>,
+) -> impl FnOnce()
+where
+  T: Send + UnwindSafe,
+  R: Send + Clone,
+{
+  move || {
+    let backoff = Backoff::new();
+    let mut buffered = Vec::with_capacity(count);
+    let mut flush = make_flush(when_buffered);
+
+    loop {
+      while !backoff.is_completed() {
+        for ctx in (0..count).map_while(|_| queue.pop()) {
+          match ctx {
+            Context::Work(v, done) => buffered.push((v, Some(done))),
+            Context::Dispatch(v) => buffered.push((v, None)),
+            Context::Term => {
+              flush(&mut buffered);
+              return;
+            }
+          }
+        }
+
+        if flush(&mut buffered) {
+          backoff.reset();
+          continue;
+        };
+        backoff.snooze();
+      }
+
+      park();
+      backoff.reset();
+    }
   }
 }
 
@@ -65,44 +105,13 @@ where
     count: usize,
     when_buffered: SingleFn<'static, Vec<T>, R>,
   ) -> Self {
-    let queue = SegQueue::new().to_arc();
-    let queue_c = Arc::clone(&queue);
-
+    let queue = Arc::new(SegQueue::new());
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(move || {
-        let backoff = Backoff::new();
-        let mut buffered = Vec::with_capacity(count);
-        let mut flush = make_flush(when_buffered);
-
-        loop {
-          while !backoff.is_completed() {
-            for ctx in (0..count).map_while(|_| queue_c.pop()) {
-              match ctx {
-                Context::Work(v, done) => buffered.push((v, Some(done))),
-                Context::Dispatch(v) => buffered.push((v, None)),
-                Context::Term => {
-                  flush(&mut buffered);
-                  return;
-                }
-              }
-            }
-
-            if flush(&mut buffered) {
-              backoff.reset();
-              continue;
-            };
-            backoff.snooze();
-          }
-
-          park();
-          backoff.reset();
-        }
-      })
+      .spawn(worker_loop(queue.clone(), count, when_buffered))
       .unwrap();
     let waker = handle.thread().clone();
-
     Self {
       queue,
       waker,

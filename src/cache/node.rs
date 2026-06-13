@@ -7,7 +7,7 @@ use std::{
 
 use hashbrown::{raw::RawTable, Equivalent};
 
-use crate::utils::{ToRawPointer, UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
+use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
@@ -151,7 +151,7 @@ where
     debug_assert!(self.table.find(hash, equivalent(key)).is_none());
     let evicted = self.evict(hash_builder, &try_evict)?;
 
-    let ptr = CacheEntry::new_small(key.clone()).to_raw_ptr();
+    let ptr = Box::into_raw(Box::new(CacheEntry::new_small(key.clone())));
     self.table.insert(hash, ptr, make_hasher(hash_builder));
 
     self.small.push_back(ptr);
@@ -189,7 +189,7 @@ where
 
         let evicted = self.evict(hash_builder, &try_evict)?;
 
-        let ptr = CacheEntry::new_main(key.clone()).to_raw_ptr();
+        let ptr = Box::into_raw(Box::new(CacheEntry::new_main(key.clone())));
         self.table.insert(hash, ptr, make_hasher(hash_builder));
         self.main.push_back(ptr);
         self.main_count += 1;
@@ -266,10 +266,7 @@ where
           self.ghost.push_back(ptr);
           return Ok((entry.get_key().clone(), entry.take_value(), reserved));
         }
-        State::Tombstone => {
-          ptr.drop_unsafe();
-          continue;
-        }
+        State::Tombstone => ptr.drop_unsafe(),
         State::Ghost | State::Main { .. } => unreachable!(),
       }
     }

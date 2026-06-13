@@ -86,9 +86,7 @@ impl<T> SBox<MaybeUninit<T>> {
   pub unsafe fn assume_init(self) -> SBox<T> {
     let inner = self.inner;
     std::mem::forget(self);
-    SBox {
-      inner: inner.cast(),
-    }
+    SBox { inner: inner as _ }
   }
 }
 

@@ -111,12 +111,12 @@ pub type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 
 const MAX_FLUSH_COUNT: usize = 512;
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
-  let count = max_iov();
   move |(backend, task, state)| {
     metrics.active_io_threads.inc();
 
     match task {
       IOTask::Write(handle) => {
+        let count = max_iov();
         let mut buffered = Vec::with_capacity(count);
 
         loop {

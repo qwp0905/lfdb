@@ -1,10 +1,9 @@
 use std::{
   panic::{RefUnwindSafe, UnwindSafe},
+  sync::Arc,
   thread::Builder,
   time::Duration,
 };
-
-use crate::utils::ToArc;
 
 use super::{
   BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
@@ -71,7 +70,7 @@ impl MultiThreadBuilder {
       self.builder.name,
       self.builder.stack_size,
       self.count,
-      SharedFn::new(build.to_arc()),
+      SharedFn::new(Arc::new(build)),
     )
   }
 }

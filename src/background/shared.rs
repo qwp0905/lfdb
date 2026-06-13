@@ -66,7 +66,7 @@ where
   true
 }
 
-const fn work_loop<T, R>(
+const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: Arc<Injector<Context<T, R>>>,
   stealers: Arc<Vec<Stealer<Context<T, R>>>>,
@@ -178,7 +178,7 @@ where
       let thread = Builder::new()
         .name(name.clone())
         .stack_size(size)
-        .spawn(work_loop(
+        .spawn(worker_loop(
           local,
           Arc::clone(&global),
           Arc::clone(&stealers),
