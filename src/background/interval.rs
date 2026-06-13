@@ -1,36 +1,25 @@
-use std::{
-  panic::{RefUnwindSafe, UnwindSafe},
-  thread::Builder,
-  time::Duration,
-};
+use std::{thread::Builder, time::Duration};
 
-use crate::error;
-
-use super::{BackgroundThread, Context, SingleFn, ThreadSlot};
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+use super::{BackgroundThread, Context, SingleFn, ThreadSlot, UnwindSpawner};
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
 const fn worker_loop<T, R>(
   receiver: Receiver<Context<T, R>>,
   mut work: SingleFn<'static, Option<T>, R>,
   timeout: Duration,
-  name: String,
 ) -> impl FnOnce()
 where
-  T: Send + UnwindSafe,
+  T: Send,
   R: Send,
 {
   move || loop {
     match receiver.recv_timeout(timeout) {
       Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
       Ok(Context::Dispatch(v)) => {
-        if let Err(err) = work.call(Some(v)) {
-          error!("error occurs in thread {}: {}", name, err);
-        }
+        let _ = work.call(Some(v));
       }
       Err(RecvTimeoutError::Timeout) => {
-        if let Err(err) = work.call(None) {
-          error!("error occurs in thread {}: {}", name, err);
-        }
+        let _ = work.call(None);
       }
       Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => return,
     }
@@ -48,7 +37,7 @@ pub struct IntervalWorkThread<T, R> {
 }
 impl<T, R> IntervalWorkThread<T, R>
 where
-  T: Send + UnwindSafe + 'static,
+  T: Send + 'static,
   R: Send + 'static,
 {
   pub fn new<S: ToString + Send + 'static>(
@@ -61,8 +50,7 @@ where
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(worker_loop(receiver, work, timeout, name.to_string()))
-      .unwrap();
+      .spawn_unwind(worker_loop(receiver, work, timeout));
     Self {
       channel,
       slot: ThreadSlot::new(handle),
@@ -71,20 +59,15 @@ where
 }
 unsafe impl<T, R> Send for IntervalWorkThread<T, R> {}
 unsafe impl<T, R> Sync for IntervalWorkThread<T, R> {}
-impl<T, R> RefUnwindSafe for IntervalWorkThread<T, R> {}
-impl<T, R> UnwindSafe for IntervalWorkThread<T, R> {}
 impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
-  fn register(&self, ctx: Context<T, R>) -> bool {
-    !matches!(
-      self.channel.try_send(ctx),
-      Err(TrySendError::Disconnected(_))
-    )
+  fn register(&self, ctx: Context<T, R>) {
+    self.channel.send(ctx).unwrap()
   }
 
   fn close(&self) {
     if let Some(v) = self.slot.close() {
-      self.channel.send(Context::Term).unwrap();
-      let _ = v.join();
+      let _ = self.channel.send(Context::Term);
+      v.join().unwrap();
     }
   }
 }

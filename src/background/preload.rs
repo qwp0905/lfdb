@@ -1,23 +1,18 @@
-use crate::{background::SingleFn, error};
+use crate::background::SingleFn;
 
-use super::{BackgroundThread, Context, ThreadSlot};
-use std::{
-  panic::{RefUnwindSafe, UnwindSafe},
-  thread::Builder,
-  time::Duration,
-};
+use super::{BackgroundThread, Context, ThreadSlot, UnwindSpawner};
+use std::{thread::Builder, time::Duration};
 
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
 const fn worker_loop<T>(
   timeout: Duration,
   mut preload: SingleFn<'static, (), T>,
   mut fallback: SingleFn<'static, Option<T>, ()>,
-  name: String,
   receiver: Receiver<Context<(), T>>,
 ) -> impl FnOnce()
 where
-  T: Send + UnwindSafe,
+  T: Send,
 {
   let mut preloaded = None;
   move || loop {
@@ -25,16 +20,11 @@ where
     match receiver.recv_timeout(timeout) {
       Ok(Context::Work(_, done)) => done.fulfill(result),
       Ok(Context::Dispatch(_)) | Err(RecvTimeoutError::Timeout) => {
-        if let Err(err) = fallback.call(None) {
-          error!("error occurs in thread {}: {}", name, err);
-        }
+        fallback.call(None);
         preloaded = Some(result);
       }
       Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
-        if let Err(err) = result.and_then(|r| fallback.call(Some(r))) {
-          error!("error occurs in thread {}: {}", name, err);
-        }
-        return;
+        return fallback.call(Some(result))
       }
     }
   }
@@ -46,7 +36,7 @@ pub struct PreloadThread<T> {
 }
 impl<T> PreloadThread<T>
 where
-  T: Send + UnwindSafe + 'static,
+  T: Send + 'static,
 {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
@@ -59,14 +49,7 @@ where
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(worker_loop(
-        timeout,
-        preload,
-        fallback,
-        name.to_string(),
-        rx,
-      ))
-      .unwrap();
+      .spawn_unwind(worker_loop(timeout, preload, fallback, rx));
 
     Self {
       channel: tx,
@@ -76,21 +59,16 @@ where
 }
 unsafe impl<T> Send for PreloadThread<T> {}
 unsafe impl<T> Sync for PreloadThread<T> {}
-impl<T> RefUnwindSafe for PreloadThread<T> {}
-impl<T> UnwindSafe for PreloadThread<T> {}
 
 impl<T> BackgroundThread<(), T> for PreloadThread<T> {
-  fn register(&self, ctx: Context<(), T>) -> bool {
-    if let Err(TrySendError::Disconnected(_)) = self.channel.try_send(ctx) {
-      return false;
-    }
-    true
+  fn register(&self, ctx: Context<(), T>) {
+    self.channel.send(ctx).unwrap()
   }
 
   fn close(&self) {
     if let Some(v) = self.slot.close() {
       self.channel.send(Context::Term).unwrap();
-      let _ = v.join();
+      v.join().unwrap();
     }
   }
 }

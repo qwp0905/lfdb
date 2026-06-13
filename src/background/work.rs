@@ -1,17 +1,9 @@
-use std::{
-  panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
-  thread::JoinHandle,
-};
+use std::{sync::Arc, thread::JoinHandle};
 
-use super::{Oneshot, OneshotFulfill};
-use crate::{
-  error::{Error, Result},
-  utils::{SafeCallable, SafeCallableMut},
-};
+use super::OneshotFulfill;
 
 pub enum Context<T, R> {
-  Work(T, OneshotFulfill<Result<R>>),
+  Work(T, OneshotFulfill<R>),
   Dispatch(T),
   Term,
 }
@@ -20,18 +12,18 @@ pub enum Context<T, R> {
  * A panic-safe wrapper around a shared, immutable function.
  * Can be cloned and called concurrently across threads.
  */
-pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>);
+pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + Send + Sync + 'a>);
 impl<'a, T, R> SharedFn<'a, T, R>
 where
-  T: Send + UnwindSafe + 'a,
+  T: Send + 'a,
   R: Send + 'a,
 {
-  pub const fn new(f: Arc<dyn Fn(T) -> R + RefUnwindSafe + Send + Sync + 'a>) -> Self {
+  pub const fn new(f: Arc<dyn Fn(T) -> R + Send + Sync + 'a>) -> Self {
     Self(f)
   }
   #[inline]
-  pub fn call(&self, v: T) -> Result<R> {
-    self.0.as_ref().safe_call(v).map_err(Error::panic)
+  pub fn call(&self, v: T) -> R {
+    self.0(v)
   }
 }
 impl<'a, T, R> Clone for SharedFn<'a, T, R> {
@@ -44,43 +36,29 @@ impl<'a, T, R> Clone for SharedFn<'a, T, R> {
  * A panic-safe wrapper around a mutable function for single-threaded use.
  * Allows the function to maintain state between calls via FnMut.
  */
-pub struct SingleFn<'a, T, R>(Box<dyn FnMut(T) -> R + RefUnwindSafe + Send + Sync + 'a>);
+pub struct SingleFn<'a, T, R>(Box<dyn FnMut(T) -> R + Send + Sync + 'a>);
 impl<'a, T, R> SingleFn<'a, T, R>
 where
-  T: Send + UnwindSafe,
+  T: Send,
   R: Send,
 {
   pub fn new<F>(f: F) -> Self
   where
-    F: FnMut(T) -> R + RefUnwindSafe + Send + Sync + 'a,
+    F: FnMut(T) -> R + Send + Sync + 'a,
   {
     Self(Box::new(f))
   }
 
   #[inline]
-  pub fn call(&mut self, v: T) -> Result<R> {
-    self.0.as_mut().safe_call_mut(v).map_err(Error::panic)
-  }
-}
-
-pub struct TaskHandle<R>(Oneshot<Result<R>>);
-impl<R> TaskHandle<R> {
-  pub fn wait(self) -> Result<R> {
-    self.0.wait()?
-  }
-
-  pub const fn new(v: Oneshot<Result<R>>) -> Self {
-    TaskHandle(v)
-  }
-  pub fn fulfilled(v: Result<R>) -> Self {
-    TaskHandle(Oneshot::fulfilled(v))
+  pub fn call(&mut self, v: T) -> R {
+    self.0(v)
   }
 }
 
 pub struct OnceHandle<T>(JoinHandle<T>);
 impl<T> OnceHandle<T> {
-  pub fn wait(self) -> Result<T> {
-    self.0.join().map_err(Error::panic)
+  pub fn wait(self) -> T {
+    self.0.join().unwrap()
   }
 
   #[inline]

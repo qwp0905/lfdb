@@ -10,7 +10,12 @@ use crossbeam::{
   select,
 };
 
-use crate::{background::ThreadSlot, debug, wal::TxId, warn};
+use crate::{
+  background::{ThreadSlot, UnwindSpawner},
+  debug,
+  wal::TxId,
+  warn,
+};
 
 use super::VersionVisibility;
 
@@ -254,8 +259,7 @@ impl TimeoutThread {
     let th = Builder::new()
       .name("timeout".to_string())
       .stack_size(2 << 20)
-      .spawn(handle_thread(version_visibility, rx))
-      .unwrap();
+      .spawn_unwind(handle_thread(version_visibility, rx));
 
     Self {
       channel: tx,
@@ -269,8 +273,8 @@ impl TimeoutThread {
 
   pub fn close(&self) {
     if let Some(th) = self.slot.close() {
-      let _ = self.channel.send(Msg::Term);
-      let _ = th.join();
+      self.channel.send(Msg::Term).unwrap();
+      th.join().unwrap();
     }
   }
 }

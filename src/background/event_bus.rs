@@ -8,7 +8,7 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use super::ThreadSlot;
+use super::{ThreadSlot, UnwindSpawner};
 use crate::{error, utils::SBox};
 
 pub trait SharedSubscription<E> {
@@ -286,8 +286,7 @@ impl EventBus {
     let handle = Builder::new()
       .name("event bus".to_string())
       .stack_size(2 << 20)
-      .spawn(handle_thread(queue.clone()))
-      .unwrap();
+      .spawn_unwind(handle_thread(queue.clone()));
     let waker = handle.thread().clone();
     Self {
       queue,
@@ -347,7 +346,7 @@ impl EventBus {
     if let Some(handle) = self.slot.close() {
       self.queue.push(EventMsg::Terminate);
       self.waker.unpark();
-      let _ = handle.join();
+      handle.join().unwrap();
     }
   }
 }

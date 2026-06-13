@@ -1,15 +1,15 @@
 use std::{
-  panic::{RefUnwindSafe, UnwindSafe},
   sync::Arc,
   thread::{park, Builder, Thread},
 };
 
-use super::{BackgroundThread, Context, OneshotFulfill, SingleFn, ThreadSlot};
-use crate::Result;
+use super::{
+  BackgroundThread, Context, OneshotFulfill, SingleFn, ThreadSlot, UnwindSpawner,
+};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-type Buffered<T, R> = Vec<(T, Option<OneshotFulfill<Result<R>>>)>;
+type Buffered<T, R> = Vec<(T, Option<OneshotFulfill<R>>)>;
 
 /**
  * The callback is called once per batch and the result is cloned to each
@@ -19,7 +19,7 @@ const fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
 ) -> impl FnMut(&mut Buffered<T, R>) -> bool + 'a
 where
-  T: Send + UnwindSafe + 'a,
+  T: Send + 'a,
   R: Send + Clone + 'a,
 {
   move |buffered| {
@@ -43,7 +43,7 @@ const fn worker_loop<T, R>(
   when_buffered: SingleFn<'static, Vec<T>, R>,
 ) -> impl FnOnce()
 where
-  T: Send + UnwindSafe,
+  T: Send,
   R: Send + Clone,
 {
   move || {
@@ -96,7 +96,7 @@ pub struct EagerBufferingThread<T, R> {
 }
 impl<T, R> EagerBufferingThread<T, R>
 where
-  T: Send + UnwindSafe + 'static,
+  T: Send + 'static,
   R: Send + Clone + 'static,
 {
   pub fn new<S: ToString>(
@@ -109,8 +109,7 @@ where
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(worker_loop(queue.clone(), count, when_buffered))
-      .unwrap();
+      .spawn_unwind(worker_loop(queue.clone(), count, when_buffered));
     let waker = handle.thread().clone();
     Self {
       queue,
@@ -119,26 +118,20 @@ where
     }
   }
 }
-impl<T, R> UnwindSafe for EagerBufferingThread<T, R> {}
-impl<T, R> RefUnwindSafe for EagerBufferingThread<T, R> {}
 unsafe impl<T, R> Send for EagerBufferingThread<T, R> {}
 unsafe impl<T, R> Sync for EagerBufferingThread<T, R> {}
 
 impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
-  fn register(&self, ctx: Context<T, R>) -> bool {
-    if self.slot.is_closed() {
-      return false;
-    }
+  fn register(&self, ctx: Context<T, R>) {
     self.queue.push(ctx);
     self.waker.unpark();
-    true
   }
 
   fn close(&self) {
     if let Some(th) = self.slot.close() {
       self.queue.push(Context::Term);
       self.waker.unpark();
-      let _ = th.join();
+      th.join().unwrap();
     }
   }
 }

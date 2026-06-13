@@ -1,9 +1,4 @@
-use std::{
-  panic::{RefUnwindSafe, UnwindSafe},
-  sync::Arc,
-  thread::Builder,
-  time::Duration,
-};
+use std::{sync::Arc, thread::Builder, time::Duration};
 
 use super::{
   BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
@@ -62,9 +57,9 @@ pub struct MultiThreadBuilder {
 impl MultiThreadBuilder {
   pub fn shared<T, R, F>(self, build: F) -> SharedWorkThread<T, R>
   where
-    T: Send + UnwindSafe + 'static,
+    T: Send + 'static,
     R: Send + 'static,
-    F: Fn(T) -> R + RefUnwindSafe + Send + Sync + 'static,
+    F: Fn(T) -> R + Send + Sync + 'static,
   {
     SharedWorkThread::new(
       self.builder.name,
@@ -81,9 +76,9 @@ pub struct SingleThreadBuilder {
 impl SingleThreadBuilder {
   pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> impl BackgroundThread<T, R>
   where
-    T: Send + UnwindSafe + RefUnwindSafe + 'static,
+    T: Send + 'static,
     R: Send + 'static,
-    F: FnMut(Option<T>) -> R + Send + RefUnwindSafe + Sync + 'static,
+    F: FnMut(Option<T>) -> R + Send + Sync + 'static,
   {
     IntervalWorkThread::new(
       self.builder.name,
@@ -99,9 +94,9 @@ impl SingleThreadBuilder {
     when_buffered: F,
   ) -> impl BackgroundThread<T, R>
   where
-    T: Send + UnwindSafe + 'static,
+    T: Send + 'static,
     R: Send + Clone + 'static,
-    F: FnMut(Vec<T>) -> R + RefUnwindSafe + Send + Sync + 'static,
+    F: FnMut(Vec<T>) -> R + Send + Sync + 'static,
   {
     EagerBufferingThread::new(
       self.builder.name,
@@ -118,9 +113,9 @@ impl SingleThreadBuilder {
     fallback: R,
   ) -> impl BackgroundThread<(), T>
   where
-    T: Send + UnwindSafe + 'static,
-    F: FnMut(()) -> T + Send + RefUnwindSafe + Sync + 'static,
-    R: FnMut(Option<T>) + Send + RefUnwindSafe + Sync + 'static,
+    T: Send + 'static,
+    F: FnMut(()) -> T + Send + Sync + 'static,
+    R: FnMut(Option<T>) + Send + Sync + 'static,
   {
     PreloadThread::new(
       self.builder.name,
