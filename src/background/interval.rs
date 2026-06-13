@@ -4,10 +4,38 @@ use std::{
   time::Duration,
 };
 
-use crate::{error, utils::UnwrappedSender};
+use crate::error;
 
 use super::{BackgroundThread, Context, SingleFn, ThreadSlot};
-use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+
+const fn worker_loop<T, R>(
+  receiver: Receiver<Context<T, R>>,
+  mut work: SingleFn<'static, Option<T>, R>,
+  timeout: Duration,
+  name: String,
+) -> impl FnOnce()
+where
+  T: Send + UnwindSafe,
+  R: Send,
+{
+  move || loop {
+    match receiver.recv_timeout(timeout) {
+      Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
+      Ok(Context::Dispatch(v)) => {
+        if let Err(err) = work.call(Some(v)) {
+          error!("error occurs in thread {}: {}", name, err);
+        }
+      }
+      Err(RecvTimeoutError::Timeout) => {
+        if let Err(err) = work.call(None) {
+          error!("error occurs in thread {}: {}", name, err);
+        }
+      }
+      Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => return,
+    }
+  }
+}
 
 /**
  * A background thread that processes work items on demand, and also calls
@@ -27,28 +55,13 @@ where
     name: S,
     size: usize,
     timeout: Duration,
-    mut work: SingleFn<'static, Option<T>, R>,
+    work: SingleFn<'static, Option<T>, R>,
   ) -> Self {
     let (channel, receiver) = unbounded();
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(move || loop {
-        match receiver.recv_timeout(timeout) {
-          Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
-          Ok(Context::Dispatch(v)) => {
-            if let Err(err) = work.call(Some(v)) {
-              error!("error occurs in thread {}: {}", name.to_string(), err);
-            }
-          }
-          Err(RecvTimeoutError::Timeout) => {
-            if let Err(err) = work.call(None) {
-              error!("error occurs in thread {}: {}", name.to_string(), err);
-            }
-          }
-          Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => return,
-        }
-      })
+      .spawn(worker_loop(receiver, work, timeout, name.to_string()))
       .unwrap();
     Self {
       channel,
@@ -70,7 +83,7 @@ impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
 
   fn close(&self) {
     if let Some(v) = self.slot.close() {
-      self.channel.must_send(Context::Term);
+      self.channel.send(Context::Term).unwrap();
       let _ = v.join();
     }
   }

@@ -7,7 +7,38 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::channel::{unbounded, RecvTimeoutError, Sender, TrySendError};
+use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+
+const fn worker_loop<T>(
+  timeout: Duration,
+  mut preload: SingleFn<'static, (), T>,
+  mut fallback: SingleFn<'static, Option<T>, ()>,
+  name: String,
+  receiver: Receiver<Context<(), T>>,
+) -> impl FnOnce()
+where
+  T: Send + UnwindSafe,
+{
+  let mut preloaded = None;
+  move || loop {
+    let result = preloaded.take().unwrap_or_else(|| preload.call(()));
+    match receiver.recv_timeout(timeout) {
+      Ok(Context::Work(_, done)) => done.fulfill(result),
+      Ok(Context::Dispatch(_)) | Err(RecvTimeoutError::Timeout) => {
+        if let Err(err) = fallback.call(None) {
+          error!("error occurs in thread {}: {}", name, err);
+        }
+        preloaded = Some(result);
+      }
+      Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
+        if let Err(err) = result.and_then(|r| fallback.call(Some(r))) {
+          error!("error occurs in thread {}: {}", name, err);
+        }
+        return;
+      }
+    }
+  }
+}
 
 pub struct PreloadThread<T> {
   channel: Sender<Context<(), T>>,
@@ -21,34 +52,20 @@ where
     name: S,
     size: usize,
     timeout: Duration,
-    mut preload: SingleFn<'static, (), T>,
-    mut fallback: SingleFn<'static, Option<T>, ()>,
+    preload: SingleFn<'static, (), T>,
+    fallback: SingleFn<'static, Option<T>, ()>,
   ) -> Self {
     let (tx, rx) = unbounded();
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn(move || {
-        let mut preloaded = None;
-        loop {
-          let result = preloaded.take().unwrap_or_else(|| preload.call(()));
-          match rx.recv_timeout(timeout) {
-            Ok(Context::Work(_, done)) => done.fulfill(result),
-            Ok(Context::Dispatch(_)) | Err(RecvTimeoutError::Timeout) => {
-              if let Err(err) = fallback.call(None) {
-                error!("error occurs in thread {}: {}", name.to_string(), err);
-              }
-              preloaded = Some(result);
-            }
-            Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
-              if let Err(err) = result.and_then(|r| fallback.call(Some(r))) {
-                error!("error occurs in thread {}: {}", name.to_string(), err);
-              }
-              return;
-            }
-          }
-        }
-      })
+      .spawn(worker_loop(
+        timeout,
+        preload,
+        fallback,
+        name.to_string(),
+        rx,
+      ))
       .unwrap();
 
     Self {

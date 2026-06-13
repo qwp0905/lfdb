@@ -6,11 +6,11 @@ use std::{
 };
 
 use crossbeam::{
-  channel::{tick, unbounded, Sender},
+  channel::{tick, unbounded, Receiver, Sender},
   select,
 };
 
-use crate::{background::ThreadSlot, debug, utils::UnwrappedSender, wal::TxId, warn};
+use crate::{background::ThreadSlot, debug, wal::TxId, warn};
 
 use super::VersionVisibility;
 
@@ -199,6 +199,46 @@ enum Msg {
   Term,
 }
 
+const fn handle_thread(
+  version_visibility: Arc<VersionVisibility>,
+  receiver: Receiver<Msg>,
+) -> impl FnOnce() {
+  move || {
+    let mut wheel = TimingWheel::new(move |tx_id: TxId| {
+      let Some(state) = version_visibility.get_active_state(tx_id) else {
+        return;
+      };
+      if !state.try_timeout() {
+        return;
+      }
+      warn!("tx {} timeout reached", state.get_id());
+
+      version_visibility.set_abort(state.get_id());
+      state.deactive();
+    });
+    let ticker = tick(TICK_SIZE);
+
+    while let Ok(ctx) = receiver.recv() {
+      match ctx {
+        Msg::Register(id, timeout) => wheel.register(id, timeout),
+        Msg::Term => return,
+      }
+      debug!("timeout thread wake up.");
+
+      while !wheel.is_empty() {
+        select! {
+          recv(ticker) -> _ => wheel.tick(),
+          recv(receiver) -> msg => match msg {
+            Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
+            Err(_) | Ok(Msg::Term) => return,
+          }
+        }
+      }
+      debug!("timeout thread switches to idle.");
+    }
+  }
+}
+
 /**
  * Aborts transactions that exceed their timeout.
  * Uses a timing wheel internally to schedule abort callbacks efficiently.
@@ -214,40 +254,7 @@ impl TimeoutThread {
     let th = Builder::new()
       .name("timeout".to_string())
       .stack_size(2 << 20)
-      .spawn(move || {
-        let mut wheel = TimingWheel::new(move |tx_id: TxId| {
-          let Some(state) = version_visibility.get_active_state(tx_id) else {
-            return;
-          };
-          if !state.try_timeout() {
-            return;
-          }
-          warn!("tx {} timeout reached", state.get_id());
-
-          version_visibility.set_abort(state.get_id());
-          state.deactive();
-        });
-        let ticker = tick(TICK_SIZE);
-
-        while let Ok(ctx) = rx.recv() {
-          match ctx {
-            Msg::Register(id, timeout) => wheel.register(id, timeout),
-            Msg::Term => return,
-          }
-          debug!("timeout thread wake up.");
-
-          while !wheel.is_empty() {
-            select! {
-              recv(ticker) -> _ => wheel.tick(),
-              recv(rx) -> msg => match msg {
-                Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
-                Err(_) | Ok(Msg::Term) => return,
-              }
-            }
-          }
-          debug!("timeout thread switches to idle.");
-        }
-      })
+      .spawn(handle_thread(version_visibility, rx))
       .unwrap();
 
     Self {
@@ -257,7 +264,7 @@ impl TimeoutThread {
   }
 
   pub fn register(&self, id: TxId, timeout: Duration) {
-    self.channel.must_send(Msg::Register(id, timeout));
+    self.channel.send(Msg::Register(id, timeout)).unwrap();
   }
 
   pub fn close(&self) {
