@@ -187,11 +187,7 @@ impl WAL {
    *   10-3. if current segment has been rotated, wait until pin is empty.
    *   10-4. take segment raw pointer in buffer, and then trigger checkpoint.
    */
-  fn append<F>(&self, create_record: F, flush: bool) -> Result
-  where
-    F: FnOnce() -> LogRecordUninit,
-  {
-    let record = create_record();
+  fn append(&self, record: LogRecordUninit, flush: bool) -> Result {
     let len = record.len();
     let backoff = Backoff::new();
 
@@ -204,7 +200,7 @@ impl WAL {
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
 
-      let Some(token) = buffer.pin_segment() else {
+      let Some(mut token) = buffer.pin_segment() else {
         backoff.snooze();
         continue;
       };
@@ -278,7 +274,6 @@ impl WAL {
 
       unsafe { guard.defer_destroy(buffer_ptr) };
 
-      let buffer = buffer_ptr.as_raw().borrow_unsafe();
       while order > buffer.load_commit() {
         backoff.snooze();
       }
@@ -296,7 +291,13 @@ impl WAL {
         continue;
       }
 
-      forget(token.upgrade());
+      loop {
+        match token.try_upgrade() {
+          Ok(t) => break forget(t),
+          Err(t) => token = t,
+        };
+        backoff.snooze();
+      }
 
       let segment = buffer.take_segment();
       self.sync_queue.push(segment.fsync());
@@ -317,7 +318,7 @@ impl WAL {
     data: Vec<u8>,
   ) -> Result {
     self.append(
-      || LogRecordUninit::new_insert(tx_id, table_id, ptr, record_version, data),
+      LogRecordUninit::new_insert(tx_id, table_id, ptr, record_version, data),
       false,
     )
   }
@@ -329,13 +330,13 @@ impl WAL {
     path: PathBuf,
   ) -> Result {
     self.append(
-      || LogRecordUninit::new_checkpoint(last_log_id, current_version, path),
+      LogRecordUninit::new_checkpoint(last_log_id, current_version, path),
       true,
     )
   }
 
   pub fn commit_and_flush(&self, tx_id: TxId) -> Result {
-    self.append(|| LogRecordUninit::new_commit(tx_id), true)
+    self.append(LogRecordUninit::new_commit(tx_id), true)
   }
 
   pub fn is_available(&self) -> bool {
