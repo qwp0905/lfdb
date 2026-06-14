@@ -232,9 +232,9 @@ where
     for _ in 0..threads.len() {
       self.register(Context::Term);
       let id = self.closed.recv().unwrap();
-      unsafe { ManuallyDrop::take(&mut threads[id]) }
-        .join()
-        .unwrap();
+      let handle = unsafe { ManuallyDrop::take(&mut threads[id]) };
+      debug_assert!(!handle.is_finished());
+      handle.join().unwrap();
     }
 
     while let Some(ctx) = self.global.steal().success() {
