@@ -5,7 +5,8 @@ use super::{
   MAX_VALUE,
 };
 use crate::{
-  metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext, Error, Result,
+  measure, metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext,
+  Error, Result,
 };
 
 /**
@@ -49,19 +50,20 @@ impl<'a> Cursor<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    if key.as_ref().len() > MAX_KEY {
-      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    let key = key.as_ref();
+    if key.len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
     }
 
-    self.metrics.operation_get.measure(|| {
-      if let Some(table) = self.compaction.as_ref() {
-        if let Some(found) = self.index.get(key.as_ref(), table)? {
-          return Ok(found);
-        }
-      }
+    let metrics = &self.metrics.operation_get;
 
-      Ok(self.index.get(key.as_ref(), &self.table)?.flatten())
-    })
+    if let Some(table) = self.compaction.as_ref() {
+      if let Some(found) = measure!(metrics, self.index.get(key, table))? {
+        return Ok(found);
+      }
+    }
+
+    measure!(metrics, Ok(self.index.get(key, &self.table)?.flatten()))
   }
 
   pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
@@ -77,34 +79,30 @@ impl<'a> Cursor<'a> {
     }
 
     let table = self.compaction.as_ref().unwrap_or(&self.table);
-    self
-      .metrics
-      .operation_insert
-      .measure(|| self.index.insert(key, value, table))
-      .map(|_| ())
+    measure!(
+      self.metrics.operation_insert,
+      self.index.insert(key, value, table)
+    )?;
+    Ok(())
   }
 
   pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    if key.as_ref().len() > MAX_KEY {
-      return Err(Error::KeyExceeded(MAX_KEY, key.as_ref().len()));
+    let key = key.as_ref();
+    if key.len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
     }
 
+    let metrics = &self.metrics.operation_remove;
     if let Some(table) = self.compaction.as_ref() {
-      return self
-        .metrics
-        .operation_remove
-        .measure(|| self.index.insert_record(key.as_ref().to_vec(), None, table))
-        .map(|_| ());
+      measure!(metrics, self.index.insert_record(key.to_vec(), None, table))?;
+      return Ok(());
     }
 
-    self
-      .metrics
-      .operation_remove
-      .measure(|| self.index.remove(key.as_ref(), &self.table))
-      .map(|_| ())
+    measure!(metrics, self.index.remove(key, &self.table))?;
+    Ok(())
   }
 
   pub fn scan<'b, 'c, K>(
