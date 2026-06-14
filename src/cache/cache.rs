@@ -12,7 +12,7 @@ use super::{
 use crate::{
   background::{BackgroundThread, WorkBuilder},
   disk::{PagePool, Pointer, PAGE_SIZE},
-  error,
+  error, measure,
   metrics::MetricsRegistry,
   table::TableHandleRef,
   utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc},
@@ -204,10 +204,7 @@ impl BlockCache {
     pointer: Pointer,
     handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
-    self
-      .metrics
-      .block_cache_read
-      .measure(|| self.__read(pointer, handle))
+    measure!(self.metrics.block_cache_read, self.__read(pointer, handle))
   }
 
   pub fn create_flusher(&self) -> CacheFlusher {
