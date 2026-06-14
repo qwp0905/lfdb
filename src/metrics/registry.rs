@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use super::{Counter, Gauge, Histogram};
+use super::{Counter, Gauge, Histogram, TimeHistogram};
 
 /**
  * A point-in-time snapshot of engine metrics. Obtain via Engine::metrics().
@@ -69,6 +69,24 @@ pub struct EngineMetrics {
    * p50 disk write io latency in microseconds.
    */
   pub disk_write_latency_micros_p50: f64,
+
+  /**
+   * Average disk write batch block count.
+   */
+  pub disk_write_batch_avg: f64,
+  /**
+   * p50 disk write batch block count.
+   */
+  pub disk_write_batch_p50: f64,
+
+  /**
+   * Average disk fsync batch count.
+   */
+  pub disk_sync_batch_avg: f64,
+  /**
+   * p50 disk fsync batch count.
+   */
+  pub disk_sync_batch_p50: f64,
 
   /**
    * Number of active IO threads processing disk requests.
@@ -186,63 +204,75 @@ pub struct EngineMetrics {
   pub operation_remove_latency_micros_p99: f64,
 }
 pub struct MetricsRegistry {
-  pub block_cache_read: Histogram,
+  pub block_cache_read: TimeHistogram,
   pub block_cache_hit: Counter,
 
-  pub checkpoint_cycle: Histogram,
+  pub checkpoint_cycle: TimeHistogram,
 
-  pub disk_read: Histogram,
-  pub disk_write: Histogram,
+  pub disk_read: TimeHistogram,
+  pub disk_write: TimeHistogram,
   pub active_io_threads: Gauge,
 
-  pub transaction_start: Histogram,
-  pub transaction_commit: Histogram,
+  pub disk_write_batch: Histogram,
+  pub disk_sync_batch: Histogram,
+
+  pub transaction_start: TimeHistogram,
+  pub transaction_commit: TimeHistogram,
   pub transaction_abort_count: Counter,
 
-  pub operation_get: Histogram,
-  pub operation_insert: Histogram,
-  pub operation_remove: Histogram,
+  pub operation_get: TimeHistogram,
+  pub operation_insert: TimeHistogram,
+  pub operation_remove: TimeHistogram,
 
   started_at: Instant,
 }
+
+const MICROS: Duration = Duration::from_micros(1);
+const MILLIS: Duration = Duration::from_millis(1);
+
 impl MetricsRegistry {
   pub fn new() -> Self {
     Self {
-      block_cache_read: Histogram::new(10_000, Duration::from_nanos(100)),
+      block_cache_read: TimeHistogram::new(10_000, Duration::from_nanos(100)),
       block_cache_hit: Counter::new(),
-      checkpoint_cycle: Histogram::new(10, Duration::from_millis(1)),
-      transaction_start: Histogram::new(1000, Duration::from_micros(10)),
-      transaction_commit: Histogram::new(1000, Duration::from_micros(10)),
+      checkpoint_cycle: TimeHistogram::new(10, Duration::from_millis(1)),
+      transaction_start: TimeHistogram::new(1000, Duration::from_micros(10)),
+      transaction_commit: TimeHistogram::new(1000, Duration::from_micros(10)),
       transaction_abort_count: Counter::new(),
-      disk_read: Histogram::new(1000, Duration::from_nanos(100)),
-      disk_write: Histogram::new(1000, Duration::from_nanos(100)),
+      disk_read: TimeHistogram::new(1000, Duration::from_nanos(100)),
+      disk_write: TimeHistogram::new(1000, Duration::from_nanos(100)),
+      disk_write_batch: Histogram::new(1000),
+      disk_sync_batch: Histogram::new(1000),
       active_io_threads: Gauge::new(),
       started_at: Instant::now(),
-      operation_get: Histogram::new(1000, Duration::from_nanos(100)),
-      operation_insert: Histogram::new(1000, Duration::from_nanos(100)),
-      operation_remove: Histogram::new(1000, Duration::from_nanos(100)),
+      operation_get: TimeHistogram::new(1000, Duration::from_nanos(100)),
+      operation_insert: TimeHistogram::new(1000, Duration::from_nanos(100)),
+      operation_remove: TimeHistogram::new(1000, Duration::from_nanos(100)),
     }
   }
 
   pub fn snapshot(&self) -> EngineMetrics {
-    let transaction_start = self.transaction_start.snapshot();
-    let transaction_commit = self.transaction_commit.snapshot();
-    let block_cache_read = self.block_cache_read.snapshot();
-    let checkpoint_cycle = self.checkpoint_cycle.snapshot();
-    let disk_read = self.disk_read.snapshot();
-    let disk_write = self.disk_write.snapshot();
-    let operation_get = self.operation_get.snapshot();
-    let operation_insert = self.operation_insert.snapshot();
-    let operation_remove = self.operation_remove.snapshot();
+    let transaction_start = self.transaction_start.snapshot_with(MILLIS);
+    let transaction_commit = self.transaction_commit.snapshot_with(MILLIS);
+    let block_cache_read = self.block_cache_read.snapshot_with(MILLIS);
+    let checkpoint_cycle = self.checkpoint_cycle.snapshot_with(MILLIS);
+    let disk_read = self.disk_read.snapshot_with(MICROS);
+    let disk_write = self.disk_write.snapshot_with(MICROS);
+    let operation_get = self.operation_get.snapshot_with(MICROS);
+    let operation_insert = self.operation_insert.snapshot_with(MICROS);
+    let operation_remove = self.operation_remove.snapshot_with(MICROS);
+
+    let write_batch = self.disk_write_batch.snapshot();
+    let sync_batch = self.disk_sync_batch.snapshot();
 
     EngineMetrics {
       uptime_ms: self.started_at.elapsed().as_millis() as u64,
 
       block_cache_read_count: block_cache_read.total_count(),
-      block_cache_read_latency_micros_avg: block_cache_read.average() / 10.0,
-      block_cache_read_latency_micros_p50: block_cache_read.percentile(0.5) / 10.0,
-      block_cache_read_latency_micros_p95: block_cache_read.percentile(0.95) / 10.0,
-      block_cache_read_latency_micros_p99: block_cache_read.percentile(0.99) / 10.0,
+      block_cache_read_latency_micros_avg: block_cache_read.average(),
+      block_cache_read_latency_micros_p50: block_cache_read.percentile(0.5),
+      block_cache_read_latency_micros_p95: block_cache_read.percentile(0.95),
+      block_cache_read_latency_micros_p99: block_cache_read.percentile(0.99),
 
       block_cache_hit: self.block_cache_hit.load(),
 
@@ -250,45 +280,52 @@ impl MetricsRegistry {
       checkpoint_cycle_time_ms_avg: checkpoint_cycle.average(),
 
       disk_read_count: disk_read.total_count(),
-      disk_read_latency_micros_avg: disk_read.average() / 10.0,
-      disk_read_latency_micros_p50: disk_read.percentile(0.5) / 10.0,
+      disk_read_latency_micros_avg: disk_read.average(),
+      disk_read_latency_micros_p50: disk_read.percentile(0.5),
+
       disk_write_count: disk_write.total_count(),
-      disk_write_latency_micros_avg: disk_write.average() / 10.0,
-      disk_write_latency_micros_p50: disk_write.percentile(0.5) / 10.0,
+      disk_write_latency_micros_avg: disk_write.average(),
+      disk_write_latency_micros_p50: disk_write.percentile(0.5),
+
+      disk_write_batch_avg: write_batch.average(),
+      disk_write_batch_p50: write_batch.percentile(0.5),
+
+      disk_sync_batch_avg: sync_batch.average(),
+      disk_sync_batch_p50: sync_batch.percentile(0.5),
 
       active_io_threads: self.active_io_threads.load(),
 
       transaction_start_count: transaction_start.total_count(),
       transaction_abort_count: self.transaction_abort_count.load(),
 
-      transaction_duration_ms_avg: transaction_start.average() / 100.0,
-      transaction_duration_ms_p50: transaction_start.percentile(0.5) / 100.0,
-      transaction_duration_ms_p95: transaction_start.percentile(0.95) / 100.0,
-      transaction_duration_ms_p99: transaction_start.percentile(0.99) / 100.0,
+      transaction_duration_ms_avg: transaction_start.average(),
+      transaction_duration_ms_p50: transaction_start.percentile(0.5),
+      transaction_duration_ms_p95: transaction_start.percentile(0.95),
+      transaction_duration_ms_p99: transaction_start.percentile(0.99),
 
       transaction_commit_count: transaction_commit.total_count(),
-      transaction_commit_latency_ms_avg: transaction_commit.average() / 100.0,
-      transaction_commit_latency_ms_p50: transaction_commit.percentile(0.5) / 100.0,
-      transaction_commit_latency_ms_p95: transaction_commit.percentile(0.95) / 100.0,
-      transaction_commit_latency_ms_p99: transaction_commit.percentile(0.99) / 100.0,
+      transaction_commit_latency_ms_avg: transaction_commit.average(),
+      transaction_commit_latency_ms_p50: transaction_commit.percentile(0.5),
+      transaction_commit_latency_ms_p95: transaction_commit.percentile(0.95),
+      transaction_commit_latency_ms_p99: transaction_commit.percentile(0.99),
 
       operation_get_count: operation_get.total_count(),
-      operation_get_latency_micros_avg: operation_get.average() / 10.0,
-      operation_get_latency_micros_p50: operation_get.percentile(0.5) / 10.0,
-      operation_get_latency_micros_p95: operation_get.percentile(0.95) / 10.0,
-      operation_get_latency_micros_p99: operation_get.percentile(0.99) / 10.0,
+      operation_get_latency_micros_avg: operation_get.average(),
+      operation_get_latency_micros_p50: operation_get.percentile(0.5),
+      operation_get_latency_micros_p95: operation_get.percentile(0.95),
+      operation_get_latency_micros_p99: operation_get.percentile(0.99),
 
       operation_insert_count: operation_insert.total_count(),
-      operation_insert_latency_micros_avg: operation_insert.average() / 10.0,
-      operation_insert_latency_micros_p50: operation_insert.percentile(0.5) / 10.0,
-      operation_insert_latency_micros_p95: operation_insert.percentile(0.95) / 10.0,
-      operation_insert_latency_micros_p99: operation_insert.percentile(0.99) / 10.0,
+      operation_insert_latency_micros_avg: operation_insert.average(),
+      operation_insert_latency_micros_p50: operation_insert.percentile(0.5),
+      operation_insert_latency_micros_p95: operation_insert.percentile(0.95),
+      operation_insert_latency_micros_p99: operation_insert.percentile(0.99),
 
       operation_remove_count: operation_remove.total_count(),
-      operation_remove_latency_micros_avg: operation_remove.average() / 10.0,
-      operation_remove_latency_micros_p50: operation_remove.percentile(0.5) / 10.0,
-      operation_remove_latency_micros_p95: operation_remove.percentile(0.95) / 10.0,
-      operation_remove_latency_micros_p99: operation_remove.percentile(0.99) / 10.0,
+      operation_remove_latency_micros_avg: operation_remove.average(),
+      operation_remove_latency_micros_p50: operation_remove.percentile(0.5),
+      operation_remove_latency_micros_p95: operation_remove.percentile(0.95),
+      operation_remove_latency_micros_p99: operation_remove.percentile(0.99),
     }
   }
 }
