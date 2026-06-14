@@ -1,11 +1,12 @@
 use std::{
-  mem::take,
+  mem::{take, ManuallyDrop},
   sync::{Arc, Mutex},
   thread::{park, Builder, JoinHandle, Thread},
 };
 
 use crossbeam::{
   atomic::AtomicCell,
+  channel::{bounded, Receiver, Sender},
   deque::{Injector, Stealer, Worker},
   queue::SegQueue,
   utils::Backoff,
@@ -56,13 +57,64 @@ where
   true
 }
 
+fn run_loop<T: Send, R: Send>(
+  local: &Worker<Context<T, R>>,
+  global: &Injector<Context<T, R>>,
+  stealers: &[Stealer<Context<T, R>>],
+  idle: &SegQueue<Idle>,
+  work: &SharedFn<'static, T, R>,
+  id: usize,
+) {
+  let state = SBox::new(AtomicCell::new(State::Unqueued));
+
+  let backoff = Backoff::new();
+  let mut cycle = stealers.iter().cycle();
+  let size = stealers.len();
+
+  loop {
+    while !backoff.is_completed() {
+      let Some(ctx) = pop_or_steal(local, global, (&mut cycle).take(size)) else {
+        backoff.snooze();
+        continue;
+      };
+
+      if !handle_task(ctx, work) {
+        return drain_task(global, local);
+      }
+      backoff.reset();
+    }
+
+    backoff.reset();
+    if state
+      .compare_exchange(State::Unqueued, State::Queued)
+      .is_ok()
+    {
+      // there are no state in idle queue.
+      idle.push(Idle::new(state.clone(), id));
+    }
+
+    let Some(ctx) = pop_or_steal(local, global, (&mut cycle).take(size)) else {
+      if state.compare_exchange(State::Queued, State::Parked).is_ok() {
+        park();
+      }
+      // if producer changed state, then never park.
+      continue;
+    };
+
+    // enqueued but tasks are left. state will be changed by producer.
+    if !handle_task(ctx, work) {
+      return drain_task(global, local);
+    }
+  }
+}
+
 const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: Arc<Injector<Context<T, R>>>,
   stealers: Arc<Vec<Stealer<Context<T, R>>>>,
   idle: Arc<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
-
+  closed: Sender<usize>,
   id: usize,
 ) -> impl FnOnce()
 where
@@ -70,47 +122,8 @@ where
   R: Send + 'static,
 {
   move || {
-    let state = SBox::new(AtomicCell::new(State::Unqueued));
-
-    let backoff = Backoff::new();
-    let mut cycle = stealers.iter().cycle();
-    let size = stealers.len();
-
-    loop {
-      while !backoff.is_completed() {
-        let Some(ctx) = pop_or_steal(&local, &global, (&mut cycle).take(size)) else {
-          backoff.snooze();
-          continue;
-        };
-
-        if !handle_task(ctx, &work) {
-          return drain_task(&global, &local);
-        }
-        backoff.reset();
-      }
-
-      backoff.reset();
-      if state
-        .compare_exchange(State::Unqueued, State::Queued)
-        .is_ok()
-      {
-        // there are no state in idle queue.
-        idle.push(Idle::new(state.clone(), id));
-      }
-
-      let Some(ctx) = pop_or_steal(&local, &global, (&mut cycle).take(size)) else {
-        if state.compare_exchange(State::Queued, State::Parked).is_ok() {
-          park();
-        }
-        // if producer changed state, then never park.
-        continue;
-      };
-
-      // enqueued but tasks are left. state will be changed by producer.
-      if !handle_task(ctx, &work) {
-        return drain_task(&global, &local);
-      }
-    }
+    run_loop(&local, &global, &stealers, &idle, &work, id);
+    closed.send(id).unwrap();
   }
 }
 
@@ -138,8 +151,9 @@ pub struct SharedWorkThread<T, R = ()> {
   global: Arc<Injector<Context<T, R>>>,
   idle: Arc<SegQueue<Idle>>,
   wakers: Vec<Thread>,
-  threads: Mutex<Vec<JoinHandle<()>>>,
+  threads: Mutex<Vec<ManuallyDrop<JoinHandle<()>>>>,
   work: SharedFn<'static, T, R>,
+  closed: Receiver<usize>,
 }
 impl<T, R> SharedWorkThread<T, R>
 where
@@ -157,6 +171,7 @@ where
       .map(|_| Worker::<Context<T, R>>::new_fifo())
       .map(|w| (w.stealer(), w))
       .unzip();
+    let (tx, closed) = bounded(count);
 
     let global = Arc::new(Injector::new());
     let stealers = Arc::new(stealers);
@@ -173,11 +188,12 @@ where
           Arc::clone(&stealers),
           Arc::clone(&idle),
           work.clone(),
+          tx.clone(),
           id,
         ));
 
       wakers.push(thread.thread().clone());
-      threads.push(thread);
+      threads.push(ManuallyDrop::new(thread));
     }
     Self {
       global,
@@ -185,6 +201,7 @@ where
       wakers,
       threads: Mutex::new(threads),
       work,
+      closed,
     }
   }
 }
@@ -211,19 +228,13 @@ where
   }
 
   fn close(&self) {
-    let threads = take(&mut *self.threads.l());
-    if threads.is_empty() {
-      return;
-    }
-
+    let mut threads = take(&mut *self.threads.l());
     for _ in 0..threads.len() {
-      self.global.push(Context::Term);
-    }
-    for waker in &self.wakers {
-      waker.unpark();
-    }
-    for th in threads {
-      th.join().unwrap();
+      self.register(Context::Term);
+      let id = self.closed.recv().unwrap();
+      unsafe { ManuallyDrop::take(&mut threads[id]) }
+        .join()
+        .unwrap();
     }
 
     while let Some(ctx) = self.global.steal().success() {
