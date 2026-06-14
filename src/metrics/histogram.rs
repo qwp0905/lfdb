@@ -33,20 +33,47 @@ const BUCKET_BOUND: [u64; BUCKET_SIZE] = [
   50_000_000,
   100_000_000,
 ];
+
+pub struct TimeHistogram {
+  histogram: Histogram,
+  unit: Duration,
+}
+impl TimeHistogram {
+  pub fn new(sample: u64, unit: Duration) -> Self {
+    Self {
+      histogram: Histogram::new(sample),
+      unit,
+    }
+  }
+  pub fn snapshot_with(&self, present_unit: Duration) -> TimeHistogramSnapshot {
+    let factor = self.unit.div_duration_f64(present_unit);
+    TimeHistogramSnapshot::new(self.histogram.snapshot(), factor)
+  }
+
+  pub fn start(&self) -> Option<Instant> {
+    if !self.histogram.sample() {
+      return None;
+    }
+    Some(Instant::now())
+  }
+  pub fn record(&self, start: Option<Instant>) {
+    let Some(start) = start else { return };
+    let elapsed = start.elapsed().as_nanos() / self.unit.as_nanos();
+    self.histogram.apply_value(elapsed as u64);
+  }
+}
 pub struct Histogram {
   count: AtomicU64,
   buckets: [AtomicU64; BUCKET_SIZE + 1],
-  sum_elapse: AtomicU64,
-  unit: u128,
+  sum: AtomicU64,
   sample: u64,
 }
 impl Histogram {
-  pub fn new(sample: u64, unit: Duration) -> Self {
+  pub fn new(sample: u64) -> Self {
     Self {
       count: AtomicU64::new(0),
       buckets: array::from_fn(|_| AtomicU64::new(0)),
-      sum_elapse: AtomicU64::new(0),
-      unit: unit.as_nanos(),
+      sum: AtomicU64::new(0),
       sample,
     }
   }
@@ -57,37 +84,44 @@ impl Histogram {
       total_count: total,
       sample_count: total.div_ceil(self.sample),
       buckets: array::from_fn(|i| self.buckets[i].load(Ordering::Relaxed)),
-      sum_elapse: self.sum_elapse.load(Ordering::Relaxed),
+      sum: self.sum.load(Ordering::Relaxed),
     }
   }
 
-  #[inline]
-  pub fn start(&self) -> Option<Instant> {
-    let n = self.count.fetch_add(1, Ordering::Relaxed);
-    if n % self.sample != 0 {
-      return None;
-    }
-    Some(Instant::now())
-  }
-
-  #[inline]
-  pub fn measure<T, F>(&self, f: F) -> T
-  where
-    F: FnOnce() -> T,
-  {
-    let start = self.start();
-    let result = f();
-    self.record(start);
-    result
-  }
-
-  #[inline]
-  pub fn record(&self, start: Option<Instant>) {
-    let Some(s) = start else { return };
-    let elapsed = (s.elapsed().as_nanos() / self.unit) as u64;
-    self.sum_elapse.fetch_add(elapsed, Ordering::Relaxed);
-    let i = BUCKET_BOUND.partition_point(|&b| elapsed > b);
+  fn apply_value(&self, value: u64) {
+    self.sum.fetch_add(value, Ordering::Relaxed);
+    let i = BUCKET_BOUND.partition_point(|&b| value > b);
     self.buckets[i].fetch_add(1, Ordering::Relaxed);
+  }
+  fn sample(&self) -> bool {
+    let n = self.count.fetch_add(1, Ordering::Relaxed);
+    n % self.sample == 0
+  }
+
+  pub fn record(&self, value: u64) {
+    if !self.sample() {
+      return;
+    }
+    self.apply_value(value);
+  }
+}
+
+pub struct TimeHistogramSnapshot {
+  snapshot: HistogramSnapshot,
+  factor: f64,
+}
+impl TimeHistogramSnapshot {
+  const fn new(snapshot: HistogramSnapshot, factor: f64) -> Self {
+    Self { snapshot, factor }
+  }
+  pub const fn total_count(&self) -> u64 {
+    self.snapshot.total_count()
+  }
+  pub const fn average(&self) -> f64 {
+    self.snapshot.average() * self.factor
+  }
+  pub fn percentile(&self, q: f64) -> f64 {
+    self.snapshot.percentile(q) * self.factor
   }
 }
 
@@ -96,7 +130,7 @@ pub struct HistogramSnapshot {
   sample_count: u64,
   total_count: u64,
   buckets: [u64; BUCKET_SIZE + 1],
-  sum_elapse: u64,
+  sum: u64,
 }
 impl HistogramSnapshot {
   #[inline]
@@ -108,7 +142,7 @@ impl HistogramSnapshot {
       return 0.0;
     }
 
-    self.sum_elapse as f64 / self.sample_count as f64
+    self.sum as f64 / self.sample_count as f64
   }
 
   pub fn percentile(&self, q: f64) -> f64 {
@@ -141,4 +175,14 @@ impl HistogramSnapshot {
     }
     BUCKET_BOUND.last().copied().unwrap_or(0) as f64
   }
+}
+
+#[macro_export]
+macro_rules! measure {
+  ($metrics:expr, $block:expr $(,)?) => {{
+    let start = $metrics.start();
+    let result = $block;
+    $metrics.record(start);
+    result
+  }};
 }
