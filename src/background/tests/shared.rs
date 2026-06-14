@@ -34,14 +34,16 @@ fn test_no_timeout() {
   );
 
   // Send multiple tasks
-  let receivers: Vec<_> = (1..=thread_count).map(|i| thread.execute(i)).collect();
+  let receivers: Vec<_> = (1..=(thread_count << 1))
+    .map(|i| thread.execute(i))
+    .collect();
   let results = receivers
     .into_iter()
     .map(|receiver| receiver.wait().expect("closed"))
     .collect::<Vec<usize>>();
 
-  assert_eq!(results, vec![2, 4, 6, 8]);
-  assert_eq!(counter.load(Ordering::Acquire), 10); // 1+2+3+4 = 10
+  assert_eq!(results, vec![2, 4, 6, 8, 10, 12, 14, 16]);
+  assert_eq!(counter.load(Ordering::Acquire), 36); // 1+2+3+4+5+6+7+8 = 36
   assert_eq!(*mc.lock().unwrap(), thread_count);
 
   thread.close();
