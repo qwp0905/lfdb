@@ -9,7 +9,7 @@ use crate::{
   cursor::{Compactor, GarbageCollector},
   disk::{IOPool, Pointer},
   error::Result,
-  info,
+  info, measure,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
@@ -119,10 +119,8 @@ impl TxOrchestrator {
 
   #[inline]
   pub fn commit_tx(&self, tx_id: TxId) -> Result {
-    self
-      .metrics
-      .transaction_commit
-      .measure(|| self.wal.commit_and_flush(tx_id))?;
+    let metrics = &self.metrics.transaction_commit;
+    measure!(metrics, self.wal.commit_and_flush(tx_id))?;
     Ok(())
   }
 

@@ -11,6 +11,7 @@ use crossbeam::queue::SegQueue;
 use super::{max_iov, IOBackend};
 use crate::{
   background::{oneshot, BackgroundThread, Oneshot, OneshotFulfill},
+  measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
@@ -80,7 +81,33 @@ impl SBox<TaskPublisher<WriteTask>> {
     thread.dispatch((backend.clone(), IOTask::Write(self.clone()), state.clone()));
     o
   }
+
+  const MAX_FLUSH_COUNT: usize = max_iov();
+  fn handle_write(
+    &self,
+    metrics: &MetricsRegistry,
+    backend: &dyn IOBackend,
+    state: &HandleState,
+  ) {
+    let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
+
+    loop {
+      for task in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+        buffered.push(task);
+      }
+
+      flush_write(metrics, backend, state, &mut buffered);
+      self.occupied.fetch_and(false, Ordering::Release);
+      if self.queue.is_empty() {
+        break;
+      }
+      if self.occupied.fetch_or(true, Ordering::AcqRel) {
+        break;
+      }
+    }
+  }
 }
+
 impl SBox<TaskPublisher<()>> {
   pub fn publish_sync(
     &self,
@@ -101,6 +128,31 @@ impl SBox<TaskPublisher<()>> {
     thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
     o
   }
+
+  const MAX_FLUSH_COUNT: usize = 512;
+  fn handle_sync(
+    &self,
+    metrics: &MetricsRegistry,
+    backend: &dyn IOBackend,
+    state: &HandleState,
+  ) {
+    let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
+
+    loop {
+      for (_, fulfill) in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+        buffered.push(fulfill);
+      }
+
+      flush_fdatasync(metrics, backend, state, &mut buffered);
+      self.occupied.fetch_and(false, Ordering::Release);
+      if self.queue.is_empty() {
+        break;
+      }
+      if self.occupied.fetch_or(true, Ordering::AcqRel) {
+        break;
+      }
+    }
+  }
 }
 pub enum IOTask {
   Write(SBox<TaskPublisher<WriteTask>>),
@@ -109,51 +161,13 @@ pub enum IOTask {
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
 pub type IOThread = dyn BackgroundThread<ThreadArg, ()>;
 
-const MAX_FLUSH_COUNT: usize = 512;
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   move |(backend, task, state)| {
     metrics.active_io_threads.inc();
-
     match task {
-      IOTask::Write(handle) => {
-        let count = max_iov();
-        let mut buffered = Vec::with_capacity(count);
-
-        loop {
-          for task in (0..count).map_while(|_| handle.queue.pop()) {
-            buffered.push(task);
-          }
-
-          flush_write(&metrics, &*backend, &state, &mut buffered);
-          handle.occupied.fetch_and(false, Ordering::Release);
-          if handle.queue.is_empty() {
-            break;
-          }
-          if handle.occupied.fetch_or(true, Ordering::AcqRel) {
-            break;
-          }
-        }
-      }
-      IOTask::Sync(handle) => {
-        let mut buffered = Vec::with_capacity(MAX_FLUSH_COUNT);
-
-        loop {
-          for (_, fulfill) in (0..MAX_FLUSH_COUNT).map_while(|_| handle.queue.pop()) {
-            buffered.push(fulfill);
-          }
-
-          flush_fdatasync(&*backend, &state, &mut buffered);
-          handle.occupied.fetch_and(false, Ordering::Release);
-          if handle.queue.is_empty() {
-            break;
-          }
-          if handle.occupied.fetch_or(true, Ordering::AcqRel) {
-            break;
-          }
-        }
-      }
+      IOTask::Write(handle) => handle.handle_write(&metrics, &*backend, &state),
+      IOTask::Sync(handle) => handle.handle_sync(&metrics, &*backend, &state),
     }
-
     metrics.active_io_threads.dec();
   }
 }
@@ -174,12 +188,10 @@ fn flush_write(
     return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
   };
 
-  match write_exec(metrics, backend, values) {
-    Ok(_) => waiting.into_iter().for_each(|done| done.fulfill(Ok(()))),
-    Err(err) => waiting
-      .into_iter()
-      .for_each(|done| done.fulfill(Err(Error::from(err.kind())))),
-  };
+  let result = write_exec(metrics, backend, values).map_err(|err| err.kind());
+  waiting
+    .into_iter()
+    .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }
 
 fn write_exec(
@@ -189,10 +201,9 @@ fn write_exec(
 ) -> std::io::Result<()> {
   if buffered.len() == 1 {
     let (p, buf) = &buffered[0];
-    return metrics
-      .disk_write
-      .measure(|| backend.pwrite_all(buf, *p))
-      .map(|_| ());
+    metrics.disk_write_batch.record(1);
+    measure!(metrics.disk_write, backend.pwrite_all(buf, *p))?;
+    return Ok(());
   }
 
   // last caller wins on duplicate pointers
@@ -204,22 +215,21 @@ fn write_exec(
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, mut bufs): (Vec<_>, Vec<_>) =
       chunk.iter().map(|(o, b)| (*o, *b)).unzip();
+    metrics.disk_write_batch.record(bufs.len() as u64);
+
     let offset = offset[0];
     if bufs.len() == 1 {
-      metrics
-        .disk_write
-        .measure(|| backend.pwrite_all(&bufs[0], offset))?;
+      measure!(metrics.disk_write, backend.pwrite_all(&bufs[0], offset))?;
       continue;
     }
 
-    metrics
-      .disk_write
-      .measure(|| backend.pwritev_all(&mut bufs, offset))?;
+    measure!(metrics.disk_write, backend.pwritev_all(&mut bufs, offset))?;
   }
   Ok(())
 }
 
 fn flush_fdatasync(
+  metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
   state: &HandleState,
   waiting: &mut Vec<OneshotFulfill<Result<()>>>,
@@ -232,10 +242,10 @@ fn flush_fdatasync(
     state.closed.fetch_or(true, Ordering::Release);
     return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
   };
-  match backend.fdatasync() {
-    Ok(_) => waiting.drain(..).for_each(|done| done.fulfill(Ok(()))),
-    Err(err) => waiting
-      .drain(..)
-      .for_each(|done| done.fulfill(Err(Error::from(err.kind())))),
-  }
+
+  let result = backend.fdatasync().map_err(|err| err.kind());
+  metrics.disk_sync_batch.record(waiting.len() as u64);
+  waiting
+    .drain(..)
+    .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }

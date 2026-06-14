@@ -19,7 +19,7 @@ use super::{
 };
 use crate::{
   background::{Oneshot, WorkBuilder},
-  error,
+  error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex, ToArc},
   Error, Result,
@@ -167,10 +167,10 @@ impl IOHandle {
   pub fn read(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
     // SAFETY: Since the removed table cannot access this path, a pin guarantee is not required.
     // If a path for read access to the removed table is established, pin guarantees are required.
-    self
-      .metrics
-      .disk_read
-      .measure(|| self.backend.pread_exact(buf, offset))
+    measure!(
+      self.metrics.disk_read,
+      self.backend.pread_exact(buf, offset)
+    )
   }
 
   pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> IOResult<()> {
@@ -328,9 +328,12 @@ impl AppendIOHandle {
     self.file.write_all(buf).map_err(Error::IO)
   }
   pub fn flush(mut self) -> Result<PathBuf> {
-    self.file.flush().map_err(Error::IO)?;
-    self.file.get_ref().fsync().map_err(Error::IO)?;
-    Ok(self.filename)
+    self
+      .file
+      .flush()
+      .and_then(|_| self.file.get_ref().fsync())
+      .map(|_| self.filename)
+      .map_err(Error::IO)
   }
 }
 pub struct ScanIOHandle {
