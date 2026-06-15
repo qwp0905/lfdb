@@ -1,8 +1,8 @@
 use std::ops::{Bound, RangeBounds};
 
 use super::{
-  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, VecRef, MAX_KEY,
-  MAX_VALUE,
+  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, StaticKeyRef, VecRef,
+  MAX_KEY, MAX_VALUE,
 };
 use crate::{
   measure, metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext,
@@ -46,6 +46,15 @@ impl<'a> Cursor<'a> {
     }
   }
 
+  fn __get(&self, key: StaticKeyRef) -> Result<Option<VecRef>> {
+    if let Some(table) = self.compaction.as_ref() {
+      if let Some(found) = self.index.get(key, table)? {
+        return Ok(found);
+      }
+    }
+
+    Ok(self.index.get(key, &self.table)?.flatten())
+  }
   pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<VecRef>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
@@ -55,17 +64,13 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, key.len()));
     }
 
-    let metrics = &self.metrics.operation_get;
-
-    if let Some(table) = self.compaction.as_ref() {
-      if let Some(found) = measure!(metrics, self.index.get(key, table))? {
-        return Ok(found);
-      }
-    }
-
-    measure!(metrics, Ok(self.index.get(key, &self.table)?.flatten()))
+    measure!(self.metrics.operation_get, self.__get(key))
   }
 
+  fn __insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
+    let table = self.compaction.as_ref().unwrap_or(&self.table);
+    self.index.insert(key, value, table)
+  }
   pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
@@ -78,14 +83,15 @@ impl<'a> Cursor<'a> {
       return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
     }
 
-    let table = self.compaction.as_ref().unwrap_or(&self.table);
-    measure!(
-      self.metrics.operation_insert,
-      self.index.insert(key, value, table)
-    )?;
-    Ok(())
+    measure!(self.metrics.operation_insert, self.__insert(key, value))
   }
 
+  fn __remove(&self, key: StaticKeyRef) -> Result {
+    if let Some(table) = self.compaction.as_ref() {
+      return self.index.insert_record(key.to_vec(), None, table);
+    }
+    self.index.remove(key, &self.table)
+  }
   pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
@@ -95,14 +101,7 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, key.len()));
     }
 
-    let metrics = &self.metrics.operation_remove;
-    if let Some(table) = self.compaction.as_ref() {
-      measure!(metrics, self.index.insert_record(key.to_vec(), None, table))?;
-      return Ok(());
-    }
-
-    measure!(metrics, self.index.remove(key, &self.table))?;
-    Ok(())
+    measure!(self.metrics.operation_remove, self.__remove(key))
   }
 
   pub fn scan<'b, 'c, K>(
