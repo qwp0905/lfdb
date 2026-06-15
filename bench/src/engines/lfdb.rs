@@ -72,4 +72,8 @@ impl BenchmarkDB for Engine {
     }
     tx.commit().unwrap();
   }
+
+  fn print_metrics(&self) {
+    println!("{}", self.metrics());
+  }
 }

@@ -111,7 +111,7 @@ not found: {not_found}"
     );
   }
 
-  println!("{:?}", engine.metrics());
+  println!("{}", engine.metrics());
   drop(engine);
   println!("done");
 }
