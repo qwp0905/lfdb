@@ -131,6 +131,8 @@ pub fn workload_a<F, E>(
 
   drop(tx);
   threads.into_iter().for_each(|t| t.join().unwrap());
+
+  engine.print_metrics();
 }
 
 pub fn workload_b<E, F>(
@@ -178,6 +180,8 @@ pub fn workload_b<E, F>(
 
   drop(tx);
   threads.into_iter().for_each(|t| t.join().unwrap());
+
+  engine.print_metrics();
 }
 
 pub fn workload_d<E, F>(
@@ -226,6 +230,8 @@ pub fn workload_d<E, F>(
 
   drop(tx);
   threads.into_iter().for_each(|t| t.join().unwrap());
+
+  engine.print_metrics();
 }
 
 pub fn workload_e<E, F>(
@@ -277,6 +283,8 @@ pub fn workload_e<E, F>(
 
   drop(tx);
   threads.into_iter().for_each(|t| t.join().unwrap());
+
+  engine.print_metrics();
 }
 
 pub fn workload_f<E, F>(
@@ -324,4 +332,6 @@ pub fn workload_f<E, F>(
 
   drop(tx);
   threads.into_iter().for_each(|t| t.join().unwrap());
+
+  engine.print_metrics();
 }

@@ -203,6 +203,107 @@ pub struct EngineMetrics {
    */
   pub operation_remove_latency_micros_p99: f64,
 }
+impl std::fmt::Display for EngineMetrics {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let uptime = Duration::from_millis(self.uptime_ms);
+
+    writeln!(
+      f,
+      "engine: uptime {:.1?} | active io threads {}",
+      uptime, self.active_io_threads,
+    )?;
+    writeln!(
+      f,
+      "transactions: start {} | commit {} | abort {}",
+      self.transaction_start_count,
+      self.transaction_commit_count,
+      self.transaction_abort_count,
+    )?;
+    writeln!(
+      f,
+      "tx duration: avg {:.3} ms | p50 {:.3} | p95 {:.3} | p99 {:.3}",
+      self.transaction_duration_ms_avg,
+      self.transaction_duration_ms_p50,
+      self.transaction_duration_ms_p95,
+      self.transaction_duration_ms_p99,
+    )?;
+    writeln!(
+      f,
+      "tx commit: avg {:.3} ms | p50 {:.3} | p95 {:.3} | p99 {:.3}",
+      self.transaction_commit_latency_ms_avg,
+      self.transaction_commit_latency_ms_p50,
+      self.transaction_commit_latency_ms_p95,
+      self.transaction_commit_latency_ms_p99,
+    )?;
+    writeln!(
+      f,
+      "get: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      self.operation_get_count,
+      self.operation_get_latency_micros_avg,
+      self.operation_get_latency_micros_p50,
+      self.operation_get_latency_micros_p95,
+      self.operation_get_latency_micros_p99,
+    )?;
+    writeln!(
+      f,
+      "insert: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      self.operation_insert_count,
+      self.operation_insert_latency_micros_avg,
+      self.operation_insert_latency_micros_p50,
+      self.operation_insert_latency_micros_p95,
+      self.operation_insert_latency_micros_p99,
+    )?;
+    writeln!(
+      f,
+      "remove: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      self.operation_remove_count,
+      self.operation_remove_latency_micros_avg,
+      self.operation_remove_latency_micros_p50,
+      self.operation_remove_latency_micros_p95,
+      self.operation_remove_latency_micros_p99,
+    )?;
+    writeln!(
+      f,
+      "block cache: hit {} | read {}",
+      self.block_cache_hit, self.block_cache_read_count,
+    )?;
+    writeln!(
+      f,
+      "cache read: avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      self.block_cache_read_latency_micros_avg,
+      self.block_cache_read_latency_micros_p50,
+      self.block_cache_read_latency_micros_p95,
+      self.block_cache_read_latency_micros_p99,
+    )?;
+    writeln!(
+      f,
+      "disk read: count {} | avg {:.2} us | p50 {:.2}",
+      self.disk_read_count,
+      self.disk_read_latency_micros_avg,
+      self.disk_read_latency_micros_p50,
+    )?;
+    writeln!(
+      f,
+      "disk write: count {} | avg {:.2} us | p50 {:.2}",
+      self.disk_write_count,
+      self.disk_write_latency_micros_avg,
+      self.disk_write_latency_micros_p50,
+    )?;
+    writeln!(
+      f,
+      "io batches: write avg {:.2} p50 {:.2} | sync avg {:.2} p50 {:.2}",
+      self.disk_write_batch_avg,
+      self.disk_write_batch_p50,
+      self.disk_sync_batch_avg,
+      self.disk_sync_batch_p50,
+    )?;
+    write!(
+      f,
+      "checkpoint: cycles {} | avg {:.2} ms",
+      self.checkpoint_cycle_count, self.checkpoint_cycle_time_ms_avg,
+    )
+  }
+}
 pub struct MetricsRegistry {
   pub block_cache_read: TimeHistogram,
   pub block_cache_hit: Counter,
@@ -254,7 +355,7 @@ impl MetricsRegistry {
   pub fn snapshot(&self) -> EngineMetrics {
     let transaction_start = self.transaction_start.snapshot_with(MILLIS);
     let transaction_commit = self.transaction_commit.snapshot_with(MILLIS);
-    let block_cache_read = self.block_cache_read.snapshot_with(MILLIS);
+    let block_cache_read = self.block_cache_read.snapshot_with(MICROS);
     let checkpoint_cycle = self.checkpoint_cycle.snapshot_with(MILLIS);
     let disk_read = self.disk_read.snapshot_with(MICROS);
     let disk_write = self.disk_write.snapshot_with(MICROS);
