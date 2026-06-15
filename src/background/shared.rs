@@ -62,7 +62,6 @@ const fn worker_loop<T, R>(
   stealers: Arc<Vec<Stealer<Context<T, R>>>>,
   idle: Arc<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
-
   id: usize,
 ) -> impl FnOnce()
 where
@@ -219,10 +218,8 @@ where
     for _ in 0..threads.len() {
       self.global.push(Context::Term);
     }
-    for waker in &self.wakers {
-      waker.unpark();
-    }
-    for th in threads {
+    for (i, th) in threads.into_iter().enumerate() {
+      self.wakers[i].unpark();
       th.join().unwrap();
     }
 
