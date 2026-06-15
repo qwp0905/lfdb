@@ -285,14 +285,7 @@ impl CacheFlusher {
   }
 
   pub fn flush_hard(&mut self) -> Result {
-    let mut waiting = Vec::with_capacity(self.dirty_blocks.len());
-    for &id in self.dirty_blocks.iter() {
-      waiting.push(self.executor.execute(FlushTask::Write(id)));
-    }
-    waiting
-      .into_iter()
-      .try_for_each(|done| done.wait().unwrap())?;
-    self.dirty_blocks.clear();
+    self.advance(self.len())?;
     self.finish()
   }
 
@@ -315,8 +308,10 @@ impl CacheFlusher {
       let Err(err) = done.wait().unwrap() else {
         continue;
       };
+
       error!("error occurs in flush table: {err}");
       self.dirty_tables.mark(&table);
+      return Err(err);
     }
     Ok(())
   }
