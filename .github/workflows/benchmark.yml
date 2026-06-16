@@ -38,8 +38,12 @@ jobs:
   criterion:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
 
+      - uses: actions/checkout@v4
       - uses: actions/cache@v4
         with:
           path: |
