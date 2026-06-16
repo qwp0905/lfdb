@@ -61,6 +61,9 @@ pub enum Error {
 
   #[error("failed to open base dir.")]
   DirOpenFailed,
+
+  #[error("invalidate config: {0}.")]
+  InvalidConfig(&'static str),
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;

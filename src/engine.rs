@@ -9,6 +9,7 @@ use std::{
   time::{Duration, Instant},
 };
 
+use super::EngineConfig;
 use crate::{
   background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
@@ -29,25 +30,6 @@ use crate::{
   Error, Result,
 };
 
-pub struct EngineConfig<T>
-where
-  T: AsRef<Path>,
-{
-  pub base_path: T,
-  pub io_thread_count: usize,
-  pub wal_file_size: usize,
-  pub wal_buffer_size: usize,
-  pub checkpoint_flush_factor: f64,
-  pub gc_batch_size: usize,
-  pub gc_thread_count: usize,
-  pub compaction_threshold: f64,
-  pub compaction_min_size: usize,
-  pub compaction_batch_size: usize,
-  pub block_cache_shard_count: usize,
-  pub block_cache_memory_capacity: usize,
-  pub transaction_timeout: Duration,
-}
-
 pub struct Engine {
   orchestrator: TxOrchestrator,
   event_bus: Arc<EventBus>,
@@ -61,6 +43,7 @@ impl Engine {
     B: DiskBackend,
   {
     let st = Instant::now();
+    config.validate()?;
     let metrics_registry = MetricsRegistry::new().to_arc();
 
     let event_bus = Arc::new(EventBus::new());

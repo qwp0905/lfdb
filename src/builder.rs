@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration};
 
-use crate::disk::DiskBackend;
-use crate::{disk::DefaultIOBackend, Engine, EngineConfig, Result};
+use super::{Engine, EngineConfig, Result};
+use crate::disk::{DefaultIOBackend, DiskBackend};
 
 pub struct EngineBuilder<T>(EngineConfig<T>)
 where
@@ -61,14 +61,6 @@ where
    *
    */
   pub const fn checkpoint_flush_factor(mut self, factor: f64) -> Self {
-    assert!(
-      factor.is_finite(),
-      "checkpoint flush pressure must be finite"
-    );
-    assert!(
-      factor >= 1.0,
-      "checkpoint flush pressure must be gte then 1.0"
-    );
     self.0.checkpoint_flush_factor = factor;
     self
   }
@@ -118,7 +110,6 @@ where
    * Threshold which trigger auto compaction. To disable auto compaction, then set 1.0.
    */
   pub const fn compaction_threshold(mut self, threshold: f64) -> Self {
-    assert!(threshold <= 1.0);
     self.0.compaction_threshold = threshold;
     self
   }
