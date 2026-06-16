@@ -125,10 +125,9 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn abort_tx(&self, tx_id: TxId) -> Result {
+  pub fn abort_tx(&self, tx_id: TxId) {
     self.version_visibility.set_abort(tx_id);
     self.metrics.transaction_abort_count.inc();
-    Ok(())
   }
 
   #[inline]
