@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::JoinHandle};
+use std::sync::Arc;
 
 use super::OneshotFulfill;
 
@@ -44,17 +44,5 @@ where
   #[inline]
   pub fn call(&mut self, v: T) -> R {
     self.0(v)
-  }
-}
-
-pub struct OnceHandle<T>(JoinHandle<T>);
-impl<T> OnceHandle<T> {
-  pub fn wait(self) -> T {
-    self.0.join().unwrap()
-  }
-
-  #[inline]
-  pub const fn new(handle: JoinHandle<T>) -> Self {
-    Self(handle)
   }
 }

@@ -123,7 +123,7 @@ impl<'a> DataEntryView<'a> {
     }
   }
 
-  #[allow(unused)]
+  #[cfg(test)]
   pub const fn len(&self) -> usize {
     self.len
   }

@@ -76,7 +76,7 @@ impl<const N: usize> PagePool<N> {
     PageRef::new(self.store.clone())
   }
 
-  #[allow(unused)]
+  #[cfg(test)]
   pub fn len(&self) -> usize {
     self.store.len()
   }

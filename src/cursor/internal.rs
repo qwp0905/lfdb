@@ -211,6 +211,7 @@ impl<'a> InternalNodeView<'a> {
     scanner.read_u64()
   }
 
+  #[cfg(test)]
   pub fn get_all_child(&self) -> Result<Vec<Pointer>> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();

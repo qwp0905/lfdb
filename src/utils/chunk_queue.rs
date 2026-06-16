@@ -56,11 +56,11 @@ impl<T> ChunkQueue<T> {
       len: 0,
     }
   }
-  #[allow(unused)]
+  #[cfg(test)]
   pub const fn len(&self) -> usize {
     self.len
   }
-  #[allow(unused)]
+  #[cfg(test)]
   pub const fn is_empty(&self) -> bool {
     self.len == 0
   }

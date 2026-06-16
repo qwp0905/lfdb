@@ -13,7 +13,7 @@ use crate::{
   background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
+    initialize, open_tables, CompactionConfig, CompactionPublished, Compactor,
     GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
@@ -216,7 +216,6 @@ impl Engine {
 
     block_cache.create_flusher().flush_hard()?;
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), &tables)?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),

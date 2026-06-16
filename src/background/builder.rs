@@ -1,24 +1,11 @@
-use std::{sync::Arc, thread::Builder, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use super::{
-  BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
-  SharedFn, SharedWorkThread, SingleFn,
+  BackgroundThread, EagerBufferingThread, IntervalWorkThread, PreloadThread, SharedFn,
+  SharedWorkThread, SingleFn,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
-
-pub fn once<F, T>(f: F) -> OnceHandle<T>
-where
-  T: Send + 'static,
-  F: FnOnce() -> T + Send + 'static,
-{
-  let handle = Builder::new()
-    .name("once thread".to_string())
-    .stack_size(DEFAULT_STACK_SIZE)
-    .spawn(f)
-    .unwrap();
-  OnceHandle::new(handle)
-}
 
 pub struct WorkBuilder {
   name: String,
