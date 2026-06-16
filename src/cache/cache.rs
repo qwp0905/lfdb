@@ -1,6 +1,6 @@
 use std::{
   cell::UnsafeCell,
-  collections::{HashMap, VecDeque},
+  collections::{BTreeMap, VecDeque},
   mem::{replace, MaybeUninit},
   sync::Arc,
 };
@@ -208,7 +208,7 @@ impl BlockCache {
   }
 
   pub fn create_flusher(&self) -> CacheFlusher {
-    let mut buckets = HashMap::<_, Vec<_>>::new();
+    let mut buckets = BTreeMap::<_, Vec<_>>::new();
     let mut len = 0;
     for id in self.dirty_blocks.iter() {
       let Some(_token) = self.pins[id].try_shared() else {

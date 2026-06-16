@@ -244,14 +244,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let old_height = stack.len() as u16;
       while let Some(ptr) = stack.pop() {
-        let Some((k, p)) =
-          self.apply_split(split_key.clone(), split_pointer, ptr, table)?
-        else {
+        let Some((k, p)) = self.apply_split(split_key, split_pointer, ptr, table)? else {
           return Ok(());
         };
 
-        split_key = k;
-        split_pointer = p;
+        (split_key, split_pointer) = (k, p);
       }
 
       let mut changed = None;
