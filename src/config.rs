@@ -1,0 +1,88 @@
+use super::{Error, Result};
+use std::{path::Path, time::Duration};
+
+macro_rules! invalid {
+  ($msg:tt) => {
+    Err(Error::InvalidConfig($msg))
+  };
+}
+
+pub struct EngineConfig<T>
+where
+  T: AsRef<Path>,
+{
+  pub base_path: T,
+  pub io_thread_count: usize,
+  pub wal_file_size: usize,
+  pub wal_buffer_size: usize,
+  pub checkpoint_flush_factor: f64,
+  pub gc_batch_size: usize,
+  pub gc_thread_count: usize,
+  pub compaction_threshold: f64,
+  pub compaction_min_size: usize,
+  pub compaction_batch_size: usize,
+  pub block_cache_shard_count: usize,
+  pub block_cache_memory_capacity: usize,
+  pub transaction_timeout: Duration,
+}
+impl<T: AsRef<Path>> EngineConfig<T> {
+  pub fn validate(&self) -> Result {
+    if self.io_thread_count == 0 {
+      return invalid!("io_thread_count must be greater then 0.");
+    }
+
+    if self.wal_file_size == 0 {
+      return invalid!("wal_file_size must be greater then 0.");
+    }
+
+    if self.wal_buffer_size == 0 {
+      return invalid!("wal_buffer_size must be greater then 0.");
+    }
+
+    if !self.checkpoint_flush_factor.is_finite() {
+      return invalid!("checkpoint_flush_factor must be finite");
+    }
+
+    if self.checkpoint_flush_factor < 1.0 {
+      return invalid!("checkpoint_flush_factor must be equal or greater then 1.0");
+    }
+
+    if self.block_cache_shard_count == 0 {
+      return invalid!("block_cache_shard_count must be greater then 0.");
+    }
+
+    if self.block_cache_memory_capacity == 0 {
+      return invalid!("block_cache_memory_capacity must be greater than 0.");
+    }
+
+    if self.gc_batch_size == 0 {
+      return invalid!("gc_batch_size must be greater than 0.");
+    }
+
+    if self.gc_thread_count == 0 {
+      return invalid!("gc_thread_count must be greater than 0.");
+    }
+
+    if self.transaction_timeout == Duration::ZERO {
+      return invalid!("transaction_timeout must be greater than 0.");
+    }
+
+    if self.compaction_threshold > 1.0 {
+      return invalid!("compaction_threshold must be equal or less then 1.0");
+    }
+
+    if self.compaction_threshold <= 0.0 {
+      return invalid!("compaction_threshold must be greater then 0.0");
+    }
+
+    if self.compaction_min_size == 0 {
+      return invalid!("compaction_min_size must be greater than 0.");
+    }
+
+    if self.compaction_batch_size == 0 {
+      return invalid!("compaction_batch_size must be greater than 0.");
+    }
+
+    Ok(())
+  }
+}
