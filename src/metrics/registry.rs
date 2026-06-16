@@ -334,7 +334,7 @@ const MILLIS: Duration = Duration::from_millis(1);
 impl MetricsRegistry {
   pub fn new() -> Self {
     Self {
-      block_cache_read: TimeHistogram::new(10_000, Duration::from_nanos(100)),
+      block_cache_read: TimeHistogram::new(10_000, Duration::from_nanos(10)),
       block_cache_hit: Counter::new(),
       checkpoint_cycle: TimeHistogram::new(10, Duration::from_millis(1)),
       transaction_start: TimeHistogram::new(1000, Duration::from_micros(10)),

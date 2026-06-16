@@ -4,35 +4,64 @@ use std::{
   time::{Duration, Instant},
 };
 
+use crossbeam::utils::Backoff;
+
 const BUCKET_SIZE: usize = 25;
 
-const BUCKET_BOUND: [u64; BUCKET_SIZE] = [
-  1,
-  2,
-  5,
-  10,
-  20,
-  50,
-  100,
-  200,
-  500,
-  1_000,
-  2_000,
-  5_000,
-  10_000,
-  20_000,
-  50_000,
-  100_000,
-  200_000,
-  500_000,
-  1_000_000,
-  2_000_000,
-  5_000_000,
-  10_000_000,
-  20_000_000,
-  50_000_000,
-  100_000_000,
+const BUCKET_BOUND: [f64; BUCKET_SIZE] = [
+  0.1,
+  0.2,
+  0.5,
+  1.0,
+  2.0,
+  5.0,
+  10.0,
+  20.0,
+  50.0,
+  100.0,
+  200.0,
+  500.0,
+  1_000.0,
+  2_000.0,
+  5_000.0,
+  10_000.0,
+  20_000.0,
+  50_000.0,
+  100_000.0,
+  200_000.0,
+  500_000.0,
+  1_000_000.0,
+  2_000_000.0,
+  5_000_000.0,
+  10_000_000.0,
 ];
+
+struct AtomicF64(AtomicU64);
+impl AtomicF64 {
+  const fn new(value: f64) -> Self {
+    Self(AtomicU64::new(value.to_bits()))
+  }
+  fn add(&self, value: f64) {
+    let backoff = Backoff::new();
+    let mut old = self.0.load(Ordering::Acquire);
+    loop {
+      let new = f64::from_bits(old) + value;
+      let Err(err) =
+        self
+          .0
+          .compare_exchange(old, new.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+      else {
+        return;
+      };
+
+      old = err;
+      backoff.snooze();
+    }
+  }
+  fn load(&self) -> f64 {
+    f64::from_bits(self.0.load(Ordering::Acquire))
+  }
+}
 
 pub struct TimeHistogram {
   histogram: Histogram,
@@ -58,14 +87,14 @@ impl TimeHistogram {
   }
   pub fn record(&self, start: Option<Instant>) {
     let Some(start) = start else { return };
-    let elapsed = start.elapsed().as_nanos() / self.unit.as_nanos();
-    self.histogram.apply_value(elapsed as u64);
+    let elapsed = start.elapsed().div_duration_f64(self.unit);
+    self.histogram.apply_value(elapsed);
   }
 }
 pub struct Histogram {
   count: AtomicU64,
   buckets: [AtomicU64; BUCKET_SIZE + 1],
-  sum: AtomicU64,
+  sum: AtomicF64,
   sample: u64,
 }
 impl Histogram {
@@ -73,7 +102,7 @@ impl Histogram {
     Self {
       count: AtomicU64::new(0),
       buckets: array::from_fn(|_| AtomicU64::new(0)),
-      sum: AtomicU64::new(0),
+      sum: AtomicF64::new(0.0),
       sample,
     }
   }
@@ -84,12 +113,12 @@ impl Histogram {
       total_count: total,
       sample_count: total.div_ceil(self.sample),
       buckets: array::from_fn(|i| self.buckets[i].load(Ordering::Relaxed)),
-      sum: self.sum.load(Ordering::Relaxed),
+      sum: self.sum.load(),
     }
   }
 
-  fn apply_value(&self, value: u64) {
-    self.sum.fetch_add(value, Ordering::Relaxed);
+  fn apply_value(&self, value: f64) {
+    self.sum.add(value);
     let i = BUCKET_BOUND.partition_point(|&b| value > b);
     self.buckets[i].fetch_add(1, Ordering::Relaxed);
   }
@@ -98,7 +127,7 @@ impl Histogram {
     n % self.sample == 0
   }
 
-  pub fn record(&self, value: u64) {
+  pub fn record(&self, value: f64) {
     if !self.sample() {
       return;
     }
@@ -130,7 +159,7 @@ pub struct HistogramSnapshot {
   sample_count: u64,
   total_count: u64,
   buckets: [u64; BUCKET_SIZE + 1],
-  sum: u64,
+  sum: f64,
 }
 impl HistogramSnapshot {
   #[inline]
@@ -142,7 +171,7 @@ impl HistogramSnapshot {
       return 0.0;
     }
 
-    self.sum as f64 / self.sample_count as f64
+    self.sum / self.sample_count as f64
   }
 
   pub fn percentile(&self, q: f64) -> f64 {
@@ -155,13 +184,9 @@ impl HistogramSnapshot {
     for (i, &count) in self.buckets.iter().enumerate() {
       cumulative += count;
       if cumulative as f64 >= target {
-        let lower = if i == 0 {
-          0.0
-        } else {
-          BUCKET_BOUND[i - 1] as f64
-        };
+        let lower = if i == 0 { 0.0 } else { BUCKET_BOUND[i - 1] };
         let upper = if i < BUCKET_BOUND.len() {
-          BUCKET_BOUND[i] as f64
+          BUCKET_BOUND[i]
         } else {
           lower
         };
@@ -173,7 +198,7 @@ impl HistogramSnapshot {
         return lower + (target - count_below) / count_in * (upper - lower);
       }
     }
-    BUCKET_BOUND.last().copied().unwrap_or(0) as f64
+    BUCKET_BOUND.last().copied().unwrap_or(0.0)
   }
 }
 
