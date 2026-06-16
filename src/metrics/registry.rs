@@ -237,7 +237,7 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "get: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      "get: count {} | avg {:.2} µs | p50 {:.2} | p95 {:.2} | p99 {:.2}",
       self.operation_get_count,
       self.operation_get_latency_micros_avg,
       self.operation_get_latency_micros_p50,
@@ -246,7 +246,7 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "insert: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      "insert: count {} | avg {:.2} µs | p50 {:.2} | p95 {:.2} | p99 {:.2}",
       self.operation_insert_count,
       self.operation_insert_latency_micros_avg,
       self.operation_insert_latency_micros_p50,
@@ -255,7 +255,7 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "remove: count {} | avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      "remove: count {} | avg {:.2} µs | p50 {:.2} | p95 {:.2} | p99 {:.2}",
       self.operation_remove_count,
       self.operation_remove_latency_micros_avg,
       self.operation_remove_latency_micros_p50,
@@ -269,7 +269,7 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "cache read: avg {:.2} us | p50 {:.2} | p95 {:.2} | p99 {:.2}",
+      "cache read: avg {:.2} µs | p50 {:.2} | p95 {:.2} | p99 {:.2}",
       self.block_cache_read_latency_micros_avg,
       self.block_cache_read_latency_micros_p50,
       self.block_cache_read_latency_micros_p95,
@@ -277,14 +277,14 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "disk read: count {} | avg {:.2} us | p50 {:.2}",
+      "disk read: count {} | avg {:.2} µs | p50 {:.2}",
       self.disk_read_count,
       self.disk_read_latency_micros_avg,
       self.disk_read_latency_micros_p50,
     )?;
     writeln!(
       f,
-      "disk write: count {} | avg {:.2} us | p50 {:.2}",
+      "disk write: count {} | avg {:.2} µs | p50 {:.2}",
       self.disk_write_count,
       self.disk_write_latency_micros_avg,
       self.disk_write_latency_micros_p50,
