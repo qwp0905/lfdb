@@ -59,6 +59,9 @@ impl CheckpointCycle {
   fn advance_flush(&mut self, count: usize) -> Result {
     self.flusher.advance(count)
   }
+  fn flush_done(&self) -> bool {
+    self.flusher.is_done()
+  }
   fn truncate_all(mut self) -> Result {
     for segment in self.drain_all() {
       segment.truncate()?;
@@ -71,14 +74,17 @@ impl CheckpointCycle {
   const fn get_log_id(&self) -> LogId {
     self.log_id
   }
-  fn segments_len(&self) -> usize {
+  const fn segments_len(&self) -> usize {
     self.segments.len()
   }
   fn dirty_len(&self) -> usize {
     self.flusher.len()
   }
-  fn take_start(&mut self) -> Option<Instant> {
+  const fn take_start(&mut self) -> Option<Instant> {
     self.start.take()
+  }
+  fn is_empty(&self) -> bool {
+    self.segments.is_empty() && self.flusher.len() == 0
   }
 }
 
@@ -204,6 +210,7 @@ impl Checkpoint {
         cycle.get_log_id(),
       )?;
       cycle.truncate_all()?;
+      info!("last checkpoint completed.");
       return Ok(());
     }
 
@@ -278,26 +285,29 @@ fn checkpoint_loop(
     let cycle = cycle.as_ptr().borrow_mut_unsafe();
     let Some(current) = cycle else {
       let log_id = wal.current_log_id();
-      let new = cycle.insert(CheckpointCycle::new(
+      let new = CheckpointCycle::new(
         repeat(()).map_while(|_| incoming.pop()),
         block_cache.create_flusher(),
         log_id,
         metrics.checkpoint_cycle.start(),
-      ));
+      );
+      if new.is_empty() {
+        debug!("no checkpoint required.");
+        return Ok(());
+      }
 
       info!(
         "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
         new.dirty_len(),
         new.segments_len(),
       );
-      return Ok(());
+      return Ok(*cycle = Some(new));
     };
 
-    if !current.flusher.is_done() {
+    if !current.flush_done() {
       let batch_size = calc_batch_size(current.segments_len() + incoming.len());
       trace!("checkpoint flush {} blocks", batch_size);
-      current.advance_flush(batch_size)?;
-      return Ok(());
+      return current.advance_flush(batch_size);
     }
 
     info!("checkpoint id {} trying to finish.", current.get_log_id());
@@ -305,8 +315,14 @@ fn checkpoint_loop(
     current.finish_flush()?;
     debug!("block cache all flushed.");
 
+    if current.segments_len() == 0 {
+      debug!("skip create checkpoint snapshot since nothing to rotate.");
+      return Ok(*cycle = None);
+    }
+
     finalize_checkpoint(&version, &io_pool, &wal, current.get_log_id())?;
     metrics.checkpoint_cycle.record(current.take_start());
+    info!("checkpoint complete id {}", current.get_log_id());
 
     let events = current.drain_all().map(SegmentReuseable::new);
     event_bus.batch_publish(events);
@@ -326,7 +342,6 @@ fn finalize_checkpoint(
   io_pool.sync_dir()?;
 
   wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
-  info!("checkpoint complete id {}", log_id);
 
   version.clear(&path)?;
   Ok(())
