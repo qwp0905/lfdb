@@ -153,6 +153,7 @@ pub struct BatchSlot<'a> {
 }
 impl<'a> BatchSlot<'a> {
   fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
+    // transmute allowed since wait for execution at the end of this function.
     let handler =
       unsafe { transmute::<Box<BatchHandler<'_>>, Box<BatchHandler<'static>>>(handler) };
     let (occupied, o) = self.batch.register(handler);

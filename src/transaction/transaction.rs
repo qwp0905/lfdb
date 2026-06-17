@@ -228,7 +228,7 @@ impl<'a> Transaction<'a> {
     }
 
     let id = state.get_id();
-    self.orchestrator.abort_tx(id)?;
+    self.orchestrator.abort_tx(id);
     state.deactive();
 
     self.clear();

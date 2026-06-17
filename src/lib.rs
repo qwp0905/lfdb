@@ -30,3 +30,6 @@ mod metrics;
 pub use metrics::EngineMetrics;
 
 mod table;
+
+mod config;
+pub use config::*;

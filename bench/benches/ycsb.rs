@@ -28,7 +28,7 @@ fn thread_count() -> usize {
     .and_then(|v| v.parse().ok())
     .unwrap_or(THREADS)
 }
-const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(60);
+const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(180);
 
 const CACHE_SIZE: usize = 1024 << 20;
 
