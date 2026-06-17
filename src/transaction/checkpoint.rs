@@ -210,6 +210,7 @@ impl Checkpoint {
         cycle.get_log_id(),
       )?;
       cycle.truncate_all()?;
+      info!("last checkpoint completed.");
       return Ok(());
     }
 
