@@ -129,6 +129,25 @@ impl IOPool {
       filename: Mutex::new(filename),
     })
   }
+  pub fn open_buffered_io(&self, filename: PathBuf) -> Result<IOHandle> {
+    let path = self.base_dir.get_path().join(&filename);
+    let mut options = OpenOptions::new();
+    let file = self
+      .base_dir
+      .open(options.read(true).write(true).create(true), &path)
+      .map(Arc::from)
+      .map_err(Error::IO)?;
+    Ok(IOHandle {
+      backend: file,
+      write_handle: SBox::new(TaskPublisher::new()),
+      sync_handle: SBox::new(TaskPublisher::new()),
+      state: SBox::new(HandleState::new()),
+      thread: self.thread.clone(),
+      metrics: self.metrics.clone(),
+      base_dir: self.base_dir.clone(),
+      filename: Mutex::new(filename),
+    })
+  }
 
   pub fn sync_dir(&self) -> Result {
     self.base_dir.fdatasync().wait().unwrap().map_err(Error::IO)

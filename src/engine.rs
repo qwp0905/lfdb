@@ -14,8 +14,8 @@ use crate::{
   background::EventBus,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
-    GarbageCollectionConfig, GarbageCollector,
+    initialize, open_tables, recovery, BlobStorage, CompactionConfig,
+    CompactionPublished, Compactor, GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
@@ -83,6 +83,7 @@ impl Engine {
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(io_pool.clone())?.to_arc();
+    let blob = BlobStorage::replay(io_pool.clone())?.to_arc();
 
     let (wal, replay) = WAL::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
     let wal = wal.to_arc();
@@ -99,7 +100,7 @@ impl Engine {
 
     if tables.is_new() {
       info!("engine initial state.");
-      initialize(&block_cache, &tables, &recorder, &version_visibility)?;
+      initialize(&block_cache, &tables, &recorder, &version_visibility, &blob)?;
 
       let gc = GarbageCollector::new(
         block_cache.clone(),
@@ -107,6 +108,7 @@ impl Engine {
         recorder.clone(),
         tables.clone(),
         event_bus.clone(),
+        blob.clone(),
         gc_config,
       );
 
@@ -117,6 +119,7 @@ impl Engine {
         version_visibility.clone(),
         wal.clone(),
         event_bus.clone(),
+        blob.clone(),
         compaction_config,
       );
 
@@ -140,6 +143,7 @@ impl Engine {
         recorder,
         compactor,
         io_pool,
+        blob,
         checkpoint,
         metrics_registry.clone(),
       );
@@ -172,7 +176,7 @@ impl Engine {
 
     let mut handles = HashMap::new();
     let (open_handles, compactions) =
-      open_tables(&block_cache, &tables, &version_visibility)?;
+      open_tables(&block_cache, &tables, &version_visibility, &blob)?;
     for (table, metadata) in open_handles {
       handles.insert(table.get_id(), (metadata, table));
     }
@@ -207,6 +211,7 @@ impl Engine {
       recorder.clone(),
       tables.clone(),
       event_bus.clone(),
+      blob.clone(),
       gc_config,
     );
 
@@ -217,6 +222,7 @@ impl Engine {
       version_visibility.clone(),
       wal.clone(),
       event_bus.clone(),
+      blob.clone(),
       compaction_config,
     );
 
@@ -251,6 +257,7 @@ impl Engine {
       recorder,
       compactor,
       io_pool,
+      blob,
       checkpoint.clone(),
       metrics_registry.clone(),
     );

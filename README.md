@@ -229,7 +229,7 @@ LFDB emits logs through the [`log`](https://crates.io/crates/log) crate facade. 
 ## Limitations
 
 - **Key size**: maximum 256 bytes
-- **Value size**: maximum 65,536 bytes (64 KB)
+- **Value size**: maximum 33,554,424 bytes (almost 32 MiB)
 - **Heavy removes**: heavy delete workloads warrant care. Disk space freed by removes is returned to the per-table free list and reused for new writes. When auto compaction is triggered, the table is rebuilt into a new file, and reads that happen during the compaction pay an extra cost because they are routed across both the old and the new file until the swap completes.
 
 ## License

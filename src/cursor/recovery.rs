@@ -3,8 +3,8 @@ use std::{collections::HashSet, ops::Bound, sync::Arc};
 use crossbeam::queue::SegQueue;
 
 use super::{
-  BTreeIndex, BTreeNodeView, DataEntryView, MergeSortable, ReadonlyPolicy,
-  RecordDataView, TreeHeader, WritablePolicy, HEADER_POINTER,
+  BTreeIndex, BTreeNodeView, BlobStorage, DataEntryView, MergeSortable, ReadonlyPolicy,
+  TreeHeader, WritablePolicy, HEADER_POINTER,
 };
 use crate::{
   background::once,
@@ -21,6 +21,7 @@ use crate::{
 struct TableOpenPolicy<'a, R> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
+  blob: &'a BlobStorage,
   recorder: R,
 }
 impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
@@ -44,6 +45,18 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table)
   }
+  fn read_blob(
+    &self,
+    blob_id: super::BlobId,
+    offset: super::BlobOffset,
+    len: super::BlobLen,
+  ) -> Result<Vec<u8>> {
+    let blob = self
+      .blob
+      .get(blob_id)
+      .unwrap_or_else(|| unreachable!("blob id {blob_id} must exists"));
+    blob.read_at(offset, len)
+  }
 }
 
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
@@ -65,6 +78,10 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
+
+  fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+    self.blob.append(data)
+  }
 }
 
 pub fn initialize(
@@ -72,11 +89,13 @@ pub fn initialize(
   tables: &TableMapper,
   recorder: &PageRecorder,
   version_visibility: &VersionVisibility,
+  blob: &BlobStorage,
 ) -> Result {
   let policy = TableOpenPolicy {
     block_cache,
     version_visibility,
     recorder,
+    blob,
   };
   BTreeIndex::new(policy).initialize(&tables.meta_table())?;
   Ok(())
@@ -86,6 +105,7 @@ pub fn open_tables(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
+  blob: &BlobStorage,
 ) -> Result<(
   Vec<(TableHandleRef, TableMetadata)>,
   Vec<((PinnedHandle, TableMetadata), (PinnedHandle, TableMetadata))>,
@@ -97,6 +117,7 @@ pub fn open_tables(
   let index = BTreeIndex::new(TableOpenPolicy {
     block_cache,
     version_visibility,
+    blob,
     recorder: (),
   });
 
@@ -170,11 +191,8 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
       BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()?),
       BTreeNodeView::Leaf(node) => {
         let mut iter = node.get_entries();
-        while let Some((_, _, record, ptr)) = iter.try_next()? {
+        while let Some((_, _, _, ptr)) = iter.try_next()? {
           entry_stack.push(ptr);
-          if let RecordDataView::Chunked(pointers) = &record.data {
-            visited.extend(pointers);
-          }
         }
       }
     };
@@ -184,12 +202,6 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
     visited.insert(ptr);
     let slot = block_cache.read(ptr, table)?.for_read();
     let entry: DataEntryView = slot.as_ref().view()?;
-    let mut iter = entry.get_versions();
-    while let Some(record) = iter.try_next()? {
-      if let RecordDataView::Chunked(pointers) = &record.data {
-        visited.extend(pointers);
-      }
-    }
     if let Some(i) = entry.get_next() {
       entry_stack.push(i)
     }

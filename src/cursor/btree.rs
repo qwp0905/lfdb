@@ -5,10 +5,10 @@ use crate::{disk::Pointer, table::TableHandleRef, wal::TxId, Error, Result};
 use crossbeam::epoch::pin;
 
 use super::{
-  BTreeIterator, BTreeNode, BTreeNodeView, CreatablePolicy, DataChunk, DataChunkView,
-  DataEntry, DataEntryView, InternalNode, KVSnapshot, NodeFindResult, ReadonlyPolicy,
-  RecordData, RecordDataView, Snapshotter, StaticKey, StaticKeyRef, TreeHeader, VecRef,
-  VersionRecord, WritablePolicy, HEADER_POINTER, LARGE_VALUE, MAX_CHUNK_SIZE,
+  BTreeIterator, BTreeNode, BTreeNodeView, BlobAppendGuard, BufferedValue,
+  CreatablePolicy, DataEntry, DataEntryView, InternalNode, KVSnapshot, NodeFindResult,
+  ReadonlyPolicy, RecordData, RecordDataView, Snapshotter, StaticKey, StaticKeyRef,
+  TreeHeader, VecRef, VersionRecord, WritablePolicy, HEADER_POINTER, LARGE_VALUE,
 };
 
 pub struct BTreeIndex<Policy>(Policy);
@@ -44,8 +44,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
             }
             return Ok(Some(match &record.data {
               RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
-              RecordDataView::Chunked(pointers) => {
-                Some(DataChunkView::read_data(&self.0, pointers, table)?)
+              RecordDataView::Blob(id, offset, len) => {
+                Some(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
               }
               RecordDataView::Tombstone => None,
             }));
@@ -66,8 +66,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       {
         return Ok(Some(match &record.data {
           RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
-          RecordDataView::Chunked(pointers) => {
-            Some(DataChunkView::read_data(&self.0, pointers, table)?)
+          RecordDataView::Blob(id, offset, len) => {
+            Some(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
           }
           RecordDataView::Tombstone => None,
         }));
@@ -102,10 +102,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
             }
-            return Ok(match &record.data {
-              RecordDataView::Chunked(_) | RecordDataView::Data(_, _) => true,
-              RecordDataView::Tombstone => false,
-            });
+            return Ok(!record.data.is_tombstone());
           }
         },
       }
@@ -120,10 +117,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       if let Some(record) =
         entry.find(|record| self.0.is_visible(record.owner, record.version))?
       {
-        return Ok(match &record.data {
-          RecordDataView::Chunked(_) | RecordDataView::Data(_, _) => true,
-          RecordDataView::Tombstone => false,
-        });
+        return Ok(!record.data.is_tombstone());
       };
 
       next = entry.get_next();
@@ -291,25 +285,18 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
   fn create_record(
     &self,
     data: Option<Vec<u8>>,
-    table: &TableHandleRef,
-  ) -> Result<RecordData> {
-    let Some(mut data) = data else {
-      return Ok(RecordData::Tombstone);
+  ) -> Result<(RecordData, Option<BlobAppendGuard<'_>>)> {
+    let Some(data) = data else {
+      return Ok((RecordData::Tombstone, None));
     };
     if data.len() < LARGE_VALUE {
-      return Ok(RecordData::Data(data));
+      return Ok((RecordData::Data(data), None));
     }
-
-    let mut pointers = Vec::with_capacity(data.len().div_ceil(MAX_CHUNK_SIZE));
-    while data.len() > MAX_CHUNK_SIZE {
-      let remain = data.split_off(MAX_CHUNK_SIZE);
-      let chunk = DataChunk::new(data);
-      pointers.push(self.0.alloc_and_log(&chunk, table)?);
-      data = remain;
-    }
-    pointers.push(self.0.alloc_and_log(&DataChunk::new(data), table)?);
-
-    Ok(RecordData::Chunked(pointers))
+    let guard = self.0.write_blob(data)?;
+    Ok((
+      RecordData::Blob(guard.get_id(), guard.get_offset(), guard.get_len()),
+      Some(guard),
+    ))
   }
 
   fn apply_version_chain(
@@ -380,7 +367,10 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let record = VersionRecord::new(
       snapshot.owner,
       snapshot.version,
-      self.create_record(Some(snapshot.value.into_vec()), table)?,
+      match snapshot.value {
+        BufferedValue::Data(data) => RecordData::Data(data.into_vec()),
+        BufferedValue::Blob(id, offset, len) => RecordData::Blob(id, offset, len),
+      },
     );
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
@@ -402,8 +392,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
             let old = node.replace_at(i, new_record);
             if !is_aborted {
               self.append_version_chain(entry_ptr, old, table)?;
-            } else if let RecordData::Chunked(pointers) = old.data {
-              pointers.into_iter().for_each(|p| table.free().dealloc(p));
             }
             node
           }
@@ -452,6 +440,7 @@ where
     create: bool,
   ) -> Result {
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
+    let mut _guard = None;
 
     loop {
       let mut state = LoopState::Continue;
@@ -465,16 +454,17 @@ where
             }
 
             let mut node = leaf.writable()?;
+            let (record, guard) = self.create_record(record.take())?;
+            debug_assert!(_guard.is_none());
+            _guard = Some(guard);
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
-              self.create_record(record.take(), table)?,
+              record,
             );
             let old = node.replace_at(i, new_record);
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               self.append_version_chain(entry_ptr, old, table)?;
-            } else if let RecordData::Chunked(pointers) = old.data {
-              pointers.into_iter().for_each(|p| table.free().dealloc(p));
             }
             node
           }
@@ -486,10 +476,13 @@ where
             let mut node = leaf.writable()?;
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
 
+            let (record, guard) = self.create_record(record.take())?;
+            debug_assert!(_guard.is_none());
+            _guard = Some(guard);
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
-              self.create_record(record.take(), table)?,
+              record,
             );
             node.insert_at(i, key.to_vec(), new_record, entry_ptr);
             node

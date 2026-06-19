@@ -1,3 +1,5 @@
+use super::{BlobAppendGuard, BlobId, BlobLen, BlobOffset};
+
 use crate::{
   cache::{CachedSlot, RefedSlot},
   disk::{FreePointer, Pointer},
@@ -12,6 +14,12 @@ pub trait ReadonlyPolicy {
   fn is_owned(&self, owner: TxId) -> bool;
   fn is_readable(&self, version: TxId) -> bool;
   fn is_active(&self, owner: TxId) -> bool;
+  fn read_blob(
+    &self,
+    blob_id: BlobId,
+    offset: BlobOffset,
+    len: BlobLen,
+  ) -> Result<Vec<u8>>;
 
   fn fetch_slot(
     &self,
@@ -46,9 +54,18 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
   ) -> Result<CachedSlot<'_>> {
     (*self).fetch_slot(pointer, table)
   }
+  fn read_blob(
+    &self,
+    blob_id: BlobId,
+    offset: BlobOffset,
+    len: BlobLen,
+  ) -> Result<Vec<u8>> {
+    (*self).read_blob(blob_id, offset, len)
+  }
 }
 
 pub trait WritablePolicy: ReadonlyPolicy {
+  fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>>;
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,
@@ -76,6 +93,9 @@ pub trait WritablePolicy: ReadonlyPolicy {
   }
 }
 impl<Policy: WritablePolicy> WritablePolicy for &Policy {
+  fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
+    (*self).write_blob(data)
+  }
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,
