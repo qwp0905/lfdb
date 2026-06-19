@@ -43,5 +43,8 @@ use record::*;
 mod iterator;
 pub use iterator::*;
 
-mod chunk;
-use chunk::*;
+mod blob;
+pub use blob::*;
+
+mod constants;
+pub use constants::*;
