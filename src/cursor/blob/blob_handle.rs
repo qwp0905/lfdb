@@ -72,10 +72,11 @@ impl BlobHandle {
   }
 
   pub fn write(&self, data: &[u8], offset: BlobOffset) -> Result {
+    // blob handle must call write only rather than alloc_and_write since it calls fallocate in constructor.
     let static_ref = unsafe { transmute::<&[u8], &'static [u8]>(data) };
     self
       .io
-      .write_async(static_ref, offset)
+      .write_only(static_ref, offset)
       .wait()
       .unwrap()
       .map_err(Error::IO)

@@ -179,9 +179,11 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
     .get_root();
   let mut node_stack = vec![root];
   let mut entry_stack = vec![];
+  let mut used = HEADER_POINTER;
 
   while let Some(ptr) = node_stack.pop() {
     visited.insert(ptr);
+    used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
       .for_read()
@@ -200,6 +202,7 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
+    used = used.max(ptr);
     let slot = block_cache.read(ptr, table)?.for_read();
     let entry: DataEntryView = slot.as_ref().view()?;
     if let Some(i) = entry.get_next() {
@@ -212,6 +215,7 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
   (0..file_end)
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
+  table.free().replay(used + 1);
 
   Ok(())
 }
