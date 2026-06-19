@@ -10,9 +10,6 @@ use crate::{
   Result,
 };
 
-pub const MAX_KEY: usize = 1 << 8;
-pub const MAX_VALUE: usize = 1 << 16;
-
 /**
  * MVCC version chain for a single key, stored as a linked list of pages.
  * When a page fills up with version records, overflow continues on the next page
