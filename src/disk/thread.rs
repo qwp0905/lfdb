@@ -1,4 +1,5 @@
 use std::{
+  cell::Cell,
   io::{Error, IoSlice, Result},
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -17,6 +18,27 @@ use crate::{
 };
 
 pub type WriteTask = (u64, IoSlice<'static>);
+
+pub struct AllocState(Cell<u64>);
+impl AllocState {
+  pub const fn new(allocated: u64) -> Self {
+    Self(Cell::new(allocated))
+  }
+  pub const fn get(&self) -> u64 {
+    self.0.get()
+  }
+  pub fn set(&self, allocated: u64) {
+    self.0.set(allocated);
+  }
+}
+
+/**
+ * AllocState allowed send and sync because only one thread can access to this state.
+ * Multiple requests are merged into a single dispatch and executed once on a single thread.
+ * Only in io pool is allowed to access this state.
+ */
+unsafe impl Send for AllocState {}
+unsafe impl Sync for AllocState {}
 
 pub struct HandleState {
   /**
@@ -61,7 +83,32 @@ impl<T> TaskPublisher<T> {
   }
 }
 impl SBox<TaskPublisher<WriteTask>> {
-  pub fn publish_write(
+  pub fn publish_alloc_and_write(
+    &self,
+    state: &SBox<HandleState>,
+    thread: &IOThread,
+    backend: &Arc<dyn IOBackend>,
+    alloc: &SBox<AllocState>,
+    task: WriteTask,
+  ) -> Oneshot<Result<()>> {
+    if state.is_closed() {
+      return Oneshot::fulfilled(Ok(()));
+    }
+
+    let (o, f) = oneshot();
+    self.queue.push((task, f));
+    if self.occupied.fetch_or(true, Ordering::Release) {
+      return o;
+    }
+
+    thread.dispatch((
+      backend.clone(),
+      IOTask::AllocAndWrite(self.clone(), alloc.clone()),
+      state.clone(),
+    ));
+    o
+  }
+  pub fn publish_write_only(
     &self,
     state: &SBox<HandleState>,
     thread: &IOThread,
@@ -78,12 +125,40 @@ impl SBox<TaskPublisher<WriteTask>> {
       return o;
     }
 
-    thread.dispatch((backend.clone(), IOTask::Write(self.clone()), state.clone()));
+    thread.dispatch((
+      backend.clone(),
+      IOTask::WriteOnly(self.clone()),
+      state.clone(),
+    ));
     o
   }
 
   const MAX_FLUSH_COUNT: usize = max_iov();
-  fn handle_write(
+  fn handle_alloc_and_write(
+    &self,
+    metrics: &MetricsRegistry,
+    backend: &dyn IOBackend,
+    state: &HandleState,
+    alloc: &AllocState,
+  ) {
+    let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
+
+    loop {
+      for task in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+        buffered.push(task);
+      }
+
+      flush_alloc_and_write(metrics, backend, state, alloc, &mut buffered);
+      self.occupied.fetch_and(false, Ordering::Release);
+      if self.queue.is_empty() {
+        break;
+      }
+      if self.occupied.fetch_or(true, Ordering::AcqRel) {
+        break;
+      }
+    }
+  }
+  fn handle_write_only(
     &self,
     metrics: &MetricsRegistry,
     backend: &dyn IOBackend,
@@ -96,7 +171,7 @@ impl SBox<TaskPublisher<WriteTask>> {
         buffered.push(task);
       }
 
-      flush_write(metrics, backend, state, &mut buffered);
+      flush_write_only(metrics, backend, state, &mut buffered);
       self.occupied.fetch_and(false, Ordering::Release);
       if self.queue.is_empty() {
         break;
@@ -155,7 +230,8 @@ impl SBox<TaskPublisher<()>> {
   }
 }
 pub enum IOTask {
-  Write(SBox<TaskPublisher<WriteTask>>),
+  AllocAndWrite(SBox<TaskPublisher<WriteTask>>, SBox<AllocState>),
+  WriteOnly(SBox<TaskPublisher<WriteTask>>),
   Sync(SBox<TaskPublisher<()>>),
 }
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
@@ -165,14 +241,16 @@ pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   move |(backend, task, state)| {
     metrics.active_io_threads.inc();
     match task {
-      IOTask::Write(handle) => handle.handle_write(&metrics, &*backend, &state),
+      IOTask::AllocAndWrite(handle, alloc) => {
+        handle.handle_alloc_and_write(&metrics, &*backend, &state, &alloc)
+      }
+      IOTask::WriteOnly(handle) => handle.handle_write_only(&metrics, &*backend, &state),
       IOTask::Sync(handle) => handle.handle_sync(&metrics, &*backend, &state),
     }
     metrics.active_io_threads.dec();
   }
 }
-
-fn flush_write(
+fn flush_write_only(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
   state: &HandleState,
@@ -188,29 +266,79 @@ fn flush_write(
     return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
   };
 
-  let result = write_exec(metrics, backend, values).map_err(|err| err.kind());
+  let result = exec_write_only(metrics, backend, values).map_err(|err| err.kind());
   waiting
     .into_iter()
     .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }
+fn flush_alloc_and_write(
+  metrics: &MetricsRegistry,
+  backend: &dyn IOBackend,
+  state: &HandleState,
+  alloc: &AllocState,
+  buffered: &mut Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
+) {
+  if buffered.is_empty() {
+    return;
+  }
 
-fn write_exec(
+  let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
+  let Some(_token) = state.pin.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Release);
+    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+  };
+
+  let result =
+    exec_alloc_and_write(metrics, backend, alloc, values).map_err(|err| err.kind());
+  waiting
+    .into_iter()
+    .for_each(|done| done.fulfill(result.map_err(Error::from)));
+}
+const EXTENT: u64 = 1 << 20;
+fn exec_write_only(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
   mut buffered: Vec<WriteTask>,
 ) -> std::io::Result<()> {
-  if buffered.len() == 1 {
-    let (p, buf) = &buffered[0];
-    metrics.disk_write_batch.record(1.0);
-    measure!(metrics.disk_write, backend.pwrite_or_fail(buf, *p))?;
-    return Ok(());
-  }
-
   // last caller wins on duplicate pointers
   buffered.sort_by_key(|(i, _)| *i);
   buffered.reverse();
   buffered.dedup_by_key(|(i, b)| (*i, b.len()));
   buffered.reverse();
+
+  for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
+    let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
+    metrics.disk_write_batch.record(bufs.len() as f64);
+
+    let offset = offset[0];
+    if bufs.len() == 1 {
+      measure!(metrics.disk_write, backend.pwrite_or_fail(&bufs[0], offset))?;
+      continue;
+    }
+
+    measure!(metrics.disk_write, backend.pwritev_or_fail(&bufs, offset))?;
+  }
+  Ok(())
+}
+fn exec_alloc_and_write(
+  metrics: &MetricsRegistry,
+  backend: &dyn IOBackend,
+  alloc: &AllocState,
+  mut buffered: Vec<WriteTask>,
+) -> std::io::Result<()> {
+  // last caller wins on duplicate pointers
+  buffered.sort_by_key(|(i, _)| *i);
+  buffered.reverse();
+  buffered.dedup_by_key(|(i, b)| (*i, b.len()));
+  buffered.reverse();
+
+  let required = buffered.last().map(|(o, b)| *o + b.len() as u64).unwrap();
+  let mut allocated = alloc.get();
+  while required > allocated {
+    allocated += EXTENT;
+  }
+  backend.fallocate(alloc.get(), allocated - alloc.get())?;
+  alloc.set(allocated);
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
