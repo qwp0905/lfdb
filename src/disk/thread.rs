@@ -202,7 +202,7 @@ fn write_exec(
   if buffered.len() == 1 {
     let (p, buf) = &buffered[0];
     metrics.disk_write_batch.record(1.0);
-    measure!(metrics.disk_write, backend.pwrite_all(buf, *p))?;
+    measure!(metrics.disk_write, backend.pwrite_or_fail(buf, *p))?;
     return Ok(());
   }
 
@@ -213,17 +213,16 @@ fn write_exec(
   buffered.reverse();
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
-    let (offset, mut bufs): (Vec<_>, Vec<_>) =
-      chunk.iter().map(|(o, b)| (*o, *b)).unzip();
+    let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
     metrics.disk_write_batch.record(bufs.len() as f64);
 
     let offset = offset[0];
     if bufs.len() == 1 {
-      measure!(metrics.disk_write, backend.pwrite_all(&bufs[0], offset))?;
+      measure!(metrics.disk_write, backend.pwrite_or_fail(&bufs[0], offset))?;
       continue;
     }
 
-    measure!(metrics.disk_write, backend.pwritev_all(&mut bufs, offset))?;
+    measure!(metrics.disk_write, backend.pwritev_or_fail(&bufs, offset))?;
   }
   Ok(())
 }
