@@ -188,26 +188,17 @@ impl IOHandle {
     // If a path for read access to the removed table is established, pin guarantees are required.
     measure!(
       self.metrics.disk_read,
-      self.backend.pread_exact(buf, offset)
+      self.backend.pread_or_fail(buf, offset)
     )
   }
 
-  pub fn read_unchecked(&self, mut buf: &mut [u8], mut offset: u64) -> IOResult<()> {
-    let full = buf.len();
-    while !buf.is_empty() {
-      match self.backend.pread(buf, offset) {
-        Ok(0) if buf.len() == full => break, // allow only empty, not partial.
-        Ok(0) => return Err(IoError::from(ErrorKind::UnexpectedEof)),
-        Ok(n) => {
-          let tmp = buf;
-          buf = &mut tmp[n..];
-          offset += n as u64;
-        }
-        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) => return Err(e),
-      }
+  pub fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
+    match self.backend.pread(buf, offset) {
+      Ok(0) => Ok(()),
+      Ok(n) if n == buf.len() => Ok(()),
+      Ok(_) => Err(IoError::from(ErrorKind::UnexpectedEof)),
+      Err(err) => Err(err),
     }
-    Ok(())
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {

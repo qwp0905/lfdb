@@ -4,6 +4,8 @@ use std::{
   path::Path,
 };
 
+const RETRY: u8 = 3;
+
 pub trait IOBackend: Send + Sync + Read + Write + 'static {
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
   fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
@@ -15,54 +17,39 @@ pub trait IOBackend: Send + Sync + Read + Write + 'static {
   fn try_flock(&self) -> Result<bool>;
   fn unlock(&self) -> Result<()>;
 
-  fn pread_exact(&self, mut buf: &mut [u8], mut offset: u64) -> Result<()> {
-    while !buf.is_empty() {
-      match self.pread(buf, offset) {
-        Ok(0) => return Err(Error::from(ErrorKind::UnexpectedEof)),
-        Ok(n) => {
-          let tmp = buf;
-          buf = &mut tmp[n..];
-          offset += n as u64;
-        }
-        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) => return Err(e),
+  /**
+   * avoid half read.
+   */
+  fn pread_or_fail(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+    for _ in 0..RETRY {
+      if buf.len() == self.pread(buf, offset)? {
+        return Ok(());
       }
     }
-
-    Ok(())
+    Err(Error::from(ErrorKind::UnexpectedEof))
   }
-
-  fn pwrite_all(&self, mut buf: &[u8], mut offset: u64) -> Result<()> {
-    while !buf.is_empty() {
-      match self.pwrite(buf, offset) {
-        Ok(0) => return Err(Error::from(ErrorKind::WriteZero)),
-        Ok(n) => {
-          buf = &buf[n..];
-          offset += n as u64;
-        }
-        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) => return Err(e),
+  /**
+   * avoid half read.
+   */
+  fn pwrite_or_fail(&self, buf: &[u8], offset: u64) -> Result<()> {
+    for _ in 0..RETRY {
+      if buf.len() == self.pwrite(buf, offset)? {
+        return Ok(());
       }
     }
-    Ok(())
+    Err(Error::from(ErrorKind::WriteZero))
   }
-
-  fn pwritev_all(&self, mut bufs: &mut [IoSlice<'_>], mut offset: u64) -> Result<()> {
-    while !bufs.is_empty() {
-      match self.pwritev(bufs, offset) {
-        Ok(0) => {
-          return Err(Error::new(ErrorKind::WriteZero, "pwritev wrote zero bytes"))
-        }
-        Ok(n) => {
-          IoSlice::advance_slices(&mut bufs, n);
-          offset += n as u64;
-        }
-        Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) => return Err(e),
+  /**
+   * avoid half read.
+   */
+  fn pwritev_or_fail(&self, bufs: &[IoSlice<'_>], offset: u64) -> Result<()> {
+    let total: usize = bufs.iter().map(|b| b.len()).sum();
+    for _ in 0..RETRY {
+      if total == self.pwritev(bufs, offset)? {
+        return Ok(());
       }
     }
-
-    Ok(())
+    Err(Error::from(ErrorKind::WriteZero))
   }
 }
 
