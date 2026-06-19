@@ -6,7 +6,9 @@ use super::{
 
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage, Compactor, GarbageCollector},
+  cursor::{
+    BlobAppendGuard, BlobHandle, BlobId, BlobStorage, Compactor, GarbageCollector,
+  },
   disk::{IOPool, Pointer},
   error::Result,
   info, measure,
