@@ -90,7 +90,7 @@ impl CheckpointCycle {
 
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
-  ticker: Box<dyn BackgroundThread<(), Result>>,
+  ticker: Box<dyn BackgroundThread<()>>,
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
@@ -250,6 +250,65 @@ binding_events!(Checkpoint {
   shared: [WALFailed]
 });
 
+fn run_tick<F: Fn(usize) -> usize>(
+  incoming: &SegQueue<WALSegment>,
+  wal: &WAL,
+  block_cache: &BlockCache,
+  version: &VersionVisibility,
+  io_pool: &IOPool,
+  event_bus: &EventBus,
+  cycle: &AtomicCell<Option<CheckpointCycle>>,
+  metrics: &MetricsRegistry,
+  calc_batch_size: &F,
+) -> Result {
+  let cycle = cycle.as_ptr().borrow_mut_unsafe();
+  let Some(current) = cycle else {
+    let log_id = wal.current_log_id();
+    let new = CheckpointCycle::new(
+      repeat(()).map_while(|_| incoming.pop()),
+      block_cache.create_flusher(),
+      log_id,
+      metrics.checkpoint_cycle.start(),
+    );
+    if new.is_empty() {
+      debug!("no checkpoint required.");
+      return Ok(());
+    }
+
+    info!(
+      "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
+      new.dirty_len(),
+      new.segments_len(),
+    );
+    return Ok(*cycle = Some(new));
+  };
+
+  if !current.flush_done() {
+    let batch_size = calc_batch_size(current.segments_len() + incoming.len());
+    trace!("checkpoint flush {} blocks", batch_size);
+    return current.advance_flush(batch_size);
+  }
+
+  info!("checkpoint id {} trying to finish.", current.get_log_id());
+
+  current.finish_flush()?;
+  debug!("block cache all flushed.");
+
+  if current.segments_len() == 0 {
+    debug!("skip create checkpoint snapshot since nothing to rotate.");
+    return Ok(*cycle = None);
+  }
+
+  finalize_checkpoint(version, io_pool, wal, current.get_log_id())?;
+  metrics.checkpoint_cycle.record(current.take_start());
+  info!("checkpoint complete id {}", current.get_log_id());
+
+  let events = current.drain_all().map(SegmentReuseable::new);
+  event_bus.batch_publish(events);
+
+  Ok(*cycle = None)
+}
+
 /**
  * Adaptive incremental checkpoint.
  * As the pressure to replace Wal segments increases,
@@ -265,7 +324,7 @@ fn checkpoint_loop(
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
-) -> impl FnMut(Option<()>) -> Result {
+) -> impl FnMut(Option<()>) {
   let mut calculated = [0f64; 20];
   calculated[0] = BATCH_SIZE;
   for i in 1..calculated.len() {
@@ -282,52 +341,18 @@ fn checkpoint_loop(
   };
 
   move |_| {
-    let cycle = cycle.as_ptr().borrow_mut_unsafe();
-    let Some(current) = cycle else {
-      let log_id = wal.current_log_id();
-      let new = CheckpointCycle::new(
-        repeat(()).map_while(|_| incoming.pop()),
-        block_cache.create_flusher(),
-        log_id,
-        metrics.checkpoint_cycle.start(),
-      );
-      if new.is_empty() {
-        debug!("no checkpoint required.");
-        return Ok(());
-      }
-
-      info!(
-        "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
-        new.dirty_len(),
-        new.segments_len(),
-      );
-      return Ok(*cycle = Some(new));
-    };
-
-    if !current.flush_done() {
-      let batch_size = calc_batch_size(current.segments_len() + incoming.len());
-      trace!("checkpoint flush {} blocks", batch_size);
-      return current.advance_flush(batch_size);
-    }
-
-    info!("checkpoint id {} trying to finish.", current.get_log_id());
-
-    current.finish_flush()?;
-    debug!("block cache all flushed.");
-
-    if current.segments_len() == 0 {
-      debug!("skip create checkpoint snapshot since nothing to rotate.");
-      return Ok(*cycle = None);
-    }
-
-    finalize_checkpoint(&version, &io_pool, &wal, current.get_log_id())?;
-    metrics.checkpoint_cycle.record(current.take_start());
-    info!("checkpoint complete id {}", current.get_log_id());
-
-    let events = current.drain_all().map(SegmentReuseable::new);
-    event_bus.batch_publish(events);
-
-    Ok(*cycle = None)
+    run_tick(
+      &incoming,
+      &wal,
+      &block_cache,
+      &version,
+      &io_pool,
+      &event_bus,
+      &cycle,
+      &metrics,
+      &calc_batch_size,
+    )
+    .unwrap()
   }
 }
 
