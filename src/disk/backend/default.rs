@@ -7,6 +7,8 @@ use std::{
   path::Path,
 };
 
+#[cfg(target_vendor = "apple")]
+use std::io::ErrorKind;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -90,6 +92,9 @@ impl IOBackend for DefaultDiskBackend {
   }
   #[cfg(target_vendor = "apple")]
   fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
+    if len == 0 {
+      return Err(Error::from(ErrorKind::InvalidInput));
+    }
     let eof = self.metadata()?.len();
     if eof >= offset + len {
       return Ok(());
