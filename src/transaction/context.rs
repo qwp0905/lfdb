@@ -77,6 +77,18 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.fetch(pointer, table)
   }
+  fn read_blob(
+    &self,
+    blob_id: crate::cursor::BlobId,
+    offset: crate::cursor::BlobOffset,
+    len: crate::cursor::BlobLen,
+  ) -> Result<Vec<u8>> {
+    let blob = self
+      .orchestrator
+      .get_blob_handle(blob_id)
+      .unwrap_or_else(|| unreachable!("blob id {blob_id} must exists"));
+    blob.read_at(offset, len)
+  }
 }
 impl<'a> WritablePolicy for TxContext<'a> {
   fn serialize_and_log<T: Serializable>(
@@ -102,6 +114,9 @@ impl<'a> WritablePolicy for TxContext<'a> {
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.alloc(pointer, table)
+  }
+  fn write_blob(&self, data: Vec<u8>) -> Result<crate::cursor::BlobAppendGuard<'_>> {
+    self.orchestrator.write_blob(data)
   }
 }
 impl<'a> CreatablePolicy for TxContext<'a> {

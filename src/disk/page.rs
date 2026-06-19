@@ -139,6 +139,13 @@ impl<'a, const T: usize> PageScanner<'a, T> {
       None => Err(EOF),
     }
   }
+  #[inline(always)]
+  pub const fn read_u32(&mut self) -> Result<u32> {
+    match self.0.read_u32() {
+      Some(v) => Ok(v),
+      None => Err(EOF),
+    }
+  }
 
   #[inline(always)]
   pub const fn read_u16(&mut self) -> Result<u16> {
@@ -166,6 +173,13 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   #[inline(always)]
   pub const fn write_u64(&mut self, value: u64) -> Result {
     match self.0.write_u64(value) {
+      true => Ok(()),
+      false => Err(EOF),
+    }
+  }
+  #[inline(always)]
+  pub const fn write_u32(&mut self, value: u32) -> Result {
+    match self.0.write_u32(value) {
       true => Ok(()),
       false => Err(EOF),
     }

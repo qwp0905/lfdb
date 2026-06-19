@@ -30,7 +30,7 @@ fn test_entry_with_data_roundtrip() {
   match &records[0].data {
     RecordDataView::Data(s, e) => assert_eq!(page.range(*s..*e), &vec![10, 20, 30]),
     RecordDataView::Tombstone => panic!("expected Data"),
-    RecordDataView::Chunked(_) => panic!("expected Data"),
+    RecordDataView::Blob(_, _, _) => panic!("expected Data"),
   }
 }
 
@@ -53,20 +53,15 @@ fn test_entry_with_tombstone_roundtrip() {
   match &records[0].data {
     RecordDataView::Data(_, _) => panic!("expected Tombstone"),
     RecordDataView::Tombstone => {}
-    RecordDataView::Chunked(_) => panic!("expected Tombstone"),
+    RecordDataView::Blob(_, _, _) => panic!("expected Tombstone"),
   }
 }
 #[test]
 fn test_entry_with_chunked_roundtrip() {
   let mut page = Page::new();
-  let pointers = vec![10, 20, 30, 500];
   let owner = 2;
   let mut entry = DataEntry::empty();
-  entry.append(VersionRecord::new(
-    2,
-    200,
-    RecordData::Chunked(pointers.clone()),
-  ));
+  entry.append(VersionRecord::new(2, 200, RecordData::Blob(1, 2, 3)));
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.view().expect("deserialize error");
@@ -82,8 +77,12 @@ fn test_entry_with_chunked_roundtrip() {
   match &records[0].data {
     RecordDataView::Data(_, _) => panic!("expected Chunked"),
     RecordDataView::Tombstone => panic!("expected Chunked"),
-    RecordDataView::Chunked(p) => assert_eq!(p, &pointers),
-  }
+    RecordDataView::Blob(id, offset, len) => {
+      assert_eq!(*id, 1);
+      assert_eq!(*offset, 2);
+      assert_eq!(*len, 3);
+    }
+  };
 }
 
 #[test]

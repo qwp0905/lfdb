@@ -7,22 +7,23 @@ use crate::{
 use crossbeam::epoch::pin;
 
 use super::{
-  BTreeNodeView, DataChunkView, DataEntryView, MergeSortable, ReadonlyPolicy,
-  RecordDataView, StaticKey, TreeHeader, VecRef, VersionRecordView, HEADER_POINTER,
+  BTreeNodeView, BlobId, BlobLen, BlobOffset, DataEntryView, MergeSortable,
+  ReadonlyPolicy, RecordDataView, StaticKey, TreeHeader, VecRef, VersionRecordView,
+  HEADER_POINTER,
 };
 
-enum Buffered {
+pub enum BufferedValue {
   Data(VecRef),
-  Chunked(Vec<Pointer>),
+  Blob(BlobId, BlobOffset, BlobLen),
 }
 
 struct BufferedRecord {
-  data: Buffered,
+  data: BufferedValue,
   owner: TxId,
   version: TxId,
 }
 impl BufferedRecord {
-  const fn new(data: Buffered, owner: TxId, version: TxId) -> Self {
+  const fn new(data: BufferedValue, owner: TxId, version: TxId) -> Self {
     Self {
       data,
       owner,
@@ -33,12 +34,12 @@ impl BufferedRecord {
   fn from(slot: &ReadonlySlot, record: VersionRecordView) -> Option<Self> {
     match record.data {
       RecordDataView::Data(s, e) => Some(Self::new(
-        Buffered::Data(VecRef::refed(slot.page(), s, e)),
+        BufferedValue::Data(VecRef::refed(slot.page(), s, e)),
         record.owner,
         record.version,
       )),
-      RecordDataView::Chunked(pointers) => Some(Self::new(
-        Buffered::Chunked(pointers),
+      RecordDataView::Blob(id, offset, len) => Some(Self::new(
+        BufferedValue::Blob(id, offset, len),
         record.owner,
         record.version,
       )),
@@ -49,7 +50,7 @@ impl BufferedRecord {
 
 pub struct KVSnapshot {
   pub key: VecRef,
-  pub value: VecRef,
+  pub value: BufferedValue,
   pub owner: TxId,
   pub version: TxId,
 }
@@ -69,19 +70,11 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
         continue;
       };
 
-      return Ok(Some(match record.data {
-        Buffered::Data(value) => KVSnapshot {
-          key,
-          value,
-          owner: record.owner,
-          version: record.version,
-        },
-        Buffered::Chunked(pointers) => KVSnapshot {
-          key,
-          value: self.0.read_chunk(&pointers)?,
-          owner: record.owner,
-          version: record.version,
-        },
+      return Ok(Some(KVSnapshot {
+        key,
+        value: record.data,
+        owner: record.owner,
+        version: record.version,
       }));
     }
   }
@@ -158,10 +151,6 @@ where
         }
       }
     }
-  }
-
-  fn read_chunk(&self, pointers: &[Pointer]) -> Result<VecRef> {
-    DataChunkView::read_data(&self.policy, pointers, &self.table)
   }
 
   fn __find(
@@ -250,8 +239,11 @@ where
       return Ok(Some((key, None)));
     };
     match record.data {
-      Buffered::Data(data) => Ok(Some((key, Some(data)))),
-      Buffered::Chunked(pointers) => Ok(Some((key, Some(self.read_chunk(&pointers)?)))),
+      BufferedValue::Data(data) => Ok(Some((key, Some(data)))),
+      BufferedValue::Blob(id, offset, len) => Ok(Some((
+        key,
+        Some(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
+      ))),
     }
   }
 }

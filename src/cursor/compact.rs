@@ -9,8 +9,8 @@ use std::{
 use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{
-  BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, Snapshotter,
-  WritablePolicy,
+  BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy,
+  Snapshotter, WritablePolicy,
 };
 use crate::{
   background::{
@@ -36,6 +36,7 @@ struct MiniTx<'a> {
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
   wal: &'a WAL,
+  blob: &'a BlobStorage,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -45,6 +46,7 @@ impl<'a> MiniTx<'a> {
     wal: &'a WAL,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
+    blob: &'a BlobStorage,
   ) -> Result<Self> {
     let Some((snapshot, state)) = version_visibility.new_transaction() else {
       return Err(Error::EngineUnavailable);
@@ -56,6 +58,7 @@ impl<'a> MiniTx<'a> {
       recorder,
       version_visibility,
       wal,
+      blob,
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -112,6 +115,18 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
   fn is_active(&self, owner: TxId) -> bool {
     self.snapshot.is_active(&owner)
   }
+  fn read_blob(
+    &self,
+    blob_id: super::BlobId,
+    offset: super::BlobOffset,
+    len: super::BlobLen,
+  ) -> Result<Vec<u8>> {
+    let blob = self
+      .blob
+      .get(blob_id)
+      .unwrap_or_else(|| unreachable!("blob id {blob_id} must exists"));
+    blob.read_at(offset, len)
+  }
 }
 impl<'a> WritablePolicy for MiniTx<'a> {
   fn serialize_and_log<T: Serializable>(
@@ -137,6 +152,9 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     table: &TableHandleRef,
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
+  }
+  fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+    self.blob.append(data)
   }
 }
 impl<'a> CreatablePolicy for MiniTx<'a> {
@@ -173,6 +191,14 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table)
   }
+  fn read_blob(
+    &self,
+    _: super::BlobId,
+    _: super::BlobOffset,
+    _: super::BlobLen,
+  ) -> Result<Vec<u8>> {
+    unreachable!()
+  }
 }
 
 struct CompactionWritePolicy {
@@ -200,6 +226,14 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   fn is_active(&self, _: TxId) -> bool {
     false
   }
+  fn read_blob(
+    &self,
+    _: super::BlobId,
+    _: super::BlobOffset,
+    _: super::BlobLen,
+  ) -> Result<Vec<u8>> {
+    unreachable!()
+  }
 }
 impl WritablePolicy for CompactionWritePolicy {
   fn serialize_and_log<T: Serializable>(
@@ -220,6 +254,9 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
+  fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+    unreachable!()
+  }
 }
 
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
@@ -230,10 +267,11 @@ fn create_compaction(
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
+  blob: &BlobStorage,
   meta_table: &TableHandleRef,
   table_name: &TableName,
 ) -> Result<Option<(PinnedHandle, TxId, TableMetadata)>> {
-  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
   let index = BTreeIndex::new(&tx);
 
   let Some(bytes) = index.get(table_name.as_bytes(), meta_table)?.flatten() else {
@@ -331,6 +369,7 @@ pub struct Compactor {
   version_visibility: Arc<VersionVisibility>,
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
+  blob: Arc<BlobStorage>,
   meta_table: TableHandleRef,
 }
 impl Compactor {
@@ -341,6 +380,7 @@ impl Compactor {
     version_visibility: Arc<VersionVisibility>,
     wal: Arc<WAL>,
     event_bus: Arc<EventBus>,
+    blob: Arc<BlobStorage>,
     config: CompactionConfig,
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
@@ -361,6 +401,7 @@ impl Compactor {
           wal.clone(),
           recorder.clone(),
           event_bus.clone(),
+          blob.clone(),
           cycle.clone(),
           config.batch_size,
         ),
@@ -376,6 +417,7 @@ impl Compactor {
       version_visibility,
       recorder,
       wal,
+      blob,
       meta_table: tables.meta_table(),
     });
     event_bus.register(&this);
@@ -418,6 +460,7 @@ impl Compactor {
         &self.wal,
         &self.block_cache,
         &self.recorder,
+        &self.blob,
         &self.meta_table,
         cycle.metadata.get_name(),
       )? {
@@ -438,6 +481,7 @@ impl Compactor {
         &self.wal,
         &self.block_cache,
         &self.recorder,
+        &self.blob,
         &self.meta_table,
         &cycle.metadata,
       )?;
@@ -489,10 +533,11 @@ fn remove_compaction(
   wal: &WAL,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
+  blob: &BlobStorage,
   meta_table: &TableHandleRef,
   table_metadata: &TableMetadata,
 ) -> Result<Option<(TxId, TxId)>> {
-  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
   let index = BTreeIndex::new(&tx);
 
   let table_name = table_metadata.get_name();
@@ -539,10 +584,11 @@ fn check_compaction(
   wal: &WAL,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
+  blob: &BlobStorage,
   meta_table: &TableHandleRef,
   table_name: &TableName,
 ) -> Result<bool> {
-  let tx = MiniTx::start(version_visibility, wal, block_cache, recorder)?;
+  let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
   BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)
 }
 
@@ -555,6 +601,7 @@ fn compaction_loop(
   wal: Arc<WAL>,
   recorder: Arc<PageRecorder>,
   event_bus: Arc<EventBus>,
+  blob: Arc<BlobStorage>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
 ) -> impl FnMut(Option<()>) -> Result {
@@ -594,6 +641,7 @@ fn compaction_loop(
             &block_cache,
             &recorder,
             &tables,
+            &blob,
             &meta_table,
             table_name,
           )?
@@ -642,6 +690,7 @@ fn compaction_loop(
         &wal,
         &block_cache,
         &recorder,
+        &blob,
         &meta_table,
         &current.metadata,
       )?
@@ -666,6 +715,7 @@ fn compaction_loop(
       &wal,
       &block_cache,
       &recorder,
+      &blob,
       &meta_table,
       current.metadata.get_name(),
     )? {

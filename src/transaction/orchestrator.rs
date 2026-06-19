@@ -6,13 +6,16 @@ use super::{
 
 use crate::{
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{Compactor, GarbageCollector},
+  cursor::{
+    BlobAppendGuard, BlobHandle, BlobId, BlobStorage, Compactor, GarbageCollector,
+  },
   disk::{IOPool, Pointer},
   error::Result,
   info, measure,
   metrics::MetricsRegistry,
   serialize::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
+  utils::SBox,
   wal::{TxId, WAL},
 };
 
@@ -36,6 +39,7 @@ pub struct TxOrchestrator {
   recorder: Arc<PageRecorder>,
   compactor: Arc<Compactor>,
   io_pool: Arc<IOPool>,
+  blob: Arc<BlobStorage>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
@@ -51,6 +55,7 @@ impl TxOrchestrator {
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
     io_pool: Arc<IOPool>,
+    blob: Arc<BlobStorage>,
     checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
@@ -66,6 +71,7 @@ impl TxOrchestrator {
       compactor,
       timeout_thread,
       io_pool,
+      blob,
       tx_timeout: config.timeout,
       metrics,
     }
@@ -154,6 +160,13 @@ impl TxOrchestrator {
 
   pub fn wait_commit(&self, owner: TxId) {
     self.version_visibility.wait_commit(owner);
+  }
+
+  pub fn get_blob_handle(&self, blob_id: BlobId) -> Option<SBox<BlobHandle>> {
+    self.blob.get(blob_id)
+  }
+  pub fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
+    self.blob.append(data)
   }
 
   /**
