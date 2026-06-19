@@ -75,11 +75,8 @@ impl TableMapper {
       exists.insert(filename);
     }
 
-    self.metadata.replay()?;
-
     for (metadata, table) in iter {
       exists.remove(metadata.get_filename());
-      table.replay()?;
       let id = metadata.get_id();
       self.last_table_id.fetch_max(id + 1, Ordering::Relaxed);
       self.open_handles.wl().insert(id, table);
