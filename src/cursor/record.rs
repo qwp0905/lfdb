@@ -1,8 +1,8 @@
-use crate::{
-  disk::{Pointer, POINTER_BYTES},
-  wal::TxId,
-  Error,
+use super::{
+  BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_LEN_BYTES, BLOB_OFFSET_BYTES,
 };
+
+use crate::{disk::POINTER_BYTES, wal::TxId, Error};
 
 /**
  * Data: value fits inline in the DataEntry page.
@@ -13,15 +13,15 @@ use crate::{
 #[derive(Debug)]
 pub enum RecordData {
   Data(Vec<u8>),
-  Chunked(Vec<Pointer>),
+  Blob(BlobId, BlobOffset, BlobLen),
   Tombstone,
 }
 impl RecordData {
   pub const fn len(&self) -> usize {
-    match self {
-      RecordData::Data(data) => 1 + 2 + data.len(),
-      RecordData::Chunked(pointers) => 1 + 1 + POINTER_BYTES * pointers.len(),
-      RecordData::Tombstone => 1,
+    1 + match self {
+      RecordData::Data(data) => 2 + data.len(),
+      RecordData::Blob(_, _, _) => BLOB_ID_BYTES + BLOB_OFFSET_BYTES + BLOB_LEN_BYTES,
+      RecordData::Tombstone => 0,
     }
   }
 }
@@ -60,12 +60,11 @@ impl VersionRecord {
         writer.write(data)?;
       }
       RecordData::Tombstone => writer.write(&[1])?,
-      RecordData::Chunked(pointers) => {
+      RecordData::Blob(id, offset, len) => {
         writer.write(&[2])?;
-        writer.write_u8(pointers.len() as u8)?;
-        for ptr in pointers {
-          writer.write_u64(*ptr)?;
-        }
+        writer.write_u64(*id)?;
+        writer.write_u64(*offset)?;
+        writer.write_u32(*len)?;
       }
     }
     Ok(())
@@ -81,12 +80,10 @@ impl VersionRecord {
       }
       1 => RecordData::Tombstone,
       2 => {
-        let l = reader.read()? as usize;
-        let mut pointers = Vec::with_capacity(l);
-        for _ in 0..l {
-          pointers.push(reader.read_u64()?);
-        }
-        RecordData::Chunked(pointers)
+        let id = reader.read_u64()?;
+        let offset = reader.read_u64()?;
+        let len = reader.read_u32()?;
+        RecordData::Blob(id, offset, len)
       }
       _ => return Err(Error::InvalidFormat("invalid type for data version record")),
     };
@@ -97,7 +94,7 @@ impl VersionRecord {
 #[derive(Debug)]
 pub enum RecordDataView {
   Data(usize, usize),
-  Chunked(Vec<Pointer>),
+  Blob(BlobId, BlobOffset, BlobLen),
   Tombstone,
 }
 impl RecordDataView {
@@ -132,12 +129,10 @@ impl VersionRecordView {
       }
       1 => RecordDataView::Tombstone,
       2 => {
-        let l = reader.read()? as usize;
-        let mut pointers = Vec::with_capacity(l);
-        for _ in 0..l {
-          pointers.push(reader.read_u64()?);
-        }
-        RecordDataView::Chunked(pointers)
+        let id = reader.read_u64()?;
+        let offset = reader.read_u64()?;
+        let len = reader.read_u32()?;
+        RecordDataView::Blob(id, offset, len)
       }
       _ => return Err(Error::InvalidFormat("invalid type for data version record")),
     };
