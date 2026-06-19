@@ -14,7 +14,7 @@ use crate::{
 
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 
-pub const ALIGN: usize = PAGE_SIZE;
+pub const ALIGN: usize = 512;
 
 /**
  * An abstraction over a fixed-size disk block.
