@@ -320,6 +320,22 @@ fn exec_write_only(
   }
   Ok(())
 }
+fn alloc_if_needed(
+  required: u64,
+  alloc: &AllocState,
+  backend: &dyn IOBackend,
+) -> Result<()> {
+  let mut allocated = alloc.get();
+  if allocated >= required {
+    return Ok(());
+  }
+  while required >= allocated {
+    allocated += EXTENT;
+  }
+  backend.fallocate(alloc.get(), allocated - alloc.get())?;
+  alloc.set(allocated);
+  Ok(())
+}
 fn exec_alloc_and_write(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
@@ -333,12 +349,7 @@ fn exec_alloc_and_write(
   buffered.reverse();
 
   let required = buffered.last().map(|(o, b)| *o + b.len() as u64).unwrap();
-  let mut allocated = alloc.get();
-  while required > allocated {
-    allocated += EXTENT;
-  }
-  backend.fallocate(alloc.get(), allocated - alloc.get())?;
-  alloc.set(allocated);
+  alloc_if_needed(required, alloc, backend)?;
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
