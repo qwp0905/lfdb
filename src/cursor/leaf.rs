@@ -7,6 +7,8 @@ use crate::{
   Result,
 };
 
+const EMPTY_PRESSURE: [u8; 3] = [0; 3];
+
 #[derive(Debug)]
 pub struct LeafEntry {
   key: StaticKey,
@@ -31,21 +33,28 @@ impl LeafEntry {
 pub struct LeafNode {
   entries: Vec<LeafEntry>,
   next: Option<Pointer>,
+  pressure: [u8; 3],
 }
 impl LeafNode {
   pub const fn empty() -> Self {
-    Self {
-      entries: Vec::new(),
-      next: None,
-    }
+    Self::new(Vec::new(), None, EMPTY_PRESSURE)
   }
-  pub const fn new(entries: Vec<LeafEntry>, next: Option<Pointer>) -> Self {
-    Self { entries, next }
+  const fn new(
+    entries: Vec<LeafEntry>,
+    next: Option<Pointer>,
+    pressure: [u8; 3],
+  ) -> Self {
+    Self {
+      entries,
+      next,
+      pressure,
+    }
   }
 
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
     writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.entries.len() as u16)?;
+    writer.write(&self.pressure)?;
     for entry in &self.entries {
       writer.write_u16(entry.key.len() as u16)?;
       writer.write(&entry.key)?;
@@ -58,6 +67,7 @@ impl LeafNode {
   pub fn from_scanner(scanner: &mut PageScanner) -> Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
+    let pressure = scanner.read_array::<3>()?;
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
@@ -66,7 +76,7 @@ impl LeafNode {
       let next = scanner.read_u64()?;
       entries.push(LeafEntry::new(key, record, next))
     }
-    Ok(Self::new(entries, (next != 0).then_some(next)))
+    Ok(Self::new(entries, (next != 0).then_some(next), pressure))
   }
 
   pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
@@ -74,35 +84,54 @@ impl LeafNode {
   }
 
   #[inline]
-  fn bytes_len(&self) -> usize {
-    1 + POINTER_BYTES + 2 + self.entries.iter().map(|e| e.bytes_len()).sum::<usize>()
+  fn data_bytes(&self) -> usize {
+    self.entries.iter().map(|e| e.bytes_len()).sum::<usize>()
   }
+  // node type + entry len (u16) + next pointer + pressure array (3 byte)
+  const RESERVED_BYTES: usize = 1 + 2 + POINTER_BYTES + 3;
 
-  pub fn split_if_needed(&mut self, insert_at: usize) -> Option<LeafNode> {
-    let bytes_len = self.bytes_len();
-    if bytes_len <= SERIALIZABLE_BYTES {
+  pub fn split_if_needed(&mut self) -> Option<LeafNode> {
+    let data_bytes = self.data_bytes();
+    if data_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
-
-    debug_assert!(self.entries.len() > 1);
-    let len = self.entries.len();
-    let split_point = match insert_at {
-      i if i < len / 3 => bytes_len >> 2,
-      i if i < (len << 1) / 3 => bytes_len >> 1,
-      _ => (bytes_len >> 2) * 3,
+    let split_point = {
+      let [l, m, r] = replace(&mut self.pressure, EMPTY_PRESSURE);
+      let sum = l as usize + r as usize + m as usize;
+      (data_bytes * ((m as usize >> 1) + r as usize))
+        .checked_div(sum)
+        .unwrap_or(data_bytes >> 1)
     };
 
-    let mut sum = 1 + POINTER_BYTES + 2;
-    let mut mid = 0;
-    while mid == 0 || (sum < split_point && mid < len - 1) {
-      sum += self.entries[mid].bytes_len();
-      mid += 1;
+    debug_assert!(self.entries.len() > 1);
+
+    let mut best = None;
+    let mut left_data = 0;
+
+    for mid in 1..self.entries.len() {
+      left_data += self.entries[mid - 1].bytes_len();
+
+      if Self::RESERVED_BYTES + left_data > SERIALIZABLE_BYTES {
+        continue;
+      }
+      if Self::RESERVED_BYTES + data_bytes - left_data > SERIALIZABLE_BYTES {
+        continue;
+      }
+
+      let dist = left_data.abs_diff(split_point);
+      if best.is_none_or(|(_, best_dist)| dist < best_dist) {
+        best = Some((mid, dist));
+      }
     }
 
-    let split = Self::new(self.entries.split_off(mid), self.next.take());
-    debug_assert!(self.bytes_len() <= SERIALIZABLE_BYTES);
+    let split = Self::new(
+      self.entries.split_off(best.unwrap().0),
+      self.next.take(),
+      EMPTY_PRESSURE,
+    );
+    debug_assert!(self.data_bytes() + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES);
     debug_assert!(!self.entries.is_empty());
-    debug_assert!(split.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(split.data_bytes() + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES);
     debug_assert!(!split.entries.is_empty());
 
     Some(split)
@@ -121,6 +150,14 @@ impl LeafNode {
     self
       .entries
       .insert(index, LeafEntry::new(key, record, pointer));
+
+    let len = self.entries.len();
+    let i = match index {
+      i if i < len / 3 => 0,
+      i if i < (len << 1) / 3 => 1,
+      _ => 2,
+    };
+    self.pressure[i] = self.pressure[i].saturating_add(1);
   }
 
   pub fn top(&self) -> &StaticKey {
@@ -146,21 +183,36 @@ pub struct LeafNodeView<'a> {
   offset: usize,
   len: usize,
   next: Option<Pointer>,
+  pressure: [u8; 3],
 }
 impl<'a> LeafNodeView<'a> {
-  const fn new(page: &'a Page, offset: usize, len: usize, next: Option<Pointer>) -> Self {
+  const fn new(
+    page: &'a Page,
+    offset: usize,
+    len: usize,
+    next: Option<Pointer>,
+    pressure: [u8; 3],
+  ) -> Self {
     Self {
       page,
       offset,
       len,
       next,
+      pressure,
     }
   }
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
+    let pressure = scanner.read_array()?;
     let offset = scanner.advance(0)?;
-    Ok(Self::new(page, offset, len, (next != 0).then_some(next)))
+    Ok(Self::new(
+      page,
+      offset,
+      len,
+      (next != 0).then_some(next),
+      pressure,
+    ))
   }
 
   pub fn find(&self, key: StaticKeyRef) -> Result<NodeFindResult> {
@@ -204,7 +256,7 @@ impl<'a> LeafNodeView<'a> {
       entries.push(LeafEntry::new(key, record, next))
     }
 
-    Ok(LeafNode::new(entries, self.next))
+    Ok(LeafNode::new(entries, self.next, self.pressure))
   }
 
   pub fn get_entries(&self) -> LeafNodeIter<'_> {

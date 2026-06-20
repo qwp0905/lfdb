@@ -4,7 +4,7 @@ pub const MAX_KEY: usize = 1 << 8;
 pub const MAX_VALUE: usize = BLOB_SIZE as usize - BLOB_ID_BYTES;
 
 // Maximum inline value size for a leaf entry.
-pub const LARGE_VALUE: usize = ((SERIALIZABLE_BYTES - (1 + POINTER_BYTES + 2)) >> 1)
+pub const LARGE_VALUE: usize = ((SERIALIZABLE_BYTES - (1 + POINTER_BYTES + 2 + 3)) >> 1)
   - (MAX_KEY + POINTER_BYTES + 2 + (TX_ID_BYTES << 1) + 1 + 2);
 
 pub type BlobId = u64;
