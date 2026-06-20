@@ -6,7 +6,7 @@ use std::{
   },
   mem::forget,
   path::{Path, PathBuf},
-  sync::{Arc, Mutex},
+  sync::{atomic::AtomicU64, Arc, Mutex},
   thread::sleep,
   time::Duration,
 };
@@ -14,8 +14,8 @@ use std::{
 use crossbeam::utils::Backoff;
 
 use super::{
-  create_io_thread, AllocState, DiskBackend, HandleState, IOBackend, IOThread,
-  TaskPublisher, WriteTask,
+  create_io_thread, DiskBackend, HandleState, IOBackend, IOThread, TaskPublisher,
+  WriteTask,
 };
 use crate::{
   background::{Oneshot, WorkBuilder},
@@ -127,7 +127,7 @@ impl IOPool {
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
-      allocated: SBox::new(AllocState::new(allocated)),
+      allocated: SBox::new(AtomicU64::new(allocated)),
       filename: Mutex::new(filename),
     })
   }
@@ -148,7 +148,7 @@ impl IOPool {
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
-      allocated: SBox::new(AllocState::new(allocated)),
+      allocated: SBox::new(AtomicU64::new(allocated)),
       filename: Mutex::new(filename),
     })
   }
@@ -184,7 +184,7 @@ pub struct IOHandle {
   state: SBox<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
-  allocated: SBox<AllocState>,
+  allocated: SBox<AtomicU64>,
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {
