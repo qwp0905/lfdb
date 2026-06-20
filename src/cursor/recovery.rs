@@ -203,11 +203,15 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
   while let Some(ptr) = entry_stack.pop() {
     visited.insert(ptr);
     used = used.max(ptr);
-    let slot = block_cache.read(ptr, table)?.for_read();
-    let entry: DataEntryView = slot.as_ref().view()?;
-    if let Some(i) = entry.get_next() {
-      entry_stack.push(i)
-    }
+    if let Some(i) = block_cache
+      .read(ptr, table)?
+      .for_read()
+      .as_ref()
+      .view::<DataEntryView>()?
+      .get_next()
+    {
+      entry_stack.push(i);
+    };
   }
 
   let file_end = table.disk().len()?;
