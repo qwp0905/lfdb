@@ -1,7 +1,8 @@
 use std::{
+  cell::Cell,
   io::{Error, IoSlice, Result},
   sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
   },
 };
@@ -17,6 +18,27 @@ use crate::{
 };
 
 pub type WriteTask = (u64, IoSlice<'static>);
+
+pub struct AllocState(Cell<u64>);
+impl AllocState {
+  pub const fn new(allocated: u64) -> Self {
+    Self(Cell::new(allocated))
+  }
+  pub const fn get(&self) -> u64 {
+    self.0.get()
+  }
+  pub fn set(&self, allocated: u64) {
+    self.0.set(allocated);
+  }
+}
+
+/**
+ * AllocState allowed send and sync because only one thread can access to this state.
+ * Multiple requests are merged into a single dispatch and executed once on a single thread.
+ * Only in io pool is allowed to access this state.
+ */
+unsafe impl Send for AllocState {}
+unsafe impl Sync for AllocState {}
 
 pub struct HandleState {
   /**
@@ -66,7 +88,7 @@ impl SBox<TaskPublisher<WriteTask>> {
     state: &SBox<HandleState>,
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
-    alloc: &SBox<AtomicU64>,
+    alloc: &SBox<AllocState>,
     task: WriteTask,
   ) -> Oneshot<Result<()>> {
     if state.is_closed() {
@@ -117,7 +139,7 @@ impl SBox<TaskPublisher<WriteTask>> {
     metrics: &MetricsRegistry,
     backend: &dyn IOBackend,
     state: &HandleState,
-    alloc: &AtomicU64,
+    alloc: &AllocState,
   ) {
     let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
 
@@ -208,7 +230,7 @@ impl SBox<TaskPublisher<()>> {
   }
 }
 pub enum IOTask {
-  AllocAndWrite(SBox<TaskPublisher<WriteTask>>, SBox<AtomicU64>),
+  AllocAndWrite(SBox<TaskPublisher<WriteTask>>, SBox<AllocState>),
   WriteOnly(SBox<TaskPublisher<WriteTask>>),
   Sync(SBox<TaskPublisher<()>>),
 }
@@ -253,7 +275,7 @@ fn flush_alloc_and_write(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
   state: &HandleState,
-  alloc: &AtomicU64,
+  alloc: &AllocState,
   buffered: &mut Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
 ) {
   if buffered.is_empty() {
@@ -300,23 +322,24 @@ fn exec_write_only(
 }
 fn alloc_if_needed(
   required: u64,
-  alloc: &AtomicU64,
+  alloc: &AllocState,
   backend: &dyn IOBackend,
 ) -> Result<()> {
-  let offset = alloc.load(Ordering::Acquire);
-  if offset >= required {
+  let mut allocated = alloc.get();
+  if allocated >= required {
     return Ok(());
   }
-
-  let len = (required - offset).div_ceil(EXTENT) * EXTENT;
-  backend.fallocate(offset, len)?;
-  alloc.fetch_add(len, Ordering::Release);
+  while required >= allocated {
+    allocated += EXTENT;
+  }
+  backend.fallocate(alloc.get(), allocated - alloc.get())?;
+  alloc.set(allocated);
   Ok(())
 }
 fn exec_alloc_and_write(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
-  alloc: &AtomicU64,
+  alloc: &AllocState,
   mut buffered: Vec<WriteTask>,
 ) -> std::io::Result<()> {
   // last caller wins on duplicate pointers
