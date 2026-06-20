@@ -79,7 +79,7 @@ impl InternalNode {
     &mut self,
     key: &StaticKey,
     pointer: Pointer,
-  ) -> std::result::Result<(), Pointer> {
+  ) -> std::result::Result<usize, Pointer> {
     if let Some((right, high)) = &self.right {
       if high <= key {
         return Err(*right);
@@ -92,7 +92,7 @@ impl InternalNode {
 
     self.keys.insert(at, key.clone());
     self.children.insert(at + 1, pointer);
-    Ok(())
+    Ok(at)
   }
 
   #[inline]
@@ -109,16 +109,27 @@ impl InternalNode {
       + self.keys.len() * 2
   }
 
-  pub fn split_if_needed(&mut self) -> Option<(InternalNode, StaticKey)> {
+  pub fn split_if_needed(
+    &mut self,
+    insert_at: usize,
+  ) -> Option<(InternalNode, StaticKey)> {
     let bytes_len = self.bytes_len();
     if bytes_len <= SERIALIZABLE_BYTES {
       return None;
     }
 
+    debug_assert!(self.keys.len() > 2);
+    let len = self.keys.len();
+    let split_point = match insert_at {
+      i if i < len / 3 => bytes_len >> 2,
+      i if i < (len << 1) / 3 => bytes_len >> 1,
+      _ => (bytes_len >> 2) * 3,
+    };
+
     // node type + right pointer flag + key length + first child pointer
     let mut sum = 1 + 1 + 2 + POINTER_BYTES;
     let mut mid = 0;
-    while sum <= bytes_len >> 1 {
+    while mid == 0 || (sum < split_point && mid < len - 2) {
       sum += self.keys[mid].len() + 2 + POINTER_BYTES;
       mid += 1;
     }
@@ -126,6 +137,9 @@ impl InternalNode {
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);
+
+    debug_assert!(!self.keys.is_empty());
+    debug_assert!(!keys.is_empty());
 
     Some((
       InternalNode::new(keys, children, self.right.take()),

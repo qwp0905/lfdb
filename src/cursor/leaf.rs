@@ -78,22 +78,33 @@ impl LeafNode {
     1 + POINTER_BYTES + 2 + self.entries.iter().map(|e| e.bytes_len()).sum::<usize>()
   }
 
-  pub fn split_if_needed(&mut self) -> Option<LeafNode> {
+  pub fn split_if_needed(&mut self, insert_at: usize) -> Option<LeafNode> {
     let bytes_len = self.bytes_len();
     if bytes_len <= SERIALIZABLE_BYTES {
       return None;
     }
 
+    debug_assert!(self.entries.len() > 1);
+    let len = self.entries.len();
+    let split_point = match insert_at {
+      i if i < len / 3 => bytes_len >> 2,
+      i if i < (len << 1) / 3 => bytes_len >> 1,
+      _ => (bytes_len >> 2) * 3,
+    };
+
     let mut sum = 1 + POINTER_BYTES + 2;
     let mut mid = 0;
-    while sum <= bytes_len >> 1 {
+    while mid == 0 || (sum < split_point && mid < len - 1) {
       sum += self.entries[mid].bytes_len();
       mid += 1;
     }
 
     let split = Self::new(self.entries.split_off(mid), self.next.take());
     debug_assert!(self.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(!self.entries.is_empty());
     debug_assert!(split.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(!split.entries.is_empty());
+
     Some(split)
   }
 

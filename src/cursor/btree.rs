@@ -37,7 +37,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
           NodeFindResult::NotFound(_) => return Ok(None),
-          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Move(next) => ptr = next,
           NodeFindResult::Found(_, record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
@@ -97,7 +97,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
           NodeFindResult::NotFound(_) => return Ok(false),
-          NodeFindResult::Move(i) => ptr = i,
+          NodeFindResult::Move(next) => ptr = next,
           NodeFindResult::Found(_, record, i) => {
             if !self.0.is_visible(record.owner, record.version) {
               break ptr = i;
@@ -203,12 +203,14 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     while !stop {
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let mut internal = slot.as_ref().deserialize::<BTreeNode>()?.into_internal()?;
-        if let Err(i) = internal.insert_or_next(&evicted_key, evicted_ptr) {
-          return Ok(ptr = i);
+
+        let pos = match internal.insert_or_next(&evicted_key, evicted_ptr) {
+          Ok(pos) => pos,
+          Err(next) => return Ok(ptr = next),
         };
 
         stop = true;
-        let Some((split_node, split_key)) = internal.split_if_needed() else {
+        let Some((split_node, split_key)) = internal.split_if_needed(pos) else {
           self
             .0
             .serialize_and_log(slot, &internal.into_node(), table)?;
@@ -379,9 +381,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       let mut result = None;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-        let mut node = match leaf.find(&key)? {
-          NodeFindResult::Move(i) => return Ok(ptr = i),
-          NodeFindResult::Found(i, old, entry_ptr) => {
+        let (mut node, pos) = match leaf.find(&key)? {
+          NodeFindResult::Move(next) => return Ok(ptr = next),
+          NodeFindResult::Found(pos, old, entry_ptr) => {
             let is_aborted = self.0.is_aborted(old.owner);
             if old.version > snapshot.version && !is_aborted {
               return Ok(result = Some(Err(entry_ptr)));
@@ -389,22 +391,22 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
 
             let mut node = leaf.writable()?;
             let new_record = record.take().unwrap();
-            let old = node.replace_at(i, new_record);
+            let old = node.replace_at(pos, new_record);
             if !is_aborted {
               self.append_version_chain(entry_ptr, old, table)?;
             }
-            node
+            (node, pos)
           }
-          NodeFindResult::NotFound(i) => {
+          NodeFindResult::NotFound(pos) => {
             let mut node = leaf.writable()?;
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
             let new_record = record.take().unwrap();
-            node.insert_at(i, key.to_vec(), new_record, entry_ptr);
-            node
+            node.insert_at(pos, key.to_vec(), new_record, entry_ptr);
+            (node, pos)
           }
         };
 
-        let Some(split) = node.split_if_needed() else {
+        let Some(split) = node.split_if_needed(pos) else {
           self.0.serialize_and_log(slot, &node.into_node(), table)?;
           return Ok(result = Some(Ok(None)));
         };
@@ -446,9 +448,9 @@ where
       let mut state = LoopState::Continue;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-        let mut node = match leaf.find(key)? {
-          NodeFindResult::Move(i) => return Ok(ptr = i),
-          NodeFindResult::Found(i, old, entry_ptr) => {
+        let (mut node, pos) = match leaf.find(key)? {
+          NodeFindResult::Move(next) => return Ok(ptr = next),
+          NodeFindResult::Found(pos, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               return Ok(state = LoopState::Conflict(old.owner));
             }
@@ -462,13 +464,13 @@ where
               self.0.current_version(),
               record,
             );
-            let old = node.replace_at(i, new_record);
+            let old = node.replace_at(pos, new_record);
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               self.append_version_chain(entry_ptr, old, table)?;
             }
-            node
+            (node, pos)
           }
-          NodeFindResult::NotFound(i) => {
+          NodeFindResult::NotFound(pos) => {
             if !create {
               return Ok(state = LoopState::Break);
             }
@@ -484,12 +486,12 @@ where
               self.0.current_version(),
               record,
             );
-            node.insert_at(i, key.to_vec(), new_record, entry_ptr);
-            node
+            node.insert_at(pos, key.to_vec(), new_record, entry_ptr);
+            (node, pos)
           }
         };
 
-        let Some(split) = node.split_if_needed() else {
+        let Some(split) = node.split_if_needed(pos) else {
           self.0.serialize_and_log(slot, &node.into_node(), table)?;
           return Ok(state = LoopState::Break);
         };
