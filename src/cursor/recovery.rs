@@ -214,9 +214,7 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
     };
   }
 
-  let file_end = table.disk().len()?;
-
-  (0..file_end)
+  (0..=used)
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
   table.free().replay(used + 1);
