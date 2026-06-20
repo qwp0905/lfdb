@@ -14,8 +14,8 @@ use std::{
 use crossbeam::utils::Backoff;
 
 use super::{
-  create_io_thread, DiskBackend, HandleState, IOBackend, IOThread, TaskPublisher,
-  WriteTask,
+  create_io_thread, AllocState, DiskBackend, HandleState, IOBackend, IOThread,
+  TaskPublisher, WriteTask,
 };
 use crate::{
   background::{Oneshot, WorkBuilder},
@@ -118,6 +118,7 @@ impl IOPool {
       .base_dir
       .open_direct_io(options.read(true).write(true).create(true), &path)
       .map_err(Error::IO)?;
+    let allocated = file.metadata().map_err(Error::IO)?.len();
     Ok(IOHandle {
       backend: file,
       write_handle: SBox::new(TaskPublisher::new()),
@@ -126,17 +127,19 @@ impl IOPool {
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
+      allocated: SBox::new(AllocState::new(allocated)),
       filename: Mutex::new(filename),
     })
   }
   pub fn open_buffered_io(&self, filename: PathBuf) -> Result<IOHandle> {
     let path = self.base_dir.get_path().join(&filename);
     let mut options = OpenOptions::new();
-    let file = self
+    let file: Arc<dyn IOBackend> = self
       .base_dir
       .open(options.read(true).write(true).create(true), &path)
-      .map(Arc::from)
+      .map(Arc::<dyn IOBackend>::from)
       .map_err(Error::IO)?;
+    let allocated = file.metadata().map_err(Error::IO)?.len();
     Ok(IOHandle {
       backend: file,
       write_handle: SBox::new(TaskPublisher::new()),
@@ -145,6 +148,7 @@ impl IOPool {
       thread: self.thread.clone(),
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
+      allocated: SBox::new(AllocState::new(allocated)),
       filename: Mutex::new(filename),
     })
   }
@@ -180,6 +184,7 @@ pub struct IOHandle {
   state: SBox<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
+  allocated: SBox<AllocState>,
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {
@@ -201,8 +206,21 @@ impl IOHandle {
     }
   }
 
-  pub fn write_async(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
-    self.write_handle.publish_write(
+  pub fn alloc_and_write(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+  ) -> Oneshot<IOResult<()>> {
+    self.write_handle.publish_alloc_and_write(
+      &self.state,
+      &*self.thread,
+      &self.backend,
+      &self.allocated,
+      (offset, IoSlice::new(buf)),
+    )
+  }
+  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
+    self.write_handle.publish_write_only(
       &self.state,
       &*self.thread,
       &self.backend,

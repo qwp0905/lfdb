@@ -78,6 +78,7 @@ fn test_allocate() -> Result<()> {
   let dir = tempdir_in(".")?;
   let file = File::create(dir.path().join("fallocate.txt"))?;
 
+  assert!(file.fallocate(0, 0).is_err());
   file.fallocate(0, 100)?;
   assert_eq!(file.metadata()?.len(), 100);
   file.fallocate(100, 200)?;
@@ -85,6 +86,8 @@ fn test_allocate() -> Result<()> {
 
   file.fallocate(500, 10)?;
   assert_eq!(file.metadata()?.len(), 510);
+
+  assert!(file.fallocate(510, 0).is_err());
 
   Ok(())
 }

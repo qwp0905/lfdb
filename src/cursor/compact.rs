@@ -364,7 +364,7 @@ pub struct Compactor {
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<dyn BackgroundThread<(), Result>>,
+  ticker: Box<dyn BackgroundThread<()>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   wal: Arc<WAL>,
@@ -592,6 +592,134 @@ fn check_compaction(
   BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)
 }
 
+fn run_tick(
+  incoming: &SegQueue<CompactTask>,
+  in_progress: &SegQueue<CompactionCycle>,
+  tables: &TableMapper,
+  block_cache: &BlockCache,
+  version_visibility: &VersionVisibility,
+  wal: &WAL,
+  recorder: &PageRecorder,
+  event_bus: &EventBus,
+  blob: &BlobStorage,
+  cycle: &AtomicCell<Option<CompactionCycle>>,
+  batch_size: usize,
+  waiting_publish: &mut LinkedList<(TableHandleRef, PinnedHandle, TableMetadata, TxId)>,
+  waiting_pin: &mut VecDeque<(TableHandleRef, PinnedHandle, TableMetadata)>,
+  meta_table: &TableHandleRef,
+  old_index: &BTreeIndex<Arc<CompactionReadPolicy>>,
+  new_index: &BTreeIndex<CompactionWritePolicy>,
+) -> Result {
+  let cycle_ref = cycle.as_ptr().borrow_mut_unsafe();
+  while let Some(task) = incoming.pop() {
+    match task {
+      CompactTask::Committed(committed) => waiting_publish.push_back((
+        committed.old,
+        committed.new,
+        committed.metadata,
+        committed.commit_version,
+      )),
+      CompactTask::New(trigger) => {
+        let old = trigger.old;
+        let table_name = old.get_name();
+        let Some((new_table, wait_until, metadata)) = create_compaction(
+          version_visibility,
+          wal,
+          block_cache,
+          recorder,
+          tables,
+          blob,
+          meta_table,
+          table_name,
+        )?
+        else {
+          continue;
+        };
+
+        info!("table {table_name} compacting wait until another tx close.");
+        waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
+      }
+    }
+  }
+
+  let min_version = version_visibility.min_version();
+  for (old, new, metadata, _) in
+    waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
+  {
+    waiting_pin.push_back((old, new, metadata));
+  }
+
+  for (old, new, metadata) in take(waiting_pin) {
+    let Some(old) = old.try_pin() else { continue };
+    in_progress.push(CompactionCycle::new(old, new, metadata));
+  }
+
+  let Some(current) = cycle_ref.as_mut().or_else(|| {
+    in_progress
+      .pop()
+      .map(|v| cycle.as_ptr().borrow_mut_unsafe().insert(v))
+  }) else {
+    return Ok(());
+  };
+
+  let Some(snapshotter) = &mut current.snapshotter else {
+    info!(
+      "table {} compaction start to create snapshot.",
+      current.metadata.get_name()
+    );
+    current.snapshotter = Some(old_index.snapshot(current.old.handle())?);
+    return Ok(());
+  };
+
+  if snapshotter.is_done() {
+    let Some((owner, version)) = remove_compaction(
+      version_visibility,
+      wal,
+      block_cache,
+      recorder,
+      blob,
+      meta_table,
+      &current.metadata,
+    )?
+    else {
+      return Ok(());
+    };
+    info!(
+      "table {} compacting copied record complete.",
+      current.metadata.get_name()
+    );
+    event_bus.publish(DropTableCommitted::new(
+      current.old.handle().clone(),
+      owner,
+      version,
+    ));
+    *cycle_ref = None;
+    return Ok(());
+  }
+
+  if !check_compaction(
+    version_visibility,
+    wal,
+    block_cache,
+    recorder,
+    blob,
+    meta_table,
+    current.metadata.get_name(),
+  )? {
+    warn!("table {} already dropped.", current.metadata.get_name());
+    return Ok(());
+  }
+
+  for _ in 0..batch_size {
+    let Some(snap) = snapshotter.next_snapshot()? else {
+      break;
+    };
+    new_index.apply_snapshot(snap, current.new.handle())?;
+  }
+
+  Ok(())
+}
+
 fn compaction_loop(
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
@@ -604,7 +732,7 @@ fn compaction_loop(
   blob: Arc<BlobStorage>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
-) -> impl FnMut(Option<()>) -> Result {
+) -> impl FnMut(Option<()>) {
   let meta_table = tables.meta_table();
   let mut waiting_publish = LinkedList::new();
   let mut waiting_pin = VecDeque::new();
@@ -623,113 +751,24 @@ fn compaction_loop(
   });
 
   move |_| {
-    let cycle_ref = cycle.as_ptr().borrow_mut_unsafe();
-    while let Some(task) = incoming.pop() {
-      match task {
-        CompactTask::Committed(committed) => waiting_publish.push_back((
-          committed.old,
-          committed.new,
-          committed.metadata,
-          committed.commit_version,
-        )),
-        CompactTask::New(trigger) => {
-          let old = trigger.old;
-          let table_name = old.get_name();
-          let Some((new_table, wait_until, metadata)) = create_compaction(
-            &version_visibility,
-            &wal,
-            &block_cache,
-            &recorder,
-            &tables,
-            &blob,
-            &meta_table,
-            table_name,
-          )?
-          else {
-            continue;
-          };
-
-          info!("table {table_name} compacting wait until another tx close.");
-          waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
-        }
-      }
-    }
-
-    let min_version = version_visibility.min_version();
-    for (old, new, metadata, _) in
-      waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
-    {
-      waiting_pin.push_back((old, new, metadata));
-    }
-
-    for (old, new, metadata) in take(&mut waiting_pin) {
-      let Some(old) = old.try_pin() else { continue };
-      in_progress.push(CompactionCycle::new(old, new, metadata));
-    }
-
-    let Some(current) = cycle_ref.as_mut().or_else(|| {
-      in_progress
-        .pop()
-        .map(|v| cycle.as_ptr().borrow_mut_unsafe().insert(v))
-    }) else {
-      return Ok(());
-    };
-
-    let Some(snapshotter) = &mut current.snapshotter else {
-      info!(
-        "table {} compaction start to create snapshot.",
-        current.metadata.get_name()
-      );
-      current.snapshotter = Some(old_index.snapshot(current.old.handle())?);
-      return Ok(());
-    };
-
-    if snapshotter.is_done() {
-      let Some((owner, version)) = remove_compaction(
-        &version_visibility,
-        &wal,
-        &block_cache,
-        &recorder,
-        &blob,
-        &meta_table,
-        &current.metadata,
-      )?
-      else {
-        return Ok(());
-      };
-      info!(
-        "table {} compacting copied record complete.",
-        current.metadata.get_name()
-      );
-      event_bus.publish(DropTableCommitted::new(
-        current.old.handle().clone(),
-        owner,
-        version,
-      ));
-      *cycle_ref = None;
-      return Ok(());
-    }
-
-    if !check_compaction(
+    run_tick(
+      &incoming,
+      &in_progress,
+      &tables,
+      &block_cache,
       &version_visibility,
       &wal,
-      &block_cache,
       &recorder,
+      &event_bus,
       &blob,
+      &cycle,
+      batch_size,
+      &mut waiting_publish,
+      &mut waiting_pin,
       &meta_table,
-      current.metadata.get_name(),
-    )? {
-      warn!("table {} already dropped.", current.metadata.get_name());
-      return Ok(());
-    }
-
-    for _ in 0..batch_size {
-      let Some(snap) = snapshotter.next_snapshot()? else {
-        break;
-      };
-      new_index.apply_snapshot(snap, current.new.handle())?;
-    }
-
-    Ok(())
+      &old_index,
+      &new_index,
+    )
+    .unwrap()
   }
 }

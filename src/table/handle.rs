@@ -33,12 +33,6 @@ impl TableHandle {
     }
   }
 
-  #[inline]
-  pub fn replay(&self) -> Result {
-    self.free_list.replay(self.disk.len()?);
-    Ok(())
-  }
-
   pub const fn get_name(&self) -> &TableName {
     &self.name
   }

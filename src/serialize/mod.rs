@@ -13,7 +13,6 @@ pub enum SerializeType {
   Header,
   BTreeNode,
   DataEntry,
-  DataChunk,
 }
 impl SerializeType {
   const fn byte(&self) -> u8 {
@@ -21,7 +20,6 @@ impl SerializeType {
       SerializeType::Header => 1,
       SerializeType::BTreeNode => 2,
       SerializeType::DataEntry => 3,
-      SerializeType::DataChunk => 4,
     }
   }
 }

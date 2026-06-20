@@ -38,7 +38,11 @@ impl<const N: usize> BlockIOHandle<N> {
   }
 
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
-    AsyncIO::new(self.handle.write_async(page.as_ref(), pointer * Self::SIZE))
+    AsyncIO::new(
+      self
+        .handle
+        .alloc_and_write(page.as_ref(), pointer * Self::SIZE),
+    )
   }
 
   #[inline]
