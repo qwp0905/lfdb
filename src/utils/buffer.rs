@@ -44,7 +44,7 @@ impl<'a> OffsetReader<'a> {
     self.offset = end;
     Some(buf)
   }
-  pub const fn read_constant<const N: usize>(&mut self) -> Option<[u8; N]> {
+  pub const fn read_array<const N: usize>(&mut self) -> Option<[u8; N]> {
     if self.offset + N > self.len {
       return None;
     }
@@ -53,19 +53,19 @@ impl<'a> OffsetReader<'a> {
     Some(buf)
   }
   pub const fn read_u64(&mut self) -> Option<u64> {
-    match self.read_constant() {
+    match self.read_array() {
       Some(buf) => Some(u64::from_le_bytes(buf)),
       None => None,
     }
   }
   pub const fn read_u32(&mut self) -> Option<u32> {
-    match self.read_constant() {
+    match self.read_array() {
       Some(buf) => Some(u32::from_le_bytes(buf)),
       None => None,
     }
   }
   pub const fn read_u16(&mut self) -> Option<u16> {
-    match self.read_constant() {
+    match self.read_array() {
       Some(buf) => Some(u16::from_le_bytes(buf)),
       None => None,
     }

@@ -154,6 +154,12 @@ impl<'a, const T: usize> PageScanner<'a, T> {
       None => Err(EOF),
     }
   }
+  pub const fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+    match self.0.read_array() {
+      Some(v) => Ok(v),
+      None => Err(EOF),
+    }
+  }
 }
 
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
