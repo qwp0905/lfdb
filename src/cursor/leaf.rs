@@ -1,4 +1,7 @@
-use std::{mem::replace, ops::Bound};
+use std::{
+  mem::{replace, take},
+  ops::Bound,
+};
 
 use super::{StaticKey, StaticKeyRef, VersionRecord, VersionRecordView};
 use crate::{
@@ -6,8 +9,6 @@ use crate::{
   serialize::SERIALIZABLE_BYTES,
   Result,
 };
-
-const EMPTY_PRESSURE: [u8; 3] = [0; 3];
 
 #[derive(Debug)]
 pub struct LeafEntry {
@@ -37,7 +38,7 @@ pub struct LeafNode {
 }
 impl LeafNode {
   pub const fn empty() -> Self {
-    Self::new(Vec::new(), None, EMPTY_PRESSURE)
+    Self::new(Vec::new(), None, [0; 3])
   }
   const fn new(
     entries: Vec<LeafEntry>,
@@ -96,7 +97,7 @@ impl LeafNode {
       return None;
     }
     let split_point = {
-      let [l, m, r] = replace(&mut self.pressure, EMPTY_PRESSURE);
+      let [l, m, r] = take(&mut self.pressure);
       let sum = l as usize + r as usize + m as usize;
       (data_bytes * ((m as usize >> 1) + r as usize))
         .checked_div(sum)
@@ -127,7 +128,7 @@ impl LeafNode {
     let split = Self::new(
       self.entries.split_off(best.unwrap().0),
       self.next.take(),
-      EMPTY_PRESSURE,
+      [0; 3],
     );
     debug_assert!(self.data_bytes() + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES);
     debug_assert!(!self.entries.is_empty());
