@@ -107,17 +107,16 @@ impl InternalNode {
   }
 
   // node type + right pointer flag + key len (u16) + bias
-  const BASE_BYTES: usize = 1 + 1 + 2 + SPLIT_BIAS_BYTES;
+  const RESERVED_BYTES: usize = 1 + 1 + 2 + SPLIT_BIAS_BYTES;
   #[inline]
   const fn key_bytes(key: &StaticKey) -> usize {
     key.len() + 2 + POINTER_BYTES
   }
-  fn right_bytes(&self) -> usize {
-    self
-      .right
-      .as_ref()
-      .map(|(_, k)| Self::key_bytes(k))
-      .unwrap_or(0)
+  const fn right_bytes(&self) -> usize {
+    let Some((_, k)) = &self.right else {
+      return 0;
+    };
+    Self::key_bytes(k)
   }
   fn keys_bytes(&self) -> usize {
     self.keys.iter().map(Self::key_bytes).sum::<usize>() + POINTER_BYTES
@@ -125,14 +124,14 @@ impl InternalNode {
 
   #[inline]
   fn bytes_len(&self) -> usize {
-    Self::BASE_BYTES + self.keys_bytes() + self.right_bytes()
+    Self::RESERVED_BYTES + self.keys_bytes() + self.right_bytes()
   }
 
   pub fn split_if_needed(&mut self) -> Option<(InternalNode, StaticKey)> {
     let right_bytes = self.right_bytes();
     let keys_bytes = self.keys_bytes();
     let split_bytes = right_bytes + keys_bytes;
-    if split_bytes + Self::BASE_BYTES <= SERIALIZABLE_BYTES {
+    if split_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
 
@@ -152,8 +151,8 @@ impl InternalNode {
 
       let split_key_bytes = Self::key_bytes(&self.keys[mid]);
       let right_key_bytes = keys_bytes - left_bytes - split_key_bytes;
-      let left_total = Self::BASE_BYTES + left_bytes + split_key_bytes;
-      let right_total = Self::BASE_BYTES + right_bytes + right_key_bytes;
+      let left_total = Self::RESERVED_BYTES + left_bytes + split_key_bytes;
+      let right_total = Self::RESERVED_BYTES + right_bytes + right_key_bytes;
 
       if left_total > SERIALIZABLE_BYTES {
         continue;
