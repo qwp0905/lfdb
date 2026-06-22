@@ -21,6 +21,7 @@ fn update_bias_records_insert_position_bucket() {
 #[test]
 fn update_bias_keeps_only_last_sixteen_directions() {
   let mut bias = DEFAULT_BIAS;
+  assert_eq!(count_directions(bias), [0, CAP as usize, 0]);
 
   let left_count = CAP as usize / 2 + 1;
   let right_count = CAP as usize / 2 + 1;

@@ -1,4 +1,4 @@
-pub type SplitBias = u16;
+pub type SplitBias = u32;
 pub const SPLIT_BIAS_BYTES: usize = SplitBias::BITS as usize >> 3;
 
 const DIRECTIONS: usize = 3;
