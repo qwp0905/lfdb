@@ -8,8 +8,8 @@ use crossbeam::epoch::pin;
 
 use super::{
   BTreeNodeView, BlobId, BlobLen, BlobOffset, DataEntryView, MergeSortable,
-  ReadonlyPolicy, RecordDataView, StaticKey, TreeHeader, VecRef, VersionRecordView,
-  HEADER_POINTER,
+  ReadonlyPolicy, RecordDataView, RecordId, StaticKey, TreeHeader, VecRef,
+  VersionRecordView, HEADER_POINTER,
 };
 
 pub enum BufferedValue {
@@ -21,13 +21,15 @@ struct BufferedRecord {
   data: BufferedValue,
   owner: TxId,
   version: TxId,
+  id: RecordId,
 }
 impl BufferedRecord {
-  const fn new(data: BufferedValue, owner: TxId, version: TxId) -> Self {
+  const fn new(data: BufferedValue, owner: TxId, version: TxId, id: RecordId) -> Self {
     Self {
       data,
       owner,
       version,
+      id,
     }
   }
 
@@ -37,11 +39,13 @@ impl BufferedRecord {
         BufferedValue::Data(VecRef::refed(slot.page(), s, e)),
         record.owner,
         record.version,
+        record.record_id,
       )),
       RecordDataView::Blob(id, offset, len) => Some(Self::new(
         BufferedValue::Blob(id, offset, len),
         record.owner,
         record.version,
+        record.record_id,
       )),
       RecordDataView::Tombstone => None,
     }
@@ -53,6 +57,7 @@ pub struct KVSnapshot {
   pub value: BufferedValue,
   pub owner: TxId,
   pub version: TxId,
+  pub record_id: RecordId,
 }
 
 pub struct Snapshotter<Policy>(BTreeIterator<Policy>);
@@ -75,6 +80,7 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
         value: record.data,
         owner: record.owner,
         version: record.version,
+        record_id: record.id,
       }));
     }
   }
