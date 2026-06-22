@@ -1,12 +1,3 @@
-mod header;
-use header::*;
-
-mod node;
-use node::*;
-
-mod entry;
-use entry::*;
-
 mod cursor;
 pub use cursor::*;
 
@@ -15,12 +6,6 @@ pub use gc::*;
 
 mod types;
 pub use types::*;
-
-mod leaf;
-use leaf::*;
-
-mod internal;
-use internal::*;
 
 mod compact;
 pub use compact::*;
@@ -37,9 +22,6 @@ pub use recovery::*;
 mod sort;
 use sort::*;
 
-mod record;
-use record::*;
-
 mod iterator;
 pub use iterator::*;
 
@@ -48,3 +30,6 @@ pub use blob::*;
 
 mod constants;
 pub use constants::*;
+
+mod objects;
+use objects::*;

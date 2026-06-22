@@ -1,10 +1,6 @@
-use crate::{
-  cursor::record::{RecordData, RecordDataView},
-  disk::Page,
-  serialize::SerializeFrom,
-};
-
 use super::*;
+use crate::cursor::objects::*;
+use crate::{disk::Page, serialize::SerializeFrom};
 
 #[test]
 fn test_entry_with_data_roundtrip() {

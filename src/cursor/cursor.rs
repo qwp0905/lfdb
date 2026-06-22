@@ -2,7 +2,7 @@ use std::ops::{Bound, RangeBounds};
 
 use super::{
   BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, StaticKeyRef, VecRef,
-  MAX_KEY, MAX_VALUE,
+  WriteResult, MAX_KEY, MAX_VALUE,
 };
 use crate::{
   measure, metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext,
@@ -67,11 +67,11 @@ impl<'a> Cursor<'a> {
     measure!(self.metrics.operation_get, self.__get(key))
   }
 
-  fn __insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
+  fn __insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteResult> {
     let table = self.compaction.as_ref().unwrap_or(&self.table);
     self.index.insert(key, value, table)
   }
-  pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result {
+  pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<InsertResult> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -83,16 +83,23 @@ impl<'a> Cursor<'a> {
       return Err(Error::ValueExceeded(MAX_VALUE, value.len()));
     }
 
-    measure!(self.metrics.operation_insert, self.__insert(key, value))
+    let result = measure!(self.metrics.operation_insert, self.__insert(key, value))?;
+    if result.splitted {
+      self.metrics.btree_split.inc();
+    }
+    Ok(InsertResult {
+      updated: result.updated,
+      inserted: result.inserted,
+    })
   }
 
-  fn __remove(&self, key: StaticKeyRef) -> Result {
+  fn __remove(&self, key: StaticKeyRef) -> Result<WriteResult> {
     if let Some(table) = self.compaction.as_ref() {
       return self.index.insert_record(key.to_vec(), None, table);
     }
     self.index.remove(key, &self.table)
   }
-  pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
+  pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result<RemoveResult> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -101,7 +108,13 @@ impl<'a> Cursor<'a> {
       return Err(Error::KeyExceeded(MAX_KEY, key.len()));
     }
 
-    measure!(self.metrics.operation_remove, self.__remove(key))
+    let result = measure!(self.metrics.operation_remove, self.__remove(key))?;
+    if result.splitted {
+      self.metrics.btree_split.inc();
+    }
+    Ok(RemoveResult {
+      removed: result.updated || result.inserted,
+    })
   }
 
   pub fn scan<'b, 'c, K>(
@@ -157,4 +170,13 @@ impl<'a> CursorIterator<'a> {
 
     self.iter.get_next_pair()
   }
+}
+
+pub struct InsertResult {
+  pub updated: bool,
+  pub inserted: bool,
+}
+
+pub struct RemoveResult {
+  pub removed: bool,
 }

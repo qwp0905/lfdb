@@ -438,7 +438,7 @@ where
     mut record: Option<Vec<u8>>,
     table: &TableHandleRef,
     create: bool,
-  ) -> Result {
+  ) -> Result<WriteResult> {
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
     let mut _guard = None;
 
@@ -446,7 +446,7 @@ where
       let mut state = LoopState::Continue;
       self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-        let mut node = match leaf.find(key)? {
+        let (mut node, mut result) = match leaf.find(key)? {
           NodeFindResult::Move(i) => return Ok(ptr = i),
           NodeFindResult::Found(i, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
@@ -466,11 +466,11 @@ where
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               self.append_version_chain(entry_ptr, old, table)?;
             }
-            node
+            (node, WriteResult::updated(false))
           }
           NodeFindResult::NotFound(i) => {
             if !create {
-              return Ok(state = LoopState::Break);
+              return Ok(state = LoopState::Break(WriteResult::not_matched()));
             }
 
             let mut node = leaf.writable()?;
@@ -485,26 +485,30 @@ where
               record,
             );
             node.insert_at(i, key.to_vec(), new_record, entry_ptr);
-            node
+            (node, WriteResult::inserted(false))
           }
         };
 
         let Some(split) = node.split_if_needed() else {
           self.0.serialize_and_log(slot, &node.into_node(), table)?;
-          return Ok(state = LoopState::Break);
+          return Ok(state = LoopState::Break(result));
         };
+        result.splitted = true;
 
         let mid_key = split.top().clone();
         let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
         node.set_next(split_ptr);
         self.0.serialize_and_log(slot, &node.into_node(), table)?;
-        Ok(state = LoopState::Split(mid_key, split_ptr))
+        Ok(state = LoopState::Split(mid_key, split_ptr, result))
       })?;
 
       match state {
-        LoopState::Break => return Ok(()),
-        LoopState::Split(k, p) => return self.propagate_split(k, p, stack, table),
+        LoopState::Break(result) => return Ok(result),
+        LoopState::Split(k, p, result) => {
+          self.propagate_split(k, p, stack, table)?;
+          return Ok(result);
+        }
         LoopState::Conflict(i) => {
           self.0.wait_close(i);
           return Err(Error::WriteConflict);
@@ -518,38 +522,62 @@ where
     key: StaticKey,
     record: Option<Vec<u8>>,
     table: &TableHandleRef,
-  ) -> Result {
+  ) -> Result<WriteResult> {
     self.__insert(&key, record, table, true)
   }
-  pub fn insert(&self, key: StaticKey, data: Vec<u8>, table: &TableHandleRef) -> Result {
+  pub fn insert(
+    &self,
+    key: StaticKey,
+    data: Vec<u8>,
+    table: &TableHandleRef,
+  ) -> Result<WriteResult> {
     self.insert_record(key, Some(data), table)
   }
-  pub fn remove(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result {
-    self.insert_record_if_matched(key, None, table)
+  pub fn remove(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<WriteResult> {
+    self.insert_if_matched(key, None, table)
   }
-
   pub fn insert_if_matched(
     &self,
     key: StaticKeyRef,
     data: Option<Vec<u8>>,
     table: &TableHandleRef,
-  ) -> Result {
-    self.insert_record_if_matched(key, data, table)
-  }
-
-  fn insert_record_if_matched(
-    &self,
-    key: StaticKeyRef,
-    record: Option<Vec<u8>>,
-    table: &TableHandleRef,
-  ) -> Result {
-    self.__insert(key, record, table, false)
+  ) -> Result<WriteResult> {
+    self.__insert(key, data, table, false)
   }
 }
 
 enum LoopState {
   Continue,
-  Break,
+  Break(WriteResult),
   Conflict(TxId),
-  Split(StaticKey, Pointer),
+  Split(StaticKey, Pointer, WriteResult),
+}
+
+pub struct WriteResult {
+  pub inserted: bool,
+  pub updated: bool,
+  pub splitted: bool,
+}
+impl WriteResult {
+  const fn inserted(splitted: bool) -> Self {
+    Self {
+      inserted: true,
+      updated: false,
+      splitted,
+    }
+  }
+  const fn updated(splitted: bool) -> Self {
+    Self {
+      inserted: false,
+      updated: true,
+      splitted,
+    }
+  }
+  const fn not_matched() -> Self {
+    Self {
+      inserted: false,
+      updated: false,
+      splitted: false,
+    }
+  }
 }
