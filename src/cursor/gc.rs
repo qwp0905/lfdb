@@ -242,6 +242,9 @@ fn release_entry(
 
       if !new_versions.is_empty() {
         entry.set_versions(new_versions);
+        if max_found.is_some() {
+          entry.clear_next();
+        }
         serialize_and_log(slot, &entry)?;
         return Ok(());
       }
