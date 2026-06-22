@@ -1,4 +1,4 @@
-use super::{BlobAppendGuard, BlobId, BlobLen, BlobOffset};
+use super::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, RecordId};
 
 use crate::{
   cache::{CachedSlot, RefedSlot},
@@ -120,6 +120,7 @@ pub trait CreatablePolicy: WritablePolicy {
   fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
+  fn gen_record_id(&self) -> RecordId;
 }
 impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
   fn wait_close(&self, owner: TxId) {
@@ -130,5 +131,8 @@ impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
   }
   fn current_version(&self) -> TxId {
     (*self).current_version()
+  }
+  fn gen_record_id(&self) -> RecordId {
+    (*self).gen_record_id()
   }
 }
