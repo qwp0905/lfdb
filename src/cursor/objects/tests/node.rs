@@ -1,10 +1,7 @@
-use crate::{
-  cursor::{leaf::*, record::*},
-  disk::Page,
-  serialize::SerializeFrom,
-};
+use crate::{disk::Page, serialize::SerializeFrom};
 
 use super::*;
+use crate::cursor::objects::*;
 
 #[test]
 fn test_serialize_internal() {
