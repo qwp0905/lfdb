@@ -202,6 +202,11 @@ pub struct EngineMetrics {
    * p99 remove operation latency in microseconds.
    */
   pub operation_remove_latency_micros_p99: f64,
+
+  /**
+   * Number of btree splitted.
+   */
+  pub btree_split_count: u64,
 }
 impl std::fmt::Display for EngineMetrics {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -297,11 +302,13 @@ impl std::fmt::Display for EngineMetrics {
       self.disk_sync_batch_avg,
       self.disk_sync_batch_p50,
     )?;
-    write!(
+    writeln!(
       f,
       "checkpoint: cycles {} | avg {:.2} ms",
       self.checkpoint_cycle_count, self.checkpoint_cycle_time_ms_avg,
-    )
+    )?;
+    writeln!(f, "btree splitted: {}", self.btree_split_count)?;
+    Ok(())
   }
 }
 pub struct MetricsRegistry {
@@ -325,6 +332,8 @@ pub struct MetricsRegistry {
   pub operation_insert: TimeHistogram,
   pub operation_remove: TimeHistogram,
 
+  pub btree_split: Counter,
+
   started_at: Instant,
 }
 
@@ -336,19 +345,26 @@ impl MetricsRegistry {
     Self {
       block_cache_read: TimeHistogram::new(10_000, Duration::from_nanos(10)),
       block_cache_hit: Counter::new(),
+
       checkpoint_cycle: TimeHistogram::new(10, Duration::from_millis(1)),
+
       transaction_start: TimeHistogram::new(1000, Duration::from_micros(10)),
       transaction_commit: TimeHistogram::new(1000, Duration::from_micros(10)),
       transaction_abort_count: Counter::new(),
+
       disk_read: TimeHistogram::new(1000, Duration::from_nanos(100)),
       disk_write: TimeHistogram::new(1000, Duration::from_nanos(100)),
       disk_write_batch: Histogram::new(1000),
       disk_sync_batch: Histogram::new(1000),
       active_io_threads: Gauge::new(),
-      started_at: Instant::now(),
+
       operation_get: TimeHistogram::new(1000, Duration::from_nanos(100)),
       operation_insert: TimeHistogram::new(1000, Duration::from_nanos(100)),
       operation_remove: TimeHistogram::new(1000, Duration::from_nanos(100)),
+
+      btree_split: Counter::new(),
+
+      started_at: Instant::now(),
     }
   }
 
@@ -427,6 +443,8 @@ impl MetricsRegistry {
       operation_remove_latency_micros_p50: operation_remove.percentile(0.5),
       operation_remove_latency_micros_p95: operation_remove.percentile(0.95),
       operation_remove_latency_micros_p99: operation_remove.percentile(0.99),
+
+      btree_split_count: self.btree_split.load(),
     }
   }
 }
