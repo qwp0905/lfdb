@@ -1,4 +1,9 @@
-use super::{StaticKey, StaticKeyRef};
+use std::mem::replace;
+
+use super::{
+  count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, DEFAULT_BIAS,
+  SPLIT_BIAS_BYTES,
+};
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
   serialize::SERIALIZABLE_BYTES,
@@ -16,6 +21,7 @@ pub struct InternalNode {
   keys: Vec<StaticKey>,
   children: Vec<Pointer>,
   right: Option<(Pointer, StaticKey)>,
+  bias: SplitBias,
 }
 impl InternalNode {
   pub fn from_scanner(scanner: &mut PageScanner) -> Result<Self> {
@@ -28,6 +34,7 @@ impl InternalNode {
     };
 
     let len = scanner.read_u16()? as usize;
+    let bias = scanner.read_u32()?;
     let mut keys = Vec::with_capacity(len);
     let mut children = Vec::with_capacity(len + 1);
     children.push(scanner.read_u64()?);
@@ -37,7 +44,7 @@ impl InternalNode {
       children.push(scanner.read_u64()?);
     }
 
-    Ok(Self::new(keys, children, right))
+    Ok(Self::new(keys, children, right, bias))
   }
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
     match &self.right {
@@ -50,6 +57,7 @@ impl InternalNode {
       None => writer.write(&[0]),
     }?;
     writer.write_u16(self.keys.len() as u16)?;
+    writer.write_u32(self.bias)?;
     writer.write_u64(self.children[0])?;
     for i in 0..self.keys.len() {
       let key = &self.keys[i];
@@ -61,17 +69,19 @@ impl InternalNode {
     Ok(())
   }
   pub fn initialize(key: StaticKey, left: Pointer, right: Pointer) -> Self {
-    Self::new(vec![key], vec![left, right], None)
+    Self::new(vec![key], vec![left, right], None, DEFAULT_BIAS)
   }
   pub const fn new(
     keys: Vec<StaticKey>,
     children: Vec<Pointer>,
     right: Option<(Pointer, StaticKey)>,
+    bias: SplitBias,
   ) -> Self {
     Self {
       keys,
       children,
       right,
+      bias,
     }
   }
 
@@ -85,52 +95,91 @@ impl InternalNode {
         return Err(*right);
       }
     };
-    let at = self
+    let pos = self
       .keys
       .binary_search_by(|k| k.cmp(key))
       .unwrap_or_else(|i| i);
 
-    self.keys.insert(at, key.clone());
-    self.children.insert(at + 1, pointer);
+    self.keys.insert(pos, key.clone());
+    self.children.insert(pos + 1, pointer);
+    self.bias = update_bias(self.bias, self.keys.len(), pos);
     Ok(())
+  }
+
+  // node type + right pointer flag + key len (u16) + bias
+  const BASE_BYTES: usize = 1 + 1 + 2 + SPLIT_BIAS_BYTES;
+  #[inline]
+  const fn key_bytes(key: &StaticKey) -> usize {
+    key.len() + 2 + POINTER_BYTES
+  }
+  fn right_bytes(&self) -> usize {
+    self
+      .right
+      .as_ref()
+      .map(|(_, k)| Self::key_bytes(k))
+      .unwrap_or(0)
+  }
+  fn keys_bytes(&self) -> usize {
+    self.keys.iter().map(Self::key_bytes).sum::<usize>() + POINTER_BYTES
   }
 
   #[inline]
   fn bytes_len(&self) -> usize {
-    1 + 1
-      + self
-        .right
-        .as_ref()
-        .map(|(_, k)| k.len() + POINTER_BYTES + 2)
-        .unwrap_or(0)
-      + 2
-      + self.children.len() * POINTER_BYTES
-      + self.keys.iter().map(|k| k.len()).sum::<usize>()
-      + self.keys.len() * 2
+    Self::BASE_BYTES + self.keys_bytes() + self.right_bytes()
   }
 
   pub fn split_if_needed(&mut self) -> Option<(InternalNode, StaticKey)> {
-    let bytes_len = self.bytes_len();
-    if bytes_len <= SERIALIZABLE_BYTES {
+    let right_bytes = self.right_bytes();
+    let keys_bytes = self.keys_bytes();
+    let split_bytes = right_bytes + keys_bytes;
+    if split_bytes + Self::BASE_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
 
-    // node type + right pointer flag + key length + first child pointer
-    let mut sum = 1 + 1 + 2 + POINTER_BYTES;
-    let mut mid = 0;
-    while sum <= bytes_len >> 1 {
-      sum += self.keys[mid].len() + 2 + POINTER_BYTES;
-      mid += 1;
+    let split_point = {
+      let [l, m, r] = count_directions(replace(&mut self.bias, DEFAULT_BIAS));
+      debug_assert!((l + m + r) != 0);
+      split_bytes * (m + (r << 1)) / ((l + m + r) << 1)
+    };
+
+    debug_assert!(self.keys.len() > 2);
+
+    let mut best = None;
+    let mut left_bytes = 0;
+
+    for mid in 1..(self.keys.len() - 1) {
+      left_bytes += Self::key_bytes(&self.keys[mid - 1]);
+
+      let split_key_bytes = Self::key_bytes(&self.keys[mid]);
+      let right_key_bytes = keys_bytes - left_bytes - split_key_bytes;
+      let left_total = Self::BASE_BYTES + left_bytes + split_key_bytes;
+      let right_total = Self::BASE_BYTES + right_bytes + right_key_bytes;
+
+      if left_total > SERIALIZABLE_BYTES {
+        continue;
+      }
+      if right_total > SERIALIZABLE_BYTES {
+        continue;
+      }
+
+      let dist = (left_bytes + split_key_bytes).abs_diff(split_point);
+      if best.is_none_or(|(_, best_dist)| dist < best_dist) {
+        best = Some((mid, dist));
+      }
     }
 
+    let mid = best.unwrap().0;
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);
+    let split = InternalNode::new(keys, children, self.right.take(), Default::default());
 
-    Some((
-      InternalNode::new(keys, children, self.right.take()),
-      mid_key,
-    ))
+    debug_assert!(split.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(!split.keys.is_empty());
+    debug_assert!(!self.keys.is_empty());
+    debug_assert!(self.bytes_len() <= SERIALIZABLE_BYTES);
+
+    Some((split, mid_key))
   }
 
   pub fn set_right(
@@ -159,6 +208,7 @@ impl<'a> InternalNodeView<'a> {
     };
 
     let len = scanner.read_u16()? as usize;
+    scanner.advance(SPLIT_BIAS_BYTES)?;
     let offset = scanner.advance(0)?;
 
     Ok(Self::new(page, len, offset, right))
