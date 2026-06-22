@@ -151,6 +151,27 @@ impl LeafNode {
   pub fn top(&self) -> &StaticKey {
     &self.entries[0].key
   }
+  pub fn find_slot(&self, key: StaticKeyRef) -> FindSlotResult {
+    match self.entries.binary_search_by(|r| (*r.key).cmp(key)) {
+      Ok(i) => FindSlotResult::Replace(i),
+      Err(i) => {
+        if i == self.entries.len() {
+          if let Some(p) = self.next {
+            return FindSlotResult::Move(p);
+          }
+        };
+
+        FindSlotResult::Insert(i)
+      }
+    }
+  }
+}
+
+pub enum FindSlotResult {
+  Replace(usize),
+  Move(Pointer),
+  #[allow(unused)]
+  Insert(usize),
 }
 
 /**
