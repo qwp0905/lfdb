@@ -34,7 +34,7 @@ impl InternalNode {
     };
 
     let len = scanner.read_u16()? as usize;
-    let bias = scanner.read_u32()?;
+    let bias = scanner.read_u16()?;
     let mut keys = Vec::with_capacity(len);
     let mut children = Vec::with_capacity(len + 1);
     children.push(scanner.read_u64()?);
@@ -57,7 +57,7 @@ impl InternalNode {
       None => writer.write(&[0]),
     }?;
     writer.write_u16(self.keys.len() as u16)?;
-    writer.write_u32(self.bias)?;
+    writer.write_u16(self.bias)?;
     writer.write_u64(self.children[0])?;
     for i in 0..self.keys.len() {
       let key = &self.keys[i];
