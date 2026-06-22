@@ -1,10 +1,18 @@
-pub type SplitBias = u32;
+pub type SplitBias = u16;
 pub const SPLIT_BIAS_BYTES: usize = SplitBias::BITS as usize >> 3;
 
 const DIRECTIONS: usize = 3;
 
-pub const DEFAULT_BIAS: SplitBias = 0b01010101_01010101_01010101_01010101;
 const CAP: u8 = SplitBias::BITS as u8 >> 1;
+pub const DEFAULT_BIAS: SplitBias = {
+  let mut b = 0;
+  let mut c = 0;
+  while c < CAP {
+    b = b << 2 | 1;
+    c += 1;
+  }
+  b
+};
 
 pub const fn update_bias(bias: SplitBias, len: usize, pos: usize) -> SplitBias {
   let bucket = pos * DIRECTIONS / len;
