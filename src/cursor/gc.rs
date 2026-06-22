@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeSet, LinkedList, VecDeque},
+  collections::{HashSet, LinkedList, VecDeque},
   sync::Arc,
   time::Duration,
 };
@@ -341,14 +341,16 @@ where
 struct GcCycle {
   tasks: ChunkQueue<GCTask>,
   min_version: TxId,
-  blob_refs: BTreeSet<BlobId>,
+  blob_refs: HashSet<BlobId>,
+  exists_blobs: Vec<BlobId>,
 }
 impl GcCycle {
-  fn new(min_version: TxId) -> Self {
+  fn new(min_version: TxId, exists_blobs: Vec<BlobId>) -> Self {
     Self {
       tasks: ChunkQueue::new(),
       min_version,
-      blob_refs: BTreeSet::new(),
+      blob_refs: HashSet::new(),
+      exists_blobs,
     }
   }
 }
@@ -371,15 +373,17 @@ impl GCTask {
 
 fn flush_buffered(
   buffered: &mut VecDeque<Oneshot<Result<EntryRelease>>>,
-) -> Result<(TxId, Vec<BlobId>)> {
+  refs: &mut HashSet<BlobId>,
+) -> Result<TxId> {
   let mut min = TxId::MAX;
-  let mut refs = Vec::new();
   while let Some(handle) = buffered.pop_front() {
     let result = handle.wait().unwrap()?;
     min = min.min(result.min_version);
-    refs.extend(result.blob_refs);
+    for id in result.blob_refs {
+      refs.insert(id);
+    }
   }
-  Ok((min, refs))
+  Ok(min)
 }
 fn run_tick(
   cycle: &mut Option<GcCycle>,
@@ -395,7 +399,10 @@ fn run_tick(
   compaction_min_size: Pointer,
 ) -> Result {
   let Some(current) = cycle.as_mut() else {
-    let cycle = cycle.insert(GcCycle::new(version_visibility.min_version()));
+    let cycle = cycle.insert(GcCycle::new(
+      version_visibility.min_version(),
+      blob.readonly_handle_ids(),
+    ));
     for task in tables.get_all().into_iter().map(GCTask::new) {
       cycle.tasks.push(task);
     }
@@ -404,17 +411,15 @@ fn run_tick(
 
   for _ in 0..key_count {
     let Some(mut task) = current.tasks.pop() else {
-      let (min, blob_refs) = flush_buffered(buffered)?;
-      for id in blob_refs {
-        current.blob_refs.insert(id);
-      }
+      let min = flush_buffered(buffered, &mut current.blob_refs)?;
       version_visibility.remove_aborted(&current.min_version.min(min));
 
-      for handle in blob.readonly_handles() {
-        if current.blob_refs.contains(&handle.get_id()) {
-          continue;
-        }
-        blob.truncate(handle.get_id())?;
+      for &id in current
+        .exists_blobs
+        .iter()
+        .filter(|id| !current.blob_refs.contains(id))
+      {
+        blob.truncate(id)?;
       }
       return Ok(*cycle = None);
     };
@@ -484,11 +489,8 @@ fn run_tick(
     event_bus.publish(CompactionTriggered::new(table.into_inner()));
   }
 
-  let (min_version, blob_refs) = flush_buffered(buffered)?;
+  let min_version = flush_buffered(buffered, &mut current.blob_refs)?;
   current.min_version = current.min_version.min(min_version);
-  for id in blob_refs {
-    current.blob_refs.insert(id);
-  }
   Ok(())
 }
 

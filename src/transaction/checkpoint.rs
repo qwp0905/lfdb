@@ -296,6 +296,7 @@ fn run_tick<F: Fn(usize) -> usize>(
 
   if current.segments_len() == 0 {
     debug!("skip create checkpoint snapshot since nothing to rotate.");
+    metrics.checkpoint_cycle.record(current.take_start());
     return Ok(*cycle = None);
   }
 

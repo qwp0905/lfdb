@@ -453,17 +453,19 @@ fn test_entry_split() {
     tx.commit().unwrap();
   }
 
-  // verify latest value is readable
-  let tx = engine.new_tx().unwrap();
-  let table = tx.table(TEST_TABLE).unwrap();
-  let val = table.get(&key).unwrap();
-  assert!(
-    val.is_some(),
-    "hot key should be readable after many overwrites"
-  );
-  let v = val.unwrap();
-  assert_eq!(v.len(), 100);
-  assert_eq!(v[0], (iterations - 1) as u8);
+  {
+    // verify latest value is readable
+    let tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
+    let val = table.get(&key).unwrap();
+    assert!(
+      val.is_some(),
+      "hot key should be readable after many overwrites"
+    );
+    let v = val.unwrap();
+    assert_eq!(v.len(), 100);
+    assert_eq!(v[0], (iterations - 1) as u8);
+  }
 }
 
 // ============================================================
