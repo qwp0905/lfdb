@@ -51,7 +51,7 @@ impl LeafNode {
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
     writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.entries.len() as u16)?;
-    writer.write_u16(self.bias)?;
+    writer.write_u32(self.bias)?;
     for entry in &self.entries {
       writer.write_u16(entry.key.len() as u16)?;
       writer.write(&entry.key)?;
@@ -64,7 +64,7 @@ impl LeafNode {
   pub fn from_scanner(scanner: &mut PageScanner) -> Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
-    let bias = scanner.read_u16()?;
+    let bias = scanner.read_u32()?;
     let mut entries = Vec::with_capacity(len);
     for _ in 0..len {
       let l = scanner.read_u16()? as usize;
@@ -213,7 +213,7 @@ impl<'a> LeafNodeView<'a> {
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
-    let bias = scanner.read_u16()?;
+    let bias = scanner.read_u32()?;
     let offset = scanner.advance(0)?;
     Ok(Self::new(
       page,
