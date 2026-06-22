@@ -49,8 +49,8 @@ impl BlobStorage {
     })
   }
 
-  pub fn readonly_handles(&self) -> Vec<SBox<BlobHandle>> {
-    self.readonly.rl().values().cloned().collect()
+  pub fn readonly_handle_ids(&self) -> Vec<BlobId> {
+    self.readonly.rl().values().map(|h| h.get_id()).collect()
   }
   fn writable_handles(&self) -> Vec<SBox<BlobHandle>> {
     self.writable.rl().values().cloned().collect()
