@@ -456,7 +456,7 @@ where
             let mut node = leaf.writable()?;
             let (record, guard) = self.create_record(record.take())?;
             debug_assert!(_guard.is_none());
-            _guard = Some(guard);
+            _guard = guard;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
@@ -478,7 +478,7 @@ where
 
             let (record, guard) = self.create_record(record.take())?;
             debug_assert!(_guard.is_none());
-            _guard = Some(guard);
+            _guard = guard;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
