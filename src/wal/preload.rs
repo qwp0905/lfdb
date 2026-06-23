@@ -4,7 +4,7 @@ use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  background::{BackgroundThread, EventBus, OwnedSubscription, WorkBuilder},
+  background::{BackgroundThread, EventBus, OwnedSubscription, ThreadBuilder},
   binding_events,
   disk::{IOPool, Pointer},
   error,
@@ -38,7 +38,7 @@ pub struct SegmentPreload {
 impl SegmentPreload {
   pub fn new(max_len: Pointer, io_pool: Arc<IOPool>, event_bus: &EventBus) -> Arc<Self> {
     let ready = SegQueue::new().to_arc();
-    let reuse = WorkBuilder::new()
+    let reuse = ThreadBuilder::new()
       .name("wal segment reuse")
       .single()
       .eager_buffering(
@@ -46,7 +46,7 @@ impl SegmentPreload {
         handle_reuse(ready.clone(), io_pool.clone()),
       )
       .to_arc();
-    let preload = WorkBuilder::new()
+    let preload = ThreadBuilder::new()
       .name("wal segment preload")
       .single()
       .preload(

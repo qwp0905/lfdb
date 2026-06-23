@@ -20,13 +20,13 @@ where
   OnceHandle::new(handle)
 }
 
-pub struct WorkBuilder {
+pub struct ThreadBuilder {
   name: String,
   stack_size: usize,
 }
-impl WorkBuilder {
+impl ThreadBuilder {
   pub const fn new() -> Self {
-    WorkBuilder {
+    ThreadBuilder {
       name: String::new(),
       stack_size: DEFAULT_STACK_SIZE,
     }
@@ -51,7 +51,7 @@ impl WorkBuilder {
   }
 }
 pub struct MultiThreadBuilder {
-  builder: WorkBuilder,
+  builder: ThreadBuilder,
   count: usize,
 }
 impl MultiThreadBuilder {
@@ -71,7 +71,7 @@ impl MultiThreadBuilder {
 }
 
 pub struct SingleThreadBuilder {
-  builder: WorkBuilder,
+  builder: ThreadBuilder,
 }
 impl SingleThreadBuilder {
   pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> impl BackgroundThread<T, R>

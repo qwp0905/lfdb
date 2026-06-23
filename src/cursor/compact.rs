@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
   background::{
-    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, WorkBuilder,
+    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
   },
   binding_events,
   cache::{BlockCache, RefedSlot},
@@ -393,7 +393,7 @@ impl Compactor {
     let incoming = SegQueue::new().to_arc();
     let in_progress = SegQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
-    let ticker = WorkBuilder::new()
+    let ticker = ThreadBuilder::new()
       .name("compaction")
       .stack_size(2 << 20)
       .single()

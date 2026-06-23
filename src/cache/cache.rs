@@ -10,7 +10,7 @@ use super::{
   MappingTable,
 };
 use crate::{
-  background::{BackgroundThread, WorkBuilder},
+  background::{BackgroundThread, ThreadBuilder},
   disk::{PagePool, Pointer, PAGE_SIZE},
   error, measure,
   metrics::MetricsRegistry,
@@ -85,7 +85,7 @@ impl BlockCache {
 
     let dirty_tables = DirtyTables::new().to_arc();
 
-    let flush_executor = WorkBuilder::new()
+    let flush_executor = ThreadBuilder::new()
       .name("flush executor")
       .multi(PRE_FLUSH_CONCURRENCY)
       .shared(handle_execute(

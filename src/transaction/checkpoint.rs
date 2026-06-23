@@ -10,7 +10,7 @@ use super::VersionVisibility;
 
 use crate::{
   background::{
-    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, WorkBuilder,
+    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
   },
   binding_events,
   cache::{BlockCache, CacheFlusher},
@@ -109,7 +109,7 @@ impl Checkpoint {
   ) -> Arc<Self> {
     let incoming = SegQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
-    let ticker = WorkBuilder::new()
+    let ticker = ThreadBuilder::new()
       .name("checkpoint")
       .stack_size(2 << 20)
       .single()
