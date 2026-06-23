@@ -9,7 +9,7 @@ use std::{
 use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{
-  BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy,
+  BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, RecordId,
   Snapshotter, WritablePolicy,
 };
 use crate::{
@@ -39,6 +39,7 @@ struct MiniTx<'a> {
   blob: &'a BlobStorage,
   committed: Cell<bool>,
   modified: Cell<bool>,
+  record_id: Cell<RecordId>,
 }
 impl<'a> MiniTx<'a> {
   fn start(
@@ -61,6 +62,7 @@ impl<'a> MiniTx<'a> {
       blob,
       committed: Cell::new(false),
       modified: Cell::new(false),
+      record_id: Cell::new(0),
     })
   }
 
@@ -165,6 +167,11 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
     self.state.current_version()
   }
   fn wait_close(&self, _owner: TxId) {}
+  fn gen_record_id(&self) -> RecordId {
+    let id = self.record_id.get();
+    self.record_id.set(id + 1);
+    id
+  }
 }
 
 struct CompactionReadPolicy {

@@ -9,7 +9,12 @@ fn test_serialize_internal() {
   let children = vec![10];
   let next = None;
   let mut page = Page::new();
-  let node = BTreeNode::Internal(InternalNode::new(keys.clone(), children.clone(), next));
+  let node = BTreeNode::Internal(InternalNode::new(
+    keys.clone(),
+    children.clone(),
+    next,
+    DEFAULT_BIAS,
+  ));
   page.serialize_from(&node).expect("serialize error");
 
   let d = match page.view::<BTreeNodeView>().expect("deserialize error") {
@@ -34,7 +39,7 @@ fn test_serialize_leaf() {
     leaf.insert_at(
       i,
       key.clone(),
-      VersionRecord::new(*o, *v, RecordData::Data(d.clone())),
+      VersionRecord::new(*o, *v, RecordData::Data(d.clone()), 1),
       *p,
     );
   }
@@ -64,7 +69,7 @@ fn test_serialize_leaf() {
     ))
   }
 
-  assert_eq!(d.get_next(), Some(200))
+  assert_eq!(d.get_next(), Some(200));
 }
 
 #[test]
@@ -77,6 +82,7 @@ fn test_serialize_internal_with_keys_and_right() {
     keys.clone(),
     children.clone(),
     next.clone(),
+    DEFAULT_BIAS,
   ));
   page.serialize_from(&node).expect("serialize error");
 

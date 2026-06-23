@@ -17,3 +17,6 @@ pub use internal::*;
 
 mod record;
 pub use record::*;
+
+mod bias;
+use bias::*;
