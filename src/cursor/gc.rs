@@ -13,7 +13,7 @@ use super::{
 use crate::{
   background::{
     BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
-    WorkBuilder,
+    ThreadBuilder,
   },
   binding_events,
   cache::{BlockCache, RefedSlot},
@@ -53,7 +53,7 @@ impl GarbageCollector {
     config: GarbageCollectionConfig,
   ) -> Arc<Self> {
     let release_queue = SegQueue::new().to_arc();
-    let entry = WorkBuilder::new()
+    let entry = ThreadBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
       .shared(run_entry(
@@ -63,7 +63,7 @@ impl GarbageCollector {
       ))
       .to_arc();
 
-    let table = WorkBuilder::new()
+    let table = ThreadBuilder::new()
       .name("gc release tables")
       .single()
       .interval(
@@ -76,7 +76,7 @@ impl GarbageCollector {
       )
       .to_arc();
 
-    let main = WorkBuilder::new()
+    let main = ThreadBuilder::new()
       .name("gc main")
       .stack_size(2 << 20)
       .single()

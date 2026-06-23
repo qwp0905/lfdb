@@ -18,7 +18,7 @@ use super::{
   TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Oneshot, WorkBuilder},
+  background::{Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex, ToArc},
@@ -51,7 +51,7 @@ impl IOPool {
     base_path: &Path,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let thread = WorkBuilder::new()
+    let thread = ThreadBuilder::new()
       .name("io pool")
       .multi(thread_count)
       .shared(create_io_thread(metrics.clone()))
