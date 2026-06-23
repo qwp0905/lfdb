@@ -295,7 +295,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let Some(data) = data else {
       return Ok((RecordData::Tombstone, None));
     };
-    if data.len() < LARGE_VALUE {
+    if data.len() <= LARGE_VALUE {
       return Ok((RecordData::Data(data), None));
     }
     let guard = self.0.write_blob(data)?;
