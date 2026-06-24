@@ -1,6 +1,6 @@
 use crate::{
   debug,
-  disk::IOPool,
+  disk::{AlignedBuf, IOPool},
   utils::{uuid_simple, SBox, ShortenedRwLock},
   Result,
 };
@@ -36,7 +36,7 @@ impl BlobStorage {
         continue;
       }
 
-      let handle = BlobHandle::replay(io_pool.open_buffered_io(filename)?)?;
+      let handle = BlobHandle::replay(io_pool.open_direct_io(filename)?)?;
       last_id = last_id.max(handle.get_id() + 1);
       readonly.insert(handle.get_id(), SBox::new(handle));
     }
@@ -74,10 +74,12 @@ impl BlobStorage {
   }
 
   pub fn append(&self, buf: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
-    let len = buf.len() as BlobOffset;
+    let buf = AlignedBuf::from_vec(buf);
+    let len = buf.len();
+    let size = buf.size() as BlobOffset;
     loop {
       for handle in self.writable_handles() {
-        match handle.reserve(len) {
+        match handle.reserve(size) {
           BlobReserved::Ok(offset) => {
             handle.write(&buf, offset)?;
             handle.sync().wait()?;
@@ -103,7 +105,7 @@ impl BlobStorage {
       }
 
       let last_id = self.last_id.fetch_add(1, Ordering::Relaxed);
-      let new = BlobHandle::open(last_id, self.io_pool.open_buffered_io(filename())?)?;
+      let new = BlobHandle::open(last_id, self.io_pool.open_direct_io(filename())?)?;
       self.io_pool.sync_dir()?;
       self.writable.wl().insert(last_id, SBox::new(new));
     }
