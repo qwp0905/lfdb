@@ -60,11 +60,11 @@ impl<const T: usize> Page<T> {
   }
   #[inline]
   pub const fn scanner(&self) -> PageScanner<'_, T> {
-    PageScanner::new(self.as_slice())
+    PageScanner::new(self.0)
   }
   #[inline]
   pub const fn writer(&mut self) -> PageWriter<'_, T> {
-    PageWriter::new(self.as_mut_slice())
+    PageWriter::new(self.0)
   }
   #[inline]
   pub const fn range(&self, range: Range<usize>) -> &[u8] {
@@ -97,8 +97,8 @@ const EOF: Error = Error::EOF;
 
 pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
 impl<'a, const T: usize> PageScanner<'a, T> {
-  const fn new(inner: &'a [u8]) -> Self {
-    Self(OffsetReader::new(inner))
+  const fn new(inner: *mut u8) -> Self {
+    Self(unsafe { OffsetReader::from_ptr(inner, T) })
   }
 
   #[inline(always)]
@@ -151,8 +151,8 @@ impl<'a, const T: usize> PageScanner<'a, T> {
 
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
 impl<'a, const T: usize> PageWriter<'a, T> {
-  const fn new(inner: &'a mut [u8]) -> Self {
-    Self(OffsetWriter::new(inner))
+  const fn new(inner: *mut u8) -> Self {
+    Self(unsafe { OffsetWriter::from_ptr(inner, T) })
   }
 
   #[inline(always)]
