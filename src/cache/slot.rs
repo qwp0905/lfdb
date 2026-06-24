@@ -95,7 +95,7 @@ impl<'a> CachedSlot<'a> {
     let mut shadow = self.page_pool.acquire();
     let latch = self.block.latch();
     self.dirty.insert(self.block_id);
-    shadow.copy_from(&**self.block.load_page());
+    shadow.copy_from(self.block.load_page().as_slice());
     WritableSlot {
       shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
 
@@ -166,7 +166,7 @@ impl<'a> BatchSlot<'a> {
       {
         let mut latch = self.block.latch();
         self.dirty.insert(self.block_id);
-        page.copy_from(&**self.block.load_page());
+        page.copy_from(self.block.load_page().as_slice());
 
         let mut slot = RefedSlot::new(self.block.get_pointer(), page);
         self.batch.flush_with(&mut slot);

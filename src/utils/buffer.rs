@@ -10,9 +10,9 @@ pub struct OffsetReader<'a> {
 }
 impl<'a> OffsetReader<'a> {
   pub const fn new(buf: &'a [u8]) -> Self {
-    Self::from_ptr(buf.as_ptr(), buf.len())
+    unsafe { Self::from_ptr(buf.as_ptr(), buf.len()) }
   }
-  pub const fn from_ptr(ptr: *const u8, len: usize) -> Self {
+  const unsafe fn from_ptr(ptr: *const u8, len: usize) -> Self {
     Self {
       ptr,
       offset: 0,

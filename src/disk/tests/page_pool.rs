@@ -8,13 +8,13 @@ fn test_return_and_reuse() {
   assert_eq!(pool.len(), 0);
 
   let page = pool.acquire();
-  assert_eq!(page.as_ref().as_ref().len(), PAGE_SIZE);
+  assert_eq!(page.as_slice().len(), PAGE_SIZE);
 
   drop(page);
   assert_eq!(pool.len(), 1);
 
   let page = pool.acquire();
-  assert_eq!(page.as_ref().as_ref().len(), PAGE_SIZE);
+  assert_eq!(page.as_slice().len(), PAGE_SIZE);
   assert_eq!(pool.len(), 0);
 
   drop(page);

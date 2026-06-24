@@ -19,14 +19,14 @@ impl<const N: usize> BlockIOHandle<N> {
   pub fn read(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
-      .read(page.as_mut(), pointer * Self::SIZE)
+      .read(page.as_mut_slice(), pointer * Self::SIZE)
       .map_err(Error::IO)
   }
 
   pub fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
-      .read_unchecked(page.as_mut(), pointer * Self::SIZE)
+      .read_unchecked(page.as_mut_slice(), pointer * Self::SIZE)
       .map_err(Error::IO)
   }
 
@@ -41,7 +41,7 @@ impl<const N: usize> BlockIOHandle<N> {
     AsyncIO::new(
       self
         .handle
-        .alloc_and_write(page.as_ref(), pointer * Self::SIZE),
+        .alloc_and_write(page.as_slice(), pointer * Self::SIZE),
     )
   }
 
