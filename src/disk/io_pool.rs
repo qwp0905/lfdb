@@ -54,10 +54,9 @@ impl IOPool {
       .shared(create_io_thread(metrics.clone()))
       .to_arc();
 
-    let base_dir = SBox::new(
-      DirHandle::ensure(base_path, Box::new(backend), thread.clone())
-        .map_err(Error::IO)?,
-    );
+    let base_dir = DirHandle::ensure(base_path, Box::new(backend), thread.clone())
+      .map_err(Error::IO)
+      .map(SBox::new)?;
     for _ in 0..MAX_RETRY {
       if base_dir.try_lock().map_err(Error::IO)? {
         return Ok(Self {
