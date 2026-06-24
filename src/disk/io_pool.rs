@@ -1,10 +1,7 @@
 use std::{
   fs::{DirEntry, OpenOptions},
-  io::{
-    BufReader, BufWriter, Error as IoError, ErrorKind, IoSlice, Read, Result as IOResult,
-    Write,
-  },
-  mem::forget,
+  io::{Error as IoError, ErrorKind, IoSlice, Result as IOResult},
+  mem::{forget, replace},
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
   thread::sleep,
@@ -14,8 +11,8 @@ use std::{
 use crossbeam::utils::Backoff;
 
 use super::{
-  create_io_thread, AllocState, DiskBackend, HandleState, IOBackend, IOThread,
-  TaskPublisher, WriteTask,
+  create_io_thread, AlignedArray, AllocState, DiskBackend, HandleState, IOBackend,
+  IOThread, TaskPublisher, WriteTask, ALIGN,
 };
 use crate::{
   background::{Oneshot, ThreadBuilder},
@@ -85,27 +82,18 @@ impl IOPool {
     let mut options = OpenOptions::new();
     let file = self
       .base_dir
-      .open(options.write(true).append(true).create(true), &path)
+      .open_direct_io(options.write(true).append(true).create(true), &path)
       .map_err(Error::IO)?;
-    Ok(AppendIOHandle {
-      file: BufWriter::new(file),
-      filename,
-    })
+    Ok(AppendIOHandle::new(file, filename))
   }
   pub fn open_scan_io(&self, filename: PathBuf) -> Result<ScanIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
     let mut options = OpenOptions::new();
     let file = self
       .base_dir
-      .open(options.read(true), &path)
+      .open_direct_io(options.read(true), &path)
       .map_err(Error::IO)?;
-    let len = file.metadata().map_err(Error::IO)?.len();
-    Ok(ScanIOHandle {
-      file: BufReader::new(file),
-      len,
-      base_dir: self.base_dir.clone(),
-      filename,
-    })
+    Ok(ScanIOHandle::new(file, self.base_dir.clone(), filename))
   }
   pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
@@ -117,26 +105,6 @@ impl IOPool {
     let file = self
       .base_dir
       .open_direct_io(options.read(true).write(true).create(true), &path)
-      .map_err(Error::IO)?;
-    let allocated = file.metadata().map_err(Error::IO)?.len();
-    Ok(IOHandle {
-      backend: file,
-      write_handle: SBox::new(TaskPublisher::new()),
-      sync_handle: SBox::new(TaskPublisher::new()),
-      state: SBox::new(HandleState::new()),
-      thread: self.thread.clone(),
-      metrics: self.metrics.clone(),
-      base_dir: self.base_dir.clone(),
-      allocated: SBox::new(AllocState::new(allocated)),
-      filename: Mutex::new(filename),
-    })
-  }
-  pub fn open_buffered_io(&self, filename: PathBuf) -> Result<IOHandle> {
-    let path = self.base_dir.get_path().join(&filename);
-    let mut options = OpenOptions::new();
-    let file: Arc<dyn IOBackend> = self
-      .base_dir
-      .open(options.read(true).write(true).create(true), &path)
       .map(Arc::<dyn IOBackend>::from)
       .map_err(Error::IO)?;
     let allocated = file.metadata().map_err(Error::IO)?.len();
@@ -326,18 +294,12 @@ impl DirHandle {
       .disk_backend
       .rename(&self.path.join(from), &self.path.join(to))
   }
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> IOResult<Box<dyn IOBackend>> {
-    self.disk_backend.open(options, path)
-  }
   fn open_direct_io(
     &self,
     options: &mut OpenOptions,
     path: &Path,
-  ) -> IOResult<Arc<dyn IOBackend>> {
-    self
-      .disk_backend
-      .open_direct_io(options, path)
-      .map(Arc::from)
+  ) -> IOResult<Box<dyn IOBackend>> {
+    self.disk_backend.open_direct_io(options, path)
   }
   fn try_lock(&self) -> IOResult<bool> {
     self.io_backend.try_flock()
@@ -348,39 +310,105 @@ impl DirHandle {
 }
 
 pub struct AppendIOHandle {
-  file: BufWriter<Box<dyn IOBackend>>,
+  file: Box<dyn IOBackend>,
+  buffer: AlignedArray,
+  buffer_offset: usize,
+  file_offset: u64,
   filename: PathBuf,
 }
 impl AppendIOHandle {
-  pub fn append(&mut self, buf: &[u8]) -> Result {
-    self.file.write_all(buf).map_err(Error::IO)
+  pub const fn new(file: Box<dyn IOBackend>, filename: PathBuf) -> Self {
+    Self {
+      file,
+      filename,
+      buffer: AlignedArray::new(),
+      buffer_offset: 0,
+      file_offset: 0,
+    }
   }
-  pub fn flush(mut self) -> Result<PathBuf> {
+  pub fn append(&mut self, mut buf: &[u8]) -> Result {
+    loop {
+      let end = self.buffer_offset + buf.len();
+      if end <= ALIGN {
+        self.buffer[replace(&mut self.buffer_offset, end)..end].copy_from_slice(buf);
+        return Ok(());
+      }
+
+      let available = ALIGN - self.buffer_offset;
+      self.buffer[self.buffer_offset..].copy_from_slice(&buf[..available]);
+      self.flush_buf()?;
+      buf = &buf[available..];
+    }
+  }
+  fn flush_buf(&mut self) -> Result {
     self
       .file
-      .flush()
-      .and_then(|_| self.file.get_ref().fsync())
-      .map(|_| self.filename)
-      .map_err(Error::IO)
+      .pwrite_or_fail(&*self.buffer, self.file_offset)
+      .map_err(Error::IO)?;
+    self.file_offset += ALIGN as u64;
+    self.buffer_offset = 0;
+    Ok(())
+  }
+  pub fn flush(mut self) -> Result<PathBuf> {
+    self.flush_buf()?;
+    self.file.fsync().map_err(Error::IO)?;
+    Ok(self.filename)
   }
 }
+
 pub struct ScanIOHandle {
-  file: BufReader<Box<dyn IOBackend>>,
-  len: u64,
+  file: Box<dyn IOBackend>,
+  buffer: AlignedArray,
+  buffer_offset: usize,
+  file_offset: u64,
   base_dir: SBox<DirHandle>,
   filename: PathBuf,
 }
 impl ScanIOHandle {
+  const fn new(
+    file: Box<dyn IOBackend>,
+    base_dir: SBox<DirHandle>,
+    filename: PathBuf,
+  ) -> Self {
+    Self {
+      file,
+      buffer: AlignedArray::new(),
+      buffer_offset: ALIGN,
+      file_offset: 0,
+      base_dir,
+      filename,
+    }
+  }
+  fn fill_buf(&mut self) -> Result {
+    self
+      .file
+      .pread_or_fail(&mut *self.buffer, self.file_offset)
+      .map_err(Error::IO)?;
+    self.file_offset += ALIGN as u64;
+    self.buffer_offset = 0;
+    Ok(())
+  }
   pub fn read_to_vec(&mut self, bytes: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0; bytes];
     self.read(&mut buf)?;
     Ok(buf)
   }
-  pub fn read(&mut self, buf: &mut [u8]) -> Result {
-    self.file.read_exact(buf).map_err(Error::IO)
+  pub fn read(&mut self, mut buf: &mut [u8]) -> Result {
+    loop {
+      let end = self.buffer_offset + buf.len();
+      if end <= ALIGN {
+        buf.copy_from_slice(&self.buffer[replace(&mut self.buffer_offset, end)..end]);
+        return Ok(());
+      }
+
+      let available = ALIGN - self.buffer_offset;
+      buf[..available].copy_from_slice(&self.buffer[self.buffer_offset..]);
+      self.fill_buf()?;
+      buf = &mut buf[available..];
+    }
   }
-  pub const fn len(&self) -> u64 {
-    self.len
+  pub fn len(&self) -> Result<u64> {
+    Ok(self.file.metadata().map_err(Error::IO)?.len())
   }
   pub fn truncate(&self) -> Result {
     self.base_dir.remove(&self.filename).map_err(Error::IO)
