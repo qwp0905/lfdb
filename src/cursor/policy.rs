@@ -2,7 +2,7 @@ use super::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, RecordId};
 
 use crate::{
   cache::{CachedSlot, RefedSlot},
-  disk::{FreePointer, Pointer},
+  disk::{AlignedBuf, FreePointer, Pointer},
   serialize::Serializable,
   table::TableHandleRef,
   wal::TxId,
@@ -19,7 +19,7 @@ pub trait ReadonlyPolicy {
     blob_id: BlobId,
     offset: BlobOffset,
     len: BlobLen,
-  ) -> Result<Vec<u8>>;
+  ) -> Result<AlignedBuf>;
 
   fn fetch_slot(
     &self,
@@ -59,7 +59,7 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
     blob_id: BlobId,
     offset: BlobOffset,
     len: BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<AlignedBuf> {
     (*self).read_blob(blob_id, offset, len)
   }
 }

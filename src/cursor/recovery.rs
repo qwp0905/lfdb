@@ -10,7 +10,7 @@ use crate::{
   background::once,
   cache::BlockCache,
   debug,
-  disk::Pointer,
+  disk::{AlignedBuf, Pointer},
   info,
   table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
@@ -50,7 +50,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
     blob_id: super::BlobId,
     offset: super::BlobOffset,
     len: super::BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<AlignedBuf> {
     let blob = self
       .blob
       .get(blob_id)

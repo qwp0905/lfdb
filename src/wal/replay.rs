@@ -77,7 +77,7 @@ pub fn replay(
   let mut last_checkpoint: Option<LogId> = None;
   for path in files {
     let mut segment = io_pool.open_scan_io(path)?;
-    let len = segment.len();
+    let len = segment.len()?;
     let mut offset = 0;
 
     while offset < len {
