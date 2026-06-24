@@ -1,5 +1,5 @@
 use std::{
-  alloc::{alloc, dealloc, Layout},
+  alloc::{alloc_zeroed, dealloc, Layout},
   ops::{Deref, DerefMut},
   ptr::copy_nonoverlapping,
   slice::{from_raw_parts, from_raw_parts_mut},
@@ -40,7 +40,7 @@ pub struct AlignedBuf {
 impl AlignedBuf {
   pub fn new(len: usize) -> Self {
     let layout = unsafe { Layout::from_size_align_unchecked(aligned_len(len), ALIGN) };
-    let ptr = unsafe { alloc(layout) };
+    let ptr = unsafe { alloc_zeroed(layout) };
     Self { ptr, len, layout }
   }
   pub const fn size(&self) -> usize {
@@ -79,7 +79,7 @@ unsafe impl Send for AlignedBuf {}
 impl Clone for AlignedBuf {
   fn clone(&self) -> Self {
     Self {
-      ptr: unsafe { alloc(self.layout) },
+      ptr: unsafe { alloc_zeroed(self.layout) },
       len: self.len,
       layout: self.layout,
     }
