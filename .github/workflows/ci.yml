@@ -58,14 +58,14 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Switch to main baseline
-        run: git switch main
+        run: git switch --detach ${{ github.event.pull_request.base.sha }}
 
       - name: YCSB baseline
         run: cargo benchmark --bench ycsb --features lfdb -- --save-baseline main --quiet --sample-size 30
         continue-on-error: true
 
       - name: Switch to PR branch
-        run: git switch ${{ github.head_ref }}
+        run: git switch --detach ${{ github.event.pull_request.head.sha }}
 
       - name: YCSB (PR vs main)
         run: cargo benchmark --bench ycsb --features lfdb -- --baseline-lenient main --sample-size 30
