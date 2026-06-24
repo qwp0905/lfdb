@@ -84,7 +84,7 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
     blob_id: crate::cursor::BlobId,
     offset: crate::cursor::BlobOffset,
     len: crate::cursor::BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<crate::disk::AlignedBuf> {
     let blob = self
       .orchestrator
       .get_blob_handle(blob_id)

@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use crate::{
-  disk::{PageRef, PAGE_SIZE},
+  disk::{AlignedBuf, PageRef, PAGE_SIZE},
   utils::SBox,
 };
 
@@ -10,7 +10,7 @@ pub type StaticKeyRef<'a> = &'a [u8];
 
 enum Type {
   Refed(SBox<PageRef<PAGE_SIZE>>, usize, usize),
-  Copied(Vec<u8>),
+  Copied(AlignedBuf),
 }
 
 pub struct VecRef(Type);
@@ -18,14 +18,14 @@ impl VecRef {
   pub const fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
     Self(Type::Refed(page, start, end))
   }
-  pub const fn copied(data: Vec<u8>) -> Self {
+  pub const fn copied(data: AlignedBuf) -> Self {
     Self(Type::Copied(data))
   }
 
   pub fn into_vec(self) -> Vec<u8> {
     match self.0 {
       Type::Refed(slot, s, e) => slot.copy_range(s..e),
-      Type::Copied(data) => data,
+      Type::Copied(data) => data.as_slice().to_vec(),
     }
   }
 }

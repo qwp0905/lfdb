@@ -122,7 +122,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
     blob_id: super::BlobId,
     offset: super::BlobOffset,
     len: super::BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<crate::disk::AlignedBuf> {
     let blob = self
       .blob
       .get(blob_id)
@@ -203,7 +203,7 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
     _: super::BlobId,
     _: super::BlobOffset,
     _: super::BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
 }
@@ -238,7 +238,7 @@ impl ReadonlyPolicy for CompactionWritePolicy {
     _: super::BlobId,
     _: super::BlobOffset,
     _: super::BlobLen,
-  ) -> Result<Vec<u8>> {
+  ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
 }
