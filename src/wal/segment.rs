@@ -35,7 +35,7 @@ impl WALSegment {
     // transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
-    let static_ref = unsafe { transmute::<&[u8], &'static [u8]>(page.as_ref()) };
+    let static_ref = unsafe { transmute::<&[u8], &'static [u8]>(page.as_slice()) };
 
     // segment must call write only rather than alloc_and_write since it calls fallocate in constructor.
     self

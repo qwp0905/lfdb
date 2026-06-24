@@ -235,7 +235,7 @@ fn test_as_ref() {
   writer.write(&test_data).unwrap();
 
   // Verify AsRef implementation
-  let slice: &[u8] = page.as_ref();
+  let slice = page.as_slice();
   assert_eq!(slice, &test_data);
 }
 
@@ -246,7 +246,7 @@ fn test_as_mut() {
   let test_data = [1, 2, 3, 4];
 
   // Modify through AsMut
-  let slice: &mut [u8] = page.as_mut();
+  let slice = page.as_mut_slice();
   slice.copy_from_slice(&test_data);
 
   // Verify changes

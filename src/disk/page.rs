@@ -52,6 +52,12 @@ impl<const T: usize> Page<T> {
     unsafe { data.set_len(len) };
     data
   }
+  pub const fn as_slice(&self) -> &[u8] {
+    unsafe { from_raw_parts(self.0, T) }
+  }
+  pub const fn as_mut_slice(&mut self) -> &mut [u8] {
+    unsafe { from_raw_parts_mut(self.0, T) }
+  }
   #[inline]
   pub const fn scanner(&self) -> PageScanner<'_, T> {
     PageScanner::new(self.0)
@@ -73,19 +79,6 @@ impl<const T: usize> Drop for Page<T> {
   }
 }
 
-impl<const T: usize> AsRef<[u8]> for Page<T> {
-  #[inline(always)]
-  fn as_ref(&self) -> &[u8] {
-    unsafe { from_raw_parts(self.0, T) }
-  }
-}
-impl<const T: usize> AsMut<[u8]> for Page<T> {
-  #[inline(always)]
-  fn as_mut(&mut self) -> &mut [u8] {
-    unsafe { from_raw_parts_mut(self.0, T) }
-  }
-}
-
 impl<const T: usize> From<&[u8]> for Page<T> {
   #[inline]
   fn from(value: &[u8]) -> Self {
@@ -104,8 +97,8 @@ const EOF: Error = Error::EOF;
 
 pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
 impl<'a, const T: usize> PageScanner<'a, T> {
-  const fn new(inner: *const u8) -> Self {
-    Self(OffsetReader::from_ptr(inner, T))
+  const fn new(inner: *mut u8) -> Self {
+    Self(unsafe { OffsetReader::from_ptr(inner, T) })
   }
 
   #[inline(always)]
@@ -159,7 +152,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
 impl<'a, const T: usize> PageWriter<'a, T> {
   const fn new(inner: *mut u8) -> Self {
-    Self(OffsetWriter::from_ptr(inner, T))
+    Self(unsafe { OffsetWriter::from_ptr(inner, T) })
   }
 
   #[inline(always)]

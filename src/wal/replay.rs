@@ -81,7 +81,7 @@ pub fn replay(
     let mut offset = 0;
 
     while offset < len {
-      segment.read(page.as_mut())?;
+      segment.read(page.as_mut_slice())?;
       offset += WAL_BLOCK_SIZE as u64;
 
       let (records, complete) = read_page(&page);
