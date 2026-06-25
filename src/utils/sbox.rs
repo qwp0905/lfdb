@@ -19,7 +19,17 @@ impl<T> Inner<T> {
 }
 
 /**
- * A lightweight shared box with atomic strong reference counting.
+ * Strong-only variant of `Arc`.
+ *
+ * `SBox` is intentionally modeled after `std::sync::Arc`: it uses the same
+ * strong reference-counting flow, the same clone/drop ordering pattern, and the
+ * same `get_mut` semantics. The main difference is that `SBox` has no weak
+ * reference count, so the allocation is reclaimed as soon as the last strong
+ * owner is dropped.
+ *
+ * Use `Arc` as the reference model for the safety and memory-ordering rules;
+ * this type exists only to remove weak-reference overhead in engine-internal
+ * paths that do not need `Weak`.
  */
 pub struct SBox<T: ?Sized> {
   inner: *mut Inner<T>,

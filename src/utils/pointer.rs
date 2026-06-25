@@ -1,3 +1,11 @@
+/**
+ * Small convenience traits for common pointer and ownership operations.
+ *
+ * This module is intentionally lightweight. It only shortens repetitive code
+ * such as `Arc::new(value)`, `Box::new(value)`, and simple raw-pointer
+ * conversions that would otherwise require local `unsafe` blocks at every call
+ * site.
+ */
 use std::sync::Arc;
 
 pub trait ToArc {

@@ -2,6 +2,13 @@ use std::{mem::MaybeUninit, ptr::null_mut};
 
 const CAP: usize = 31;
 
+/*
+ * Slots outside `head..tail` are intentionally uninitialized.
+ *
+ * The queue manages initialization manually so `T` does not need `Default` and
+ * unused capacity does not construct values. Only the initialized range is read
+ * or dropped.
+ */
 struct Block<T> {
   next: *mut Block<T>,
   data: [MaybeUninit<T>; CAP],
@@ -35,6 +42,9 @@ impl<T> Block<T> {
     self.head == self.tail
   }
 }
+/*
+ * Drop only the initialized, not-yet-popped values.
+ */
 impl<T> Drop for Block<T> {
   fn drop(&mut self) {
     for i in self.head..self.tail {
@@ -43,6 +53,14 @@ impl<T> Drop for Block<T> {
   }
 }
 
+/**
+ * Mutable FIFO queue backed by linked fixed-size chunks.
+ *
+ * `ChunkQueue` is similar in shape to a segmented queue, but it is not
+ * concurrent: all mutating operations require `&mut self`. Values are stored in
+ * small fixed-capacity blocks, which amortizes allocation while avoiding a
+ * single large moving buffer.
+ */
 pub struct ChunkQueue<T> {
   head: *mut Block<T>,
   tail: *mut Block<T>,
