@@ -10,6 +10,12 @@ use crate::{
   Result,
 };
 
+/**
+ * Page reference annotated with its logical disk pointer.
+ *
+ * This is a thin wrapper used when code needs both the page bytes and the block
+ * pointer that the cached page represents.
+ */
 pub struct RefedSlot {
   pointer: Pointer,
   page: PageRef<PAGE_SIZE>,
@@ -37,11 +43,12 @@ impl AsMut<Page> for RefedSlot {
 }
 
 /**
- * A handle to a block cache page, abstracting over cached blocks and temp pages.
+ * Access interface for one cached block.
  *
- * Callers only need to call for_read() or for_write() — the distinction between
- * Page and Temp is an internal detail. Dirty tracking and disk writes are handled
- * by the block cache itself when the slot is dropped.
+ * A `CachedSlot` is returned after the block cache has found and pinned a block.
+ * The caller then chooses the access mode: read the current page, write through
+ * a shadow page, or join a batched mutation pass. The slot hides the cached page
+ * replacement, dirty marking, and page-pool details behind those modes.
  */
 pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
@@ -105,6 +112,13 @@ impl<'a> CachedSlot<'a> {
   }
 }
 
+/**
+ * Immutable snapshot of a cached page.
+ *
+ * The slot owns an `SBox` reference to the page version it loaded. Later writers
+ * may replace the block's current page, but this reader continues to observe the
+ * same page snapshot without taking the block latch.
+ */
 pub struct ReadonlySlot {
   page: SBox<PageRef<PAGE_SIZE>>,
 }
@@ -118,6 +132,14 @@ impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
     &self.page
   }
 }
+
+/**
+ * Copy-on-write write guard for a cached block.
+ *
+ * The guard owns a shadow page copied from the current cached page. Callers
+ * mutate that shadow page, and when the guard is dropped the shadow replaces the
+ * cached page and advances the block epoch.
+ */
 pub struct WritableSlot<'a> {
   shadow: ManuallyDrop<RefedSlot>,
   latch: BlockLatch<'a>,
@@ -153,7 +175,10 @@ pub struct BatchSlot<'a> {
 }
 impl<'a> BatchSlot<'a> {
   fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
-    // transmute allowed since wait for execution at the end of this function.
+    // SAFETY: `BatchHandle` stores handlers behind a `'static` type because a
+    // different caller may become the batch owner and execute them. This function
+    // waits for this handler's completion before returning, so any non-static
+    // captures inside the closure cannot outlive the call.
     let handler =
       unsafe { transmute::<Box<BatchHandler<'_>>, Box<BatchHandler<'static>>>(handler) };
     let (occupied, o) = self.batch.register(handler);
