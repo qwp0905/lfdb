@@ -11,9 +11,22 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
 use super::{ThreadSlot, UnwindSpawner};
 use crate::{error, utils::SBox};
 
+/**
+ * Subscriber for events that may be observed by multiple consumers.
+ *
+ * Shared events are delivered as `Arc<E>`, allowing the same event object to be
+ * seen by every registered subscriber. Use this for global notifications or
+ * fan-out style events.
+ */
 pub trait SharedSubscription<E> {
   fn handle(&self, event: Arc<E>);
 }
+/**
+ * Subscriber for events that have exactly one consumer.
+ *
+ * Owned events are moved into the subscriber. Use this for event payloads whose
+ * ownership must be transferred to the handler.
+ */
 pub trait OwnedSubscription<E> {
   fn handle(&self, event: E);
 }
@@ -32,6 +45,13 @@ trait OwnedEventAdapter {
 trait SharedEventAdapter {
   fn cast_event(&self, event: SharedEvent) -> bool;
 }
+/*
+ * The event bus does not own subscribers.
+ *
+ * Routes store `Weak` references so registering a subscriber does not extend
+ * its lifetime. If the subscriber has been dropped, delivery fails naturally:
+ * owned routes become tombstones and shared routes remove the dead adapter.
+ */
 struct AdapterImpl<E, S: ?Sized> {
   subscriber: Weak<S>,
   _event: PhantomData<E>,
@@ -75,12 +95,44 @@ impl<E, S: ?Sized> AdapterImpl<E, S> {
   }
 }
 enum Route {
+  /*
+   * Exactly one owned subscriber is registered for this event type.
+   *
+   * Owned events are usually important hand-off messages, so the bus preserves
+   * them during startup until the owning subscriber is registered.
+   */
   Owned(Box<dyn OwnedEventAdapter>),
+  /*
+   * Zero or more shared subscribers are registered for this event type.
+   *
+   * Shared events are fan-out notifications and are delivered as `Arc`.
+   */
   Shared(Vec<Box<dyn SharedEventAdapter>>),
+  /*
+   * Events published before their owned subscriber is registered.
+   *
+   * This exists to avoid tight initialization-order coupling between engine
+   * components. Once the subscriber is registered, the queued events are drained
+   * into it and the route becomes `Owned`.
+   */
   Offline(Vec<OwnedEvent>),
+  /*
+   * The previous owned subscriber disappeared.
+   *
+   * After startup, reaching this state should normally only happen during engine
+   * shutdown. Future events of this type are ignored as a defensive measure.
+   */
   Tombstone,
 }
 
+/*
+ * Registration conflicts are programmer errors.
+ *
+ * An owned event type must have exactly one consumer, and an event type cannot
+ * be both owned and shared. Shared routes support fan-out, but the ownership
+ * model is still exclusive: a type is either an owned hand-off event or a shared
+ * notification event, never both.
+ */
 struct EventRouter {
   handlers: HashMap<TypeId, Route>,
 }
@@ -185,7 +237,13 @@ where
     B::bind(bus, subscriber)
   }
 }
-
+/**
+ * Compile-time list of owned events handled by a subscriber.
+ *
+ * The `binding_events!` macro expands event arrays into recursive tuple lists.
+ * Calling `bind` walks that type list and registers a route from each event
+ * type to the subscriber.
+ */
 pub trait EventBindings {
   type Owned: OwnedEventList<Self>;
   type Shared: SharedEventList<Self>;

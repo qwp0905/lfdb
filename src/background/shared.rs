@@ -15,6 +15,12 @@ use crate::utils::{SBox, ShortenedMutex};
 
 use super::{BackgroundThread, Context, SharedFn, UnwindSpawner};
 
+/*
+ * Standard work-stealing priority:
+ * 1. run local work first,
+ * 2. pull a batch from the global injector,
+ * 3. steal from other workers as a fallback.
+ */
 fn pop_or_steal<'a, A: 'a>(
   local: &Worker<A>,
   global: &Injector<A>,
@@ -41,6 +47,11 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
   }
 }
 
+/*
+ * A worker that receives `Term` stops processing work. Any tasks already pulled
+ * into its local queue are returned to the global injector so another worker,
+ * or the close-time cleanup path, can handle them.
+ */
 fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
 where
   T: Send,
@@ -115,9 +126,26 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-  Unqueued, // out of idle queue.
-  Queued,   // in idle queue, but still working.
-  Parked,   // in idle queue and parked.
+  /*
+   * The worker is not discoverable through the idle queue.
+   *
+   * Producers cannot wake this worker directly through `idle`; either it is
+   * running, or it will re-register itself before sleeping.
+   */
+  Unqueued,
+  /*
+   * The worker has published itself to the idle queue and is preparing to park.
+   *
+   * It is still checking for work. If a producer observes this state and changes
+   * it back to `Unqueued`, the worker will notice that signal and avoid parking.
+   */
+  Queued,
+  /*
+   * The worker found no work after publishing itself and has gone to sleep.
+   *
+   * A producer that takes this idle entry must unpark the corresponding thread.
+   */
+  Parked,
 }
 struct Idle {
   state: SBox<AtomicCell<State>>,
@@ -130,8 +158,16 @@ impl Idle {
 }
 
 /**
- * Multiple worker threads sharing a single channel for task distribution.
- * Suitable for tasks that require burst throughput but have long idle periods.
+ * Parallel background executor used by the engine.
+ *
+ * This is the engine's primary runtime for parallel background work. It uses a
+ * work-stealing layout: producers push tasks into a global injector, workers
+ * keep local queues, and idle workers can steal from each other when the global
+ * queue is empty.
+ *
+ * When no work is available, workers register themselves in the idle queue and
+ * park. Producers wake parked workers on demand, so the executor can handle
+ * bursts of parallel work without keeping idle threads busy.
  */
 pub struct SharedWorkThread<T, R = ()> {
   global: Arc<Injector<Context<T, R>>>,
@@ -209,6 +245,17 @@ where
     }
   }
 
+  /*
+   * Closing a shared executor cannot use the same simple boundary as a single
+   * worker. Tasks may already be in the global injector or in a worker's local
+   * queue when `Term` is observed, and the exact ordering between task submission
+   * and termination is distributed across workers.
+   *
+   * The executor therefore sends one `Term` per worker and, after all workers
+   * have joined, drains the global queue on the closing thread. This preserves
+   * the important guarantee: work submitted before `close` begins is completed
+   * even if some workers encounter `Term` before processing all local work.
+   */
   fn close(&self) {
     let threads = take(&mut *self.threads.l());
     if threads.is_empty() {

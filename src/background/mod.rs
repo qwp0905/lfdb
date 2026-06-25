@@ -19,8 +19,8 @@ use interval::*;
 mod parker;
 pub use parker::*;
 
-mod eager;
-pub use eager::*;
+mod buffering;
+pub use buffering::*;
 
 mod preload;
 pub use preload::*;
