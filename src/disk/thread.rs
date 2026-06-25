@@ -33,9 +33,12 @@ impl AllocState {
 }
 
 /**
- * AllocState allowed send and sync because only one thread can access to this state.
- * Multiple requests are merged into a single dispatch and executed once on a single thread.
- * Only in io pool is allowed to access this state.
+ * Tracks the file size already covered by preallocation.
+ *
+ * `AllocState` uses `Cell` because it is only accessed by the single worker that
+ * owns the corresponding `AllocAndWrite` flush pass. The value is stored in an
+ * `SBox` and can move across threads, but `TaskPublisher::occupied` serializes
+ * execution so the state is logically single-threaded.
  */
 unsafe impl Send for AllocState {}
 unsafe impl Sync for AllocState {}
@@ -70,6 +73,14 @@ impl HandleState {
   }
 }
 
+/**
+ * Per-handle task publisher and batching gate.
+ *
+ * Callers push requests into the queue concurrently. The `occupied` flag elects
+ * exactly one caller as the winner that dispatches this publisher to the IO
+ * worker pool. That worker owns the flush pass, drains the buffered requests,
+ * and may keep ownership while more requests arrive.
+ */
 pub struct TaskPublisher<T> {
   queue: SegQueue<(T, OneshotFulfill<Result<()>>)>,
   occupied: AtomicBool,
@@ -149,6 +160,10 @@ impl SBox<TaskPublisher<WriteTask>> {
       }
 
       flush_alloc_and_write(metrics, backend, state, alloc, &mut buffered);
+
+      // Drop ownership before checking the queue so a new publisher can schedule a
+      // worker. If work is already visible after that, try to reacquire ownership and
+      // continue draining it here. Losing the race means another worker was scheduled.
       self.occupied.fetch_and(false, Ordering::Release);
       if self.queue.is_empty() {
         break;
@@ -230,8 +245,20 @@ impl SBox<TaskPublisher<()>> {
   }
 }
 pub enum IOTask {
+  /**
+   * For files whose usable space grows with writes, such as table segments.
+   * The worker preallocates up to the highest required offset before writing.
+   */
   AllocAndWrite(SBox<TaskPublisher<WriteTask>>, SBox<AllocState>),
+  /**
+   * For fixed-size or externally preallocated files.
+   * The worker only batches and writes; allocation is handled outside.
+   */
   WriteOnly(SBox<TaskPublisher<WriteTask>>),
+  /**
+   * Batches multiple fdatasync waiters into one syscall. A sync batch has one
+   * result, so every waiter receives the same completion result.
+   */
   Sync(SBox<TaskPublisher<()>>),
 }
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
@@ -284,6 +311,9 @@ fn flush_alloc_and_write(
 
   let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
   let Some(_token) = state.pin.try_shared() else {
+    // If truncate/remove owns the handle exclusively, this request no longer has a
+    // meaningful file to operate on. Mark the handle closed and complete queued
+    // waiters as successful no-ops.
     state.closed.fetch_or(true, Ordering::Release);
     return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
   };
@@ -294,6 +324,10 @@ fn flush_alloc_and_write(
     .into_iter()
     .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }
+
+// Preallocate in coarse chunks so the filesystem can keep nearby writes in a
+// more local extent instead of allocating space block by block. 1 MiB is a
+// simple default chunk size, not a carefully tuned boundary.
 const EXTENT: u64 = 1 << 20;
 fn exec_write_only(
   metrics: &MetricsRegistry,
@@ -342,12 +376,16 @@ fn exec_alloc_and_write(
   alloc: &AllocState,
   mut buffered: Vec<WriteTask>,
 ) -> std::io::Result<()> {
-  // last caller wins on duplicate pointers
+  // Treat the flush batch like a tiny write buffer. When multiple writes target
+  // the same byte range, only the last published value needs to reach the file.
   buffered.sort_by_key(|(i, _)| *i);
   buffered.reverse();
   buffered.dedup_by_key(|(i, b)| (*i, b.len()));
   buffered.reverse();
 
+  // Space allocation is owned by this batching layer. Since all writes for this
+  // handle are flushed here, the worker can preallocate once up to the highest
+  // required offset before issuing the actual writes.
   let required = buffered.last().map(|(o, b)| *o + b.len() as u64).unwrap();
   alloc_if_needed(required, alloc, backend)?;
 

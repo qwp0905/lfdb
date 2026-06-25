@@ -17,16 +17,23 @@ pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 pub const ALIGN: usize = 512;
 
 /**
- * An abstraction over a fixed-size disk block.
- * Allocate 512-byte aligned heap memory for Direct I/O.
- * For memory alignment, the page size must always be a multiple of 2.
+ * Fixed-size disk block backed by aligned heap memory.
+ *
+ * `Page` has two responsibilities: it represents one disk block used by the
+ * storage layer, and it guarantees the memory alignment required by direct I/O.
+ * The buffer is allocated manually with `ALIGN` alignment and freed with the
+ * same layout in `Drop`.
+ *
+ * `ALIGN` is fixed to 512 bytes for direct I/O. `T` is additionally kept as a
+ * power-of-two engine block size; this is an engine storage policy, not a
+ * requirement of `Layout` itself.
  */
 #[derive(Debug)]
 pub struct Page<const T: usize = PAGE_SIZE>(*mut u8, PhantomData<[u8; T]>);
 
 impl<const T: usize> Page<T> {
   const LAYOUT: Layout = {
-    assert!(T & (T - 1) == 0);
+    assert!(T.is_power_of_two());
     unsafe { Layout::from_size_align_unchecked(T, ALIGN) }
   };
 
@@ -39,9 +46,12 @@ impl<const T: usize> Page<T> {
     self.0
   }
   #[inline]
-  pub fn copy_from<V: AsRef<[u8]>>(&mut self, data: V) {
-    let data = data.as_ref();
-    let len = data.len().min(T);
+  pub fn copy_from(&mut self, data: &[u8]) {
+    let len = data.len();
+    assert!(
+      len <= T,
+      "cannot copy from data since overflow bytes. required {T} but received {len}"
+    );
     unsafe { copy_nonoverlapping(data.as_ptr(), self.0, len) };
   }
   #[inline]
@@ -89,12 +99,19 @@ impl<const T: usize> From<&[u8]> for Page<T> {
   }
 }
 
-// Page itself is a plain byte buffer with no internal synchronization.
+// Page is an owned byte buffer. Moving it across threads is safe, and shared
+// references only expose immutable byte access; mutation still requires `&mut`.
 unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}
 
 const EOF: Error = Error::EOF;
 
+/**
+ * Sequential reader over a `Page`.
+ *
+ * This wraps `OffsetReader` with the page size and converts out-of-bounds reads
+ * into the engine's `Error::EOF`.
+ */
 pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
 impl<'a, const T: usize> PageScanner<'a, T> {
   const fn new(inner: *mut u8) -> Self {
@@ -149,6 +166,12 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   }
 }
 
+/**
+ * Sequential writer over a `Page`.
+ *
+ * This wraps `OffsetWriter` with the page size and converts out-of-bounds
+ * writes into the engine's `Error::EOF`.
+ */
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
 impl<'a, const T: usize> PageWriter<'a, T> {
   const fn new(inner: *mut u8) -> Self {

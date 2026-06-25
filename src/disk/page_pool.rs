@@ -9,8 +9,12 @@ use super::Page;
 use crate::utils::SBox;
 
 /**
- * A handle to a pooled Page. The page is always present — ManuallyDrop
- * defers deallocation to Drop, where it is returned to the pool or freed.
+ * Owned handle to a pooled page.
+ *
+ * `PageRef` keeps the page in `ManuallyDrop` because dropping the handle should
+ * normally return the page to the pool instead of freeing it. If the pool is
+ * already full, the failed `push` drops the page normally and releases the
+ * allocation.
  */
 pub struct PageRef<const N: usize> {
   page: ManuallyDrop<Page<N>>,
@@ -51,9 +55,12 @@ impl<const N: usize> Drop for PageRef<N> {
 }
 
 /**
- * A pool of reusable Page buffers.
- * acquire() returns a pooled page if available, or allocates a new one.
- * Dropped pages are returned to the pool; excess pages beyond capacity are freed.
+ * Bounded pool of reusable aligned pages.
+ *
+ * `PagePool` reduces heap allocation churn for direct-I/O pages. `acquire`
+ * returns a recycled page when one is available and allocates a new page only
+ * when the pool is empty. When the returned `PageRef` is dropped, the page is
+ * returned to the pool if there is capacity.
  */
 pub struct PagePool<const N: usize> {
   store: SBox<ArrayQueue<Page<N>>>,

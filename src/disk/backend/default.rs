@@ -1,3 +1,11 @@
+/**
+ * Default filesystem backend.
+ *
+ * This implementation uses the standard library whenever it exposes the needed
+ * operation. Platform-specific code appears only for operations that are missing
+ * from stable std APIs, such as vectored positioned writes, preallocation, and
+ * direct-I/O-style open flags.
+ */
 use std::{
   fs::{
     create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions,
@@ -26,6 +34,9 @@ use std::{
 
 use super::{DiskBackend, IOBackend};
 
+/**
+ * The default `IOBackend` implementation is just `std::fs::File`.
+ */
 pub type DefaultDiskBackend = File;
 impl IOBackend for DefaultDiskBackend {
   #[cfg(unix)]
@@ -114,7 +125,7 @@ impl IOBackend for DefaultDiskBackend {
     self.set_len(offset + len)
   }
   #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-  fn fallocate(&self, offset: u64, len: u64) {
+  fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
     self.set_len(offset + len)
   }
 
@@ -139,6 +150,9 @@ impl IOBackend for DefaultDiskBackend {
   }
 }
 
+/**
+ * Filesystem namespace operations implemented with the standard library.
+ */
 pub struct DefaultIOBackend;
 impl DiskBackend for DefaultIOBackend {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>
@@ -155,6 +169,8 @@ impl DiskBackend for DefaultIOBackend {
     options: &mut OpenOptions,
     path: &Path,
   ) -> Result<Box<dyn IOBackend>> {
+    // macOS does not expose Linux-style O_DIRECT here. F_NOCACHE is the closest
+    // default-backend approximation.
     let file = options.open(path)?;
     let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
     if ret == -1 {
@@ -169,6 +185,7 @@ impl DiskBackend for DefaultIOBackend {
     options: &mut OpenOptions,
     path: &Path,
   ) -> Result<Box<dyn IOBackend>> {
+    // Closest default-backend approximation to Linux O_DIRECT on Windows.
     let file = options.custom_flags(libc::O_DIRECT).open(path)?;
     Ok(Box::new(file))
   }

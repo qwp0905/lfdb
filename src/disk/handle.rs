@@ -4,7 +4,13 @@ use super::{AsyncIO, IOHandle, Page, Pointer};
 use crate::{error::Result, Error};
 
 /**
- * Just a wrapper for IOHandle that provides a logical offset function.
+ * Block-addressed wrapper around `IOHandle`.
+ *
+ * `IOHandle` works with byte offsets and `std::io::Error`. This wrapper maps a
+ * logical block pointer to a byte offset (`pointer * N`) and converts IO errors
+ * into the engine error type. Its synchronous `write` method also closes the
+ * lifetime gap around the async write path by waiting before the borrowed page
+ * can go out of scope.
  */
 pub struct BlockIOHandle<const N: usize> {
   handle: IOHandle,
@@ -32,11 +38,21 @@ impl<const N: usize> BlockIOHandle<N> {
 
   #[inline]
   pub fn write(&self, pointer: Pointer, page: &Page<N>) -> Result {
-    // transmute allowed since page lifetime available until wait called.
+    // SAFETY: `write_async` requires a `'static` page because the buffer crosses
+    // into the IO worker queue. This synchronous wrapper immediately waits for
+    // completion, and completion means the worker no longer holds or reads the
+    // submitted slice. Therefore the borrowed page cannot outlive this call.
     let static_ref = unsafe { transmute::<&Page<N>, &'static Page<N>>(page) };
     self.write_async(pointer, static_ref).wait()
   }
 
+  /**
+   * Submit an asynchronous block write.
+   *
+   * The page must remain valid until the returned `AsyncIO` completes. Callers
+   * that cannot provide that lifetime should use `write`, which waits before
+   * returning.
+   */
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
     AsyncIO::new(
       self
