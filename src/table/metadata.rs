@@ -14,11 +14,26 @@ pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
 pub type AtomicTableId = AtomicU32;
 
+/**
+ * Durable table descriptor stored in the metadata table.
+ *
+ * This value records the table id, validated table name, backing filename, and
+ * optional compaction state. `to_vec` and `from_bytes` encode/decode the binary
+ * value stored in the metadata table.
+ */
 #[derive(Debug)]
 pub struct TableMetadata {
   id: TableId,
   name: TableName,
   filename: PathBuf,
+  /**
+   * In-progress compaction target, if any.
+   *
+   * The primary role is to elect a single compaction winner for a table by making
+   * the in-progress target visible in metadata. Because the marker is serialized
+   * with the table descriptor, recovery can also discover the compaction target
+   * after a crash.
+   */
   compaction: Option<(TableId, PathBuf)>,
 }
 impl TableMetadata {
@@ -41,6 +56,12 @@ impl TableMetadata {
       None => None,
     }
   }
+  /**
+   * Return metadata for the table produced by compaction.
+   *
+   * Compaction keeps the same logical table name but writes into a different id
+   * and backing file.
+   */
   pub fn get_compaction_metadata(&self) -> Option<TableMetadata> {
     let (id, filename) = self.compaction.as_ref()?;
     Some(TableMetadata::new(*id, self.name.clone(), filename.clone()))

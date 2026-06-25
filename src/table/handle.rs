@@ -12,6 +12,13 @@ use crate::{
 
 pub type TableHandleRef = SBox<TableHandle>;
 
+/**
+ * Runtime accessor for one opened table segment.
+ *
+ * `TableMetadata` is the durable descriptor. `TableHandle` is the live object
+ * built from it: it owns the block IO handle, the in-memory free list, and the
+ * pin used to keep background table operations from racing with final close.
+ */
 pub struct TableHandle {
   id: TableId,
   name: TableName,
@@ -50,8 +57,12 @@ impl TableHandle {
   }
 
   /**
-   * Permanently and exclusively fix the table pin.
-   * After calling this method, you cannot pin it forever.
+   * Try to logically close this table segment.
+   *
+   * This does not close the underlying file handle. It permanently takes the
+   * exclusive table pin so no new `PinnedHandle` can be created. Drop-table and
+   * other lifecycle code use this as the announcement that runtime-independent
+   * background workers should stop touching this table.
    */
   #[inline]
   pub fn try_close(&self) -> bool {
@@ -72,7 +83,10 @@ impl TableHandleRef {
     let token = self.pin.try_shared()?;
     let static_token =
       unsafe { transmute::<SharedToken<'_>, SharedToken<'static>>(token) };
-    // transmute allowed since sbox guarantees the lifespan
+    // SAFETY: `PinnedHandle` stores a clone of this `SBox<TableHandle>` together
+    // with the shared token. The clone keeps the allocation alive until the token
+    // is dropped in `PinnedHandle::drop`, so extending the token lifetime is valid
+    // for the guard's lifetime.
     Some(PinnedHandle {
       handle: self.clone(),
       token: ManuallyDrop::new(static_token),
@@ -80,6 +94,16 @@ impl TableHandleRef {
   }
 }
 
+/**
+ * Guarded table handle.
+ *
+ * Holds a shared table pin together with a cloned table reference, preventing
+ * `try_close` from taking the exclusive pin while the guard is alive.
+ *
+ * TODO: This can keep a table pinned longer than necessary for long background
+ * work. Prefer short-lived pins at the actual access points instead of extending
+ * the pin lifetime across waits.
+ */
 pub struct PinnedHandle {
   handle: TableHandleRef,
   token: ManuallyDrop<SharedToken<'static>>,
