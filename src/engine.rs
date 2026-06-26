@@ -33,6 +33,13 @@ use crate::{
 pub struct Engine {
   orchestrator: TxOrchestrator,
   event_bus: Arc<EventBus>,
+  /**
+   * Engine-level availability flag.
+   *
+   * `Engine` mainly exposes bootstrapping and transaction creation, so this flag
+   * is observed at transaction creation time, but its meaning is broader: whether
+   * this engine instance is still usable.
+   */
   available: AtomicBool,
   metrics_registry: Arc<MetricsRegistry>,
 }
@@ -40,7 +47,7 @@ impl Engine {
   pub fn bootstrap<T, B>(backend: B, config: &EngineConfig<T>) -> Result<Self>
   where
     T: AsRef<Path>,
-    B: DiskBackend,
+    B: DiskBackend + 'static,
   {
     let st = Instant::now();
     config.validate()?;
@@ -201,7 +208,6 @@ impl Engine {
         .write(data)?;
     }
 
-    block_cache.create_flusher().flush_hard()?;
     tables.replay(handles.into_values())?;
     recovery(block_cache.clone(), &tables)?;
 
@@ -242,6 +248,11 @@ impl Engine {
       metrics_registry.clone(),
       config.checkpoint_flush_factor,
     )?;
+
+    // Discard replay input WAL segments after the initial checkpoint.
+    // Restart may use a different WAL segment size/configuration. Rather than
+    // validating and resizing old segment files for reuse, boot removes the replayed
+    // files and lets the new WAL/preload configuration create fresh segments.
     replay
       .segments
       .into_iter()

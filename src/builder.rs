@@ -134,7 +134,7 @@ where
     Engine::bootstrap(DefaultIOBackend, &self.0)
   }
 
-  pub fn with_backend<B: DiskBackend>(&self, backend: B) -> Result<Engine> {
+  pub fn with_backend<B: DiskBackend + 'static>(&self, backend: B) -> Result<Engine> {
     Engine::bootstrap(backend, &self.0)
   }
 }
