@@ -17,6 +17,17 @@ const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — pre
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
 
+/**
+ * Active transaction status transitions.
+ *
+ * Every transaction starts as `AVAILABLE`.
+ * - commit path:  `AVAILABLE -> ON_COMMIT`
+ * - timeout path: `AVAILABLE -> TIMEOUT`
+ * - abort path:   `AVAILABLE | TIMEOUT -> ABORTED`
+ *
+ * `ON_COMMIT` is terminal for timeout/abort ownership: once commit owns the
+ * transaction, timeout code cannot abort it.
+ */
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
@@ -86,6 +97,13 @@ impl ActiveState {
   }
 }
 
+/**
+ * Active transaction registry plus close-notification primitive.
+ *
+ * A transaction is considered closed when it is removed from this map, regardless
+ * of how it finished. Waiters parked on that transaction id are woken when the
+ * state is removed.
+ */
 pub struct ActiveSet {
   inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
   last_tx_id: AtomicTxId,
@@ -100,6 +118,14 @@ impl ActiveSet {
   pub fn current_version(&self) -> TxId {
     self.last_tx_id.load(Ordering::Acquire)
   }
+
+  /**
+   * Allocate and publish a new active transaction under one write lock.
+   *
+   * A transaction id becomes externally observable only when its state is inserted
+   * into the active map. Keeping id allocation and insertion in the same critical
+   * section prevents a newly issued transaction from being missed by snapshots.
+   */
   pub fn new_state(&self) -> SBox<ActiveState> {
     let mut uninit = SBox::new_uninit();
     let mut inner = self.inner.wl();
@@ -114,6 +140,12 @@ impl ActiveSet {
       .or_insert(unsafe { uninit.assume_init() })
       .clone()
   }
+  /**
+   * Build a bitmap snapshot of active transaction ids below `max`.
+   *
+   * The snapshot is offset-based so visibility checks can test active ids without
+   * storing every possible transaction id up to `max`.
+   */
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
     let inner = self.inner.rl();
     let Some((&offset, _)) = inner.first_key_value() else {

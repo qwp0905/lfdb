@@ -141,7 +141,7 @@ impl TxOrchestrator {
     self.tables.get(table_id)
   }
   #[inline]
-  pub fn commit_table(&self, table: TableHandleRef) {
+  pub fn register_table(&self, table: TableHandleRef) {
     self.tables.insert(table);
   }
   #[inline]
@@ -170,9 +170,11 @@ impl TxOrchestrator {
   }
 
   /**
-   * Closes components in dependency order — higher-level components first.
-   * wal.half_close() step 1 stops new checkpoint triggers; checkpoint.close()
-   * performs the final checkpoint; step 2 wal.close() finalizes the WAL.
+   * Close subsystems in logical dependency order.
+   *
+   * Background components are stopped first so they stop producing cache/WAL/IO
+   * work. Lower-level storage components are then closed after their users have
+   * finished.
    */
   pub fn close(&self) -> Result {
     self.compactor.close()?;

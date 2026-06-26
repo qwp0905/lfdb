@@ -48,7 +48,12 @@ impl<'a> Deref for TxState<'a> {
 }
 
 /**
- * Snapshot of the version visibility active set to achieve snapshot isolation.
+ * Transaction snapshot used for visibility checks.
+ *
+ * The active set is captured at transaction start to provide snapshot isolation.
+ * The aborted set is referenced live instead of copied: transactions added there
+ * were not readable to this snapshot anyway, so observing later abort markings
+ * does not expand visibility.
  */
 pub struct TxSnapshot<'a> {
   active: OffsetBitmap,
@@ -82,6 +87,14 @@ pub struct VersionVisibility {
   closed: AtomicBool,
 }
 impl VersionVisibility {
+  /**
+   * Rebuild visibility after replay.
+   *
+   * Transactions that were active in the persisted snapshot or started in the WAL
+   * window are treated as aborted unless a close record is also present. After a
+   * restart there are no still-active user transactions; committed transactions
+   * are represented implicitly as ids that are neither active-at-crash nor aborted.
+   */
   pub fn replay(
     io_pool: Arc<IOPool>,
     last_tx_id: TxId,
@@ -111,9 +124,10 @@ impl VersionVisibility {
   }
 
   /**
-   * Trims aborted tx_ids that are older than version. Called after GC completes —
-   * version is the oldest tx_id that GC has fully cleaned up, so no active reader
-   * can reference those versions anymore and their abort status no longer needs tracking.
+   * Advance the retained abort marker boundary.
+   *
+   * Abort markers below `version` are removed. Safety of that boundary is supplied
+   * by the caller.
    */
   pub fn remove_aborted(&self, version: &TxId) {
     while let Some(v) = self.aborted.front() {
@@ -192,6 +206,10 @@ impl VersionVisibility {
     Ok((active, aborted))
   }
 
+  /**
+   * Persist the current visibility state and return its covered transaction
+   * boundary with the snapshot file path.
+   */
   pub fn persist_snapshot(&self) -> Result<(TxId, PathBuf)> {
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
     let mut file = self.io_pool.open_append_io(current)?;
@@ -233,12 +251,18 @@ impl VersionVisibility {
       if path == current {
         continue;
       }
-      self.io_pool.remove(&path)?;
+      self.io_pool.truncate(&path)?;
     }
     Ok(())
   }
 }
 impl SharedSubscription<WALFailed> for VersionVisibility {
+  /**
+   * End all currently active transactions as aborted after WAL failure.
+   *
+   * No active transaction can commit once WAL durability is unavailable, so every
+   * abortable active state is moved to the aborted set and removed from active.
+   */
   fn handle(&self, _: Arc<WALFailed>) {
     if self.closed.fetch_or(true, Ordering::Release) {
       return;
