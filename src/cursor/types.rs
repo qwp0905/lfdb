@@ -1,8 +1,4 @@
-use std::{
-  borrow::Borrow,
-  hash::{Hash, Hasher},
-  ops::Deref,
-};
+use std::{borrow, cmp, fmt, hash, ops::Deref};
 
 use crate::{
   disk::{AlignedBuf, PageRef, PAGE_SIZE},
@@ -60,8 +56,8 @@ impl Deref for VecRef {
     self.as_slice()
   }
 }
-impl std::fmt::Debug for VecRef {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for VecRef {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     self.as_slice().fmt(f)
   }
 }
@@ -83,12 +79,12 @@ impl<T: AsRef<[u8]>> PartialEq<T> for VecRef {
 impl Eq for VecRef {}
 
 impl PartialOrd for VecRef {
-  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+  fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
     Some(self.cmp(other))
   }
 }
 impl Ord for VecRef {
-  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+  fn cmp(&self, other: &Self) -> cmp::Ordering {
     self.as_slice().cmp(other.deref())
   }
 }
@@ -100,13 +96,13 @@ impl Clone for VecRef {
     }
   }
 }
-impl Borrow<[u8]> for VecRef {
+impl borrow::Borrow<[u8]> for VecRef {
   fn borrow(&self) -> &[u8] {
     self.as_slice()
   }
 }
-impl Hash for VecRef {
-  fn hash<H: Hasher>(&self, state: &mut H) {
+impl hash::Hash for VecRef {
+  fn hash<H: hash::Hasher>(&self, state: &mut H) {
     self.as_slice().hash(state)
   }
 }
