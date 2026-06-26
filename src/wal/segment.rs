@@ -14,6 +14,13 @@ pub type FsyncResult = Oneshot<IOResult<()>>;
 
 const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
 
+/**
+ * Fixed-size WAL segment made of WAL blocks.
+ *
+ * `max_len` is the number of WAL blocks in the segment. Each write addresses a
+ * block index inside the segment and is translated to a byte offset by
+ * multiplying by `WAL_BLOCK_SIZE`.
+ */
 pub struct WALSegment {
   handle: IOHandle,
 }
@@ -32,7 +39,7 @@ impl WALSegment {
     Ok(Self { handle })
   }
   pub fn write(&self, pointer: Pointer, page: &Page<WAL_BLOCK_SIZE>) -> IOResult<()> {
-    // transmute extends the slice lifetime to 'static to satisfy the background thread's
+    // SAFETY: transmute extends the slice lifetime to 'static to satisfy the background thread's
     // type bound. Safe because wait and flatten blocks until the write completes, ensuring
     // the page buffer outlives the background thread's use of the pointer.
     let static_ref = unsafe { transmute::<&[u8], &'static [u8]>(page.as_slice()) };

@@ -139,6 +139,13 @@ impl WAL {
     ))
   }
 
+  /**
+   * Transition WAL to failed state and publish the failure.
+   *
+   * WAL I/O failure is terminal for this WAL instance. After the first failure,
+   * later callers see `WALUnavailable`; the failure event only reports that this
+   * transition happened.
+   */
   fn failover(&self, err: ErrorKind) -> Error {
     if !self.state.swap(State::Failed).is_available() {
       return Error::WALUnavailable;
@@ -185,6 +192,14 @@ impl WAL {
    *   10-2. if current segment has not been rotated, then continue.
    *   10-3. if current segment has been rotated, wait until pin is empty.
    *   10-4. take segment raw pointer in buffer, and then trigger checkpoint.
+   *
+   * A segment rotation raises the segment-sync boundary.
+   *
+   * When the rotator fills a segment, it schedules that segment fsync in
+   * `SyncQueue` and publishes the rotated segment for reuse bookkeeping. The
+   * rotator does not wait for durability here. Durability is enforced later by
+   * `flush=true` callers through `SyncQueue::wait_until`, which collectively bear
+   * the cost of waiting for completed rotated-segment syncs.
    */
   fn append(&self, record: LogRecordUninit, flush: bool) -> Result {
     let len = record.len();

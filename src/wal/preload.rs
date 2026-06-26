@@ -41,7 +41,7 @@ impl SegmentPreload {
     let reuse = ThreadBuilder::new()
       .name("wal segment reuse")
       .single()
-      .eager_buffering(
+      .buffering(
         SEGMENT_MAX_BATCH,
         handle_reuse(ready.clone(), io_pool.clone()),
       )
@@ -69,6 +69,13 @@ impl SegmentPreload {
     self.preload.execute(()).wait().unwrap()
   }
 
+  /**
+   * Stop without cleanup I/O after WAL failure.
+   *
+   * In failover state the engine can no longer trust WAL I/O, so the preloader
+   * only stops workers and drops queued handles. Normal shutdown can still issue
+   * cleanup truncates, but failover must not depend on more disk operations.
+   */
   pub fn failover(&self) {
     self.reuse.close();
     self.preload.close();
@@ -144,6 +151,14 @@ const fn handle_preload(
     Ok(segment)
   }
 }
+
+/**
+ * Drop an unused preloaded segment when segment demand is low.
+ *
+ * The preload fallback runs when no caller consumed the prepared segment within
+ * the idle window. That implies low WAL write pressure, so keeping preallocated
+ * disk space is unnecessary; the segment is truncated instead.
+ */
 const fn handle_fallback() -> impl FnMut(Option<Result<WALSegment>>) {
   move |finalize| {
     if let Some(Ok(segment)) = finalize {

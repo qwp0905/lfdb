@@ -31,6 +31,13 @@ impl SyncQueue {
     self.queue.push(fsync);
   }
 
+  /**
+   * Wait until enough rotated segment fsyncs have completed.
+   *
+   * `generation` is used as a count-based durability barrier, not as an identity
+   * lookup for a particular fsync result. When this returns successfully, at least
+   * that many queued segment sync operations have completed.
+   */
   pub fn wait_until(&self, generation: SegmentGeneration) -> Result<IOResult<()>> {
     let backoff = Backoff::new();
     while generation > self.synced_count.load(Ordering::Acquire) {
@@ -40,6 +47,9 @@ impl SyncQueue {
       };
 
       let sync_r = fsync.wait().unwrap();
+      // The counter tracks completed sync operations, not successful ones. A failed
+      // fsync is still consumed from the queue; the error is returned to the caller to
+      // handle WAL failure.
       self.synced_count.fetch_add(1, Ordering::Release);
       if let Err(err) = sync_r {
         return Ok(Err(err));

@@ -12,6 +12,14 @@ use crate::{
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
+/**
+ * Shared segment ownership state for buffers in the same WAL segment.
+ *
+ * Multiple `LogBuffer`s can write blocks that belong to one segment, but the WAL
+ * manager eventually needs to recover ownership of that segment for reuse.
+ * `MaybeUninit` allows the segment to be moved out exactly once by
+ * `take_segment` instead of being dropped with the shared state.
+ */
 struct SegmentState {
   /**
    * Shared across all buffers within the same segment. Raw pointer allows exclusive
