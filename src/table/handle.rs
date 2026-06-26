@@ -1,7 +1,4 @@
-use std::{
-  mem::{forget, transmute, ManuallyDrop},
-  ops::Deref,
-};
+use std::{mem::forget, ops::Deref};
 
 use super::{TableId, TableMetadata, TableName};
 use crate::{
@@ -79,39 +76,26 @@ impl TableHandle {
 }
 
 impl TableHandleRef {
-  pub fn try_pin(&self) -> Option<PinnedHandle> {
+  pub fn try_pin(&self) -> Option<PinnedHandle<'_>> {
     let token = self.pin.try_shared()?;
-    let static_token =
-      unsafe { transmute::<SharedToken<'_>, SharedToken<'static>>(token) };
-    // SAFETY: `PinnedHandle` stores a clone of this `SBox<TableHandle>` together
-    // with the shared token. The clone keeps the allocation alive until the token
-    // is dropped in `PinnedHandle::drop`, so extending the token lifetime is valid
-    // for the guard's lifetime.
     Some(PinnedHandle {
-      handle: self.clone(),
-      token: ManuallyDrop::new(static_token),
+      handle: self,
+      _token: token,
     })
   }
 }
 
 /**
  * Guarded table handle.
- *
- * Holds a shared table pin together with a cloned table reference, preventing
- * `try_close` from taking the exclusive pin while the guard is alive.
- *
- * TODO: This can keep a table pinned longer than necessary for long background
- * work. Prefer short-lived pins at the actual access points instead of extending
- * the pin lifetime across waits.
  */
-pub struct PinnedHandle {
-  handle: TableHandleRef,
-  token: ManuallyDrop<SharedToken<'static>>,
+pub struct PinnedHandle<'a> {
+  handle: &'a TableHandleRef,
+  _token: SharedToken<'a>,
 }
-impl PinnedHandle {
+impl<'a> PinnedHandle<'a> {
   #[inline]
   pub const fn handle(&self) -> &TableHandleRef {
-    &self.handle
+    self.handle
   }
 
   pub fn into_inner(self) -> TableHandleRef {
@@ -119,16 +103,11 @@ impl PinnedHandle {
   }
 }
 
-impl Deref for PinnedHandle {
+impl<'a> Deref for PinnedHandle<'a> {
   type Target = TableHandle;
 
   #[inline]
   fn deref(&self) -> &Self::Target {
-    &self.handle
-  }
-}
-impl Drop for PinnedHandle {
-  fn drop(&mut self) {
-    unsafe { ManuallyDrop::drop(&mut self.token) };
+    self.handle
   }
 }

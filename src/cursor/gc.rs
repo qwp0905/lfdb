@@ -489,6 +489,7 @@ fn run_tick(
       }
 
       task.leaf_ptr = Some(ptr);
+      drop(table);
       current.tasks.push(task);
       continue;
     };
@@ -516,6 +517,7 @@ fn run_tick(
 
     if let Some(i) = node.get_next() {
       task.leaf_ptr = Some(i);
+      drop(table);
       current.tasks.push(task);
       continue;
     }

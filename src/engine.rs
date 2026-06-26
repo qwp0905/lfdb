@@ -188,8 +188,8 @@ impl Engine {
       handles.insert(table.get_id(), (metadata, table));
     }
     for ((table, metadata), (c_table, c_meta)) in compactions.iter() {
-      handles.insert(table.get_id(), (metadata.clone(), table.handle().clone()));
-      handles.insert(c_table.get_id(), (c_meta.clone(), c_table.handle().clone()));
+      handles.insert(table.get_id(), (metadata.clone(), table.clone()));
+      handles.insert(c_table.get_id(), (c_meta.clone(), c_table.clone()));
     }
 
     for (table_id, ptr, data) in replay
