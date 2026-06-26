@@ -4,9 +4,11 @@ use crate::{
 };
 
 /**
- * A type tag written as the first byte of every serialized page.
- * Deserialization fails if the tag does not match, catching dangling
- * pointers or unreplayed WAL entries before corrupt data is read.
+ * Type tag written as the first byte of every serialized page.
+ *
+ * The tag prevents a page from being interpreted as the wrong object kind. This
+ * catches invalid states such as dangling pointers, corrupted pages, or replay
+ * mismatches before the remaining bytes are decoded as a different layout.
  */
 #[derive(Debug)]
 pub enum SerializeType {
@@ -30,6 +32,12 @@ pub trait TypedObject {
   const TYPE: SerializeType;
 }
 
+/**
+ * Owned page deserialization.
+ *
+ * Use this path when the caller needs to take ownership of the page contents,
+ * usually because it will modify the object and serialize it back to a page.
+ */
 pub trait Deserializable: Sized + TypedObject {
   fn read_from(reader: &mut PageScanner) -> Result<Self>;
   fn deserialize(value: &Page<PAGE_SIZE>) -> Result<Self> {
@@ -79,6 +87,13 @@ impl<T: Serializable> SerializeFrom<T> for Page<PAGE_SIZE> {
   }
 }
 
+/**
+ * Borrowed zero-copy page view.
+ *
+ * Use this path for read-only access. The page type tag is checked, then the
+ * returned view borrows byte ranges directly from the page instead of copying
+ * them into an owned object.
+ */
 pub trait Viewable<'a>: Sized + TypedObject {
   fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
     let mut scanner = page.scanner();
