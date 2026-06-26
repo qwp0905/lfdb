@@ -13,15 +13,25 @@ use crate::{
 pub const RESERVED_TX: TxId = 0;
 
 /**
- * Output of WAL replay on startup.
+ * WAL replay order is defined by `LogId`, not by segment file names or directory
+ * iteration order.
  *
- * All Insert/Multi records are replayed unconditionally (redo-only) because
- * structural operations like B-tree splits cannot be safely undone — a crash
- * mid-split would leave the tree inconsistent if partial writes were skipped.
+ * Segment files are just containers for WAL blocks. Replay scans every `.log`
+ * file it can find, decodes valid records, and orders redo work by the log ids
+ * embedded in those records.
  *
- * aborted holds the set of transaction IDs that must be treated as rolled back
- * for MVCC visibility: explicitly aborted transactions plus any transactions
- * that were open (started but never committed or aborted) at the time of crash.
+ * Checkpoint records trim the replay window.
+ *
+ * A checkpoint means every log before `last_log_id` is already represented
+ * elsewhere: page changes are durable in table files, and transaction visibility
+ * state is available through the version snapshot. Those older logs may be
+ * replayable, but they are no longer needed for startup recovery.
+ *
+ * WAL replay is redo-only.
+ *
+ * Insert records are replayed regardless of whether their transaction later
+ * committed. Commit/abort state is reconstructed only for MVCC visibility; it
+ * does not decide whether a page record is redone.
  */
 pub struct ReplayResult {
   pub last_log_id: LogId,

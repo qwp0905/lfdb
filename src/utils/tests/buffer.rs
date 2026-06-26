@@ -188,7 +188,7 @@ fn read_all_returns_all_remaining_written_values() {
 
   let mut reader = OffsetReader::new(&buf[..written]);
   assert_eq!(reader.read(first.len()), Some(first.as_slice()));
-  assert_eq!(reader.read_all(), Some(remaining.as_slice()));
+  assert_eq!(reader.read_all(), remaining.as_slice());
   assert!(reader.is_eof());
 }
 
@@ -204,8 +204,8 @@ fn each_reader_reads_written_values_from_the_beginning() {
   };
 
   let mut first = OffsetReader::new(&buf[..written]);
-  assert_eq!(first.read_all(), Some(expected.as_slice()));
+  assert_eq!(first.read_all(), expected.as_slice());
 
   let mut second = OffsetReader::new(&buf[..written]);
-  assert_eq!(second.read_all(), Some(expected.as_slice()));
+  assert_eq!(second.read_all(), expected.as_slice());
 }

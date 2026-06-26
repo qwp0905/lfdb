@@ -130,6 +130,14 @@ where
       handle,
     }
   }
+
+  /**
+   * Reset the wheel clock whenever a new non-empty batch starts.
+   *
+   * Bucket layers are derived from the remaining delay magnitude. Resetting after
+   * the wheel becomes empty prevents old elapsed time from forcing newly
+   * registered timeouts into unnecessarily high layers.
+   */
   #[inline]
   fn reset(&mut self) {
     self.timer.reset();

@@ -19,9 +19,19 @@ const FILE_EXT: &str = "db";
 pub const META_TABLE_ID: TableId = 0;
 
 fn to_path(table_name: &TableName) -> PathBuf {
+  // Keep the logical table name in the filename for readability, but use a UUID
+  // for uniqueness because one logical table may produce multiple backing files.
   PathBuf::from(format!("{table_name}_{}", uuid_simple())).with_extension(FILE_EXT)
 }
 
+/**
+ * Runtime registry for opened table segments.
+ *
+ * Historically this type mapped table names to table handles, hence the name.
+ * That responsibility has moved elsewhere; today it mainly owns the metadata
+ * table handle, tracks opened table handles by id, allocates new table metadata,
+ * and reconciles table files during replay.
+ */
 pub struct TableMapper {
   open_handles: RwLock<HashMap<TableId, TableHandleRef>>,
   metadata: TableHandleRef,
@@ -62,6 +72,14 @@ impl TableMapper {
     Ok(SBox::new(TableHandle::new(table_meta, disk)))
   }
 
+  /**
+   * Rebuild the open table registry from replay results.
+   *
+   * The caller decides which table metadata entries are live and passes their
+   * opened handles here. `TableMapper` simply registers every supplied handle,
+   * advances the next table id, and removes `.db` files in the base directory that
+   * were not supplied by the replay result.
+   */
   pub fn replay<Iter: Iterator<Item = (TableMetadata, TableHandleRef)>>(
     &self,
     iter: Iter,
@@ -83,7 +101,7 @@ impl TableMapper {
     }
 
     for filename in exists {
-      self.io_pool.remove(&filename)?;
+      self.io_pool.truncate(&filename)?;
     }
     Ok(())
   }
@@ -103,6 +121,12 @@ impl TableMapper {
     self.open_handles.wl().remove(&id);
   }
 
+  /**
+   * Allocate a fresh table metadata record.
+   *
+   * This atomically reserves the next table id and pairs it with a newly generated
+   * backing filename. Persisting the metadata is the caller's responsibility.
+   */
   pub fn create_metadata(&self, name: &TableName) -> TableMetadata {
     let id = self.last_table_id.fetch_add(1, Ordering::Relaxed);
     TableMetadata::new(id, name.clone(), to_path(name))
@@ -112,6 +136,9 @@ impl TableMapper {
     self.metadata.clone()
   }
 
+  /**
+   * Return every table handle known to the registry, including the metadata table.
+   */
   pub fn get_all(&self) -> Vec<TableHandleRef> {
     self
       .open_handles

@@ -85,7 +85,7 @@ impl LogRecord {
         let table_id = reader.read_u32()?;
         let pointer = reader.read_u64()?;
         let current_version = reader.read_u64()?;
-        let data = reader.read_all()?;
+        let data = reader.read_all();
         Operation::Insert {
           table_id,
           pointer,
@@ -97,7 +97,7 @@ impl LogRecord {
       3 => {
         let log_id = reader.read_u64()?;
         let current_version = reader.read_u64()?;
-        let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read_all()?) };
+        let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read_all()) };
         Operation::Checkpoint {
           last_log_id: log_id,
           current_version,
@@ -147,6 +147,13 @@ impl LogRecord {
     buf[..4].copy_from_slice(&checksum);
   }
 }
+
+/**
+ * WAL record with its final size known but without an assigned `LogId`.
+ *
+ * The record body and encoded length are prepared first. The `LogId` is attached
+ * later by `init`, when the caller is ready to produce the final WAL bytes.
+ */
 pub struct LogRecordUninit {
   buf: Vec<u8>,
   tx_id: TxId,
@@ -194,6 +201,13 @@ impl LogRecordUninit {
     Self::new(tx_id, Operation::Commit)
   }
 
+  /**
+   * Build a checkpoint control record.
+   *
+   * The outer `tx_id` field has no meaning for checkpoint records; replay uses the
+   * checkpoint payload (`last_log_id`, `current_version`, and `snapshot_path`)
+   * instead.
+   */
   pub fn new_checkpoint(
     last_log_id: LogId,
     current_version: TxId,
@@ -210,6 +224,14 @@ impl LogRecordUninit {
   }
 }
 
+/**
+ * Read all durable records from one WAL block.
+ *
+ * The boolean is a stop signal. When it is `true`, scanning reached a partial,
+ * corrupt, or checksum-invalid record, so this point marks the boundary after
+ * which WAL durability is not trusted. Records returned before that boundary are
+ * still valid for replay.
+ */
 pub fn read_page(value: &Page<WAL_BLOCK_SIZE>) -> (Vec<LogRecord>, bool) {
   let mut scanner = value.scanner();
   let Ok(len) = scanner.read_u16() else {

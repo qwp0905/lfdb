@@ -11,6 +11,15 @@ use crate::{
 const MAX_BATCH_SIZE: usize = 32;
 
 pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) -> Result + 'a;
+
+/**
+ * Per-block mutation batch coordinator.
+ *
+ * This is the same winner/occupied pattern used by the disk task publisher,
+ * adapted for cached block mutation. Callers register mutation closures, and
+ * one winner owns the batch pass that applies queued handlers to the same
+ * `RefedSlot`.
+ */
 pub struct BatchHandle {
   queue: SegQueue<(Box<BatchHandler<'static>>, OneshotFulfill<Result>)>,
   occupied: AtomicBool,
@@ -36,6 +45,9 @@ impl BatchHandle {
   }
 
   pub fn try_release(&self) -> bool {
+    // Same lost-wakeup handoff as the IO task publisher: release ownership, check
+    // for newly queued work, and either finish or reacquire ownership to keep
+    // draining.
     self.occupied.fetch_and(false, Ordering::Release);
     if self.queue.is_empty() {
       return true;

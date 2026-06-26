@@ -1,3 +1,10 @@
+/**
+ * Platform-specific maximum number of iovec entries for vectored I/O.
+ *
+ * This mirrors the constants used by Rust's standard library. Platforms expose
+ * the limit under different names (`IOV_MAX`, `UIO_MAXIOV`), and the fallback is
+ * the POSIX-required minimum.
+ */
 #[cfg(any(
   target_os = "dragonfly",
   target_os = "freebsd",

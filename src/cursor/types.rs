@@ -13,6 +13,14 @@ enum Type {
   Copied(AlignedBuf),
 }
 
+/**
+ * Byte-vector view used by cursor reads.
+ *
+ * `VecRef` avoids copying when the bytes already live inside a cached page: it
+ * keeps an `SBox` reference to the page and exposes the requested range as a
+ * slice. When bytes must be materialized elsewhere, it stores the copied aligned
+ * buffer but presents the same `[u8]` interface.
+ */
 pub struct VecRef(Type);
 impl VecRef {
   pub const fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
@@ -22,6 +30,12 @@ impl VecRef {
     Self(Type::Copied(data))
   }
 
+  /**
+   * Materialize this view as owned bytes.
+   *
+   * Use this only when the caller needs an owned `Vec`; otherwise `VecRef` can be
+   * read directly as a byte slice.
+   */
   pub fn into_vec(self) -> Vec<u8> {
     match self.0 {
       Type::Refed(slot, s, e) => slot.copy_range(s..e),

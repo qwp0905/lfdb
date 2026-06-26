@@ -12,8 +12,11 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
 type Buffered<T, R> = Vec<(T, Option<OneshotFulfill<R>>)>;
 
 /**
- * The callback is called once per batch and the result is cloned to each
- * waiter — hence R: Clone.
+ * Flush buffered items by calling the batch handler once.
+ *
+ * The handler receives all buffered values and returns one result for the
+ * entire batch. That result is cloned to every waiter that submitted a `Work`
+ * item in the batch; dispatched items have no waiter.
  */
 const fn make_flush<'a, T, R>(
   mut when_buffered: SingleFn<'a, Vec<T>, R>,
@@ -78,23 +81,19 @@ where
 }
 
 /**
- * A background thread that batches incoming work items and flushes them
- * together via a single callback call.
+ * Single-worker runtime that processes queued work in buffered batches.
  *
- * While a flush is in progress, new items accumulate in the queue.
- * After each flush, the thread immediately drains the queue for the next
- * batch — achieving continuous pipelining without idle gaps.
- *
- * The burst loop uses backoff to spin briefly before parking, allowing
- * items that arrive just after a flush to be included in the next batch
- * rather than triggering a separate wakeup.
+ * The worker drains up to `count` queued items, calls the handler once with the
+ * collected `Vec<T>`, and completes all waiters with the returned result. While
+ * one batch is being processed, producers can continue pushing new work into
+ * the queue; after the flush, the worker immediately drains the next batch.
  */
-pub struct EagerBufferingThread<T, R> {
+pub struct BufferingThread<T, R> {
   queue: Arc<SegQueue<Context<T, R>>>,
   waker: Thread,
   slot: ThreadSlot,
 }
-impl<T, R> EagerBufferingThread<T, R>
+impl<T, R> BufferingThread<T, R>
 where
   T: Send + 'static,
   R: Send + Clone + 'static,
@@ -118,10 +117,10 @@ where
     }
   }
 }
-unsafe impl<T, R> Send for EagerBufferingThread<T, R> {}
-unsafe impl<T, R> Sync for EagerBufferingThread<T, R> {}
+unsafe impl<T, R> Send for BufferingThread<T, R> {}
+unsafe impl<T, R> Sync for BufferingThread<T, R> {}
 
-impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
+impl<T, R> BackgroundThread<T, R> for BufferingThread<T, R> {
   fn register(&self, ctx: Context<T, R>) {
     self.queue.push(ctx);
     self.waker.unpark();
@@ -137,5 +136,5 @@ impl<T, R> BackgroundThread<T, R> for EagerBufferingThread<T, R> {
 }
 
 #[cfg(test)]
-#[path = "tests/eager.rs"]
-mod tests;
+#[path = "tests/buffering.rs"]
+mod buffering;

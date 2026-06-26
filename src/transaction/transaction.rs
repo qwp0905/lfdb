@@ -106,7 +106,7 @@ impl<'a> Transaction<'a> {
 
     let table = self.orchestrator.open_table(&table_meta)?;
     let cursor = Cursor::initialize(table.clone(), &self.context, self.metrics)?;
-    self.orchestrator.commit_table(table.clone());
+    self.orchestrator.register_table(table.clone());
     self.created_tables.push(table);
 
     Ok(cursor)
@@ -167,7 +167,12 @@ impl<'a> Transaction<'a> {
     let table_meta = self.orchestrator.create_table_metadata(&name);
     metadata.set_compaction(&table_meta);
 
-    cursor.insert(name.as_bytes().to_vec(), metadata.to_vec())?;
+    if let Err(err) = cursor.insert(name.as_bytes().to_vec(), metadata.to_vec()) {
+      if matches!(err, Error::WriteConflict) {
+        return Ok(());
+      }
+      return Err(err);
+    };
 
     let new_table = self
       .orchestrator
@@ -176,7 +181,7 @@ impl<'a> Transaction<'a> {
       .unwrap();
 
     Cursor::initialize(new_table.handle().clone(), &self.context, self.metrics)?;
-    self.orchestrator.commit_table(new_table.handle().clone());
+    self.orchestrator.register_table(new_table.handle().clone());
     self.compacted_tables.push((old, new_table, table_meta));
 
     Ok(())
@@ -235,6 +240,11 @@ impl<'a> Transaction<'a> {
     Ok(())
   }
 
+  /**
+   * Publish abort/drop cleanup for buffered table side effects.
+   *
+   * This method drains its buffers, so repeated calls are idempotent.
+   */
   fn clear(&mut self) {
     let id = self.context.state().get_id();
     let version = self.context.state().current_version();

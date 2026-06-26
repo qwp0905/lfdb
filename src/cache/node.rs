@@ -32,9 +32,19 @@ where
 }
 
 enum State {
-  Small { freq: u8 },
-  Main { freq: u8 },
+  Small {
+    freq: u8,
+  },
+  Main {
+    freq: u8,
+  },
   Ghost,
+
+  /**
+   * Removed from the lookup table and no longer owns a live value, but the raw
+   * pointer may still be present in one of the FIFO queues. It is freed lazily
+   * when that queue entry reaches the front.
+   */
   Tombstone,
 }
 
@@ -91,19 +101,18 @@ impl<K, V> CacheEntry<K, V> {
 const MAX_FREQ: u8 = 3;
 
 /**
- * A single node of the block cache.
- * It implements a S3-FIFO algorithm, which divides entries into three
- * categories: small, main, and ghost.
- * New entries are inserted into the small category, and if the small
- * category exceeds its capacity, entries with frequency 1 or less are
- * moved to the main category, while entries with frequency greater than
- * 1 are evicted.
- * If the main category exceeds its capacity, entries with frequency 0 are
- * evicted.
- * The ghost category tracks recently evicted entries, and if the total
- * number of entries in the table exceeds the sum of small and main
- * capacities, entries in the ghost category are evicted until the total
- * number of entries is within the limit.
+ * S3-FIFO cache node.
+ *
+ * A node keeps three FIFO queues:
+ * - `small`: probationary entries for newly inserted keys.
+ * - `main`: protected entries promoted from `small` after enough hits.
+ * - `ghost`: recently evicted keys whose values have been dropped.
+ *
+ * `RawTable` is the lookup index for entries that live in any of those queues.
+ * A hit increments a small saturating frequency counter. When the cache needs
+ * space, `small` entries with enough frequency are promoted to `main`; the rest
+ * lose their value and become ghost entries. A later hit on a ghost entry
+ * reserves a new value slot directly in `main`.
  */
 pub struct CacheNode<K, V> {
   table: RawTable<*mut CacheEntry<K, V>>,
@@ -121,6 +130,9 @@ where
   K: Eq + Hash,
 {
   pub const fn new(capacity: usize) -> Self {
+    // S3-FIFO's usual split: a small probationary queue and a large protected
+    // main queue. This ratio is kept as the recommended/default value; tuning it
+    // did not show meaningful performance changes here.
     let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
@@ -159,6 +171,12 @@ where
     Ok(Reserved::new(evicted, ptr.borrow_mut_unsafe().value_ptr()))
   }
 
+  /**
+   * `try_evict` is the external eviction gate. Before inserting a new entry into
+   * the raw table, the cache first proves that some live entry can actually be
+   * removed; this avoids growing the raw table just because all current victims
+   * are temporarily unevictable.
+   */
   pub fn get_or_reserve<S, R, F>(
     &mut self,
     key: &K,
@@ -185,6 +203,11 @@ where
       }
       State::Ghost => {
         let (old, _) = unsafe { self.table.remove(bucket) };
+
+        // Do not revive the ghost entry in place. Its pointer is still queued in the
+        // ghost FIFO, so reusing it as a live entry would let that queue observe the
+        // live entry again later. Leave the old pointer as a tombstone and insert a
+        // fresh main entry instead.
         old.borrow_mut_unsafe().set_state(State::Tombstone);
 
         let evicted = self.evict(hash_builder, &try_evict)?;
@@ -315,6 +338,9 @@ where
   where
     S: BuildHasher,
   {
+    // Ghost entries stay in the lookup table but no longer count as live cache
+    // values. Their count is `table.len() - len()`, so no separate ghost counter
+    // is needed.
     while self.table.len() - self.len() >= self.ghost_cap {
       let ptr = self.ghost.pop_front().unwrap_or_else(|| unreachable!());
       let entry = ptr.borrow_unsafe();
@@ -404,6 +430,15 @@ pub enum GetOrReserve<'a, K, V, R> {
   Reserved(Reserved<K, V, R>),
 }
 
+/**
+ * Reserved uninitialized value slot in the cache.
+ *
+ * Cache insertion first reserves capacity and, if necessary, evicts an existing
+ * value. The caller may need to process that evicted value before it can build
+ * the replacement, so the cache returns a reserved value slot instead of taking
+ * `V` immediately. A `Reserved` must be fulfilled exactly once before it is
+ * dropped.
+ */
 pub struct Reserved<K, V, R> {
   evicted: Option<(K, V, R)>,
   value: *mut V,

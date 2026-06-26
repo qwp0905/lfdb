@@ -13,6 +13,12 @@ use crate::{
 
 use super::{TxOrchestrator, TxSnapshot, TxState};
 
+/**
+ * B-tree policy for a user transaction.
+ *
+ * `TxContext` carries the transaction state, its visibility snapshot, and the
+ * storage hooks needed by cursor/B-tree operations.
+ */
 pub struct TxContext<'a> {
   orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
@@ -93,6 +99,13 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
   }
 }
 impl<'a> WritablePolicy for TxContext<'a> {
+  /**
+   * Mark the transaction modified only after a WAL page record is written.
+   *
+   * A transaction needs commit/abort visibility handling once it can be observed
+   * during WAL replay. Reads and non-WAL work do not make the transaction
+   * replay-visible.
+   */
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,

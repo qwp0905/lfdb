@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread::Builder, time::Duration};
 
 use super::{
-  BackgroundThread, EagerBufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
+  BackgroundThread, BufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
   SharedFn, SharedWorkThread, SingleFn,
 };
 
@@ -20,6 +20,14 @@ where
   OnceHandle::new(handle)
 }
 
+/**
+ * Builders for the engine's background runtime families.
+ *
+ * Runtime construction is split into two layers. `ThreadBuilder` stores common
+ * thread settings such as name and stack size, then selects either the
+ * multi-threaded family or the single-threaded family. Multi-threaded runtimes
+ * use `SharedFn`; single-threaded runtimes use `SingleFn`.
+ */
 pub struct ThreadBuilder {
   name: String,
   stack_size: usize,
@@ -88,7 +96,7 @@ impl SingleThreadBuilder {
     )
   }
 
-  pub fn eager_buffering<F, T, R>(
+  pub fn buffering<F, T, R>(
     self,
     count: usize,
     when_buffered: F,
@@ -98,7 +106,7 @@ impl SingleThreadBuilder {
     R: Send + Clone + 'static,
     F: FnMut(Vec<T>) -> R + Send + Sync + 'static,
   {
-    EagerBufferingThread::new(
+    BufferingThread::new(
       self.builder.name,
       self.builder.stack_size,
       count,

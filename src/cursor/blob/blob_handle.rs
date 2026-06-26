@@ -11,6 +11,14 @@ use crate::{
   Error, Result,
 };
 
+/**
+ * Handle for one fixed-size blob segment.
+ *
+ * A blob segment is preallocated when opened, writes its blob id into the file
+ * header, and then hands out byte ranges by advancing an atomic reservation
+ * offset. Since space is allocated up front, blob writes use the write-only IO
+ * path rather than the dynamic alloc-and-write path.
+ */
 pub struct BlobHandle {
   id: BlobId,
   io: IOHandle,
@@ -18,6 +26,9 @@ pub struct BlobHandle {
 }
 impl BlobHandle {
   pub fn replay(io: IOHandle) -> Result<Self> {
+    // Blob identity is stored in the segment header, not derived from the
+    // filename. Recovery can therefore discover the blob id from the file contents
+    // even if filename conventions change.
     let mut bytes = AlignedBuf::new(BLOB_ID_BYTES);
     io.read(bytes.get_mut_aligned_slice(), 0)
       .map_err(Error::IO)?;
@@ -70,6 +81,13 @@ impl BlobHandle {
       backoff.spin()
     }
   }
+
+  /**
+   * Read a blob range into an aligned owned buffer.
+   *
+   * Blob IO uses `AlignedBuf` as its value buffer type because reads and writes go
+   * through the direct-IO-oriented path.
+   */
   pub fn read_at(&self, offset: BlobOffset, len: BlobLen) -> Result<AlignedBuf> {
     let mut buf = AlignedBuf::new(len as usize);
     self
@@ -80,7 +98,12 @@ impl BlobHandle {
   }
 
   pub fn write(&self, data: &AlignedBuf, offset: BlobOffset) -> Result {
-    // blob handle must call write only rather than alloc_and_write since it calls fallocate in constructor.
+    // Blob segments are preallocated fixed-size files, so blob writes use the
+    // write-only path. Submit the aligned physical slice required by direct IO.
+    //
+    // SAFETY: `write_only` requires a `'static` slice because the IO worker may run
+    // later. This method immediately waits for completion, so the borrowed
+    // `AlignedBuf` cannot be dropped before the worker finishes using the slice.
     let static_ref =
       unsafe { transmute::<&[u8], &'static [u8]>(data.get_aligned_slice()) };
     self
@@ -99,7 +122,17 @@ impl BlobHandle {
 }
 
 pub enum BlobReserved {
+  /**
+   * Reservation succeeded and this segment can continue accepting reservations.
+   */
   Ok(BlobOffset),
+  /**
+   * Reservation succeeded, but this segment reached its writable threshold.
+   * The handle reports that no more reservations should be placed here.
+   */
   Last(BlobOffset),
+  /**
+   * Reservation failed because the segment has no room for the requested range.
+   */
   Eof,
 }

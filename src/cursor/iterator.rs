@@ -12,6 +12,13 @@ use super::{
   VersionRecordView, HEADER_POINTER,
 };
 
+/**
+ * Buffered record payload used by snapshot-oriented iteration.
+ *
+ * Inline data is kept as bytes, while blob data keeps its existing blob pointer.
+ * Blob segments are reclaimed by reference counting and their locations are
+ * stable, so snapshot/compaction does not copy blob bytes through this iterator.
+ */
 pub enum BufferedValue {
   Data(VecRef),
   Blob(BlobId, BlobOffset, BlobLen),
@@ -60,12 +67,26 @@ pub struct KVSnapshot {
   pub record_id: RecordId,
 }
 
+/**
+ * Iterates visible records for snapshot/compaction work.
+ *
+ * Unlike `BTreeIterator`'s value stream, this wrapper is record-oriented. It
+ * preserves the visible record metadata and blob pointer so callers can copy the
+ * record itself instead of only its value.
+ */
 pub struct Snapshotter<Policy>(BTreeIterator<Policy>);
 impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   pub fn open(policy: Policy, table: &TableHandleRef) -> Result<Self> {
     BTreeIterator::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
   }
 
+  /**
+   * Return the next live visible record for snapshot/compaction.
+   *
+   * Committed tombstones are intentionally skipped. They are obsolete space and
+   * scan-cost overhead, and removing them is one of the reasons this snapshot path
+   * exists.
+   */
   pub fn next_snapshot(&mut self) -> Result<Option<KVSnapshot>> {
     loop {
       let Some((key, found)) = self.0.next_record()? else {
@@ -90,6 +111,13 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   }
 }
 
+/**
+ * Iterates the visible key/value stream of a B-tree.
+ *
+ * This iterator is value-oriented: it resolves the visible record for each key
+ * and returns only the key plus live value/tombstone needed by merge-sort users.
+ * Blob values are materialized through the policy before they are returned.
+ */
 pub struct BTreeIterator<Policy> {
   policy: Policy,
   table: TableHandleRef,
@@ -166,6 +194,10 @@ where
   ) -> Result<Option<Option<BufferedRecord>>> {
     let mut next = Some(ptr);
 
+    // This guard protects the next data entry from GC reuse.
+    //
+    // The guard is taken before reading the current entry page. Any `next` pointer
+    // read from that page is therefore protected until the next page is fetched.
     let mut _guard = None;
     while let Some(ptr) = next.take() {
       let new_guard = pin();

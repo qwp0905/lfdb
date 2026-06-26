@@ -6,6 +6,14 @@ use std::{
 
 use crate::error;
 
+/**
+ * Utilities for spawning background threads with fail-fast panic handling.
+ *
+ * Background runtimes are part of the engine's internal machinery. If one of
+ * them panics, the engine may have violated an internal invariant and should no
+ * longer be trusted. These helpers log the panic context and abort the process
+ * instead of letting a worker thread silently disappear.
+ */
 pub trait UnwindSpawner {
   fn spawn_unwind<T, F>(self, f: F) -> JoinHandle<T>
   where

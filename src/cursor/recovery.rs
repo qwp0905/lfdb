@@ -169,6 +169,14 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   Ok(())
 }
 
+/**
+ * Rebuild the table free list from reachable table pages.
+ *
+ * Pages reachable from the table header, B-tree nodes, and data-entry chains are
+ * treated as live. Unvisited pages below the highest reachable pointer are
+ * returned to the free list. Pages above that point are treated as never
+ * allocated by this table and become the next allocation range.
+ */
 fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache

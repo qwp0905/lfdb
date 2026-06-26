@@ -36,13 +36,21 @@ impl<T> AsyncIO<T> {
   }
 }
 
+/**
+ * Engine-local filesystem facade.
+ *
+ * `IOPool` owns the database base directory lock, keeps the shared IO worker
+ * pool, exposes namespace operations, and creates the file handles used by the
+ * storage layers. In practice this is the central entry point for disk access
+ * inside the engine, not just a handle factory.
+ */
 pub struct IOPool {
   thread: Arc<IOThread>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
 }
 impl IOPool {
-  pub fn with_backend<T: DiskBackend>(
+  pub fn with_backend<T: DiskBackend + 'static>(
     backend: T,
     thread_count: usize,
     base_path: &Path,
@@ -54,6 +62,9 @@ impl IOPool {
       .shared(create_io_thread(metrics.clone()))
       .to_arc();
 
+    // The base directory lock prevents multiple engine processes from using the
+    // same database directory. Retry is a courtesy delay, not a recovery protocol:
+    // if another process keeps the lock, opening the pool fails.
     let base_dir = DirHandle::ensure(base_path, Box::new(backend), thread.clone())
       .map_err(Error::IO)
       .map(SBox::new)?;
@@ -81,7 +92,7 @@ impl IOPool {
     let mut options = OpenOptions::new();
     let file = self
       .base_dir
-      .open_direct_io(options.write(true).append(true).create(true), &path)
+      .open_direct_io(options.write(true).create(true), &path)
       .map_err(Error::IO)?;
     Ok(AppendIOHandle::new(file, filename))
   }
@@ -120,13 +131,21 @@ impl IOPool {
     })
   }
 
+  /**
+   * Durably sync base-directory namespace changes.
+   *
+   * Call this after operations that must make directory entries durable, such as
+   * creating, removing, or renaming files. The method is exposed as a low-level
+   * primitive so the caller decides which namespace changes require a durability
+   * boundary.
+   */
   pub fn sync_dir(&self) -> Result {
     self.base_dir.fdatasync().wait().unwrap().map_err(Error::IO)
   }
   pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
     self.base_dir.read().map_err(Error::IO)
   }
-  pub fn remove(&self, filename: &Path) -> Result<()> {
+  pub fn truncate(&self, filename: &Path) -> Result<()> {
     self.base_dir.remove(filename).map_err(Error::IO)
   }
   pub fn exists(&self, filename: &Path) -> Result<bool> {
@@ -143,6 +162,14 @@ impl Drop for IOPool {
   }
 }
 
+/**
+ * Main handle for one opened file backend.
+ *
+ * `IOHandle` owns an `IOBackend` and exposes the engine's general file access
+ * operations for it: positioned reads, batched asynchronous writes, data sync,
+ * full sync, preallocation, rename, truncate, and filename tracking. It is the
+ * broadest file-handle abstraction in the disk layer.
+ */
 pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
   write_handle: SBox<TaskPublisher<WriteTask>>,
@@ -164,6 +191,13 @@ impl IOHandle {
     )
   }
 
+  /**
+   * Read a full buffer, but allow an immediate EOF.
+   *
+   * This differs from `read` only in how it treats a zero-byte read: `Ok(0)` is
+   * accepted as an empty range. Any non-zero short read is still reported as
+   * `UnexpectedEof`.
+   */
   pub fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
     match self.backend.pread(buf, offset) {
       Ok(0) => Ok(()),
@@ -212,6 +246,12 @@ impl IOHandle {
     Ok(self.backend.metadata()?.len())
   }
 
+  /**
+   * Remove the file represented by this handle.
+   *
+   * The method waits until in-flight asynchronous file operations are no longer
+   * using the handle, then removes the file from the base directory.
+   */
   pub fn truncate(&self) -> IOResult<()> {
     let backoff = Backoff::new();
     while self.state.try_exclusive().map(forget).is_none() {
@@ -238,6 +278,13 @@ impl IOHandle {
   }
 }
 
+/**
+ * Base-directory-bound disk backend.
+ *
+ * `DirHandle` wraps the `DiskBackend` for namespace operations under one
+ * canonical base path, and also keeps an opened directory handle so the pool can
+ * lock and sync the directory itself.
+ */
 struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
@@ -308,6 +355,13 @@ impl DirHandle {
   }
 }
 
+/**
+ * Buffered writer for direct-I/O append-style output.
+ *
+ * Callers append arbitrary byte slices, and the handle packs them into an
+ * internally aligned buffer before issuing positioned writes. The mutable API
+ * makes this a single-writer stream handle.
+ */
 pub struct AppendIOHandle {
   file: Box<dyn IOBackend>,
   buffer: AlignedArray,
@@ -348,6 +402,12 @@ impl AppendIOHandle {
     self.buffer_offset = 0;
     Ok(())
   }
+  /**
+   * Flush the buffered stream, sync the file, and finish the writer.
+   *
+   * The handle is consumed because this is the finalization step for the append
+   * stream.
+   */
   pub fn flush(mut self) -> Result<PathBuf> {
     self.flush_buf()?;
     self.file.fsync().map_err(Error::IO)?;
@@ -355,6 +415,13 @@ impl AppendIOHandle {
   }
 }
 
+/**
+ * Buffered sequential reader for direct-I/O scan-style input.
+ *
+ * The handle reads through an internally aligned buffer and copies out exactly
+ * the number of bytes requested by the caller. Like `AppendIOHandle`, it hides
+ * the memory and disk alignment details from higher layers.
+ */
 pub struct ScanIOHandle {
   file: Box<dyn IOBackend>,
   buffer: AlignedArray,

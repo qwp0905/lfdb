@@ -8,7 +8,7 @@ const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
 #[test]
 fn test_basic_send_and_receive() {
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-basic",
     DEFAULT_STACK_SIZE,
     16,
@@ -29,7 +29,7 @@ fn test_try_recv_drains_pending() {
   let batch_sizes = Arc::new(Mutex::new(vec![]));
   let batch_sizes_c = batch_sizes.clone();
 
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-drain",
     DEFAULT_STACK_SIZE,
     64,
@@ -70,7 +70,7 @@ fn test_max_count_respected() {
   let batch_sizes_c = batch_sizes.clone();
   let max_count = 5;
 
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-max-count",
     DEFAULT_STACK_SIZE,
     max_count,
@@ -103,7 +103,7 @@ fn test_max_count_respected() {
 
 #[test]
 fn test_result_per_item() {
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-result",
     DEFAULT_STACK_SIZE,
     16,
@@ -123,7 +123,7 @@ fn test_close_flushes_remaining() {
   let total = Arc::new(AtomicUsize::new(0));
   let total_c = total.clone();
 
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-close-flush",
     DEFAULT_STACK_SIZE,
     1024,
@@ -146,7 +146,7 @@ fn test_close_flushes_remaining() {
 
 #[test]
 fn test_multiple_close() {
-  let thread = EagerBufferingThread::new(
+  let thread = BufferingThread::new(
     "test-multi-close",
     DEFAULT_STACK_SIZE,
     16,
@@ -163,7 +163,7 @@ fn test_concurrent_senders() {
   let total = Arc::new(AtomicUsize::new(0));
   let total_c = total.clone();
 
-  let thread = Arc::new(EagerBufferingThread::new(
+  let thread = Arc::new(BufferingThread::new(
     "test-concurrent",
     DEFAULT_STACK_SIZE,
     64,

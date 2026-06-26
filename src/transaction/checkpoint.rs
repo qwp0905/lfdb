@@ -91,6 +91,13 @@ impl CheckpointCycle {
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
   ticker: Box<dyn BackgroundThread<()>>,
+  /**
+   * Shared storage for the active checkpoint cycle.
+   *
+   * The interval worker is the only mutator while running, but shutdown must take
+   * over the current checkpoint context after closing the worker and finish it
+   * synchronously.
+   */
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   wal: Arc<WAL>,
   block_cache: Arc<BlockCache>,
@@ -190,6 +197,14 @@ impl Checkpoint {
     while self.incoming.pop().is_some() {}
   }
 
+  /**
+   * Reduce replay work during normal shutdown.
+   *
+   * If all rotated segments are already part of the active checkpoint cycle, close
+   * only finishes that cycle. If new rotated segments are still waiting in
+   * `incoming`, they would remain replay candidates, so close runs one final hard
+   * checkpoint and retires them as well.
+   */
   pub fn close(&self) -> Result {
     if !self.wal.is_available() {
       self.failover();
@@ -284,6 +299,10 @@ fn run_tick<F: Fn(usize) -> usize>(
   };
 
   if !current.flush_done() {
+    // Increase checkpoint work as WAL rotation pressure grows.
+    // The number of retired-but-not-yet-reusable WAL segments is treated as write
+    // pressure. Higher pressure flushes more dirty blocks per tick, both throttling
+    // ongoing write load indirectly and moving segment reuse forward sooner.
     let batch_size = calc_batch_size(current.segments_len() + incoming.len());
     trace!("checkpoint flush {} blocks", batch_size);
     return current.advance_flush(batch_size);

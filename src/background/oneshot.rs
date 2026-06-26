@@ -51,6 +51,15 @@ pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
   (Oneshot(inner.0), OneshotFulfill(inner.1))
 }
 
+/**
+ * State of a single-use completion slot.
+ *
+ * `Waiting` is the initial state after creating a oneshot. `Fulfilled` means
+ * the fulfiller has written the value and completed its side. `Disconnected`
+ * means completion is no longer possible or no longer needed: the fulfiller was
+ * dropped without writing a value, the waiter was dropped, or the value has
+ * already been consumed/cleaned up.
+ */
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
   Waiting,
@@ -59,8 +68,11 @@ enum State {
 }
 
 /**
- * value is uninitialized memory — safe to access only when state is Fulfilled,
- * which is enforced by the state machine.
+ * Two-owner shared allocation used by the oneshot pair.
+ *
+ * A oneshot always has exactly two handles: the waiter and the fulfiller. The
+ * first dropped handle only marks the allocation as disconnected; the second
+ * dropped handle reclaims the heap allocation.
  */
 struct OneshotInner<T> {
   state: AtomicCell<State>,
@@ -90,6 +102,15 @@ impl<T> OneshotInner<T> {
 
 const MAX_YIELD: usize = 10;
 
+/**
+ * Minimal single-use completion primitive for background work.
+ *
+ * This is not intended to be a general-purpose channel. It exists so
+ * `BackgroundThread::execute` can return a cheap handle for receiving exactly
+ * one result from a worker. The implementation uses a dedicated heap-allocated
+ * pair shared by the waiter and fulfiller to keep the synchronization surface
+ * small and predictable.
+ */
 pub struct Oneshot<T>(Pair<OneshotInner<T>>);
 impl<T> Oneshot<T> {
   pub fn fulfilled(value: T) -> Self {
@@ -97,6 +118,14 @@ impl<T> Oneshot<T> {
     let (inner, _) = Pair::new(inner);
     Oneshot(inner)
   }
+  /**
+   * Try to consume the result without blocking.
+   *
+   * `try_wait` takes ownership of the receiver because the oneshot has no valid
+   * use after a successful wait or a disconnect. If the value is not ready yet,
+   * the receiver is returned in `TryWaitError::Empty` so the caller can try again
+   * or fall back to blocking `wait`.
+   */
   pub fn try_wait(self) -> std::result::Result<T, TryWaitError<T>> {
     match self
       .0

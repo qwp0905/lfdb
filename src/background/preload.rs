@@ -30,6 +30,22 @@ where
   }
 }
 
+/**
+ * Single-worker runtime that keeps one value precomputed.
+ *
+ * This is one of the single-threaded runtime variants. It packages a specific
+ * usage pattern: keep one value prepared ahead of demand and return it when a
+ * request arrives.
+ *
+ * The worker creates a value with `preload` before it is requested. When a
+ * `Work` message arrives, the preloaded value is returned immediately through
+ * the oneshot fulfiller. If no request arrives before the timeout, the value is
+ * kept for the next wait cycle after reporting the timeout through
+ * `fallback(None)`.
+ *
+ * On shutdown, any unused preloaded value is passed to `fallback(Some(value))`
+ * so the caller can clean it up or return it to another owner.
+ */
 pub struct PreloadThread<T> {
   channel: Sender<Context<(), T>>,
   slot: ThreadSlot,

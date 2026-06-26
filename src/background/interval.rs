@@ -27,9 +27,19 @@ where
 }
 
 /**
- * A background thread that processes work items on demand, and also calls
- * the work function periodically with None when no item arrives within
- * the timeout — useful for recurring maintenance tasks like GC or flush.
+ * Single-worker runtime with idle-time ticks.
+ *
+ * Explicit submissions are delivered to the handler as `Some(T)`. If no
+ * submission arrives before the timeout, the handler is called with `None`,
+ * which represents an idle tick.
+ *
+ * The timeout is not a precise periodic schedule. A tick means "no message has
+ * arrived for at least this duration", so continuous explicit work can delay
+ * ticks. This makes the runtime suitable for maintenance work that should run
+ * during idle gaps.
+ *
+ * This is a single-threaded runtime: it uses `SingleFn`, so explicit work and
+ * idle ticks are serialized through one worker thread.
  */
 pub struct IntervalWorkThread<T, R> {
   channel: Sender<Context<T, R>>,
@@ -66,7 +76,7 @@ impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
 
   fn close(&self) {
     if let Some(v) = self.slot.close() {
-      let _ = self.channel.send(Context::Term);
+      self.channel.send(Context::Term).unwrap();
       v.join().unwrap();
     }
   }

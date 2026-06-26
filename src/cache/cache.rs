@@ -24,6 +24,13 @@ pub struct BlockCacheConfig {
   pub capacity: usize,
 }
 
+/**
+ * Lazily initialized cache-slot storage.
+ *
+ * The cache allocates the slot array up front, but a `CachedBlock` is only
+ * written into a slot once the mapping table assigns that slot. Drop therefore
+ * only visits the initialized ranges reported by the mapping table.
+ */
 struct BlockCell(UnsafeCell<MaybeUninit<CachedBlock>>);
 impl BlockCell {
   const fn uninit() -> Self {
@@ -45,6 +52,16 @@ impl BlockCell {
 unsafe impl Send for BlockCell {}
 unsafe impl Sync for BlockCell {}
 
+/**
+ * Central block-cache manager and higher-level disk abstraction.
+ *
+ * Upper storage layers access table pages through `BlockCache` rather than
+ * through raw disk handles. The cache maps logical table blocks to cache slots,
+ * loads missing pages, allocates fresh cached blocks, tracks dirty state, and
+ * drives checkpoint flushing. `MappingTable` owns the logical-address to slot
+ * mapping and eviction decisions; the block arrays, pins, batch handles, dirty
+ * bitmap, and page pool hold the actual cached-page state.
+ */
 pub struct BlockCache {
   table: MappingTable,
   cached_blocks: Arc<[BlockCell]>,
@@ -147,7 +164,10 @@ impl BlockCache {
   }
 
   /**
-   * Alloc new block without read from disk for allocate new block at disk.
+   * Allocate a cache slot for a newly allocated disk block.
+   *
+   * No disk read is performed because the logical block did not previously hold
+   * meaningful contents. Callers must write the page contents before reading them.
    */
   pub fn alloc(
     &self,
@@ -162,8 +182,11 @@ impl BlockCache {
   }
 
   /**
-   * Call disk read unchecked method.
-   * It is only allowed in bootstrap.
+   * Read a block through the unchecked disk-read path.
+   *
+   * This can tolerate an immediate EOF from the underlying file, unlike normal
+   * reads. Use it only while reconstructing storage state before normal cache
+   * invariants are established.
    */
   pub fn read_unchecked(
     &self,
@@ -212,9 +235,14 @@ impl BlockCache {
     let mut len = 0;
     for id in self.dirty_blocks.iter() {
       let Some(_token) = self.pins[id].try_shared() else {
+        // An exclusive owner is already handling this slot, for example during
+        // eviction/install. Do not add it to this flush snapshot.
         continue;
       };
 
+      // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
+      // pointers from the same table together reduces random write scattering during
+      // checkpoint.
       let block = self.cached_blocks[id].get();
       let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
       buckets.entry(key).or_default().push(id);
@@ -240,6 +268,10 @@ impl BlockCache {
   }
 }
 
+/**
+ * Coarse locality bucket used to order checkpoint writes by table and nearby
+ * disk range.
+ */
 const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
 const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
 
@@ -253,6 +285,14 @@ impl Drop for BlockCache {
   }
 }
 
+/**
+ * Incremental dirty-page flusher.
+ *
+ * A flusher owns a snapshot of dirty block ids. `advance` writes a bounded
+ * number of dirty blocks so flushing can be spread across multiple calls.
+ * `finish` completes the durability phase by fsyncing tables whose dirty pages
+ * have been written.
+ */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
   executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
@@ -309,6 +349,8 @@ impl CacheFlusher {
         continue;
       };
 
+      // Preserve the unfinished fsync marker for a future caller. This flusher
+      // reports the failure; retry policy belongs to the caller.
       error!("error occurs in flush table: {err}");
       self.dirty_tables.mark(&table);
       return Err(err);

@@ -1,25 +1,25 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const SHIFT: u64 = 6;
 const MAX_BIT: usize = 1 << SHIFT;
 const MASK: usize = MAX_BIT - 1;
 
 /**
- * Lock-free bitmap backed by a fixed-size array of AtomicU64.
+ * Fixed-capacity atomic bitmap with interior mutability.
+ *
+ * `AtomicBitmap` can be shared immutably while individual bits are inserted or
+ * removed with atomic operations. Each bit represents one integer index within
+ * the configured capacity.
  */
 pub struct AtomicBitmap {
   bits: Vec<AtomicU64>,
-  len: AtomicUsize,
 }
 impl AtomicBitmap {
   pub fn new(capacity: usize) -> Self {
     let cap = (capacity + MASK) >> SHIFT;
     let mut bits = Vec::with_capacity(cap);
     bits.resize_with(cap, || AtomicU64::new(0));
-    AtomicBitmap {
-      bits,
-      len: AtomicUsize::new(0),
-    }
+    AtomicBitmap { bits }
   }
 
   pub fn insert(&self, n: usize) -> bool {
@@ -30,12 +30,7 @@ impl AtomicBitmap {
     let j = n & MASK;
     let b = 1 << j;
     let prev = self.bits[i].fetch_or(b, Ordering::Release);
-    if prev & b != 0 {
-      return false;
-    }
-
-    self.len.fetch_add(1, Ordering::Relaxed);
-    true
+    prev & b == 0
   }
 
   pub fn contains(&self, n: usize) -> bool {
@@ -55,16 +50,7 @@ impl AtomicBitmap {
     let j = n & MASK;
     let b = 1 << j;
     let prev = self.bits[i].fetch_and(!b, Ordering::Release);
-    if prev & b == 0 {
-      return false;
-    }
-
-    self.len.fetch_sub(1, Ordering::Relaxed);
-    true
-  }
-
-  pub fn len(&self) -> usize {
-    self.len.load(Ordering::Relaxed)
+    prev & b != 0
   }
 
   pub const fn iter(&self) -> BitmapIter<&'_ Self> {
@@ -72,6 +58,14 @@ impl AtomicBitmap {
   }
 }
 
+/**
+ * Loose iterator over an `AtomicBitmap`.
+ *
+ * The iterator does not create a consistent snapshot. Each word is loaded while
+ * iteration progresses, so concurrent insert/remove operations may or may not
+ * be observed. This is intended for callers that can tolerate a relaxed view of
+ * the bitmap.
+ */
 pub struct BitmapIter<T> {
   inner: T,
   index: usize,
@@ -109,6 +103,17 @@ impl Iterator for BitmapIter<&AtomicBitmap> {
   }
 }
 
+/**
+ * Non-atomic bitmap over an offset-based integer range.
+ *
+ * Plain bitmaps become wasteful when the represented values are large but the
+ * interesting range is narrow. `OffsetBitmap` stores bits relative to a base
+ * offset, so values in `offset..offset + capacity` can be represented compactly.
+ *
+ * The represented range is fixed when the bitmap is created. Callers do not
+ * need to pre-check whether a value belongs to that range; values outside the
+ * range simply cannot be inserted or found.
+ */
 pub struct OffsetBitmap {
   offset: u64,
   bits: Vec<u64>,

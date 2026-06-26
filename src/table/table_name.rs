@@ -28,6 +28,12 @@ impl TableName {
     Ok(Self(name.to_string()))
   }
 
+  /**
+   * Construct a table name without validation.
+   *
+   * This is an unsafe-equivalent constructor: callers must guarantee the same
+   * invariants enforced by `from_str`.
+   */
   pub fn from_str_unchecked(name: &str) -> Self {
     Self(name.to_string())
   }

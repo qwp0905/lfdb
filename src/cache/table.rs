@@ -30,21 +30,28 @@ struct Shard {
   node: CacheNode<Key, BlockId>,
   eviction: BTreeSet<Key>, // evicting pointers
   allocated: BlockId,
+
+  /**
+   * Slots from eviction/install attempts that did not commit. The BlockId can be
+   * reused by a later miss. `Some(key)` means the slot still belongs to an old
+   * logical key and must go through eviction again before reuse; `None` means it
+   * is an uncommitted fresh slot with no live key.
+   */
   aborted: ChunkQueue<(BlockId, Option<Key>)>,
 }
 
 /**
- * Holds exclusive control over a block during eviction.
+ * Holds exclusive control over a cache slot while a new mapping is installed.
  *
- * Two pointers are blocked simultaneously while this guard is alive:
- * - The old pointer is added to the eviction set, preventing other threads
- *   from reading a dirty page that has not yet been written to disk.
- * - The new pointer maps to a block in EVICTION_BIT state, preventing access
- *   before the page has been loaded from disk.
+ * The new logical key is reserved in the mapping table but must not be readable
+ * until its page has been loaded, so it is treated as in-eviction until commit.
+ * If an old key was evicted, the guard also owns the old slot's exclusive pin,
+ * preventing readers or another eviction from using that slot during the
+ * transition.
  *
- * Call commit() to finalize the eviction and unblock both pointers.
- * If dropped without commit (e.g. on IO failure), the old mapping is
- * restored and the block is returned to an evictable state.
+ * Call `commit` after the caller has populated the cache slot for the new key.
+ * Dropping without commit rolls the mapping back and returns the slot to the
+ * aborted-slot queue.
  */
 pub struct EvictionGuard<'a> {
   evicted: Option<Key>,
@@ -82,6 +89,11 @@ impl<'a> EvictionGuard<'a> {
   pub const fn is_evicted(&self) -> bool {
     self.evicted.is_some()
   }
+  /**
+   * Committing means the cache slot has been populated for the new key and is
+   * now readable. Downgrade the exclusive slot ownership to shared ownership so
+   * the caller can continue with read access while other readers are allowed in.
+   */
   pub fn commit(mut self) -> SharedToken<'a> {
     self.committed = true;
     unsafe { ManuallyDrop::take(&mut self.token) }.downgrade()
@@ -115,6 +127,15 @@ pub enum Acquired<'a> {
   Evicted(EvictionGuard<'a>),
 }
 
+/**
+ * Sharded logical-block to cache-slot mapping table.
+ *
+ * This type does not store cached pages themselves. It maps a logical disk
+ * address `(TableId, Pointer)` to a cache `BlockId` and drives the eviction
+ * protocol when a miss needs a slot. The actual cached blocks and their pins are
+ * owned outside this table; callers provide access to those pins through
+ * callbacks.
+ */
 pub struct MappingTable {
   shards: Box<[Mutex<Shard>]>,
   offsets: Box<[BlockId]>,
@@ -151,6 +172,13 @@ impl MappingTable {
     (h, shard, offset)
   }
 
+  /**
+   * Reserve a cache slot for a key that is known not to exist.
+   *
+   * This is used when the caller has created a logically new disk address, such
+   * as a newly allocated pointer or a new table. Since the key cannot hit, the
+   * method skips lookup semantics and goes directly through reservation/eviction.
+   */
   pub fn alloc<'a, F>(
     &'a self,
     table_id: TableId,
@@ -190,17 +218,11 @@ impl MappingTable {
   }
 
   /**
-   * Acquires access to a page by index, following this order:
+   * Acquire a cache slot for an existing logical block address.
    *
-   * 1. If the index is being evicted, wait — the block is temporarily inaccessible.
-   * 2. If GC has allocated a temp page for this index, return it — the temp page
-   *    takes precedence over the shard since it reflects the latest state.
-   * 3. If the index is in the cache shard, return a hit.
-   * 4. If the shard has an empty slot, allocate a new block without eviction.
-   *
-   * The shard lock is dropped before retrying CAS operations (try_pin, try_evict)
-   * to minimize lock contention — holding the lock during CAS would block all
-   * other threads on this shard unnecessarily.
+   * Hits return the mapped block id with a shared slot token. Misses reserve a
+   * slot and return an eviction guard so the caller can populate the slot before
+   * committing the mapping.
    */
   pub fn acquire<'a, F>(
     &'a self,
@@ -265,6 +287,9 @@ impl MappingTable {
     F: Fn(&BlockId) -> Option<ExclusiveToken<'a>>,
   {
     if let Some((evicted, bid, token)) = reserved.take_evicted() {
+      // Reuse the evicted cache slot for the new key. The mapping is reserved now,
+      // but the slot may still contain the old page until the caller finishes the
+      // eviction/load work, so keep the old key blocked during the transition.
       reserved.fulfill(bid);
       shard.eviction.insert(evicted);
       return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));

@@ -5,6 +5,13 @@ use crate::{
   Error, Result,
 };
 
+/**
+ * Borrowed view of a serialized B-tree node.
+ *
+ * A B-tree page first has the outer `SerializeType::BTreeNode` tag, then this
+ * node-level tag selecting internal or leaf layout. This view reads that nested
+ * type without materializing the node.
+ */
 pub enum BTreeNodeView<'a> {
   Internal(InternalNodeView<'a>),
   Leaf(LeafNodeView<'a>),
@@ -44,6 +51,13 @@ impl<'a> BTreeNodeView<'a> {
     }
   }
 }
+
+/**
+ * Owned B-tree node.
+ *
+ * This is the owned counterpart of `BTreeNodeView`: a typed object whose payload
+ * contains another small type tag for internal-vs-leaf node layout.
+ */
 #[derive(Debug)]
 pub enum BTreeNode {
   Internal(InternalNode),
