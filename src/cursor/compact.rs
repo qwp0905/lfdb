@@ -522,10 +522,7 @@ impl Compactor {
         continue;
       }
 
-      let Some(old) = cycle.old.try_pin() else {
-        continue;
-      };
-      let Some(new) = cycle.new.try_pin() else {
+      let (Some(old), Some(new)) = (cycle.old.try_pin(), cycle.new.try_pin()) else {
         continue;
       };
 
@@ -745,11 +742,7 @@ fn run_tick(
     return Ok(());
   };
 
-  let Some(old) = current.old.try_pin() else {
-    return Ok(*cycle_ref = None);
-  };
-  let Some(new) = current.new.try_pin() else {
-    drop(old);
+  let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
     return Ok(*cycle_ref = None);
   };
 
@@ -799,7 +792,9 @@ fn run_tick(
     current.metadata.get_name(),
   )? {
     warn!("table {} already dropped.", current.metadata.get_name());
-    return Ok(());
+    drop(old);
+    drop(new);
+    return Ok(*cycle_ref = None);
   }
 
   for _ in 0..batch_size {
