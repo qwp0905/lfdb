@@ -12,7 +12,7 @@ use crate::{
   debug,
   disk::{AlignedBuf, Pointer},
   info,
-  table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata},
+  table::{TableHandleRef, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
   Result,
@@ -108,7 +108,10 @@ pub fn open_tables(
   blob: &BlobStorage,
 ) -> Result<(
   Vec<(TableHandleRef, TableMetadata)>,
-  Vec<((PinnedHandle, TableMetadata), (PinnedHandle, TableMetadata))>,
+  Vec<(
+    (TableHandleRef, TableMetadata),
+    (TableHandleRef, TableMetadata),
+  )>,
 )> {
   let mut handles = vec![];
   let mut compactions = vec![];
@@ -127,11 +130,8 @@ pub fn open_tables(
     let metadata = TableMetadata::from_bytes(&bytes)?;
     match metadata.get_compaction_metadata() {
       Some(c_meta) => compactions.push((
-        (
-          tables.create_handle(&metadata)?.try_pin().unwrap(),
-          metadata,
-        ),
-        (tables.create_handle(&c_meta)?.try_pin().unwrap(), c_meta),
+        (tables.create_handle(&metadata)?, metadata),
+        (tables.create_handle(&c_meta)?, c_meta),
       )),
       None => handles.push((tables.create_handle(&metadata)?, metadata)),
     }

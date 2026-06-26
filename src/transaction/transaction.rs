@@ -5,7 +5,7 @@ use crate::{
   background::EventBus,
   cursor::{CompactionCommitted, Cursor, DropTableCommitted},
   metrics::MetricsRegistry,
-  table::{PinnedHandle, TableHandleRef, TableMetadata, TableName},
+  table::{TableHandleRef, TableMetadata, TableName},
   Error, Result,
 };
 
@@ -20,7 +20,7 @@ pub struct Transaction<'a> {
   tx_start: Option<Instant>,
   created_tables: Vec<TableHandleRef>,
   dropped_tables: Vec<TableHandleRef>,
-  compacted_tables: Vec<(TableHandleRef, PinnedHandle, TableMetadata)>,
+  compacted_tables: Vec<(TableHandleRef, TableHandleRef, TableMetadata)>,
 }
 impl<'a> Transaction<'a> {
   pub fn new(
@@ -174,14 +174,10 @@ impl<'a> Transaction<'a> {
       return Err(err);
     };
 
-    let new_table = self
-      .orchestrator
-      .open_table(&table_meta)?
-      .try_pin()
-      .unwrap();
+    let new_table = self.orchestrator.open_table(&table_meta)?;
 
-    Cursor::initialize(new_table.handle().clone(), &self.context, self.metrics)?;
-    self.orchestrator.register_table(new_table.handle().clone());
+    Cursor::initialize(new_table.clone(), &self.context, self.metrics)?;
+    self.orchestrator.register_table(new_table.clone());
     self.compacted_tables.push((old, new_table, table_meta));
 
     Ok(())
@@ -258,7 +254,7 @@ impl<'a> Transaction<'a> {
     let events = self
       .compacted_tables
       .drain(..)
-      .map(|(_, new, _)| DropTableCommitted::new(new.into_inner(), id, version));
+      .map(|(_, new, _)| DropTableCommitted::new(new, id, version));
     self.context.event_bus().batch_publish(events);
   }
 }
