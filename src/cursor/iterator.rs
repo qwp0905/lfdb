@@ -4,8 +4,6 @@ use crate::{
   cache::ReadonlySlot, disk::Pointer, table::TableHandleRef, wal::TxId, Result,
 };
 
-use crossbeam::epoch::pin;
-
 use super::{
   BTreeNodeView, BlobId, BlobLen, BlobOffset, DataEntryView, MergeSortable,
   ReadonlyPolicy, RecordDataView, RecordId, StaticKey, TreeHeader, VecRef,
@@ -194,16 +192,9 @@ where
   ) -> Result<Option<Option<BufferedRecord>>> {
     let mut next = Some(ptr);
 
-    // This guard protects the next data entry from GC reuse.
-    //
-    // The guard is taken before reading the current entry page. Any `next` pointer
-    // read from that page is therefore protected until the next page is fetched.
-    let mut _guard = None;
     while let Some(ptr) = next.take() {
-      let new_guard = pin();
       let slot = policy.fetch_slot(ptr, table)?.for_read();
       let entry: DataEntryView = slot.as_ref().view()?;
-
       if let Some(record) =
         entry.find(|record| policy.is_visible(record.owner, record.version))?
       {
@@ -211,7 +202,6 @@ where
       }
 
       next = entry.get_next();
-      _guard = Some(new_guard);
     }
 
     Ok(None)
