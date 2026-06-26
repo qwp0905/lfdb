@@ -1,10 +1,4 @@
-use std::{
-  cell::Cell,
-  collections::{LinkedList, VecDeque},
-  mem::take,
-  sync::Arc,
-  time::Duration,
-};
+use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
 use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
@@ -21,7 +15,7 @@ use crate::{
   disk::Pointer,
   error, info,
   serialize::Serializable,
-  table::{PinnedHandle, TableHandleRef, TableMapper, TableMetadata, TableName},
+  table::{TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox, UnsafeBorrowMut},
@@ -314,7 +308,7 @@ fn create_compaction(
   blob: &BlobStorage,
   meta_table: &TableHandleRef,
   table_name: &TableName,
-) -> Result<Option<(PinnedHandle, TxId, TableMetadata)>> {
+) -> Result<Option<(TableHandleRef, TxId, TableMetadata)>> {
   let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
   let index = BTreeIndex::new(&tx);
 
@@ -342,9 +336,9 @@ fn create_compaction(
     return Err(err);
   };
 
-  let new_table = tables.create_handle(&table_meta)?.try_pin().unwrap();
-  tables.insert(new_table.handle().clone());
-  index.initialize(new_table.handle())?;
+  let new_table = tables.create_handle(&table_meta)?;
+  tables.insert(new_table.clone());
+  index.initialize(&new_table)?;
 
   tx.commit()?;
   Ok(Some((new_table, tx.current_version(), table_meta)))
@@ -352,14 +346,14 @@ fn create_compaction(
 
 pub struct CompactionCommitted {
   old: TableHandleRef,
-  new: PinnedHandle,
+  new: TableHandleRef,
   metadata: TableMetadata,
   commit_version: TxId,
 }
 impl CompactionCommitted {
   pub const fn new(
     old: TableHandleRef,
-    new: PinnedHandle,
+    new: TableHandleRef,
     metadata: TableMetadata,
     commit_version: TxId,
   ) -> Self {
@@ -395,14 +389,14 @@ impl CompactionTriggered {
  * it can be queued directly for copy progress.
  */
 pub struct CompactionPublished {
-  old: PinnedHandle,
-  new: PinnedHandle,
+  old: TableHandleRef,
+  new: TableHandleRef,
   metadata: TableMetadata,
 }
 impl CompactionPublished {
   pub const fn new(
-    old: PinnedHandle,
-    new: PinnedHandle,
+    old: TableHandleRef,
+    new: TableHandleRef,
     metadata: TableMetadata,
   ) -> Self {
     Self { old, new, metadata }
@@ -528,13 +522,20 @@ impl Compactor {
         continue;
       }
 
+      let Some(old) = cycle.old.try_pin() else {
+        continue;
+      };
+      let Some(new) = cycle.new.try_pin() else {
+        continue;
+      };
+
       let mut snapshotter = match cycle.snapshotter.take() {
         Some(v) => v,
-        None => old_index.snapshot(cycle.old.handle())?,
+        None => old_index.snapshot(old.handle())?,
       };
 
       while let Some(snap) = snapshotter.next_snapshot()? {
-        new_index.apply_snapshot(snap, cycle.new.handle())?;
+        new_index.apply_snapshot(snap, new.handle())?;
       }
 
       remove_compaction(
@@ -640,13 +641,17 @@ fn remove_compaction(
  * continue draining the same compaction synchronously.
  */
 struct CompactionCycle {
-  old: PinnedHandle,
-  new: PinnedHandle,
+  old: TableHandleRef,
+  new: TableHandleRef,
   metadata: TableMetadata,
   snapshotter: Option<Snapshotter<Arc<CompactionReadPolicy>>>,
 }
 impl CompactionCycle {
-  const fn new(old: PinnedHandle, new: PinnedHandle, metadata: TableMetadata) -> Self {
+  const fn new(
+    old: TableHandleRef,
+    new: TableHandleRef,
+    metadata: TableMetadata,
+  ) -> Self {
     Self {
       old,
       new,
@@ -688,8 +693,7 @@ fn run_tick(
   blob: &BlobStorage,
   cycle: &AtomicCell<Option<CompactionCycle>>,
   batch_size: usize,
-  waiting_publish: &mut LinkedList<(TableHandleRef, PinnedHandle, TableMetadata, TxId)>,
-  waiting_pin: &mut VecDeque<(TableHandleRef, PinnedHandle, TableMetadata)>,
+  waiting_publish: &mut LinkedList<(TableHandleRef, TableHandleRef, TableMetadata, TxId)>,
   meta_table: &TableHandleRef,
   old_index: &BTreeIndex<Arc<CompactionReadPolicy>>,
   new_index: &BTreeIndex<CompactionWritePolicy>,
@@ -730,14 +734,6 @@ fn run_tick(
   for (old, new, metadata, _) in
     waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
   {
-    waiting_pin.push_back((old, new, metadata));
-  }
-
-  for (old, new, metadata) in take(waiting_pin) {
-    // If the old table can no longer be pinned, it has already been dropped or is
-    // being closed. Compaction does not touch dropped tables, so the pending work is
-    // discarded instead of retried.
-    let Some(old) = old.try_pin() else { continue };
     in_progress.push(CompactionCycle::new(old, new, metadata));
   }
 
@@ -749,12 +745,20 @@ fn run_tick(
     return Ok(());
   };
 
+  let Some(old) = current.old.try_pin() else {
+    return Ok(*cycle_ref = None);
+  };
+  let Some(new) = current.new.try_pin() else {
+    drop(old);
+    return Ok(*cycle_ref = None);
+  };
+
   let Some(snapshotter) = &mut current.snapshotter else {
     info!(
       "table {} compaction start to create snapshot.",
       current.metadata.get_name()
     );
-    current.snapshotter = Some(old_index.snapshot(current.old.handle())?);
+    current.snapshotter = Some(old_index.snapshot(old.handle())?);
     return Ok(());
   };
 
@@ -776,12 +780,13 @@ fn run_tick(
       current.metadata.get_name()
     );
     event_bus.publish(DropTableCommitted::new(
-      current.old.handle().clone(),
+      old.handle().clone(),
       owner,
       version,
     ));
-    *cycle_ref = None;
-    return Ok(());
+    drop(old);
+    drop(new);
+    return Ok(*cycle_ref = None);
   }
 
   if !check_compaction(
@@ -801,7 +806,7 @@ fn run_tick(
     let Some(snap) = snapshotter.next_snapshot()? else {
       break;
     };
-    new_index.apply_snapshot(snap, current.new.handle())?;
+    new_index.apply_snapshot(snap, new.handle())?;
   }
 
   Ok(())
@@ -827,12 +832,6 @@ fn compaction_loop(
   // commit version is below the global minimum visible version, future access can
   // observe the old/new table-segment pair from metadata.
   let mut waiting_publish = LinkedList::new();
-  // Temporary pinning stage for an in-progress compaction source table.
-  // The pin keeps the old table from being dropped while this compaction cycle is
-  // copying records. This is an implementation detail of the current incremental
-  // compaction loop; it is expected to move toward taking short-lived pins per
-  // tick and abandoning the table if pinning fails.
-  let mut waiting_pin = VecDeque::new();
 
   let old_index = BTreeIndex::new(
     CompactionReadPolicy {
@@ -861,7 +860,6 @@ fn compaction_loop(
       &cycle,
       batch_size,
       &mut waiting_publish,
-      &mut waiting_pin,
       &meta_table,
       &old_index,
       &new_index,
