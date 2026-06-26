@@ -4,11 +4,11 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::{epoch, queue::SegQueue};
+use crossbeam::queue::SegQueue;
 
 use super::{
   BTreeNodeView, BlobId, BlobStorage, CompactionTriggered, DataEntry, DataEntryView,
-  RecordData, RecordDataView, TreeHeader, VersionRecord, HEADER_POINTER,
+  RecordDataView, TreeHeader, HEADER_POINTER,
 };
 use crate::{
   background::{
@@ -141,7 +141,6 @@ struct EntryRelease {
  */
 fn check_entry(
   block_cache: &BlockCache,
-  version_visibility: &VersionVisibility,
   ptr: Pointer,
   table: &TableHandleRef,
   next: &mut Option<Pointer>,
@@ -154,10 +153,9 @@ fn check_entry(
   let entry = slot.as_ref().view::<DataEntryView>()?;
   *next = entry.get_next();
 
-  let prev_len = blob_refs.len();
   let mut iter = entry.get_versions();
   while let Some(record) = iter.try_next()? {
-    if version_visibility.is_aborted(&record.owner) {
+    if found {
       need_trim = true;
       break;
     }
@@ -167,19 +165,10 @@ fn check_entry(
     if record.version >= min_version {
       continue;
     }
-    if !found {
-      found = true;
-      continue;
-    }
-    need_trim = true;
-    break;
-  }
-  if !need_trim {
-    return Ok(false);
+    found = true;
   }
 
-  blob_refs.drain(prev_len..);
-  Ok(true)
+  Ok(need_trim || (found && entry.get_next().is_some()))
 }
 
 /**
@@ -214,14 +203,12 @@ fn release_entry(
         .as_ref()
         .view::<DataEntryView>()?
         .get_next();
-      let handle = table.clone();
-      defer(move || handle.free().dealloc(ptr));
+      table.free().dealloc(ptr);
       continue;
     }
 
     if !check_entry(
       block_cache,
-      version_visibility,
       ptr,
       table,
       &mut next,
@@ -233,71 +220,25 @@ fn release_entry(
 
     block_cache.read(ptr, table)?.for_batch().mutate(|slot| {
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
-
-      let prev_len = entry.len();
-      let mut expired_max: Option<VersionRecord> = None;
       let mut new_versions = VecDeque::new();
 
       for record in entry.take_versions() {
-        if version_visibility.is_aborted(&record.owner) {
-          continue;
-        }
-        if record.version >= min_version {
-          new_versions.push_back(record);
-          continue;
-        }
-
-        // Keep only the newest version at or below min_version. All active
-        // transactions started after min_version, so older versions can never
-        // be reached again.
-        if expired_max
-          .as_ref()
-          .is_none_or(|max| max.version < record.version)
-        {
-          expired_max = Some(record);
-        }
-      }
-
-      if let Some(record) = expired_max.take() {
-        max_found = Some(record.version);
+        let version = record.version;
         new_versions.push_back(record);
-      }
-
-      for record in new_versions.iter() {
-        let RecordData::Blob(id, _, _) = &record.data else {
+        if version >= min_version {
           continue;
-        };
-        blob_refs.push(*id)
-      }
-
-      if new_versions.len() == prev_len {
-        return Ok(());
-      }
-
-      if !new_versions.is_empty() {
-        entry.set_versions(new_versions);
-        if max_found.is_some() {
-          entry.clear_next();
         }
-        serialize_and_log(slot, &entry)?;
+        max_found = Some(version);
+        break;
+      }
+
+      if max_found.is_none() {
         return Ok(());
       }
 
-      let Some(next_ptr) = entry.get_next() else {
-        return serialize_and_log(slot, &entry);
-      };
-
-      let next_entry = block_cache
-        .read(next_ptr, table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<DataEntry>()?;
-      serialize_and_log(slot, &next_entry)?;
-      next = Some(ptr);
-
-      let handle = table.clone();
-      defer(move || handle.free().dealloc(next_ptr));
-      Ok(())
+      entry.set_versions(new_versions);
+      entry.clear_next();
+      serialize_and_log(slot, &entry)
     })?;
   }
 
@@ -366,20 +307,6 @@ const fn run_release_table(
       mapper.remove(table.get_id());
     }
   }
-}
-
-/**
- * Defer page reuse through epoch GC.
- *
- * After an entry page is detached, readers that already observed its pointer may
- * still follow it under an epoch guard. Deferring the free-list return prevents
- * that page pointer from being reused until those pre-existing reads are gone.
- */
-fn defer<F, R>(f: F)
-where
-  F: FnOnce() -> R + Send + 'static,
-{
-  epoch::pin().defer(f)
 }
 
 struct GcCycle {
@@ -480,12 +407,13 @@ fn run_tick(
         .deserialize::<TreeHeader>()?
         .get_root();
 
-      loop {
-        let slot = block_cache.read(ptr, table.handle())?.for_read();
-        match slot.as_ref().view::<BTreeNodeView>()? {
-          BTreeNodeView::Internal(node) => ptr = node.first_child()?,
-          BTreeNodeView::Leaf(_) => break,
-        }
+      while let BTreeNodeView::Internal(node) = block_cache
+        .read(ptr, table.handle())?
+        .for_read()
+        .as_ref()
+        .view()?
+      {
+        ptr = node.first_child()?;
       }
 
       task.leaf_ptr = Some(ptr);
