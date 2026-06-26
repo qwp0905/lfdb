@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{borrow, cmp, fmt, hash, ops::Deref};
 
 use crate::{
   disk::{AlignedBuf, PageRef, PAGE_SIZE},
@@ -42,30 +42,33 @@ impl VecRef {
       Type::Copied(data) => data.as_slice().to_vec(),
     }
   }
-}
-impl Deref for VecRef {
-  type Target = [u8];
-
-  fn deref(&self) -> &Self::Target {
+  fn as_slice(&self) -> &[u8] {
     match &self.0 {
       Type::Refed(slot, s, e) => slot.range(*s..*e),
       Type::Copied(data) => data.as_slice(),
     }
   }
 }
-impl std::fmt::Debug for VecRef {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    self.deref().fmt(f)
+impl Deref for VecRef {
+  type Target = [u8];
+
+  fn deref(&self) -> &Self::Target {
+    self.as_slice()
+  }
+}
+impl fmt::Debug for VecRef {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.as_slice().fmt(f)
   }
 }
 impl AsRef<[u8]> for VecRef {
   fn as_ref(&self) -> &[u8] {
-    self.deref()
+    self.as_slice()
   }
 }
 impl PartialEq<[u8]> for VecRef {
   fn eq(&self, other: &[u8]) -> bool {
-    self.deref().eq(other)
+    self.as_slice().eq(other)
   }
 }
 impl<T: AsRef<[u8]>> PartialEq<T> for VecRef {
@@ -76,13 +79,13 @@ impl<T: AsRef<[u8]>> PartialEq<T> for VecRef {
 impl Eq for VecRef {}
 
 impl PartialOrd for VecRef {
-  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+  fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
     Some(self.cmp(other))
   }
 }
 impl Ord for VecRef {
-  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-    self.deref().cmp(other.deref())
+  fn cmp(&self, other: &Self) -> cmp::Ordering {
+    self.as_slice().cmp(other.deref())
   }
 }
 impl Clone for VecRef {
@@ -91,5 +94,15 @@ impl Clone for VecRef {
       Type::Refed(page, s, e) => Self::refed(page.clone(), *s, *e),
       Type::Copied(data) => Self::copied(data.clone()),
     }
+  }
+}
+impl borrow::Borrow<[u8]> for VecRef {
+  fn borrow(&self) -> &[u8] {
+    self.as_slice()
+  }
+}
+impl hash::Hash for VecRef {
+  fn hash<H: hash::Hasher>(&self, state: &mut H) {
+    self.as_slice().hash(state)
   }
 }
