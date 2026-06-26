@@ -50,9 +50,6 @@ impl DataEntry {
     }
   }
 
-  pub fn len(&self) -> usize {
-    self.versions.len()
-  }
   pub fn take_versions<'a>(&'a mut self) -> impl Iterator<Item = VersionRecord> + 'a {
     self.versions.drain(..)
   }

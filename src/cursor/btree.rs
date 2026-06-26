@@ -7,8 +7,6 @@ use crate::{
   Error, Result,
 };
 
-use crossbeam::epoch::pin;
-
 use super::{
   BTreeIterator, BTreeNode, BTreeNodeView, BlobAppendGuard, BufferedValue,
   CreatablePolicy, DataEntry, DataEntryView, FindSlotResult, InternalNode, KVSnapshot,
@@ -68,10 +66,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       }
     }
 
-    let mut _guard = None;
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
-      let new_guard = pin();
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       let entry: DataEntryView = slot.as_ref().view()?;
 
@@ -88,7 +84,6 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       }
 
       next = entry.get_next();
-      _guard = Some(new_guard);
     }
 
     Ok(None)
@@ -104,8 +99,6 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       .get_root();
 
     loop {
-      // This guard protects the next node or data entry from the GC.
-      // By declaring a guard before reading the current page, it is guaranteed that the pointers written to the current page have been reclaimed and are not reused.
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
@@ -122,10 +115,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       }
     }
 
-    let mut _guard = None;
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
-      let new_guard = pin();
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       let entry: DataEntryView = slot.as_ref().view()?;
       if let Some(record) =
@@ -135,7 +126,6 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       };
 
       next = entry.get_next();
-      _guard = Some(new_guard);
     }
 
     Ok(false)
