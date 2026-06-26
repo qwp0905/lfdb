@@ -3,7 +3,22 @@ use std::cmp::Ordering;
 use super::VecRef;
 use crate::Result;
 
+/**
+ * Merge two sorted key streams for tree-level compaction/merge work.
+ *
+ * When both streams contain the same key, the primary stream wins. This lets a
+ * newer or otherwise higher-priority tree shadow an older secondary tree while
+ * preserving tombstones during the merge. `get_next_pair` is only a convenience
+ * reader for callers that want to skip tombstones in the final visible output.
+ */
 pub trait MergeSortable {
+  /**
+   * A sorted stream of key/value records used by merge-style tree operations.
+   *
+   * The value side is optional because `None` is a tombstone. Merge code must keep
+   * tombstones in the stream so they can shadow older values for the same key;
+   * callers that need only live key/value pairs can use `get_next_pair`.
+   */
   fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>>;
 
   fn get_next_pair(&mut self) -> Result<Option<(VecRef, VecRef)>> {

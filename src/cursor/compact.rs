@@ -29,6 +29,15 @@ use crate::{
   warn, Error, Result,
 };
 
+/**
+ * Minimal local transaction used by compaction metadata updates.
+ *
+ * Compaction needs real transaction boundaries for metadata writes: visibility,
+ * WAL commit/abort, page recording, and rollback marking. It does not need the
+ * full user-facing transaction orchestrator, and this code runs on the single
+ * compaction worker, so `MiniTx` keeps only the local pieces required for those
+ * internal writes.
+ */
 struct MiniTx<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
@@ -174,6 +183,13 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
   }
 }
 
+/**
+ * Read policy for copying records from the old table during compaction.
+ *
+ * Compaction copies blob references, not blob bytes. Any attempt to materialize
+ * blob contents through this policy means the compaction path crossed the wrong
+ * boundary and should panic.
+ */
 struct CompactionReadPolicy {
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
@@ -208,6 +224,12 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   }
 }
 
+/**
+ * Write policy for applying snapshot records into the new table.
+ *
+ * Snapshot application preserves existing blob references. It must not create
+ * new blob payloads, so `write_blob` is unreachable for this policy.
+ */
 struct CompactionWritePolicy {
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
@@ -243,6 +265,14 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   }
 }
 impl WritablePolicy for CompactionWritePolicy {
+  /**
+   * Snapshot-copy writes use the reserved transaction id.
+   *
+   * Copying records into the compacted segment is an engine-owned background
+   * write and is not rolled back. The metadata transitions around that segment are
+   * still committed through `MiniTx`; the copied pages themselves are written as
+   * non-abortable reserved-transaction records.
+   */
   fn serialize_and_log<T: Serializable>(
     &self,
     slot: &mut RefedSlot,
@@ -268,6 +298,13 @@ impl WritablePolicy for CompactionWritePolicy {
 
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
+/**
+ * Start compaction by publishing the new physical table segment in metadata.
+ *
+ * The metadata entry is the durable compaction state for the logical table. Once
+ * this update commits, the logical table is represented by the old segment plus
+ * the new compaction segment, and transactions can route through that state.
+ */
 fn create_compaction(
   version_visibility: &VersionVisibility,
   wal: &WAL,
@@ -348,6 +385,15 @@ impl CompactionTriggered {
     Self { old }
   }
 }
+
+/**
+ * Resume a compaction whose metadata publication already happened.
+ *
+ * Runtime triggers must first publish the old/new table-segment pair and wait
+ * for that publication to become globally visible. A `CompactionPublished` event
+ * represents a compaction that has already passed that publication boundary, so
+ * it can be queued directly for copy progress.
+ */
 pub struct CompactionPublished {
   old: PinnedHandle,
   new: PinnedHandle,
@@ -431,6 +477,14 @@ impl Compactor {
     this
   }
 
+  /**
+   * Stop compaction immediately after WAL failure.
+   *
+   * WAL write failure makes the engine unavailable because durability can no
+   * longer be guaranteed. Compaction is a write path and records metadata/table
+   * changes through WAL, so it must not continue once a `WALFailed` event is
+   * observed.
+   */
   pub fn close(&self) -> Result {
     if !self.wal.is_available() {
       self.failover();
@@ -535,6 +589,14 @@ binding_events!(Compactor {
   shared: [WALFailed]
 });
 
+/**
+ * Finish compaction by removing the compaction marker from metadata.
+ *
+ * After this commit, the logical table is represented only by the compacted
+ * segment. The returned transaction id/version are used to defer physical
+ * removal of the old segment until that metadata transition is visible to all
+ * active transactions.
+ */
 fn remove_compaction(
   version_visibility: &VersionVisibility,
   wal: &WAL,
@@ -569,6 +631,14 @@ fn remove_compaction(
   Ok(Some((tx.state.get_id(), tx.current_version())))
 }
 
+/**
+ * Shared storage for the currently active compaction cycle.
+ *
+ * The interval worker is the only thread that mutates this while it is running,
+ * but shutdown needs to take over the current work context after the worker is
+ * closed. Keeping the active cycle outside the worker closure lets `close`
+ * continue draining the same compaction synchronously.
+ */
 struct CompactionCycle {
   old: PinnedHandle,
   new: PinnedHandle,
@@ -586,6 +656,13 @@ impl CompactionCycle {
   }
 }
 
+/**
+ * Check whether the logical table still exists before continuing compaction.
+ *
+ * Compaction can race with table drop. The compactor only needs to know whether
+ * the logical table is still present in metadata; if it has been removed, the
+ * in-progress compaction can be abandoned.
+ */
 fn check_compaction(
   version_visibility: &VersionVisibility,
   wal: &WAL,
@@ -657,6 +734,9 @@ fn run_tick(
   }
 
   for (old, new, metadata) in take(waiting_pin) {
+    // If the old table can no longer be pinned, it has already been dropped or is
+    // being closed. Compaction does not touch dropped tables, so the pending work is
+    // discarded instead of retried.
     let Some(old) = old.try_pin() else { continue };
     in_progress.push(CompactionCycle::new(old, new, metadata));
   }
@@ -741,7 +821,17 @@ fn compaction_loop(
   batch_size: usize,
 ) -> impl FnMut(Option<()>) {
   let meta_table = tables.meta_table();
+  // Wait until the compaction metadata publication is globally visible.
+  // `waiting_publish` holds compactions whose metadata update has committed, but
+  // may still be invisible to transactions that were already active. Once the
+  // commit version is below the global minimum visible version, future access can
+  // observe the old/new table-segment pair from metadata.
   let mut waiting_publish = LinkedList::new();
+  // Temporary pinning stage for an in-progress compaction source table.
+  // The pin keeps the old table from being dropped while this compaction cycle is
+  // copying records. This is an implementation detail of the current incremental
+  // compaction loop; it is expected to move toward taking short-lived pins per
+  // tick and abandoning the table if pinning fails.
   let mut waiting_pin = VecDeque::new();
 
   let old_index = BTreeIndex::new(

@@ -12,15 +12,24 @@ use crate::{
 };
 
 /**
- * MVCC version chain for a single key, stored as a linked list of pages.
- * When a page fills up with version records, overflow continues on the next page
- * pointed to by next. New versions are prepended so the most recent is always
- * at the front.
+ * On-page continuation of a single key's version chain.
+ *
+ * A leaf entry stores the latest version inline and points to `DataEntry` pages
+ * for the remaining version records. `next` links to the next data-entry page
+ * when this page cannot hold the whole chain. Version ordering is maintained by
+ * the caller.
  */
 #[derive(Debug)]
 pub struct DataEntry {
   next: Option<Pointer>,
   versions: VecDeque<VersionRecord>,
+  /**
+   * Transaction that last modified this data-entry page.
+   *
+   * This is entry-page metadata used by conflict/wait logic to identify the most
+   * recent writer of the page. `attach_front` updates it together with the record
+   * insertion even though the higher-level meaning is decided outside this object.
+   */
   last_owner: TxId,
 }
 impl DataEntry {
@@ -109,6 +118,12 @@ impl Deserializable for DataEntry {
   }
 }
 
+/**
+ * Zero-copy view of a serialized `DataEntry`.
+ *
+ * It provides read-only iteration over version-record views. Use `into_owned`
+ * when the page contents need to be materialized for mutation and serialization.
+ */
 pub struct DataEntryView<'a> {
   page: &'a Page,
   next: Option<Pointer>,

@@ -9,6 +9,13 @@ use crate::{
   Result,
 };
 
+/**
+ * Read-only capabilities required by cursor traversal.
+ *
+ * This keeps B-tree/object logic independent from concrete transaction, cache,
+ * and blob-storage implementations. A read policy answers MVCC visibility
+ * questions and provides access to cached pages and blob values.
+ */
 pub trait ReadonlyPolicy {
   fn is_aborted(&self, owner: TxId) -> bool;
   fn is_owned(&self, owner: TxId) -> bool;
@@ -27,6 +34,11 @@ pub trait ReadonlyPolicy {
     table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
 
+  /**
+   * Common MVCC visibility rule shared by all read policies. Implementations
+   * provide the primitive state checks; the composition is kept here so every
+   * cursor read follows the same rule.
+   */
   fn is_visible(&self, owner: TxId, version: TxId) -> bool {
     if self.is_owned(owner) {
       return true;
@@ -64,6 +76,13 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
   }
 }
 
+/**
+ * Write capabilities required by page mutation.
+ *
+ * Extends read-only traversal with blob writes, page allocation, and the
+ * serialize-and-log operation that updates a page while recording the change in
+ * WAL.
+ */
 pub trait WritablePolicy: ReadonlyPolicy {
   fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>>;
   fn serialize_and_log<T: Serializable>(
@@ -78,6 +97,11 @@ pub trait WritablePolicy: ReadonlyPolicy {
     table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
 
+  /**
+   * Reused pointers may still have existing disk contents, so fetch through the
+   * normal read path. Newly allocated file-end pointers have no meaningful old
+   * contents and can be allocated in cache without a disk read.
+   */
   fn alloc_and_log<T: Serializable>(
     &self,
     data: &T,
@@ -113,7 +137,18 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   }
 }
 
+/**
+ * Record-creation capabilities required by insert/update paths.
+ *
+ * Extends writable access with conflict detection, waiting for conflicting
+ * owners, and the current transaction/record identity needed to create new
+ * version records.
+ */
 pub trait CreatablePolicy: WritablePolicy {
+  /**
+   * Write conflict cares about unfinished foreign owners. An aborted owner is
+   * already closed, so active-ness is the relevant owner state here.
+   */
   fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
     !self.is_owned(owner) && (!self.is_readable(version) || self.is_active(owner))
   }

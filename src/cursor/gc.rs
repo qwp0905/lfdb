@@ -134,6 +134,61 @@ struct EntryRelease {
   blob_refs: Vec<BlobId>,
 }
 
+/**
+ * First check whether this entry page has anything reclaimable. Most pages do
+ * not need mutation, so the read-only pass avoids taking the batch/write path
+ * unless trimming is actually required.
+ */
+fn check_entry(
+  block_cache: &BlockCache,
+  version_visibility: &VersionVisibility,
+  ptr: Pointer,
+  table: &TableHandleRef,
+  next: &mut Option<Pointer>,
+  blob_refs: &mut Vec<BlobId>,
+  min_version: TxId,
+) -> Result<bool> {
+  let mut found = false;
+  let mut need_trim = false;
+  let slot = block_cache.read(ptr, table)?.for_read();
+  let entry = slot.as_ref().view::<DataEntryView>()?;
+  *next = entry.get_next();
+
+  let prev_len = blob_refs.len();
+  let mut iter = entry.get_versions();
+  while let Some(record) = iter.try_next()? {
+    if version_visibility.is_aborted(&record.owner) {
+      need_trim = true;
+      break;
+    }
+    if let RecordDataView::Blob(id, _, _) = record.data {
+      blob_refs.push(id);
+    }
+    if record.version >= min_version {
+      continue;
+    }
+    if !found {
+      found = true;
+      continue;
+    }
+    need_trim = true;
+    break;
+  }
+  if !need_trim {
+    return Ok(false);
+  }
+
+  blob_refs.drain(prev_len..);
+  Ok(true)
+}
+
+/**
+ * Trim an entry chain while preserving the visibility boundary.
+ *
+ * `min_version` is the threshold visible to transactions that will start after
+ * this point. GC may remove older history, but it must keep at least one record
+ * below that threshold so future reads still have a stable version boundary.
+ */
 fn release_entry(
   block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
@@ -164,37 +219,16 @@ fn release_entry(
       continue;
     }
 
-    {
-      let mut found = false;
-      let mut need_trim = false;
-      let slot = block_cache.read(ptr, table)?.for_read();
-      let entry = slot.as_ref().view::<DataEntryView>()?;
-      next = entry.get_next();
-
-      let prev_len = blob_refs.len();
-      let mut iter = entry.get_versions();
-      while let Some(record) = iter.try_next()? {
-        if version_visibility.is_aborted(&record.owner) {
-          need_trim = true;
-          break;
-        }
-        if let RecordDataView::Blob(id, _, _) = record.data {
-          blob_refs.push(id);
-        }
-        if record.version >= min_version {
-          continue;
-        }
-        if !found {
-          found = true;
-          continue;
-        }
-        need_trim = true;
-        break;
-      }
-      if !need_trim {
-        continue;
-      }
-      blob_refs.drain(prev_len..);
+    if !check_entry(
+      block_cache,
+      version_visibility,
+      ptr,
+      table,
+      &mut next,
+      &mut blob_refs,
+      min_version,
+    )? {
+      continue;
     }
 
     block_cache.read(ptr, table)?.for_batch().mutate(|slot| {
@@ -334,6 +368,13 @@ const fn run_release_table(
   }
 }
 
+/**
+ * Defer page reuse through epoch GC.
+ *
+ * After an entry page is detached, readers that already observed its pointer may
+ * still follow it under an epoch guard. Deferring the free-list return prevents
+ * that page pointer from being reused until those pre-existing reads are gone.
+ */
 fn defer<F, R>(f: F)
 where
   F: FnOnce() -> R + Send + 'static,

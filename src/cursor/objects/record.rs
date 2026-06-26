@@ -9,20 +9,24 @@ use crate::{
   Error,
 };
 
-/**
- * Data: value fits inline in the DataEntry page.
- * Chunked: value exceeds LARGE_VALUE and is stored across separate DataChunk pages;
- *          only the page pointers are stored here.
- * Tombstone: marks the key as deleted.
- */
 #[derive(Debug)]
 pub enum RecordData {
+  /**
+   * Value bytes stored inline with this record.
+   */
   Data(Vec<u8>),
+  /**
+   * Value bytes stored in blob storage, referenced by blob id, offset, and
+   * logical length.
+   */
   Blob(BlobId, BlobOffset, BlobLen),
+  /**
+   * Delete marker for the key.
+   */
   Tombstone,
 }
 impl RecordData {
-  pub const fn len(&self) -> usize {
+  const fn byte_len(&self) -> usize {
     1 + match self {
       RecordData::Data(data) => 2 + data.len(),
       RecordData::Blob(_, _, _) => BLOB_ID_BYTES + BLOB_OFFSET_BYTES + BLOB_LEN_BYTES,
@@ -32,14 +36,27 @@ impl RecordData {
 }
 
 /**
- * owner: tx_id of the transaction that wrote this version.
- * version: the global tx counter at insert time. Only transactions that started
- * at or after this value can see this version — ensuring writes become visible
- * only to transactions that begin after the insert.
+ * On-page MVCC version record.
+ *
+ * A version record stores the writer transaction, visibility version, record id,
+ * and either inline value bytes, a blob location, or a tombstone. Leaf entries
+ * and data-entry version chains share this format.
+ *
+ *  A record is uniquely identified by `(owner, record_id)`. The record id is
+ * local to the owner transaction and may repeat across transactions.
  */
 #[derive(Debug)]
 pub struct VersionRecord {
+  /**
+   * The transaction that wrote this record.
+   */
   pub owner: TxId,
+  /**
+   * The next transaction id at the moment this record is written to a
+   * page. It forms the visibility boundary: transactions that already started
+   * before that boundary should not observe the new version, while later
+   * transactions may.
+   */
   pub version: TxId,
   pub record_id: RecordId,
   pub data: RecordData,
@@ -59,7 +76,7 @@ impl VersionRecord {
     }
   }
   pub const fn byte_len(&self) -> usize {
-    (POINTER_BYTES << 1) + self.data.len() + RECORD_ID_BYTES // owner 8byte + version 8byte + data + record id
+    (POINTER_BYTES << 1) + self.data.byte_len() + RECORD_ID_BYTES // owner 8byte + version 8byte + data + record id
   }
 
   pub fn serialize_to(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
@@ -117,6 +134,13 @@ impl RecordDataView {
   }
 }
 
+/**
+ * Zero-copy view of a serialized `VersionRecord`.
+ *
+ * Inline data is represented as a byte range inside the page. Blob and tombstone
+ * variants are already self-contained. Use `into_owned_with` when an owned
+ * `VersionRecord` is needed.
+ */
 #[derive(Debug)]
 pub struct VersionRecordView {
   pub owner: TxId,

@@ -12,9 +12,11 @@ use crate::{
 
 /**
  * B-link tree internal node.
- * right holds the high key and pointer to the right sibling, set when this node
- * is split. If a search key >= high key, traversal must follow the right pointer
- * rather than descending into this node's children.
+ *
+ * `right` is the B-link right-move link created by split. It stores the right
+ * sibling pointer and this node's high key. If a search or insert key is greater
+ * than or equal to the high key, traversal must move right instead of descending
+ * through this node's children.
  */
 #[derive(Debug)]
 pub struct InternalNode {
@@ -91,6 +93,8 @@ impl InternalNode {
     pointer: Pointer,
   ) -> std::result::Result<(), Pointer> {
     if let Some((right, high)) = &self.right {
+      // B-link right move: the caller may have reached a node whose high key no
+      // longer covers this key. In that case the insert belongs to the right sibling.
       if high <= key {
         return Err(*right);
       }
@@ -127,15 +131,26 @@ impl InternalNode {
     Self::RESERVED_BYTES + self.keys_bytes() + self.right_bytes()
   }
 
+  /**
+   * Split this internal node if it no longer fits.
+   *
+   * Returns the new right node and the separator key. The separator is also the
+   * left node's B-link high key: the caller must install it with `set_right` after
+   * allocating the right sibling, and also propagate it to the parent.
+   */
   pub fn split_if_needed(&mut self) -> Option<(InternalNode, StaticKey)> {
     let right_bytes = self.right_bytes();
     let keys_bytes = self.keys_bytes();
     let split_bytes = right_bytes + keys_bytes;
-    if split_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
+    if split_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
       return None;
     }
 
     let split_point = {
+      // Consume the insertion-position bias as a direction histogram. The histogram
+      // chooses the target split position: left-heavy history moves the split target
+      // left, right-heavy history moves it right, and middle-heavy history keeps it
+      // near the center.
       let [l, m, r] = count_directions(replace(&mut self.bias, DEFAULT_BIAS));
       debug_assert!((l + m + r) != 0);
       split_bytes * (m + (r << 1)) / ((l + m + r) << 1)
@@ -151,13 +166,17 @@ impl InternalNode {
 
       let split_key_bytes = Self::key_bytes(&self.keys[mid]);
       let right_key_bytes = keys_bytes - left_bytes - split_key_bytes;
+
+      // The middle key is removed from the child-key list, but it becomes this
+      // node's high key through `set_right` after the split. Count it on the left side
+      // when checking whether both serialized nodes will fit.
       let left_total = Self::RESERVED_BYTES + left_bytes + split_key_bytes;
       let right_total = Self::RESERVED_BYTES + right_bytes + right_key_bytes;
 
-      if left_total > SERIALIZABLE_BYTES {
+      if left_total >= SERIALIZABLE_BYTES {
         continue;
       }
-      if right_total > SERIALIZABLE_BYTES {
+      if right_total >= SERIALIZABLE_BYTES {
         continue;
       }
 
@@ -171,12 +190,12 @@ impl InternalNode {
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);
-    let split = InternalNode::new(keys, children, self.right.take(), Default::default());
+    let split = InternalNode::new(keys, children, self.right.take(), DEFAULT_BIAS);
 
-    debug_assert!(split.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(split.bytes_len() < SERIALIZABLE_BYTES);
     debug_assert!(!split.keys.is_empty());
     debug_assert!(!self.keys.is_empty());
-    debug_assert!(self.bytes_len() <= SERIALIZABLE_BYTES);
+    debug_assert!(self.bytes_len() < SERIALIZABLE_BYTES);
 
     Some((split, mid_key))
   }
@@ -190,6 +209,13 @@ impl InternalNode {
   }
 }
 
+/**
+ * Zero-copy view of a serialized internal node.
+ *
+ * The owned `InternalNode` is used when the node must be modified and written
+ * back. `InternalNodeView` is the read-only traversal form: it stores offsets
+ * into the page and compares keys directly against page byte ranges.
+ */
 pub struct InternalNodeView<'a> {
   page: &'a Page,
   len: usize,

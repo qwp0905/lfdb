@@ -10,8 +10,14 @@ use crate::{
   Result,
 };
 
+/**
+ * Entry stored inside a leaf node.
+ *
+ * The leaf stores the key and the latest version record inline. `next` points
+ * to the data-entry page that continues the version chain for older records.
+ */
 #[derive(Debug)]
-pub struct LeafEntry {
+struct LeafEntry {
   key: StaticKey,
   record: VersionRecord,
   next: Pointer,
@@ -27,8 +33,11 @@ impl LeafEntry {
 }
 
 /**
- * B+tree leaf node. Leaf nodes are linked in key order via next, set when this
- * node is split to chain the new right sibling into the list.
+ * B-link tree leaf node.
+ *
+ * `LeafNode::next` links this leaf to the right sibling in key order. It is
+ * separate from `LeafEntry::next`, which links a single key to its version
+ * chain.
  */
 #[derive(Debug)]
 pub struct LeafNode {
@@ -89,7 +98,7 @@ impl LeafNode {
 
   pub fn split_if_needed(&mut self) -> Option<LeafNode> {
     let data_bytes = self.data_bytes();
-    if data_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
+    if data_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
       return None;
     }
     let split_point = {
@@ -106,10 +115,10 @@ impl LeafNode {
     for mid in 1..self.entries.len() {
       left_data += self.entries[mid - 1].bytes_len();
 
-      if Self::RESERVED_BYTES + left_data > SERIALIZABLE_BYTES {
+      if Self::RESERVED_BYTES + left_data >= SERIALIZABLE_BYTES {
         continue;
       }
-      if Self::RESERVED_BYTES + data_bytes - left_data > SERIALIZABLE_BYTES {
+      if Self::RESERVED_BYTES + data_bytes - left_data >= SERIALIZABLE_BYTES {
         continue;
       }
 
@@ -124,9 +133,9 @@ impl LeafNode {
       self.next.take(),
       DEFAULT_BIAS,
     );
-    debug_assert!(self.data_bytes() + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES);
+    debug_assert!(self.data_bytes() + Self::RESERVED_BYTES < SERIALIZABLE_BYTES);
     debug_assert!(!self.entries.is_empty());
-    debug_assert!(split.data_bytes() + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES);
+    debug_assert!(split.data_bytes() + Self::RESERVED_BYTES < SERIALIZABLE_BYTES);
     debug_assert!(!split.entries.is_empty());
 
     Some(split)
@@ -156,6 +165,10 @@ impl LeafNode {
       Ok(i) => FindSlotResult::Replace(i),
       Err(i) => {
         if i == self.entries.len() {
+          // Leaf-level B-link right move. Internal nodes store an explicit high key with
+          // the right pointer; leaf nodes derive the same decision from the ordered entry
+          // range. If the key belongs beyond the end and a right sibling exists, move
+          // right.
           if let Some(p) = self.next {
             return FindSlotResult::Move(p);
           }
@@ -186,6 +199,13 @@ pub enum NodeFindResult {
   NotFound(usize),
 }
 
+/**
+ * Zero-copy view of a serialized leaf node.
+ *
+ * Like `InternalNodeView`, this is the read-only traversal form. It borrows the
+ * page and reads keys/records by offset. Mutation paths materialize an owned
+ * `LeafNode` through `into_owned`.
+ */
 #[derive(Debug)]
 pub struct LeafNodeView<'a> {
   page: &'a Page,
@@ -252,7 +272,7 @@ impl<'a> LeafNodeView<'a> {
     )
   }
 
-  pub fn writable(self) -> Result<LeafNode> {
+  pub fn into_owned(self) -> Result<LeafNode> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
 
@@ -305,6 +325,14 @@ impl<'a> LeafNodeView<'a> {
   }
 }
 
+/**
+ * Sequential iterator over entries in a serialized leaf node.
+ *
+ * The iterator walks the page bytes directly. For each entry it returns the key
+ * byte range inside the page, the inline version-record view, and the pointer to
+ * the rest of that key's version chain. It does not allocate or decide whether
+ * the caller should copy or borrow the key bytes.
+ */
 pub struct LeafNodeIter<'a> {
   scanner: PageScanner<'a>,
   page: &'a Page,
@@ -312,12 +340,21 @@ pub struct LeafNodeIter<'a> {
   end: &'a Bound<StaticKey>,
   pos: usize,
   len: usize,
+  /**
+   * Set after the iterator reaches the end or passes the upper bound.
+   */
   closed: bool,
 }
 impl<'a> LeafNodeIter<'a> {
   pub fn is_completed(&self) -> bool {
     self.pos == self.len
   }
+
+  /**
+   * Return the next entry within the configured key bounds.
+   *
+   * The returned `(start, end)` is the key byte range in `page`.
+   */
   pub fn try_next(
     &mut self,
   ) -> Result<Option<(usize, usize, VersionRecordView, Pointer)>> {

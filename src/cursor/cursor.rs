@@ -1,3 +1,11 @@
+/**
+ * Cursor over a logical table that may be split across compaction segments.
+ *
+ * Once compaction metadata is visible, new writes are routed to the compaction
+ * segment and the old segment becomes read-only. Reads therefore check the
+ * compaction segment first, and scans merge it as the primary stream over the
+ * old segment.
+ */
 use std::ops::{Bound, RangeBounds};
 
 use super::{
@@ -93,6 +101,13 @@ impl<'a> Cursor<'a> {
     })
   }
 
+  /**
+   * During compaction, removal is written as a tombstone in the new segment.
+   *
+   * The old segment may still contain the key and the compaction copy may not have
+   * reached it yet. Since reads merge both segments with the new segment first,
+   * the tombstone must exist in the new segment to shadow the old value.
+   */
   fn __remove(&self, key: StaticKeyRef) -> Result<WriteResult> {
     if let Some(table) = self.compaction.as_ref() {
       return self.index.insert_record(key.to_vec(), None, table);
@@ -129,6 +144,8 @@ impl<'a> Cursor<'a> {
       return Err(Error::TransactionClosed);
     }
 
+    // Own range bounds inside the iterator so user-provided key references do not
+    // extend into the cursor scan lifetime.
     CursorIterator::new(
       self.context,
       &self.table,
@@ -172,6 +189,13 @@ impl<'a> CursorIterator<'a> {
   }
 }
 
+/**
+ * Result of an insert operation.
+ *
+ * `updated` and `inserted` are logically exclusive; both are exposed so callers
+ * can tell whether the write replaced an existing logical key or created a new
+ * one.
+ */
 pub struct InsertResult {
   pub updated: bool,
   pub inserted: bool,

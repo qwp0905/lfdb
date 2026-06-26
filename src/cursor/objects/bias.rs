@@ -15,6 +15,8 @@ pub const DEFAULT_BIAS: SplitBias = {
 
 pub const fn update_bias(bias: SplitBias, len: usize, pos: usize) -> SplitBias {
   if len < DIRECTIONS {
+    // With fewer entries than direction buckets, the insertion position cannot be
+    // classified meaningfully as left/middle/right.
     return bias;
   }
   let bucket = pos * DIRECTIONS / len;
