@@ -60,14 +60,10 @@ impl Drop for SegmentState {
   }
 }
 
-const U16_MASK: u32 = 0xFFFF;
+// const U16_MASK: u32 = 0xFFFF;
 
 const BITS: u64 = 40;
 const MASK: u64 = (1 << BITS) - 1;
-/**
- * default offset for entry to write records len
- */
-const OFFSET_BYTE: u64 = 2;
 
 /**
  * A single WAL block (16KB page) being filled concurrently by multiple writers.
@@ -109,17 +105,24 @@ impl LogBuffer {
     segment: WALSegment,
     generation: SegmentGeneration,
   ) -> Self {
-    Self::new(entry, 0, SBox::new(SegmentState::new(segment)), generation)
+    Self::new(
+      entry,
+      0,
+      SBox::new(SegmentState::new(segment)),
+      generation,
+      0,
+    )
   }
   /**
    * if segment is not full, then copy pointers and recreate buffer
    */
-  pub fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>) -> Self {
+  pub fn init_next(&self, entry: PageRef<WAL_BLOCK_SIZE>, offset: usize) -> Self {
     Self::new(
       entry,
       self.segment_ptr + 1,
       self.segment_state.clone(),
       self.generation,
+      offset,
     )
   }
 
@@ -128,9 +131,10 @@ impl LogBuffer {
     segment_ptr: Pointer,
     segment_state: SBox<SegmentState>,
     generation: SegmentGeneration,
+    offset: usize,
   ) -> Self {
     Self {
-      offset: AtomicU64::new(OFFSET_BYTE),
+      offset: AtomicU64::new(offset as u64),
       entry,
       commit_count: AtomicU32::new(0),
       segment_ptr,
@@ -158,9 +162,6 @@ impl LogBuffer {
       .offset
       .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
     ((prev & MASK) as usize, (prev >> BITS) as u32)
-  }
-  pub fn apply_record_count(&self, count: u32) {
-    self.write_at(&((count & U16_MASK) as u16).to_le_bytes(), 0)
   }
   pub fn write_at(&self, record: &[u8], offset: usize) {
     let ptr = self.entry.as_ptr();

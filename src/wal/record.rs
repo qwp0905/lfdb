@@ -1,8 +1,8 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use super::{LogId, TxId, WAL_BLOCK_SIZE};
+use super::{LogId, TxId};
 use crate::{
-  disk::{Page, Pointer, POINTER_BYTES},
+  disk::{Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
   utils::{OffsetReader, OffsetWriter},
   wal::{LOG_ID_BYTES, TX_ID_BYTES},
@@ -67,7 +67,9 @@ impl LogRecord {
     }
   }
 
-  fn read_from(buf: &[u8]) -> Option<Self> {
+  pub const LEN_BYTES: usize = 2;
+
+  pub fn read_from(buf: &[u8]) -> Option<Self> {
     let mut reader = OffsetReader::new(buf);
     let checksum = reader.read_u32()?;
 
@@ -162,8 +164,8 @@ pub struct LogRecordUninit {
 impl LogRecordUninit {
   fn new(tx_id: TxId, operation: Operation) -> Self {
     let len = operation.byte_len() + 4 + LOG_ID_BYTES + TX_ID_BYTES;
-    let mut buf = vec![0; len + 2];
-    buf[..2].copy_from_slice(&(len as u16).to_le_bytes());
+    let mut buf = vec![0; len + LogRecord::LEN_BYTES];
+    buf[..LogRecord::LEN_BYTES].copy_from_slice(&(len as u16).to_le_bytes());
     Self {
       buf,
       tx_id,
@@ -175,7 +177,7 @@ impl LogRecordUninit {
   }
   pub fn init(mut self, log_id: LogId) -> Vec<u8> {
     let record = LogRecord::new(log_id, self.tx_id, self.operation);
-    record.write_at(&mut self.buf[2..]);
+    record.write_at(&mut self.buf[LogRecord::LEN_BYTES..]);
     self.buf
   }
 
@@ -222,39 +224,6 @@ impl LogRecordUninit {
       },
     )
   }
-}
-
-/**
- * Read all durable records from one WAL block.
- *
- * The boolean is a stop signal. When it is `true`, scanning reached a partial,
- * corrupt, or checksum-invalid record, so this point marks the boundary after
- * which WAL durability is not trusted. Records returned before that boundary are
- * still valid for replay.
- */
-pub fn read_page(value: &Page<WAL_BLOCK_SIZE>) -> (Vec<LogRecord>, bool) {
-  let mut scanner = value.scanner();
-  let Ok(len) = scanner.read_u16() else {
-    // ignore error cause of partial write
-    return (vec![], true);
-  };
-
-  let mut data = Vec::with_capacity(len as usize);
-  for _ in 0..len {
-    let Ok(size) = scanner.read_u16() else {
-      return (data, true);
-    };
-    let Some(record) = scanner
-      .read_n(size as usize)
-      .ok()
-      .and_then(LogRecord::read_from)
-    else {
-      return (data, true);
-    };
-
-    data.push(record);
-  }
-  (data, false)
 }
 
 #[cfg(test)]

@@ -69,49 +69,6 @@ fn test_checkpoint_roundtrip() {
 }
 
 #[test]
-fn test_entry_roundtrip() {
-  let mut page = Page::new();
-  let mut writer = page.writer();
-
-  writer.write(&(3u16).to_le_bytes()).unwrap();
-  let r2 = LogRecordUninit::new_insert(1, 0, 10, 12, vec![1]);
-  let r4 = LogRecordUninit::new_checkpoint(456, 123, "sdlfkj".into());
-  let r3 = LogRecordUninit::new_commit(1);
-
-  writer.write(&r2.init(2)).unwrap();
-  writer.write(&r4.init(3)).unwrap();
-  writer.write(&r3.init(4)).unwrap();
-
-  let (d, complete) = read_page(&page);
-  assert!(!complete);
-
-  assert_eq!(d.len(), 3);
-
-  assert_eq!(d[0].log_id, 2);
-  assert_eq!(d[0].tx_id, 1);
-  assert!(matches!(
-    &d[0].operation,
-    Operation::Insert {
-      table_id: 0,
-      pointer: 10,
-      current_version: 12,
-      ..
-    }
-  ));
-
-  assert_eq!(d[1].log_id, 3);
-  assert!(matches!(
-    &d[1].operation,
-    Operation::Checkpoint{ last_log_id:456, current_version:123, snapshot } if
-    snapshot == PathBuf::from("sdlfkj").as_path(),
-  ));
-
-  assert_eq!(d[2].log_id, 4);
-  assert_eq!(d[2].tx_id, 1);
-  assert!(matches!(d[2].operation, Operation::Commit));
-}
-
-#[test]
 fn test_invalid_format() {
   let short: Vec<u8> = vec![0; 10];
   assert!(LogRecord::read_from(short.as_ref()).is_none());
