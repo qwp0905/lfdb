@@ -80,6 +80,9 @@ impl<const T: usize> Page<T> {
   pub const fn range(&self, range: Range<usize>) -> &[u8] {
     unsafe { from_raw_parts(self.0.add(range.start), range.end - range.start) }
   }
+  pub const fn range_mut(&mut self, range: Range<usize>) -> &mut [u8] {
+    unsafe { from_raw_parts_mut(self.0.add(range.start), range.end - range.start) }
+  }
 }
 
 impl<const T: usize> Drop for Page<T> {

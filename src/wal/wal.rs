@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::{
   atomic::AtomicCell,
-  epoch::{self, Atomic, Owned},
+  epoch::{self, Atomic, Guard, Owned, Shared},
   utils::Backoff,
 };
 
@@ -16,7 +16,7 @@ use crate::{
   disk::{IOPool, PagePool, Pointer},
   error, info,
   table::TableId,
-  utils::UnsafeBorrow,
+  utils::{SharedToken, UnsafeBorrow},
   Error, Result,
 };
 
@@ -110,7 +110,7 @@ impl WAL {
     let max_len = max_len as Pointer;
     info!("start to replay wal segments");
 
-    let replay_result = replay(&page_pool, &io_pool)?;
+    let replay_result = replay(&io_pool)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} redo {} segments {} last snapshot {:?}",
@@ -158,49 +158,153 @@ impl WAL {
     Error::WALFailed(err)
   }
 
-  /**
-   * ## lock freely append wal record.
-   *
-   * 1.  create uninitialized record by closure.
-   *
-   * 2.  load current buffer.
-   *
-   * 3.  pinning current segment in buffer.
-   *
-   * 4.  obtain offset and record count from buffer.
-   *
-   * 5.  is able to write in entry
-   *   5-1. obtain log id and initialize record to a vector.
-   *   5-2. write record vector and commit entry.
-   *
-   * 6.  if fsync required and able to write in entry
-   *   6-1. wait commit for previous writes in entry.
-   *   6-2. apply records count to entry and commit entry.
-   *   6-3. wait previous writes in disk and fsync call.
-   *   6-4. wait previous fsync and current fsync, then return.
-   *
-   * 7.  if obtained offset exceed the threshold(eg. WAL_BLOCK_SIZE), yield and move to 2 and retry.
-   *
-   * 8.  if obtained offset exceed the threshold at first, then start to rotate current buffer.
-   *   8-1. if current buffer segment pointer has been exceed the threshold(eg. max len),
-   *        then trying to rotate buffer with rotated segment.
-   *
-   * 9.  if failed to rotate buffer, then clear this buffer and reuse segment if the segment has been rotated.
-   *
-   * 10. if succeeded to rotate buffer,
-   *   10-1. wait previous writes in entry, and write records count, and write to disk.
-   *   10-2. if current segment has not been rotated, then continue.
-   *   10-3. if current segment has been rotated, wait until pin is empty.
-   *   10-4. take segment raw pointer in buffer, and then trigger checkpoint.
-   *
-   * A segment rotation raises the segment-sync boundary.
-   *
-   * When the rotator fills a segment, it schedules that segment fsync in
-   * `SyncQueue` and publishes the rotated segment for reuse bookkeeping. The
-   * rotator does not wait for durability here. Durability is enforced later by
-   * `flush=true` callers through `SyncQueue::wait_until`, which collectively bear
-   * the cost of waiting for completed rotated-segment syncs.
-   */
+  fn append_in_block(
+    &self,
+    buffer: &LogBuffer,
+    record: LogRecordUninit,
+    offset: usize,
+    commit_order: u32,
+    flush: bool,
+    token: SharedToken,
+    backoff: &Backoff,
+  ) -> Result {
+    let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
+    buffer.write_at(&record.init(log_id), offset);
+    if !flush {
+      buffer.commit_entry();
+      return Ok(());
+    }
+
+    while commit_order > buffer.load_commit() {
+      backoff.snooze();
+    }
+    buffer.commit_entry();
+
+    if let Err(err) = buffer.write_to_disk() {
+      return Err(self.failover(err.kind()));
+    };
+    while !buffer.is_ready_to_flush() {
+      backoff.snooze();
+    }
+
+    let f = buffer.flush();
+    drop(token);
+
+    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
+      return Err(self.failover(err.kind()));
+    }
+
+    f.wait().unwrap().map_err(|err| self.failover(err.kind()))
+  }
+
+  fn rotate_block(
+    &self,
+    buffer_ptr: Shared<LogBuffer>,
+    guard: &Guard,
+    buffer: &LogBuffer,
+    record: LogRecordUninit,
+    offset: usize,
+    commit_order: u32,
+    flush: bool,
+    backoff: &Backoff,
+    token: SharedToken,
+  ) -> Result {
+    let mut record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
+    let remain = record.split_off(WAL_BLOCK_SIZE - offset);
+    buffer.write_at(&record, offset);
+
+    let mut new_page = self.page_pool.acquire();
+    new_page.range_mut(0..remain.len()).copy_from_slice(&remain);
+    let new_buffer = buffer.init_next(new_page, remain.len());
+    let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
+      buffer_ptr,
+      Owned::new(new_buffer),
+      Ordering::Release,
+      Ordering::Acquire,
+      guard,
+    ) else {
+      unreachable!()
+    };
+
+    unsafe { guard.defer_destroy(buffer_ptr) };
+    while commit_order > buffer.load_commit() {
+      backoff.snooze();
+    }
+
+    let write_r = buffer.write_to_disk();
+    buffer.increase_written_count();
+    if let Err(err) = write_r {
+      return Err(self.failover(err.kind()));
+    };
+
+    if !flush {
+      return Ok(());
+    }
+
+    let new_buffer = new_buffer_ptr.as_raw().borrow_unsafe();
+    if let Err(err) = new_buffer.write_to_disk() {
+      return Err(self.failover(err.kind()));
+    };
+    while !new_buffer.is_ready_to_flush() {
+      backoff.snooze();
+    }
+
+    let f = new_buffer.flush();
+    drop(token);
+
+    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
+      return Err(self.failover(err.kind()));
+    }
+
+    f.wait().unwrap().map_err(|err| self.failover(err.kind()))
+  }
+
+  fn rotate_segment(
+    &self,
+    buffer_ptr: Shared<LogBuffer>,
+    guard: &Guard,
+    buffer: &LogBuffer,
+    commit_order: u32,
+    mut token: SharedToken,
+    backoff: &Backoff,
+  ) -> Result {
+    let new = match self.preloader.load() {
+      Ok(v) => v,
+      Err(Error::IO(err)) => return Err(self.failover(err.kind())),
+      Err(err) => return Err(err),
+    };
+    let replacement =
+      LogBuffer::init_new(self.page_pool.acquire(), new, buffer.get_generation() + 1);
+
+    self
+      .buffer
+      .store(Owned::init(replacement), Ordering::Release);
+    unsafe { guard.defer_destroy(buffer_ptr) };
+
+    while commit_order > buffer.load_commit() {
+      backoff.snooze();
+    }
+
+    let write_r = buffer.write_to_disk();
+    buffer.increase_written_count();
+    if let Err(err) = write_r {
+      return Err(self.failover(err.kind()));
+    };
+
+    loop {
+      match token.try_upgrade() {
+        Ok(t) => break forget(t),
+        Err(t) => token = t,
+      };
+      backoff.snooze();
+    }
+
+    let segment = buffer.take_segment();
+    self.sync_queue.push(segment.fsync());
+    self.event_bus.publish(WALSegmentRotated(segment));
+    Ok(())
+  }
+
   fn append(&self, record: LogRecordUninit, flush: bool) -> Result {
     let len = record.len();
     let backoff = Backoff::new();
@@ -214,108 +318,45 @@ impl WAL {
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = buffer_ptr.as_raw().borrow_unsafe();
 
-      let Some(mut token) = buffer.pin_segment() else {
+      let Some(token) = buffer.pin_segment() else {
         backoff.snooze();
         continue;
       };
 
-      let (offset, order) = buffer.reserve_entry(len);
-      if offset + len < WAL_BLOCK_SIZE {
-        let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
-        buffer.write_at(&record.init(log_id), offset);
-        if !flush {
-          buffer.commit_entry();
-          return Ok(());
-        }
-
-        while order > buffer.load_commit() {
-          backoff.snooze();
-        }
-        buffer.apply_record_count(order + 1);
-        buffer.commit_entry();
-
-        if let Err(err) = buffer.write_to_disk() {
-          return Err(self.failover(err.kind()));
-        };
-        while !buffer.is_ready_to_flush() {
-          backoff.snooze();
-        }
-
-        let f = buffer.flush();
-        drop(token);
-
-        if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
-          return Err(self.failover(err.kind()));
-        }
-
-        return f.wait().unwrap().map_err(|err| self.failover(err.kind()));
-      }
-
-      if offset >= WAL_BLOCK_SIZE {
+      let (offset, commit_order) = buffer.reserve_entry(len);
+      if offset > WAL_BLOCK_SIZE {
         drop(token);
         backoff.snooze();
         continue;
       }
 
-      let replacement = if buffer.get_pointer() + 1 >= self.max_len {
-        let new = match self.preloader.load() {
-          Ok(v) => v,
-          Err(Error::IO(err)) => return Err(self.failover(err.kind())),
-          Err(err) => return Err(err),
-        };
-        LogBuffer::init_new(self.page_pool.acquire(), new, buffer.get_generation() + 1)
-      } else {
-        buffer.init_next(self.page_pool.acquire())
-      };
-
-      if let Err(failed) = self.buffer.compare_exchange(
-        buffer_ptr,
-        Owned::init(replacement),
-        Ordering::Release,
-        Ordering::Acquire,
-        &guard,
-      ) {
-        if failed.new.get_pointer() > 0 {
-          drop(token);
-          backoff.snooze();
-          continue;
-        }
-
-        let segment = failed.new.take_segment();
-        self.preloader.reuse(segment);
-        continue;
+      if offset + len <= WAL_BLOCK_SIZE {
+        return self.append_in_block(
+          buffer,
+          record,
+          offset,
+          commit_order,
+          flush,
+          token,
+          &backoff,
+        );
       }
-
-      unsafe { guard.defer_destroy(buffer_ptr) };
-
-      while order > buffer.load_commit() {
-        backoff.snooze();
-      }
-
-      buffer.apply_record_count(order);
-      let write_r = buffer.write_to_disk();
-      buffer.increase_written_count();
-      if let Err(err) = write_r {
-        return Err(self.failover(err.kind()));
-      };
 
       if buffer.get_pointer() + 1 < self.max_len {
-        drop(token);
-        backoff.snooze();
-        continue;
+        return self.rotate_block(
+          buffer_ptr,
+          &guard,
+          buffer,
+          record,
+          offset,
+          commit_order,
+          flush,
+          &backoff,
+          token,
+        );
       }
 
-      loop {
-        match token.try_upgrade() {
-          Ok(t) => break forget(t),
-          Err(t) => token = t,
-        };
-        backoff.snooze();
-      }
-
-      let segment = buffer.take_segment();
-      self.sync_queue.push(segment.fsync());
-      self.event_bus.publish(WALSegmentRotated(segment));
+      self.rotate_segment(buffer_ptr, &guard, buffer, commit_order, token, &backoff)?;
     }
   }
 

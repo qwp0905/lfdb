@@ -103,7 +103,13 @@ impl IOPool {
       .base_dir
       .open_direct_io(options.read(true), &path)
       .map_err(Error::IO)?;
-    Ok(ScanIOHandle::new(file, self.base_dir.clone(), filename))
+    let len = file.metadata().map_err(Error::IO)?.len();
+    Ok(ScanIOHandle::new(
+      file,
+      self.base_dir.clone(),
+      filename,
+      len,
+    ))
   }
   pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
     // Direct IO bypasses the OS page cache for predictable latency.
@@ -427,6 +433,7 @@ pub struct ScanIOHandle {
   buffer: AlignedArray,
   buffer_offset: usize,
   file_offset: u64,
+  file_len: u64,
   base_dir: SBox<DirHandle>,
   filename: PathBuf,
 }
@@ -435,12 +442,14 @@ impl ScanIOHandle {
     file: Box<dyn IOBackend>,
     base_dir: SBox<DirHandle>,
     filename: PathBuf,
+    file_len: u64,
   ) -> Self {
     Self {
       file,
       buffer: AlignedArray::new(),
       buffer_offset: ALIGN,
       file_offset: 0,
+      file_len,
       base_dir,
       filename,
     }
@@ -473,10 +482,13 @@ impl ScanIOHandle {
       buf = &mut buf[available..];
     }
   }
-  pub fn len(&self) -> Result<u64> {
-    Ok(self.file.metadata().map_err(Error::IO)?.len())
+  pub const fn len(&self) -> u64 {
+    self.file_len
   }
   pub fn truncate(&self) -> Result {
     self.base_dir.remove(&self.filename).map_err(Error::IO)
+  }
+  pub const fn get_offset(&self) -> u64 {
+    self.file_offset + (self.buffer_offset as u64)
   }
 }
