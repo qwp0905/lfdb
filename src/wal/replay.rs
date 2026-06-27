@@ -3,9 +3,9 @@ use std::{
   path::PathBuf,
 };
 
-use super::{read_page, LogId, Operation, TxId, FILE_EXT, WAL_BLOCK_SIZE};
+use super::{LogId, LogRecord, Operation, TxId, FILE_EXT};
 use crate::{
-  disk::{IOPool, PagePool, Pointer, ScanIOHandle},
+  disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
 };
@@ -56,10 +56,7 @@ impl ReplayResult {
   }
 }
 
-pub fn replay(
-  page_pool: &PagePool<WAL_BLOCK_SIZE>,
-  io_pool: &IOPool,
-) -> Result<ReplayResult> {
+pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
   let mut files = Vec::new();
   for file in io_pool.read_dir()? {
     let filename = PathBuf::from(file.file_name());
@@ -74,7 +71,6 @@ pub fn replay(
     return Ok(ReplayResult::empty());
   }
 
-  let mut page = page_pool.acquire();
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
   let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
@@ -87,56 +83,57 @@ pub fn replay(
   let mut last_checkpoint: Option<LogId> = None;
   for path in files {
     let mut segment = io_pool.open_scan_io(path)?;
-    let len = segment.len()?;
-    let mut offset = 0;
+    let len = segment.len();
 
-    while offset < len {
-      segment.read(page.as_mut_slice())?;
-      offset += WAL_BLOCK_SIZE as u64;
-
-      let (records, complete) = read_page(&page);
-
-      for record in records {
-        tx_id = tx_id.max(record.tx_id + 1);
-
-        if last_checkpoint.is_some_and(|c| c > record.log_id) {
-          continue;
-        }
-        log_id = log_id.max(record.log_id + 1);
-
-        match record.operation {
-          Operation::Insert {
-            table_id,
-            pointer,
-            data,
-            current_version,
-          } => {
-            redo.insert(record.log_id, (table_id, pointer, data));
-            started.insert(record.log_id, record.tx_id);
-            tx_id = tx_id.max(current_version);
-          }
-          Operation::Commit => {
-            closed.insert(record.log_id, record.tx_id);
-          }
-          Operation::Checkpoint {
-            last_log_id,
-            current_version,
-            snapshot,
-          } => {
-            tx_id = tx_id.max(current_version);
-
-            redo = redo.split_off(&last_log_id);
-            started = started.split_off(&last_log_id);
-            closed = closed.split_off(&last_log_id);
-
-            last_checkpoint = Some(last_log_id);
-            last_snapshot = Some(snapshot);
-          }
-        };
-      }
-      if complete {
+    while segment.get_offset() + (LogRecord::LEN_BYTES as u64) < len {
+      let mut buf = [0; LogRecord::LEN_BYTES];
+      segment.read(&mut buf)?;
+      let byte_len = u16::from_le_bytes(buf) as usize;
+      if segment.get_offset() + (byte_len as u64) > len {
         break;
       }
+
+      let buf = segment.read_to_vec(byte_len)?;
+      let Some(record) = LogRecord::read_from(&buf) else {
+        break;
+      };
+
+      tx_id = tx_id.max(record.tx_id + 1);
+
+      if last_checkpoint.is_some_and(|c| c > record.log_id) {
+        continue;
+      }
+      log_id = log_id.max(record.log_id + 1);
+
+      match record.operation {
+        Operation::Insert {
+          table_id,
+          pointer,
+          data,
+          current_version,
+        } => {
+          redo.insert(record.log_id, (table_id, pointer, data));
+          started.insert(record.log_id, record.tx_id);
+          tx_id = tx_id.max(current_version);
+        }
+        Operation::Commit => {
+          closed.insert(record.log_id, record.tx_id);
+        }
+        Operation::Checkpoint {
+          last_log_id,
+          current_version,
+          snapshot,
+        } => {
+          tx_id = tx_id.max(current_version);
+
+          redo = redo.split_off(&last_log_id);
+          started = started.split_off(&last_log_id);
+          closed = closed.split_off(&last_log_id);
+
+          last_checkpoint = Some(last_log_id);
+          last_snapshot = Some(snapshot);
+        }
+      };
     }
 
     segments.push(segment);
