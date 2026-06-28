@@ -160,7 +160,7 @@ impl WAL {
 
   fn append_in_block(
     &self,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     record: LogRecordUninit,
     offset: usize,
     commit_order: u32,
@@ -180,12 +180,13 @@ impl WAL {
     }
     buffer.commit_entry();
 
-    if let Err(err) = buffer.write_to_disk() {
-      return Err(self.failover(err.kind()));
-    };
+    let done = buffer.write_to_disk();
     while !buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     self.wait_sync(buffer, token)
   }
@@ -205,7 +206,7 @@ impl WAL {
     &self,
     buffer_ptr: Shared<LogBuffer>,
     guard: &Guard,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     record: LogRecordUninit,
     offset: usize,
     commit_order: u32,
@@ -235,7 +236,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    let write_r = buffer.write_to_disk();
+    let write_r = buffer.write_to_disk().wait().unwrap();
     buffer.increase_written_count();
     if let Err(err) = write_r {
       return Err(self.failover(err.kind()));
@@ -246,12 +247,13 @@ impl WAL {
     }
 
     let new_buffer = new_buffer_ptr.as_raw().borrow_unsafe();
-    if let Err(err) = new_buffer.write_to_disk() {
-      return Err(self.failover(err.kind()));
-    };
+    let done = new_buffer.write_to_disk();
     while !new_buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     self.wait_sync(buffer, token)
   }
@@ -260,7 +262,7 @@ impl WAL {
     &self,
     buffer_ptr: Shared<LogBuffer>,
     guard: &Guard,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     commit_order: u32,
     mut token: SharedToken,
     backoff: &Backoff,
@@ -282,10 +284,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    if let Err(err) = buffer.write_to_disk() {
-      return Err(self.failover(err.kind()));
-    };
-
+    let done = buffer.write_to_disk();
     loop {
       match token.try_upgrade() {
         Ok(t) => break forget(t),
@@ -297,6 +296,9 @@ impl WAL {
     while !buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     let segment = buffer.take_segment();
     self.sync_queue.push(segment.fsync());

@@ -8,6 +8,7 @@ use std::{
 
 use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
+  background::Oneshot,
   disk::{PageRef, Pointer},
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
@@ -175,10 +176,10 @@ impl LogBuffer {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn write_to_disk(&self) -> IOResult<()> {
+  pub fn write_to_disk(&'static self) -> Oneshot<IOResult<()>> {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
-      .write(self.segment_ptr, &self.entry)
+      .write_async(self.segment_ptr, &self.entry)
   }
   /**
    * to complete writing data to entry
