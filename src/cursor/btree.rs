@@ -2,7 +2,7 @@ use std::{mem::replace, ops::Bound};
 
 use crate::{
   disk::Pointer,
-  table::TableHandleRef,
+  table::{ReserveGuard, TableHandleRef},
   wal::{TxId, RESERVED_TX},
   Error, Result,
 };
@@ -506,16 +506,17 @@ where
     table: &TableHandleRef,
     create: bool,
   ) -> Result<WriteResult> {
-    enum State {
+    enum State<'a> {
       Continue,
       Break(WriteResult),
       Conflict(TxId),
       Split(StaticKey, Pointer, WriteResult),
       CopyOld(Pointer, VersionRecord),
+      New(ReserveGuard<'a>),
     }
 
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
-    let mut _guard = None;
+    let mut _blob_guard = None;
 
     loop {
       let mut state = State::Continue;
@@ -537,8 +538,8 @@ where
 
             let mut node = leaf.into_owned()?;
             let (record, guard) = self.create_record(record.take())?;
-            debug_assert!(_guard.is_none());
-            _guard = guard;
+            debug_assert!(_blob_guard.is_none());
+            _blob_guard = guard;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
@@ -549,25 +550,16 @@ where
             node.replace_at(pos, new_record);
             (node, WriteResult::updated(false))
           }
-          NodeFindResult::NotFound(pos) => {
+          NodeFindResult::NotFound(_) => {
             if !create {
               return Ok(state = State::Break(WriteResult::not_matched()));
             }
 
-            let mut node = leaf.into_owned()?;
-            let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
-
-            let (record, guard) = self.create_record(record.take())?;
-            debug_assert!(_guard.is_none());
-            _guard = guard;
-            let new_record = VersionRecord::new(
-              self.0.current_owner(),
-              self.0.current_version(),
-              record,
-              self.0.gen_record_id(),
-            );
-            node.insert_at(pos, key.to_vec(), new_record, entry_ptr);
-            (node, WriteResult::inserted(false))
+            state = match table.reserve(key.to_vec(), self.0.current_owner()) {
+              Ok(guard) => State::New(guard),
+              Err(owner) => State::Conflict(owner),
+            };
+            return Ok(());
           }
         };
 
@@ -588,6 +580,9 @@ where
       match state {
         State::Continue => continue,
         State::Break(result) => return Ok(result),
+        State::New(guard) => {
+          return self.insert_new(key, record, guard, ptr, table, stack)
+        }
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
@@ -597,14 +592,33 @@ where
           return Err(Error::WriteConflict);
         }
         State::CopyOld(entry_ptr, old) => {
-          if let Some(i) = self.copy_old_record(entry_ptr, old, table)? {
-            self.0.wait_close(i);
-            return Err(Error::WriteConflict);
-          };
-          break;
+          return self.copy_and_update(key, record, ptr, table, entry_ptr, old, stack);
         }
       };
     }
+  }
+
+  fn copy_and_update(
+    &self,
+    key: StaticKeyRef,
+    mut record: Option<Vec<u8>>,
+    mut ptr: Pointer,
+    table: &TableHandleRef,
+    entry_ptr: Pointer,
+    old: VersionRecord,
+    stack: Vec<Pointer>,
+  ) -> Result<WriteResult> {
+    enum State {
+      Continue,
+      Break(WriteResult),
+      Split(StaticKey, Pointer, WriteResult),
+    }
+
+    let mut _blob_guard = None;
+    if let Some(i) = self.copy_old_record(entry_ptr, old, table)? {
+      self.0.wait_close(i);
+      return Err(Error::WriteConflict);
+    };
 
     loop {
       let mut state = State::Continue;
@@ -617,8 +631,8 @@ where
         };
 
         let (record, guard) = self.create_record(record.take())?;
-        debug_assert!(_guard.is_none());
-        _guard = guard;
+        debug_assert!(_blob_guard.is_none());
+        _blob_guard = guard;
         let new_record = VersionRecord::new(
           self.0.current_owner(),
           self.0.current_version(),
@@ -647,7 +661,69 @@ where
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
         }
-        _ => unreachable!(),
+      }
+    }
+  }
+
+  fn insert_new(
+    &self,
+    key: StaticKeyRef,
+    mut record: Option<Vec<u8>>,
+    _insert_guard: ReserveGuard<'_>,
+    mut ptr: Pointer,
+    table: &TableHandleRef,
+    stack: Vec<Pointer>,
+  ) -> Result<WriteResult> {
+    enum State {
+      Continue,
+      Break(WriteResult),
+      Split(StaticKey, Pointer, WriteResult),
+    }
+
+    let mut _blob_guard = None;
+    let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
+
+    loop {
+      let mut state = State::Continue;
+      self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
+        let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
+        let pos = match leaf.find_slot(key) {
+          FindSlotResult::Replace(_) => unreachable!(),
+          FindSlotResult::Move(next) => return Ok(ptr = next),
+          FindSlotResult::Insert(i) => i,
+        };
+
+        let (record, guard) = self.create_record(record.take())?;
+        debug_assert!(_blob_guard.is_none());
+        _blob_guard = guard;
+        let new_record = VersionRecord::new(
+          self.0.current_owner(),
+          self.0.current_version(),
+          record,
+          self.0.gen_record_id(),
+        );
+        leaf.insert_at(pos, key.to_vec(), new_record, entry_ptr);
+
+        let Some(split) = leaf.split_if_needed() else {
+          self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+          return Ok(state = State::Break(WriteResult::inserted(false)));
+        };
+
+        let mid_key = split.top().clone();
+        let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
+
+        leaf.set_next(split_ptr);
+        self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+        Ok(state = State::Split(mid_key, split_ptr, WriteResult::inserted(true)))
+      })?;
+
+      match state {
+        State::Continue => continue,
+        State::Break(result) => return Ok(result),
+        State::Split(k, p, result) => {
+          self.propagate_split(k, p, stack, table)?;
+          return Ok(result);
+        }
       }
     }
   }
