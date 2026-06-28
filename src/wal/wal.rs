@@ -192,14 +192,17 @@ impl WAL {
   }
 
   fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> Result {
-    let f = buffer.flush();
+    let done = buffer.flush();
     drop(token);
 
     if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
       return Err(self.failover(err.kind()));
     }
 
-    f.wait().unwrap().map_err(|err| self.failover(err.kind()))
+    done
+      .wait()
+      .unwrap()
+      .map_err(|err| self.failover(err.kind()))
   }
 
   fn rotate_block(
@@ -236,18 +239,21 @@ impl WAL {
       backoff.snooze();
     }
 
-    let write_r = buffer.write_to_disk().wait().unwrap();
-    buffer.increase_written_count();
-    if let Err(err) = write_r {
-      return Err(self.failover(err.kind()));
-    };
-
     if !flush {
-      return Ok(());
+      let result = buffer.write_to_disk().wait().unwrap();
+      buffer.increase_written_count();
+      return result.map_err(|err| self.failover(err.kind()));
     }
 
     let new_buffer = new_buffer_ptr.as_raw().borrow_unsafe();
     let done = new_buffer.write_to_disk();
+
+    let result = buffer.write_to_disk().wait().unwrap();
+    buffer.increase_written_count();
+    if let Err(err) = result {
+      return Err(self.failover(err.kind()));
+    };
+
     while !new_buffer.is_ready_to_flush() {
       backoff.snooze();
     }
