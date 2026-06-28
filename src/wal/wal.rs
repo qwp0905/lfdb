@@ -160,7 +160,7 @@ impl WAL {
 
   fn append_in_block(
     &self,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     record: LogRecordUninit,
     offset: usize,
     commit_order: u32,
@@ -180,32 +180,36 @@ impl WAL {
     }
     buffer.commit_entry();
 
-    if let Err(err) = buffer.write_to_disk() {
-      return Err(self.failover(err.kind()));
-    };
+    let done = buffer.write_to_disk();
     while !buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     self.wait_sync(buffer, token)
   }
 
   fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> Result {
-    let f = buffer.flush();
+    let done = buffer.flush();
     drop(token);
 
     if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
       return Err(self.failover(err.kind()));
     }
 
-    f.wait().unwrap().map_err(|err| self.failover(err.kind()))
+    done
+      .wait()
+      .unwrap()
+      .map_err(|err| self.failover(err.kind()))
   }
 
   fn rotate_block(
     &self,
     buffer_ptr: Shared<LogBuffer>,
     guard: &Guard,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     record: LogRecordUninit,
     offset: usize,
     commit_order: u32,
@@ -235,23 +239,27 @@ impl WAL {
       backoff.snooze();
     }
 
-    let write_r = buffer.write_to_disk();
-    buffer.increase_written_count();
-    if let Err(err) = write_r {
-      return Err(self.failover(err.kind()));
-    };
-
     if !flush {
-      return Ok(());
+      let result = buffer.write_to_disk().wait().unwrap();
+      buffer.increase_written_count();
+      return result.map_err(|err| self.failover(err.kind()));
     }
 
     let new_buffer = new_buffer_ptr.as_raw().borrow_unsafe();
-    if let Err(err) = new_buffer.write_to_disk() {
+    let done = new_buffer.write_to_disk();
+
+    let result = buffer.write_to_disk().wait().unwrap();
+    buffer.increase_written_count();
+    if let Err(err) = result {
       return Err(self.failover(err.kind()));
     };
+
     while !new_buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     self.wait_sync(buffer, token)
   }
@@ -260,7 +268,7 @@ impl WAL {
     &self,
     buffer_ptr: Shared<LogBuffer>,
     guard: &Guard,
-    buffer: &LogBuffer,
+    buffer: &'static LogBuffer,
     commit_order: u32,
     mut token: SharedToken,
     backoff: &Backoff,
@@ -282,10 +290,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    if let Err(err) = buffer.write_to_disk() {
-      return Err(self.failover(err.kind()));
-    };
-
+    let done = buffer.write_to_disk();
     loop {
       match token.try_upgrade() {
         Ok(t) => break forget(t),
@@ -297,6 +302,9 @@ impl WAL {
     while !buffer.is_ready_to_flush() {
       backoff.snooze();
     }
+    if let Err(err) = done.wait().unwrap() {
+      return Err(self.failover(err.kind()));
+    };
 
     let segment = buffer.take_segment();
     self.sync_queue.push(segment.fsync());
