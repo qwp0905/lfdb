@@ -1,11 +1,11 @@
 mod page;
 pub use page::*;
 
-mod handle;
-pub use handle::*;
+mod block_io;
+pub use block_io::*;
 
-mod io;
-pub use io::*;
+mod constants;
+use constants::*;
 
 mod page_pool;
 pub use page_pool::*;
@@ -27,3 +27,9 @@ pub use backend::*;
 
 mod align;
 pub use align::*;
+
+mod directory;
+use directory::*;
+
+mod buffered_io;
+pub use buffered_io::*;
