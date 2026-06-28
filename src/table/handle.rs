@@ -91,6 +91,9 @@ impl TableHandle {
     }
     Ok(ReserveGuard(entry))
   }
+  pub fn is_reserved(&self, key: &[u8]) -> Option<TxId> {
+    self.insert_set.get(key).map(|e| *e.value())
+  }
 }
 
 pub struct ReserveGuard<'a>(Entry<'a, Vec<u8>, TxId>);
