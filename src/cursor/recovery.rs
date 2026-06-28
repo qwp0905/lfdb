@@ -82,6 +82,9 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
+  fn wait_close(&self, _: TxId) {
+    unreachable!()
+  }
 }
 
 pub fn initialize(

@@ -133,6 +133,9 @@ impl<'a> WritablePolicy for TxContext<'a> {
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::cursor::BlobAppendGuard<'_>> {
     self.orchestrator.write_blob(data)
   }
+  fn wait_close(&self, owner: TxId) {
+    self.orchestrator.wait_commit(owner);
+  }
 }
 impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_owner(&self) -> TxId {
@@ -141,9 +144,7 @@ impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
-  fn wait_close(&self, owner: TxId) {
-    self.orchestrator.wait_commit(owner);
-  }
+
   fn gen_record_id(&self) -> crate::cursor::RecordId {
     self.record_id.fetch_add(1, Ordering::Relaxed)
   }
