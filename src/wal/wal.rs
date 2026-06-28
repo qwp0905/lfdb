@@ -187,6 +187,10 @@ impl WAL {
       backoff.snooze();
     }
 
+    self.wait_sync(buffer, token)
+  }
+
+  fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> Result {
     let f = buffer.flush();
     drop(token);
 
@@ -249,14 +253,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    let f = new_buffer.flush();
-    drop(token);
-
-    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
-      return Err(self.failover(err.kind()));
-    }
-
-    f.wait().unwrap().map_err(|err| self.failover(err.kind()))
+    self.wait_sync(buffer, token)
   }
 
   fn rotate_segment(
@@ -285,9 +282,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    let write_r = buffer.write_to_disk();
-    buffer.increase_written_count();
-    if let Err(err) = write_r {
+    if let Err(err) = buffer.write_to_disk() {
       return Err(self.failover(err.kind()));
     };
 
@@ -296,6 +291,10 @@ impl WAL {
         Ok(t) => break forget(t),
         Err(t) => token = t,
       };
+      backoff.snooze();
+    }
+
+    while !buffer.is_ready_to_flush() {
       backoff.snooze();
     }
 
