@@ -371,7 +371,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     enum State {
       Continue,
       Break,
-      Conflict(TxId),
       Split(StaticKey, Pointer),
       Apply(Pointer),
     }
@@ -405,8 +404,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
             node
           }
           NodeFindResult::NotFound(pos) => {
-            if let Some(conflict) = table.is_reserved(&key) {
-              return Ok(state = State::Conflict(conflict));
+            if table.is_reserved(&key) {
+              return Ok(state = State::Continue);
             }
 
             let mut node = leaf.into_owned()?;
@@ -437,7 +436,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         State::Apply(i) => {
           return self.apply_version_snapshot(i, record.take().unwrap(), table)
         }
-        State::Conflict(owner) => self.0.wait_close(owner),
       }
     }
   }
