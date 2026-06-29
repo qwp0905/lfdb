@@ -1,4 +1,4 @@
-use std::sync::Once;
+use std::sync::{Once, OnceState};
 
 /**
  * A tiny one-shot wake-all primitive.
@@ -13,7 +13,6 @@ use std::sync::Once;
  * treated as a severe programming error, not as a recoverable state.
  */
 pub struct OnceParker(Once);
-
 impl OnceParker {
   pub const fn new() -> Self {
     Self(Once::new())
@@ -24,6 +23,8 @@ impl OnceParker {
   }
 
   pub fn wake_all(&self) {
-    self.0.call_once_force(|_| ());
+    self.0.call_once_force(empty_fn);
   }
 }
+
+const fn empty_fn(_: &OnceState) {}
