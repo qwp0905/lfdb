@@ -12,7 +12,7 @@ fn record_count() -> usize {
     .and_then(|v| v.parse().ok())
     .unwrap_or(DEFAULT_RECORD_COUNT)
 }
-const DEFAULT_OP_COUNT: usize = 150_000;
+const DEFAULT_OP_COUNT: usize = 10_000;
 
 fn op_count() -> usize {
   std::env::var("YCSB_OP_COUNT")
@@ -28,7 +28,7 @@ fn thread_count() -> usize {
     .and_then(|v| v.parse().ok())
     .unwrap_or(THREADS)
 }
-const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(180);
+const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(240);
 
 const CACHE_SIZE: usize = 1024 << 20;
 
