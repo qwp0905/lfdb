@@ -10,7 +10,7 @@ use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
   background::Oneshot,
   disk::{PageRef, Pointer},
-  utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
+  utils::{ExclusivePin, SBox, SharedToken},
 };
 
 /**
@@ -147,9 +147,6 @@ impl LogBuffer {
   pub fn pin_segment(&self) -> Option<SharedToken<'_>> {
     self.segment_state.pin.try_shared()
   }
-  pub fn pin_segment_exclusive(&self) -> Option<ExclusiveToken<'_>> {
-    self.segment_state.pin.try_exclusive()
-  }
 
   /**
    * Atomically reserves a write slot and returns (offset, ready).
@@ -201,9 +198,6 @@ impl LogBuffer {
     debug_assert!(!self.segment_state.taken.get());
     self.segment_state.taken.set(true);
     unsafe { self.segment_state.segment.assume_init_read() }
-  }
-  pub fn load_offset(&self) -> usize {
-    (self.offset.load(Ordering::Acquire) & MASK) as usize
   }
   pub fn increase_written_count(&self) {
     self
