@@ -1,9 +1,12 @@
 use std::{mem::forget, ops::Deref};
 
+use crossbeam_skiplist::{map::Entry, SkipMap};
+
 use super::{TableId, TableMetadata, TableName};
 use crate::{
   disk::{BlockIOHandle, FreeList, PAGE_SIZE},
   utils::{ExclusivePin, SBox, SharedToken},
+  wal::TxId,
   Result,
 };
 
@@ -25,6 +28,8 @@ pub struct TableHandle {
    * pin to protect background mutation (eg. compaction / gc) from drop
    */
   pin: ExclusivePin,
+
+  insert_set: SkipMap<Vec<u8>, TxId>,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: BlockIOHandle<PAGE_SIZE>) -> Self {
@@ -34,6 +39,7 @@ impl TableHandle {
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
+      insert_set: SkipMap::new(),
     }
   }
 
@@ -72,6 +78,28 @@ impl TableHandle {
   #[inline]
   pub fn truncate(&self) -> Result {
     self.disk.truncate()
+  }
+
+  pub fn reserve(
+    &self,
+    key: Vec<u8>,
+    owner: TxId,
+  ) -> std::result::Result<ReserveGuard<'_>, TxId> {
+    let entry = self.insert_set.get_or_insert(key, owner);
+    if *entry.value() != owner {
+      return Err(*entry.value());
+    }
+    Ok(ReserveGuard(entry))
+  }
+  pub fn is_reserved(&self, key: &[u8]) -> bool {
+    self.insert_set.contains_key(key)
+  }
+}
+
+pub struct ReserveGuard<'a>(Entry<'a, Vec<u8>, TxId>);
+impl<'a> Drop for ReserveGuard<'a> {
+  fn drop(&mut self) {
+    self.0.remove();
   }
 }
 
