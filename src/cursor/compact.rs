@@ -161,7 +161,6 @@ impl<'a> WritablePolicy for MiniTx<'a> {
   fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
-  fn wait_close(&self, _owner: TxId) {}
 }
 impl<'a> CreatablePolicy for MiniTx<'a> {
   fn current_owner(&self) -> TxId {
@@ -170,6 +169,7 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
+  fn wait_close(&self, _owner: TxId) {}
   fn gen_record_id(&self) -> RecordId {
     let id = self.record_id.get();
     self.record_id.set(id + 1);
@@ -287,9 +287,6 @@ impl WritablePolicy for CompactionWritePolicy {
   }
   fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
     unreachable!()
-  }
-  fn wait_close(&self, owner: TxId) {
-    self.version_visibility.wait_commit(owner);
   }
 }
 

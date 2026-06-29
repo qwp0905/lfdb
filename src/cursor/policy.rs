@@ -96,7 +96,6 @@ pub trait WritablePolicy: ReadonlyPolicy {
     pointer: Pointer,
     table: &TableHandleRef,
   ) -> Result<CachedSlot<'_>>;
-  fn wait_close(&self, owner: TxId);
 
   /**
    * Reused pointers may still have existing disk contents, so fetch through the
@@ -136,9 +135,6 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   ) -> Result<CachedSlot<'_>> {
     (*self).alloc_slot(pointer, table)
   }
-  fn wait_close(&self, owner: TxId) {
-    (*self).wait_close(owner)
-  }
 }
 
 /**
@@ -156,11 +152,15 @@ pub trait CreatablePolicy: WritablePolicy {
   fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
     !self.is_owned(owner) && (!self.is_readable(version) || self.is_active(owner))
   }
+  fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
   fn gen_record_id(&self) -> RecordId;
 }
 impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
+  fn wait_close(&self, owner: TxId) {
+    (*self).wait_close(owner)
+  }
   fn current_owner(&self) -> TxId {
     (*self).current_owner()
   }
