@@ -226,7 +226,7 @@ pub fn workload_d<E, F>(
         for _ in 0..op_count {
           let op = if rng.random_bool(0.95) {
             let latest = insert_counter.load(Ordering::Relaxed);
-            let idx = latest.saturating_sub(zipf.sample(rng) as usize + 1);
+            let idx = latest.saturating_sub(zipf.sample(rng) as usize);
             Op::Get(make_key(idx))
           } else {
             let idx = insert_counter.fetch_add(1, Ordering::Relaxed);
@@ -300,7 +300,7 @@ pub fn workload_e<E, F>(
           let op = if rng.random_bool(0.95) {
             let idx = insert_counter
               .load(Ordering::Relaxed)
-              .saturating_sub(key_zipf.sample(rng) as usize - 1);
+              .saturating_sub(key_zipf.sample(rng) as usize);
             let start = make_key(id, idx.saturating_sub(SCAN_LENGTH));
             let end = make_key(id, idx);
             Op::Scan(start, end)
