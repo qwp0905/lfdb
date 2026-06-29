@@ -141,16 +141,19 @@ impl<T> Oneshot<T> {
     }
   }
   pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
-    for _ in 0..MAX_YIELD {
+    for i in 1..=MAX_YIELD {
       match self.try_wait() {
         Ok(v) => return Ok(v),
         Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
         Err(TryWaitError::Empty(this)) => self = this,
       };
-      yield_now();
+      if i < MAX_YIELD {
+        yield_now();
+      } else {
+        self.0.parker.park();
+      }
     }
 
-    self.0.parker.park();
     match self.try_wait() {
       Ok(v) => Ok(v),
       Err(TryWaitError::Disconnected) => Err(WaitDisconnectedError),
