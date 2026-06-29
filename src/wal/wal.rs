@@ -407,30 +407,15 @@ impl WAL {
 
   pub fn close(&self) {
     self.sync_queue.drain();
+    let guard = epoch::pin();
+    let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
+    if !ptr.is_null() {
+      unsafe { guard.defer_destroy(ptr) };
+    }
     if !self.state.load().is_available() {
       return;
     }
-
-    let backoff = Backoff::new();
-    loop {
-      let guard = epoch::pin();
-      let ptr = self.buffer.load(Ordering::Acquire, &guard);
-      let buffer = ptr.as_raw().borrow_unsafe();
-      if buffer.load_offset() >= WAL_BLOCK_SIZE {
-        backoff.snooze();
-        continue;
-      }
-
-      if buffer.pin_segment_exclusive().map(forget).is_none() {
-        backoff.snooze();
-        continue;
-      }
-
-      let taken = unsafe { ptr.into_owned() };
-      let _ = taken.take_segment();
-      self.preloader.close();
-      return;
-    }
+    self.preloader.close();
   }
 }
 unsafe impl Send for WAL {}
