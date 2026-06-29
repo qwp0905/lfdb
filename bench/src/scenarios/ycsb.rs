@@ -5,7 +5,7 @@ use std::sync::{
 
 use criterion::{BenchmarkGroup, Throughput, measurement::WallTime};
 use crossbeam::channel::{Sender, unbounded};
-use rand::Rng;
+use rand::{Rng, seq::SliceRandom};
 use rand_distr::{Distribution, Zipf};
 
 use crate::BenchmarkDB;
@@ -109,6 +109,11 @@ pub fn workload_a<F, E>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
+  let mut records = (0..record_count)
+    .map(|i| (make_key(i), make_value(i)))
+    .collect::<Vec<_>>();
+  records.shuffle(rng);
+
   group
     .throughput(Throughput::Elements(op_count as u64))
     .bench_function("50read-50update", |b| {
@@ -116,11 +121,11 @@ pub fn workload_a<F, E>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = make_key(idx);
+          let key = records[idx].0.clone();
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
-            Op::Insert(key, make_value(idx))
+            Op::Insert(key, records[idx].1.clone())
           };
           tx.send(op).unwrap();
         }
@@ -158,6 +163,11 @@ pub fn workload_b<E, F>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
+  let mut records = (0..record_count)
+    .map(|i| (make_key(i), make_value(i)))
+    .collect::<Vec<_>>();
+  records.shuffle(rng);
+
   group
     .throughput(Throughput::Elements(op_count as u64))
     .bench_function("95read-5update", |b| {
@@ -165,11 +175,11 @@ pub fn workload_b<E, F>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = make_key(idx);
+          let key = records[idx].0.clone();
           let op = if rng.random_bool(0.95) {
             Op::Get(key)
           } else {
-            Op::Insert(key, make_value(idx))
+            Op::Insert(key, records[idx].1.clone())
           };
           tx.send(op).unwrap();
         }
@@ -206,16 +216,17 @@ pub fn workload_d<E, F>(
 
   let rng = &mut rand::rng();
   let insert_counter = AtomicUsize::new(record_count);
+  let zipf = Zipf::new(100.0, 0.5).unwrap();
 
   group
     .throughput(Throughput::Elements(op_count as u64))
     .bench_function("95read-5insert-latest", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
-        let latest = insert_counter.load(Ordering::Relaxed);
         for _ in 0..op_count {
           let op = if rng.random_bool(0.95) {
-            let idx = latest.saturating_sub(rng.random_range(0..latest.min(1000)));
+            let latest = insert_counter.load(Ordering::Relaxed);
+            let idx = latest.saturating_sub(zipf.sample(rng) as usize + 1);
             Op::Get(make_key(idx))
           } else {
             let idx = insert_counter.fetch_add(1, Ordering::Relaxed);
@@ -244,35 +255,58 @@ pub fn workload_e<E, F>(
   E: BenchmarkDB + Send + Sync + 'static,
   F: Fn() -> E,
 {
+  fn make_key(id: usize, i: usize) -> Vec<u8> {
+    format!("{id:0>3}{i:0>width$}", width = KEY_SIZE - 3)
+      .as_bytes()
+      .to_vec()
+  }
+
+  let rng = &mut rand::rng();
+  let mut ids = (0..(u8::MAX as usize)).collect::<Vec<_>>();
+  ids.shuffle(rng);
+  let insert_counters = (0..ids.len())
+    .map(|_| AtomicUsize::new(record_count / ids.len()))
+    .collect::<Vec<_>>();
+
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
-    pre_load(engine, record_count);
+    engine.ensure_table(TABLE);
+    for &id in ids.iter() {
+      engine.bulk(
+        TABLE,
+        (0..(record_count / ids.len()))
+          .map(|i| (make_key(id, i), make_value(i)))
+          .collect(),
+      );
+    }
   }
 
   let engine = Arc::new(new());
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
-  let rng = &mut rand::rng();
-  let insert_counter = AtomicUsize::new(record_count);
+  let key_zipf = Zipf::new(100.0, 0.3).unwrap();
+  let id_zipf = Zipf::new(u8::MAX as f64, 0.99).unwrap();
 
   group
     .throughput(Throughput::Elements(op_count as u64))
     .bench_function("95scan-5insert", |b| {
       b.iter(|| {
-        let current = insert_counter.load(Ordering::Relaxed);
-        let zipf = Zipf::new(current as f64, ZIPF_EXPONENT).unwrap();
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
+          let id = ids[id_zipf.sample(rng) as usize - 1];
+          let insert_counter = &insert_counters[id];
           let op = if rng.random_bool(0.95) {
-            let idx = zipfian_index(rng, &zipf, current);
-            let start = make_key(idx);
-            let end = make_key((idx + SCAN_LENGTH).min(current - 1));
+            let idx = insert_counter
+              .load(Ordering::Relaxed)
+              .saturating_sub(key_zipf.sample(rng) as usize - 1);
+            let start = make_key(id, idx.saturating_sub(SCAN_LENGTH));
+            let end = make_key(id, idx);
             Op::Scan(start, end)
           } else {
             let idx = insert_counter.fetch_add(1, Ordering::Relaxed);
-            Op::Insert(make_key(idx), make_value(idx))
+            Op::Insert(make_key(id, idx), make_value(idx))
           };
           tx.send(op).unwrap();
         }
@@ -310,6 +344,11 @@ pub fn workload_f<E, F>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
+  let mut records = (0..record_count)
+    .map(|i| (make_key(i), make_value(i)))
+    .collect::<Vec<_>>();
+  records.shuffle(rng);
+
   group
     .throughput(Throughput::Elements(op_count as u64))
     .bench_function("50read-50rmw", |b| {
@@ -317,11 +356,11 @@ pub fn workload_f<E, F>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = make_key(idx);
+          let key = records[idx].0.clone();
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
-            Op::ReadModifyWrite(key, make_value(idx))
+            Op::ReadModifyWrite(key, records[idx].1.clone())
           };
           tx.send(op).unwrap();
         }
