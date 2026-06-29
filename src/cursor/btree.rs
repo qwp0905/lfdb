@@ -378,14 +378,14 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
    */
   pub fn apply_snapshot(&self, snapshot: KVSnapshot, table: &TableHandleRef) -> Result {
     enum State {
-      Move(Pointer),
+      Move(Pointer, VersionRecord),
       Break,
       Split(StaticKey, Pointer),
-      Apply(Pointer),
+      Apply(Pointer, VersionRecord),
     }
 
     let key = snapshot.key;
-    let record = VersionRecord::new(
+    let mut record = VersionRecord::new(
       snapshot.owner,
       snapshot.version,
       match snapshot.value {
@@ -394,32 +394,30 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       },
       snapshot.record_id,
     );
-    let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
 
-    let mut record = Some(record);
+    let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
     loop {
       let state = self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let mut node = match leaf.find(&key)? {
-          NodeFindResult::Move(next) => return Ok(State::Move(next)),
+          NodeFindResult::Move(next) => return Ok(State::Move(next, record)),
           NodeFindResult::Found(pos, old, entry_ptr) => {
             if !self.0.is_aborted(old.owner) {
-              return Ok(State::Apply(entry_ptr));
+              return Ok(State::Apply(entry_ptr, record));
             }
 
             let mut node = leaf.into_owned()?;
-            node.replace_at(pos, record.take().unwrap());
+            node.replace_at(pos, record);
             node
           }
           NodeFindResult::NotFound(pos) => {
             if table.is_reserved(&key) {
-              return Ok(State::Move(ptr));
+              return Ok(State::Move(ptr, record));
             }
 
             let mut node = leaf.into_owned()?;
             let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
-            let new_record = record.take().unwrap();
-            node.insert_at(pos, key.to_vec(), new_record, entry_ptr);
+            node.insert_at(pos, key.to_vec(), record, entry_ptr);
             node
           }
         };
@@ -438,11 +436,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       })?;
 
       match state {
-        State::Move(i) => ptr = i,
+        State::Move(i, r) => (ptr, record) = (i, r),
         State::Break => return Ok(()),
         State::Split(k, p) => return self.propagate_split(k, p, stack, table),
-        State::Apply(entry_ptr) => {
-          return self.apply_version_snapshot(entry_ptr, record.take().unwrap(), table)
+        State::Apply(entry_ptr, r) => {
+          return self.apply_version_snapshot(entry_ptr, r, table)
         }
       }
     }
@@ -516,12 +514,12 @@ where
     create: bool,
   ) -> Result<WriteResult> {
     enum State<'a> {
-      Move(Pointer),
+      Move(Pointer, Option<Vec<u8>>),
       Break(WriteResult),
       Conflict(TxId),
       Split(StaticKey, Pointer, WriteResult),
-      CopyOld(Pointer, VersionRecord),
-      New(ReserveGuard<'a>),
+      CopyOld(Pointer, VersionRecord, Option<Vec<u8>>),
+      New(ReserveGuard<'a>, Option<Vec<u8>>),
     }
 
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
@@ -529,7 +527,7 @@ where
       let state = self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let (mut node, mut result, _guard) = match leaf.find(key)? {
-          NodeFindResult::Move(i) => return Ok(State::Move(i)),
+          NodeFindResult::Move(i) => return Ok(State::Move(i, record)),
           NodeFindResult::Found(pos, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               // Fast-fail before touching the data-entry chain when the latest leaf record
@@ -539,11 +537,11 @@ where
 
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               let old = old.into_owned_with(slot.as_ref());
-              return Ok(State::CopyOld(entry_ptr, old));
+              return Ok(State::CopyOld(entry_ptr, old, record));
             }
 
             let mut node = leaf.into_owned()?;
-            let (record, guard) = self.create_record(record.take())?;
+            let (record, guard) = self.create_record(record)?;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
@@ -560,7 +558,7 @@ where
             }
 
             return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
-              Ok(guard) => State::New(guard),
+              Ok(guard) => State::New(guard, record),
               Err(owner) => State::Conflict(owner),
             });
           }
@@ -581,11 +579,9 @@ where
       })?;
 
       match state {
-        State::Move(i) => ptr = i,
+        State::Move(i, r) => (ptr, record) = (i, r),
         State::Break(result) => return Ok(result),
-        State::New(guard) => {
-          return self.insert_new(key, record, guard, ptr, table, stack)
-        }
+        State::New(guard, r) => return self.insert_new(key, r, guard, ptr, table, stack),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
@@ -594,8 +590,8 @@ where
           self.0.wait_close(i);
           return Err(Error::WriteConflict);
         }
-        State::CopyOld(entry_ptr, old) => {
-          return self.copy_and_update(key, record, ptr, table, entry_ptr, old, stack);
+        State::CopyOld(entry_ptr, old, r) => {
+          return self.copy_and_update(key, r, ptr, table, entry_ptr, old, stack);
         }
       };
     }
@@ -612,7 +608,7 @@ where
     stack: Vec<Pointer>,
   ) -> Result<WriteResult> {
     enum State {
-      Move(Pointer),
+      Move(Pointer, Option<Vec<u8>>),
       Break(WriteResult),
       Split(StaticKey, Pointer, WriteResult),
     }
@@ -627,11 +623,11 @@ where
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
         let pos = match leaf.find_slot(key) {
           FindSlotResult::Replace(i) => i,
-          FindSlotResult::Move(next) => return Ok(State::Move(next)),
+          FindSlotResult::Move(next) => return Ok(State::Move(next, record)),
           FindSlotResult::Insert(_) => unreachable!(),
         };
 
-        let (record, _guard) = self.create_record(record.take())?;
+        let (record, _guard) = self.create_record(record)?;
         let new_record = VersionRecord::new(
           self.0.current_owner(),
           self.0.current_version(),
@@ -654,7 +650,7 @@ where
       })?;
 
       match state {
-        State::Move(i) => ptr = i,
+        State::Move(i, r) => (ptr, record) = (i, r),
         State::Break(result) => return Ok(result),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
@@ -674,23 +670,22 @@ where
     stack: Vec<Pointer>,
   ) -> Result<WriteResult> {
     enum State {
-      Move(Pointer),
+      Move(Pointer, Option<Vec<u8>>),
       Break(WriteResult),
       Split(StaticKey, Pointer, WriteResult),
     }
 
     let entry_ptr = self.0.alloc_and_log(&DataEntry::empty(), table)?;
-
     loop {
       let state = self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
         let pos = match leaf.find_slot(key) {
           FindSlotResult::Replace(_) => unreachable!(),
-          FindSlotResult::Move(next) => return Ok(State::Move(next)),
+          FindSlotResult::Move(next) => return Ok(State::Move(next, record)),
           FindSlotResult::Insert(i) => i,
         };
 
-        let (record, _guard) = self.create_record(record.take())?;
+        let (record, _guard) = self.create_record(record)?;
         let new_record = VersionRecord::new(
           self.0.current_owner(),
           self.0.current_version(),
@@ -717,7 +712,7 @@ where
       })?;
 
       match state {
-        State::Move(i) => ptr = i,
+        State::Move(i, r) => (ptr, record) = (i, r),
         State::Break(result) => return Ok(result),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
