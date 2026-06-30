@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+  mem::ManuallyDrop,
+  sync::atomic::{AtomicBool, Ordering},
+};
 
 use crossbeam::queue::SegQueue;
 
@@ -6,7 +9,44 @@ use super::RefedSlot;
 
 const MAX_BATCH_SIZE: usize = 32;
 
-pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) + 'a;
+pub struct BatchFn<F>(ManuallyDrop<F>);
+impl<F> BatchFn<F> {
+  pub const fn new(f: F) -> Self {
+    Self(ManuallyDrop::new(f))
+  }
+  pub const fn task(&mut self) -> BatchTask
+  where
+    F: FnOnce(&mut RefedSlot),
+  {
+    BatchTask::new(self as *mut _)
+  }
+}
+pub struct BatchTask {
+  ptr: *mut (),
+  call: unsafe fn(*mut (), &mut RefedSlot),
+}
+impl BatchTask {
+  const fn new<F>(ptr: *mut BatchFn<F>) -> Self
+  where
+    F: FnOnce(&mut RefedSlot),
+  {
+    Self {
+      ptr: ptr.cast(),
+      call: call::<F>,
+    }
+  }
+  fn call_with(self, slot: &mut RefedSlot) {
+    unsafe { (self.call)(self.ptr, slot) };
+  }
+}
+unsafe fn call<F>(ptr: *mut (), slot: &mut RefedSlot)
+where
+  F: FnOnce(&mut RefedSlot),
+{
+  let f = unsafe { &mut (*ptr.cast::<BatchFn<F>>()).0 };
+  let task = unsafe { ManuallyDrop::take(f) };
+  task(slot);
+}
 
 /**
  * Per-block mutation batch coordinator.
@@ -17,7 +57,7 @@ pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) + 'a;
  * `RefedSlot`.
  */
 pub struct BatchHandle {
-  queue: SegQueue<Box<BatchHandler<'static>>>,
+  queue: SegQueue<BatchTask>,
   occupied: AtomicBool,
 }
 impl BatchHandle {
@@ -28,14 +68,18 @@ impl BatchHandle {
     }
   }
 
-  pub fn register(&self, handler: Box<BatchHandler<'static>>) -> bool {
+  pub fn register(&self, handler: BatchTask) -> bool {
     self.queue.push(handler);
     !self.occupied.fetch_or(true, Ordering::Release)
   }
 
-  pub fn flush_with(&self, slot: &mut RefedSlot) {
+  /**
+   * flush handles with given slot.
+   * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
+   */
+  pub unsafe fn flush_with(&self, slot: &mut RefedSlot) {
     for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle(slot);
+      handle.call_with(slot);
     }
   }
 
