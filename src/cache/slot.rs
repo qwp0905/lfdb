@@ -5,9 +5,9 @@ use std::{
 
 use super::{BatchHandle, BatchHandler, BlockId, BlockLatch, CachedBlock};
 use crate::{
+  background::oneshot,
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SBox, SharedToken},
-  Result,
 };
 
 /**
@@ -174,16 +174,9 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  fn __mutate(self, handler: Box<BatchHandler<'_>>) -> Result {
-    // SAFETY: `BatchHandle` stores handlers behind a `'static` type because a
-    // different caller may become the batch owner and execute them. This function
-    // waits for this handler's completion before returning, so any non-static
-    // captures inside the closure cannot outlive the call.
-    let handler =
-      unsafe { transmute::<Box<BatchHandler<'_>>, Box<BatchHandler<'static>>>(handler) };
-    let (occupied, o) = self.batch.register(handler);
-    if !occupied {
-      return o.wait().unwrap();
+  fn __mutate(self, handler: Box<BatchHandler<'static>>) {
+    if !self.batch.register(handler) {
+      return;
     }
 
     loop {
@@ -203,10 +196,18 @@ impl<'a> BatchSlot<'a> {
         break;
       }
     }
-
-    o.wait().unwrap()
   }
-  pub fn mutate(self, handler: impl FnOnce(&mut RefedSlot) -> Result) -> Result {
-    self.__mutate(Box::new(handler))
+  pub fn mutate<T>(self, handler: impl FnOnce(&mut RefedSlot) -> T) -> T {
+    let (o, f) = oneshot();
+    let boxed: Box<BatchHandler> = Box::new(|slot| f.fulfill(handler(slot)));
+
+    // SAFETY: `BatchHandle` stores handlers behind a `'static` type because a
+    // different caller may become the batch owner and execute them. This function
+    // waits for this handler's completion before returning, so any non-static
+    // captures inside the closure cannot outlive the call.
+    let handler =
+      unsafe { transmute::<Box<BatchHandler>, Box<BatchHandler<'static>>>(boxed) };
+    self.__mutate(handler);
+    o.wait().unwrap()
   }
 }
