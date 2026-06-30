@@ -17,7 +17,7 @@ pub struct BatchTask {
 }
 
 impl BatchTask {
-  pub const fn new<F, R>(job: *mut BatchJob<F, R>) -> Self
+  const fn new<F, R>(job: *mut BatchJob<F, R>) -> Self
   where
     F: FnOnce(&mut RefedSlot) -> R,
   {
