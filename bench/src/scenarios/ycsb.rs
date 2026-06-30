@@ -3,7 +3,7 @@ use std::sync::{
   atomic::{AtomicUsize, Ordering},
 };
 
-use criterion::{BenchmarkGroup, Throughput, measurement::WallTime};
+use criterion::{BenchmarkGroup, SamplingMode, Throughput, measurement::WallTime};
 use crossbeam::channel::{Sender, unbounded};
 use rand::{Rng, seq::SliceRandom};
 use rand_distr::{Distribution, Zipf};
@@ -116,6 +116,7 @@ pub fn workload_a<F, E>(
 
   group
     .throughput(Throughput::Elements(op_count as u64))
+    .sampling_mode(SamplingMode::Flat)
     .bench_function("50read-50update", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
@@ -170,6 +171,7 @@ pub fn workload_b<E, F>(
 
   group
     .throughput(Throughput::Elements(op_count as u64))
+    .sampling_mode(SamplingMode::Flat)
     .bench_function("95read-5update", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
@@ -220,6 +222,7 @@ pub fn workload_d<E, F>(
 
   group
     .throughput(Throughput::Elements(op_count as u64))
+    .sampling_mode(SamplingMode::Flat)
     .bench_function("95read-5insert-latest", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
@@ -291,6 +294,7 @@ pub fn workload_e<E, F>(
 
   group
     .throughput(Throughput::Elements(op_count as u64))
+    .sampling_mode(SamplingMode::Flat)
     .bench_function("95scan-5insert", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
@@ -351,6 +355,7 @@ pub fn workload_f<E, F>(
 
   group
     .throughput(Throughput::Elements(op_count as u64))
+    .sampling_mode(SamplingMode::Flat)
     .bench_function("50read-50rmw", |b| {
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
