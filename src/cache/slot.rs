@@ -194,7 +194,8 @@ impl<'a> BatchSlot<'a> {
         page.copy_from(self.block.load_page().as_slice());
 
         let mut slot = RefedSlot::new(self.block.get_pointer(), page);
-        self.batch.flush_with(&mut slot);
+        // SAFETY: jobs are stored as pin and lived until wait done. so that it allows to reference stack pointer.
+        unsafe { self.batch.flush_with(&mut slot) };
 
         latch.apply(slot.into_inner());
       }

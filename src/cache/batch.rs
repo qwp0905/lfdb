@@ -13,6 +13,9 @@ use super::RefedSlot;
 
 const MAX_BATCH_SIZE: usize = 32;
 
+/**
+ * Reference of the BatchJob.
+ */
 pub struct BatchTask {
   ptr: *mut (),
   call: unsafe fn(*mut (), &mut RefedSlot),
@@ -28,7 +31,7 @@ impl BatchTask {
       call: call::<F, R>,
     }
   }
-  fn call(self, slot: &mut RefedSlot) {
+  unsafe fn call(self, slot: &mut RefedSlot) {
     unsafe { (self.call)(self.ptr, slot) };
   }
 }
@@ -69,10 +72,7 @@ impl<F, R> BatchJob<F, R> {
 
   pub fn wait(&self) -> R {
     let backoff = Backoff::new();
-    loop {
-      if self.done.load(Ordering::Acquire) {
-        return unsafe { (*self.result.get()).assume_init_read() };
-      }
+    while !self.done.load(Ordering::Acquire) {
       if !backoff.is_complete() {
         backoff.snooze();
         continue;
@@ -81,6 +81,7 @@ impl<F, R> BatchJob<F, R> {
       park();
       backoff.reset();
     }
+    unsafe { (*self.result.get()).assume_init_read() }
   }
 }
 
@@ -109,9 +110,12 @@ impl BatchHandle {
     !self.occupied.fetch_or(true, Ordering::Release)
   }
 
-  pub fn flush_with(&self, slot: &mut RefedSlot) {
+  /**
+   * All pointers which stored in batch handle must be live until calling flush with.
+   */
+  pub unsafe fn flush_with(&self, slot: &mut RefedSlot) {
     for task in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      task.call(slot);
+      unsafe { task.call(slot) };
     }
   }
 
