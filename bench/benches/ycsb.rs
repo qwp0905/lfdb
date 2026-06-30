@@ -12,7 +12,7 @@ fn record_count() -> usize {
     .and_then(|v| v.parse().ok())
     .unwrap_or(DEFAULT_RECORD_COUNT)
 }
-const DEFAULT_OP_COUNT: usize = 50_000;
+const DEFAULT_OP_COUNT: usize = 200_000;
 
 fn op_count() -> usize {
   std::env::var("YCSB_OP_COUNT")
