@@ -20,6 +20,9 @@ impl<F> BatchFn<F> {
   {
     BatchTask::new(self as *mut _)
   }
+  unsafe fn take(&mut self) -> F {
+    unsafe { ManuallyDrop::take(&mut self.0) }
+  }
 }
 pub struct BatchTask {
   ptr: *mut (),
@@ -43,9 +46,8 @@ unsafe fn call<F>(ptr: *mut (), slot: &mut RefedSlot)
 where
   F: FnOnce(&mut RefedSlot),
 {
-  let f = unsafe { &mut (*ptr.cast::<BatchFn<F>>()).0 };
-  let task = unsafe { ManuallyDrop::take(f) };
-  task(slot);
+  let f = unsafe { (*ptr.cast::<BatchFn<F>>()).take() };
+  f(slot);
 }
 
 /**
