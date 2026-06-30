@@ -1,11 +1,11 @@
 use std::{
-  mem::{transmute, ManuallyDrop},
+  mem::ManuallyDrop,
   ops::{Deref, DerefMut},
+  pin::pin,
 };
 
-use super::{BatchHandle, BatchHandler, BlockId, BlockLatch, CachedBlock};
+use super::{BatchHandle, BatchJob, BlockId, BlockLatch, CachedBlock};
 use crate::{
-  background::oneshot,
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{AtomicBitmap, SBox, SharedToken},
 };
@@ -174,9 +174,16 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  fn __mutate(self, handler: Box<BatchHandler<'static>>) {
-    if !self.batch.register(handler) {
-      return;
+  pub fn mutate<T, F>(self, handler: F) -> T
+  where
+    F: FnOnce(&mut RefedSlot) -> T,
+  {
+    let mut job = pin!(BatchJob::new(handler));
+    if !self
+      .batch
+      .register(unsafe { job.as_mut().get_unchecked_mut() }.get_task())
+    {
+      return job.wait();
     }
 
     loop {
@@ -196,18 +203,7 @@ impl<'a> BatchSlot<'a> {
         break;
       }
     }
-  }
-  pub fn mutate<T>(self, handler: impl FnOnce(&mut RefedSlot) -> T) -> T {
-    let (o, f) = oneshot();
-    let boxed: Box<BatchHandler> = Box::new(|slot| f.fulfill(handler(slot)));
 
-    // SAFETY: `BatchHandle` stores handlers behind a `'static` type because a
-    // different caller may become the batch owner and execute them. This function
-    // waits for this handler's completion before returning, so any non-static
-    // captures inside the closure cannot outlive the call.
-    let handler =
-      unsafe { transmute::<Box<BatchHandler>, Box<BatchHandler<'static>>>(boxed) };
-    self.__mutate(handler);
-    o.wait().unwrap()
+    job.wait()
   }
 }

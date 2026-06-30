@@ -1,4 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+  cell::UnsafeCell,
+  mem::{ManuallyDrop, MaybeUninit},
+  sync::atomic::{AtomicBool, Ordering},
+  thread::{current, park, yield_now, Thread},
+};
 
 use crossbeam::queue::SegQueue;
 
@@ -6,7 +11,79 @@ use super::RefedSlot;
 
 const MAX_BATCH_SIZE: usize = 32;
 
-pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) + 'a;
+pub struct BatchTask {
+  ptr: *mut (),
+  call: unsafe fn(*mut (), &mut RefedSlot),
+}
+
+impl BatchTask {
+  pub const fn new<F, R>(job: *mut BatchJob<F, R>) -> Self
+  where
+    F: FnOnce(&mut RefedSlot) -> R,
+  {
+    Self {
+      ptr: job.cast(),
+      call: call::<F, R>,
+    }
+  }
+  fn call(self, slot: &mut RefedSlot) {
+    unsafe { (self.call)(self.ptr, slot) };
+  }
+}
+
+unsafe fn call<F, R>(ptr: *mut (), slot: &mut RefedSlot)
+where
+  F: FnOnce(&mut RefedSlot) -> R,
+{
+  let job = &mut *ptr.cast::<BatchJob<F, R>>();
+  let handler = ManuallyDrop::take(job.handler.get_mut());
+
+  (*job.result.get()).write(handler(slot));
+  job.done.store(true, Ordering::Release);
+  job.caller.unpark();
+}
+
+pub struct BatchJob<F, R> {
+  handler: UnsafeCell<ManuallyDrop<F>>,
+  result: UnsafeCell<MaybeUninit<R>>,
+  done: AtomicBool,
+  caller: Thread,
+}
+impl<F, R> BatchJob<F, R> {
+  pub fn new(task: F) -> Self {
+    Self {
+      handler: UnsafeCell::new(ManuallyDrop::new(task)),
+      result: UnsafeCell::new(MaybeUninit::uninit()),
+      done: AtomicBool::new(false),
+      caller: current(),
+    }
+  }
+  pub fn get_task(&mut self) -> BatchTask
+  where
+    F: FnOnce(&mut RefedSlot) -> R,
+  {
+    BatchTask::new(self as *mut _)
+  }
+
+  pub fn wait(&self) -> R {
+    let mut backoff = 0;
+    loop {
+      if self.done.load(Ordering::Acquire) {
+        return unsafe { (*self.result.get()).assume_init_read() };
+      }
+
+      if backoff < MAX_YIELD {
+        yield_now();
+        backoff += 1;
+      } else {
+        park();
+        backoff = 0;
+      }
+    }
+  }
+}
+
+const MAX_YIELD: u8 = 10;
 
 /**
  * Per-block mutation batch coordinator.
@@ -17,7 +94,7 @@ pub type BatchHandler<'a> = dyn FnOnce(&mut RefedSlot) + 'a;
  * `RefedSlot`.
  */
 pub struct BatchHandle {
-  queue: SegQueue<Box<BatchHandler<'static>>>,
+  queue: SegQueue<BatchTask>,
   occupied: AtomicBool,
 }
 impl BatchHandle {
@@ -28,14 +105,14 @@ impl BatchHandle {
     }
   }
 
-  pub fn register(&self, handler: Box<BatchHandler<'static>>) -> bool {
+  pub fn register(&self, handler: BatchTask) -> bool {
     self.queue.push(handler);
     !self.occupied.fetch_or(true, Ordering::Release)
   }
 
   pub fn flush_with(&self, slot: &mut RefedSlot) {
-    for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle(slot);
+    for task in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
+      task.call(slot);
     }
   }
 
