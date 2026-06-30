@@ -2,10 +2,12 @@ use std::{
   cell::UnsafeCell,
   mem::{ManuallyDrop, MaybeUninit},
   sync::atomic::{AtomicBool, Ordering},
-  thread::{current, park, yield_now, Thread},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::queue::SegQueue;
+
+use crate::utils::Backoff;
 
 use super::RefedSlot;
 
@@ -66,24 +68,21 @@ impl<F, R> BatchJob<F, R> {
   }
 
   pub fn wait(&self) -> R {
-    let mut backoff = 0;
+    let backoff = Backoff::new();
     loop {
       if self.done.load(Ordering::Acquire) {
         return unsafe { (*self.result.get()).assume_init_read() };
       }
-
-      if backoff < MAX_YIELD {
-        yield_now();
-        backoff += 1;
-      } else {
-        park();
-        backoff = 0;
+      if !backoff.is_complete() {
+        backoff.snooze();
+        continue;
       }
+
+      park();
+      backoff.reset();
     }
   }
 }
-
-const MAX_YIELD: u8 = 10;
 
 /**
  * Per-block mutation batch coordinator.

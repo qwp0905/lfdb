@@ -3,10 +3,12 @@ use std::{
   mem::MaybeUninit,
   ops::Deref,
   sync::atomic::{fence, AtomicBool, Ordering},
-  thread::{current, park, yield_now, Thread},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
+
+use crate::utils::Backoff;
 
 struct Pair<T: ?Sized>(*mut (AtomicBool, T));
 impl<T> Pair<T> {
@@ -100,8 +102,6 @@ impl<T> OneshotInner<T> {
   }
 }
 
-const MAX_YIELD: usize = 10;
-
 /**
  * Minimal single-use completion primitive for background work.
  *
@@ -139,7 +139,7 @@ impl<T> Oneshot<T> {
     }
   }
   pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
-    let mut backoff = 0;
+    let backoff = Backoff::new();
     // Register the caller thread before checking state. If fulfill() runs
     // first and finds caller as None, it won't call unpark() — causing park()
     // to block forever.
@@ -150,14 +150,13 @@ impl<T> Oneshot<T> {
         Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
         Err(TryWaitError::Empty(this)) => self = this,
       };
-      if backoff < MAX_YIELD {
-        backoff += 1;
-        yield_now();
+      if !backoff.is_complete() {
+        backoff.snooze();
         continue;
       }
 
       park();
-      backoff = 0;
+      backoff.reset();
     }
   }
 }
