@@ -2,6 +2,7 @@ use std::{
   cell::UnsafeCell,
   mem::MaybeUninit,
   ops::Deref,
+  ptr::NonNull,
   sync::atomic::{fence, AtomicBool, Ordering},
   thread::{current, park, Thread},
 };
@@ -10,27 +11,30 @@ use crossbeam::atomic::AtomicCell;
 
 use crate::utils::Backoff;
 
-struct Pair<T: ?Sized>(*mut (AtomicBool, T));
+struct Pair<T: ?Sized>(NonNull<(AtomicBool, T)>);
 impl<T> Pair<T> {
   pub fn new(value: T) -> (Self, Self) {
-    let ptr = Box::into_raw(Box::new((AtomicBool::new(false), value)));
+    let ptr = NonNull::from_mut(Box::leak(Box::new((AtomicBool::new(false), value))));
     (Self(ptr), Self(ptr))
   }
 }
 impl<T: ?Sized> Drop for Pair<T> {
   fn drop(&mut self) {
-    if !unsafe { &*self.0 }.0.fetch_or(true, Ordering::Release) {
+    if !unsafe { self.0.as_ref() }
+      .0
+      .fetch_or(true, Ordering::Release)
+    {
       return;
     }
     fence(Ordering::Acquire);
-    let _ = unsafe { Box::from_raw(self.0) };
+    let _ = unsafe { Box::from_raw(self.0.as_ptr()) };
   }
 }
 impl<T: ?Sized> Deref for Pair<T> {
   type Target = T;
 
   fn deref(&self) -> &Self::Target {
-    unsafe { &(*self.0).1 }
+    unsafe { &self.0.as_ref().1 }
   }
 }
 unsafe impl<T: Send + Sync + ?Sized> Send for Pair<T> {}
