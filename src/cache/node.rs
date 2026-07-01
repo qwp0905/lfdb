@@ -233,7 +233,7 @@ where
     &mut self,
     hasher: &S,
     try_evict: &F,
-  ) -> std::result::Result<Option<(K, V, R)>, ()>
+  ) -> std::result::Result<Option<(K, V, R, u64)>, ()>
   where
     K: Clone,
     S: Fn(&*mut CacheEntry<K, V>) -> u64,
@@ -256,7 +256,7 @@ where
     &mut self,
     hasher: &S,
     try_evict: &F,
-  ) -> std::result::Result<(K, V, R), ()>
+  ) -> std::result::Result<(K, V, R, u64), ()>
   where
     K: Clone,
     S: Fn(&*mut CacheEntry<K, V>) -> u64,
@@ -291,7 +291,12 @@ where
           entry.set_state(State::Ghost);
           self.evict_ghost(hasher);
           self.ghost.push(ptr);
-          return Ok((entry.get_key().clone(), entry.take_value(), reserved));
+          return Ok((
+            entry.get_key().clone(),
+            entry.take_value(),
+            reserved,
+            hasher(&ptr),
+          ));
         }
         State::Tombstone => ptr.drop_unsafe(),
         State::Ghost | State::Main { .. } => unreachable!(),
@@ -302,7 +307,7 @@ where
     &mut self,
     hasher: &S,
     try_evict: &F,
-  ) -> std::result::Result<Option<(K, V, R)>, ()>
+  ) -> std::result::Result<Option<(K, V, R, u64)>, ()>
   where
     S: Fn(&*mut CacheEntry<K, V>) -> u64,
     F: Fn(&V) -> Option<R>,
@@ -321,15 +326,16 @@ where
             return Err(());
           };
 
+          let hash = hasher(&ptr);
           self
             .table
-            .remove_and_shrink(hasher(&ptr), ptr_eq(ptr), hasher)
+            .remove_and_shrink(hash, ptr_eq(ptr), hasher)
             .unwrap_or_else(|| unreachable!());
 
           let entry = ptr.take_unsafe();
           let value = entry.take_value();
           self.main_count -= 1;
-          return Ok(Some((entry.take_key(), value, reserved)));
+          return Ok(Some((entry.take_key(), value, reserved, hash)));
         }
         State::Ghost | State::Small { .. } => unreachable!(),
         State::Tombstone => ptr.drop_unsafe(),
@@ -444,15 +450,15 @@ pub enum GetOrReserve<'a, K, V, R> {
  * dropped.
  */
 pub struct Reserved<K, V, R> {
-  evicted: Option<(K, V, R)>,
+  evicted: Option<(K, V, R, u64)>,
   value: *mut V,
 }
 impl<K, V, R> Reserved<K, V, R> {
-  const fn new(evicted: Option<(K, V, R)>, value: *mut V) -> Self {
+  const fn new(evicted: Option<(K, V, R, u64)>, value: *mut V) -> Self {
     Self { evicted, value }
   }
 
-  pub const fn take_evicted(&mut self) -> Option<(K, V, R)> {
+  pub const fn take_evicted(&mut self) -> Option<(K, V, R, u64)> {
     self.evicted.take()
   }
 
