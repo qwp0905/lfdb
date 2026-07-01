@@ -61,6 +61,7 @@ pub struct EvictionGuard<'a> {
   new_pointer: Key,
   new_pointer_hash: u64,
   committed: bool,
+  hasher: &'a RandomState,
 }
 
 impl<'a> EvictionGuard<'a> {
@@ -71,6 +72,7 @@ impl<'a> EvictionGuard<'a> {
     guard: &'a Mutex<Shard>,
     new_pointer: Key,
     new_pointer_hash: u64,
+    hasher: &'a RandomState,
   ) -> Self {
     Self {
       evicted,
@@ -80,6 +82,7 @@ impl<'a> EvictionGuard<'a> {
       new_pointer,
       new_pointer_hash,
       committed: false,
+      hasher,
     }
   }
 
@@ -116,7 +119,9 @@ impl<'a> Drop for EvictionGuard<'a> {
     } else {
       shard.aborted.push((self.block_id, None));
     }
-    shard.node.remove(&self.new_pointer, self.new_pointer_hash);
+    shard
+      .node
+      .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }
@@ -292,7 +297,15 @@ impl MappingTable {
       // eviction/load work, so keep the old key blocked during the transition.
       reserved.fulfill(bid);
       shard.eviction.insert(evicted);
-      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
+      return Some(EvictionGuard::new(
+        Some(evicted),
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     }
 
     let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
@@ -308,18 +321,34 @@ impl MappingTable {
 
     let Some(evicted) = evicted else {
       let token = try_evict(&bid).unwrap();
-      return Some(EvictionGuard::new(None, bid, token, s, key, hash));
+      return Some(EvictionGuard::new(
+        None,
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     };
 
     if let Some(token) = try_evict(&bid) {
       shard.eviction.insert(evicted);
-      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
+      return Some(EvictionGuard::new(
+        Some(evicted),
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     }
 
     // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights
     // due to contention with checkpoints or other reads.
     // However, since this occurs very rarely due to reasons such as disk failure, it is fine to proceed with deleting the hash table.
-    shard.node.remove(&key, hash);
+    shard.node.remove(&key, hash, &self.hasher);
     shard.aborted.push((bid, Some(evicted)));
 
     None

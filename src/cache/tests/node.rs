@@ -59,8 +59,8 @@ fn test_remove() {
   let hasher = RandomState::new();
 
   insert(&mut node, &hasher, 1, 100);
-  assert_eq!(node.remove(&1, h(&hasher, 1)), Some(100));
-  assert_eq!(node.remove(&1, h(&hasher, 1)), None);
+  assert_eq!(node.remove(&1, h(&hasher, 1), &hasher), Some(100));
+  assert_eq!(node.remove(&1, h(&hasher, 1), &hasher), None);
   assert!(matches!(
     get(&mut node, &hasher, 1),
     GetOrReserve::Reserved(_)

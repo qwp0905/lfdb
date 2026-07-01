@@ -1,13 +1,14 @@
 use std::{
   borrow::Borrow,
-  collections::VecDeque,
   hash::{BuildHasher, Hash},
   mem::MaybeUninit,
 };
 
-use hashbrown::{raw::RawTable, Equivalent};
+use hashbrown::Equivalent;
 
-use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
+use crate::utils::{
+  HashTable, ShrinkQueue, UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake,
+};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
@@ -115,10 +116,10 @@ const MAX_FREQ: u8 = 3;
  * reserves a new value slot directly in `main`.
  */
 pub struct CacheNode<K, V> {
-  table: RawTable<*mut CacheEntry<K, V>>,
-  small: VecDeque<*mut CacheEntry<K, V>>,
-  main: VecDeque<*mut CacheEntry<K, V>>,
-  ghost: VecDeque<*mut CacheEntry<K, V>>,
+  table: HashTable<*mut CacheEntry<K, V>>,
+  small: ShrinkQueue<*mut CacheEntry<K, V>>,
+  main: ShrinkQueue<*mut CacheEntry<K, V>>,
+  ghost: ShrinkQueue<*mut CacheEntry<K, V>>,
   capacity: usize,
   small_cap: usize,
   small_count: usize,
@@ -136,10 +137,10 @@ where
     let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
-      table: RawTable::new(),
-      small: VecDeque::new(),
-      main: VecDeque::new(),
-      ghost: VecDeque::new(),
+      table: HashTable::new(),
+      small: ShrinkQueue::new(),
+      main: ShrinkQueue::new(),
+      ghost: ShrinkQueue::new(),
       capacity,
       small_cap,
       small_count: 0,
@@ -161,12 +162,13 @@ where
     F: Fn(&V) -> Option<R>,
   {
     debug_assert!(self.table.find(hash, equivalent(key)).is_none());
-    let evicted = self.evict(hash_builder, &try_evict)?;
+    let hasher = make_hasher(hash_builder);
+    let evicted = self.evict(&hasher, &try_evict)?;
 
     let ptr = Box::into_raw(Box::new(CacheEntry::new_small(key.clone())));
-    self.table.insert(hash, ptr, make_hasher(hash_builder));
+    self.table.insert(hash, ptr, &hasher);
 
-    self.small.push_back(ptr);
+    self.small.push(ptr);
     self.small_count += 1;
     Ok(Reserved::new(evicted, ptr.borrow_mut_unsafe().value_ptr()))
   }
@@ -195,6 +197,8 @@ where
         .map(GetOrReserve::Reserved);
     };
 
+    let hasher = make_hasher(hash_builder);
+
     let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
     match entry.get_state_mut() {
       State::Small { freq } | State::Main { freq } => {
@@ -210,11 +214,11 @@ where
         // fresh main entry instead.
         old.borrow_mut_unsafe().set_state(State::Tombstone);
 
-        let evicted = self.evict(hash_builder, &try_evict)?;
+        let evicted = self.evict(&hasher, &try_evict)?;
 
         let ptr = Box::into_raw(Box::new(CacheEntry::new_main(key.clone())));
         self.table.insert(hash, ptr, make_hasher(hash_builder));
-        self.main.push_back(ptr);
+        self.main.push(ptr);
         self.main_count += 1;
         Ok(GetOrReserve::Reserved(Reserved::new(
           evicted,
@@ -232,7 +236,7 @@ where
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
     K: Clone,
-    S: BuildHasher,
+    S: Fn(&*mut CacheEntry<K, V>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
     while self.is_full() {
@@ -255,21 +259,21 @@ where
   ) -> std::result::Result<(K, V, R), ()>
   where
     K: Clone,
-    S: BuildHasher,
+    S: Fn(&*mut CacheEntry<K, V>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
     loop {
-      let ptr = self.small.pop_front().unwrap();
+      let ptr = self.small.pop().unwrap();
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state() {
         State::Small { freq } if *freq > 1 => {
           let Ok(evicted) = self.evict_main(hasher, try_evict) else {
-            self.small.push_back(ptr);
+            self.small.push(ptr);
             return Err(());
           };
 
           entry.set_state(State::Main { freq: 0 });
-          self.main.push_back(ptr);
+          self.main.push(ptr);
           self.small_count -= 1;
           self.main_count += 1;
 
@@ -279,14 +283,14 @@ where
         }
         State::Small { .. } => {
           let Some(reserved) = try_evict(entry.get_value()) else {
-            self.small.push_back(ptr);
+            self.small.push(ptr);
             return Err(());
           };
 
           self.small_count -= 1;
           entry.set_state(State::Ghost);
           self.evict_ghost(hasher);
-          self.ghost.push_back(ptr);
+          self.ghost.push(ptr);
           return Ok((entry.get_key().clone(), entry.take_value(), reserved));
         }
         State::Tombstone => ptr.drop_unsafe(),
@@ -300,26 +304,26 @@ where
     try_evict: &F,
   ) -> std::result::Result<Option<(K, V, R)>, ()>
   where
-    S: BuildHasher,
+    S: Fn(&*mut CacheEntry<K, V>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
-    while let Some(ptr) = self.main.pop_front() {
+    while let Some(ptr) = self.main.pop() {
       let entry = ptr.borrow_mut_unsafe();
       match entry.get_state_mut() {
         State::Main { freq } if *freq > 0 => {
           *freq -= 1;
-          self.main.push_back(ptr);
+          self.main.push(ptr);
           continue;
         }
         State::Main { .. } => {
           let Some(reserved) = try_evict(entry.get_value()) else {
-            self.main.push_back(ptr);
+            self.main.push(ptr);
             return Err(());
           };
 
           self
             .table
-            .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
+            .remove_and_shrink(hasher(&ptr), ptr_eq(ptr), hasher)
             .unwrap_or_else(|| unreachable!());
 
           let entry = ptr.take_unsafe();
@@ -334,22 +338,21 @@ where
 
     Ok(None)
   }
-  fn evict_ghost<S>(&mut self, hasher: &S)
+  fn evict_ghost<F>(&mut self, hasher: &F)
   where
-    S: BuildHasher,
+    F: Fn(&*mut CacheEntry<K, V>) -> u64,
   {
     // Ghost entries stay in the lookup table but no longer count as live cache
     // values. Their count is `table.len() - len()`, so no separate ghost counter
     // is needed.
     while self.table.len() - self.len() >= self.ghost_cap {
-      let ptr = self.ghost.pop_front().unwrap_or_else(|| unreachable!());
-      let entry = ptr.borrow_unsafe();
-      match entry.get_state() {
+      let ptr = self.ghost.pop().unwrap_or_else(|| unreachable!());
+      match ptr.borrow_unsafe().get_state() {
         State::Main { .. } | State::Small { .. } => unreachable!(),
         State::Ghost => {
           self
             .table
-            .remove_entry(hasher.hash_one(entry.get_key()), ptr_eq(ptr))
+            .remove_and_shrink(hasher(&ptr), ptr_eq(ptr), hasher)
             .unwrap_or_else(|| unreachable!());
           ptr.drop_unsafe();
         }
@@ -359,14 +362,15 @@ where
   }
 
   #[cold]
-  pub fn remove<Q>(&mut self, key: &Q, hash: u64) -> Option<V>
+  pub fn remove<Q, S>(&mut self, key: &Q, hash: u64, hasher: &S) -> Option<V>
   where
     K: Borrow<Q>,
     Q: Hash + Eq + ?Sized,
+    S: BuildHasher,
   {
     let entry = self
       .table
-      .remove_entry(hash, equivalent(key))?
+      .remove_and_shrink(hash, equivalent(key), make_hasher(hasher))?
       .borrow_mut_unsafe();
     match entry.get_state_mut() {
       State::Main { .. } => {
