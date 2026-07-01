@@ -1,5 +1,4 @@
 use std::{
-  collections::BTreeSet,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::{Mutex, MutexGuard},
@@ -7,7 +6,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheNode, GetOrReserve, Reserved};
+use super::{CacheNode, GetOrReserve, Reserved, ShrinkSet};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -28,7 +27,7 @@ const U32_MASK: u64 = u32::MAX as u64;
  */
 struct Shard {
   node: CacheNode<Key, BlockId>,
-  eviction: BTreeSet<Key>, // evicting pointers
+  eviction: ShrinkSet<Key>, // evicting pointers
   allocated: BlockId,
 
   /**
@@ -37,7 +36,7 @@ struct Shard {
    * logical key and must go through eviction again before reuse; `None` means it
    * is an uncommitted fresh slot with no live key.
    */
-  aborted: ChunkQueue<(BlockId, Option<Key>)>,
+  aborted: ChunkQueue<(BlockId, Option<(Key, u64)>)>,
 }
 
 /**
@@ -54,23 +53,25 @@ struct Shard {
  * aborted-slot queue.
  */
 pub struct EvictionGuard<'a> {
-  evicted: Option<Key>,
+  evicted: Option<(Key, u64)>,
   block_id: BlockId,
   token: ManuallyDrop<ExclusiveToken<'a>>,
   guard: &'a Mutex<Shard>,
   new_pointer: Key,
   new_pointer_hash: u64,
   committed: bool,
+  hasher: &'a RandomState,
 }
 
 impl<'a> EvictionGuard<'a> {
   const fn new(
-    evicted: Option<Key>,
+    evicted: Option<(Key, u64)>,
     block_id: usize,
     token: ExclusiveToken<'a>,
     guard: &'a Mutex<Shard>,
     new_pointer: Key,
     new_pointer_hash: u64,
+    hasher: &'a RandomState,
   ) -> Self {
     Self {
       evicted,
@@ -80,6 +81,7 @@ impl<'a> EvictionGuard<'a> {
       new_pointer,
       new_pointer_hash,
       committed: false,
+      hasher,
     }
   }
 
@@ -102,21 +104,23 @@ impl<'a> EvictionGuard<'a> {
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
-      if let Some(i) = self.evicted {
-        self.guard.l().eviction.remove(&i);
+      if let Some((k, h)) = self.evicted {
+        self.guard.l().eviction.remove(h, &k, self.hasher);
       }
       return;
     }
 
     // rollback
     let mut shard = self.guard.l();
-    if let Some(i) = self.evicted {
-      shard.eviction.remove(&i);
-      shard.aborted.push((self.block_id, Some(i)));
+    if let Some((k, h)) = self.evicted {
+      shard.eviction.remove(h, &k, self.hasher);
+      shard.aborted.push((self.block_id, Some((k, h))));
     } else {
       shard.aborted.push((self.block_id, None));
     }
-    shard.node.remove(&self.new_pointer, self.new_pointer_hash);
+    shard
+      .node
+      .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
   }
@@ -149,7 +153,7 @@ impl MappingTable {
     for i in 0..shard_count {
       let shard = Shard {
         node: CacheNode::new(cap_per_shard),
-        eviction: BTreeSet::new(),
+        eviction: ShrinkSet::new(),
         allocated: 0,
         aborted: ChunkQueue::new(),
       };
@@ -196,7 +200,7 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(&key) {
+      if shard.eviction.contains(hash, &key) {
         drop(shard);
         backoff.snooze();
         continue;
@@ -241,7 +245,7 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(&key) {
+      if shard.eviction.contains(hash, &key) {
         drop(shard);
         backoff.snooze();
         continue;
@@ -286,13 +290,21 @@ impl MappingTable {
   where
     F: Fn(&BlockId) -> Option<ExclusiveToken<'a>>,
   {
-    if let Some((evicted, bid, token)) = reserved.take_evicted() {
+    if let Some((evicted, bid, token, evicted_hash)) = reserved.take_evicted() {
       // Reuse the evicted cache slot for the new key. The mapping is reserved now,
       // but the slot may still contain the old page until the caller finishes the
       // eviction/load work, so keep the old key blocked during the transition.
       reserved.fulfill(bid);
-      shard.eviction.insert(evicted);
-      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
+      shard.eviction.insert(evicted, evicted_hash, &self.hasher);
+      return Some(EvictionGuard::new(
+        Some((evicted, evicted_hash)),
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     }
 
     let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
@@ -306,21 +318,37 @@ impl MappingTable {
     });
     reserved.fulfill(bid);
 
-    let Some(evicted) = evicted else {
+    let Some((evicted, evicted_hash)) = evicted else {
       let token = try_evict(&bid).unwrap();
-      return Some(EvictionGuard::new(None, bid, token, s, key, hash));
+      return Some(EvictionGuard::new(
+        None,
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     };
 
     if let Some(token) = try_evict(&bid) {
-      shard.eviction.insert(evicted);
-      return Some(EvictionGuard::new(Some(evicted), bid, token, s, key, hash));
+      shard.eviction.insert(evicted, evicted_hash, &self.hasher);
+      return Some(EvictionGuard::new(
+        Some((evicted, evicted_hash)),
+        bid,
+        token,
+        s,
+        key,
+        hash,
+        &self.hasher,
+      ));
     }
 
     // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights
     // due to contention with checkpoints or other reads.
     // However, since this occurs very rarely due to reasons such as disk failure, it is fine to proceed with deleting the hash table.
-    shard.node.remove(&key, hash);
-    shard.aborted.push((bid, Some(evicted)));
+    shard.node.remove(&key, hash, &self.hasher);
+    shard.aborted.push((bid, Some((evicted, evicted_hash))));
 
     None
   }
