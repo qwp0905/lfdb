@@ -18,7 +18,7 @@ use crate::{
   table::{TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
-  utils::{ToArc, ToBox, UnsafeBorrowMut},
+  utils::{ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX, WAL},
   warn, Error, Result,
 };
@@ -695,7 +695,8 @@ fn run_tick(
   old_index: &BTreeIndex<Arc<CompactionReadPolicy>>,
   new_index: &BTreeIndex<CompactionWritePolicy>,
 ) -> Result {
-  let cycle_ref = cycle.as_ptr().borrow_mut_unsafe();
+  // SAFETY: single threaded access to cycle.
+  let cycle_ref = unsafe { &mut *cycle.as_ptr() };
   while let Some(task) = incoming.pop() {
     match task {
       CompactTask::Committed(committed) => waiting_publish.push_back((
@@ -737,7 +738,7 @@ fn run_tick(
   let Some(current) = cycle_ref.as_mut().or_else(|| {
     in_progress
       .pop()
-      .map(|v| cycle.as_ptr().borrow_mut_unsafe().insert(v))
+      .map(|v| unsafe { (*cycle.as_ptr()).insert(v) })
   }) else {
     return Ok(());
   };

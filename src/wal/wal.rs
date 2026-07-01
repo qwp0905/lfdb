@@ -16,7 +16,7 @@ use crate::{
   disk::{IOPool, PagePool, Pointer},
   error, info,
   table::TableId,
-  utils::{SharedToken, UnsafeBorrow},
+  utils::SharedToken,
   Error, Result,
 };
 
@@ -245,7 +245,7 @@ impl WAL {
       return result.map_err(|err| self.failover(err.kind()));
     }
 
-    let new_buffer = new_buffer_ptr.as_raw().borrow_unsafe();
+    let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
     let done = new_buffer.write_to_disk();
 
     let result = buffer.write_to_disk().wait().unwrap();
@@ -323,7 +323,7 @@ impl WAL {
 
       let guard = epoch::pin();
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
-      let buffer = buffer_ptr.as_raw().borrow_unsafe();
+      let buffer = unsafe { &*buffer_ptr.as_raw() };
 
       let Some(token) = buffer.pin_segment() else {
         backoff.snooze();

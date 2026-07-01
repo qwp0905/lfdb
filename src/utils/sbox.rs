@@ -1,6 +1,7 @@
 use std::{
   mem::MaybeUninit,
   ops::Deref,
+  ptr::NonNull,
   sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
@@ -32,17 +33,17 @@ impl<T> Inner<T> {
  * paths that do not need `Weak`.
  */
 pub struct SBox<T: ?Sized> {
-  inner: *mut Inner<T>,
+  inner: NonNull<Inner<T>>,
 }
 impl<T> SBox<T> {
   pub fn new(data: T) -> Self {
     Self {
-      inner: Box::into_raw(Box::new(Inner::new(data))),
+      inner: NonNull::from_mut(Box::leak(Box::new(Inner::new(data)))),
     }
   }
 
   pub fn get_mut(this: &mut SBox<T>) -> Option<&mut T> {
-    let inner = unsafe { &mut *this.inner };
+    let inner = unsafe { this.inner.as_mut() };
     if inner.count.load(Ordering::Acquire) > 1 {
       return None;
     }
@@ -51,7 +52,7 @@ impl<T> SBox<T> {
 }
 impl<T: ?Sized> Clone for SBox<T> {
   fn clone(&self) -> Self {
-    if unsafe { &*self.inner }
+    if unsafe { self.inner.as_ref() }
       .count
       .fetch_add(1, Ordering::Relaxed)
       == usize::MAX
@@ -64,7 +65,7 @@ impl<T: ?Sized> Clone for SBox<T> {
 
 impl<T: ?Sized> Drop for SBox<T> {
   fn drop(&mut self) {
-    if unsafe { &*self.inner }
+    if unsafe { self.inner.as_ref() }
       .count
       .fetch_sub(1, Ordering::Release)
       > 1
@@ -73,7 +74,7 @@ impl<T: ?Sized> Drop for SBox<T> {
     }
 
     fence(Ordering::Acquire);
-    let _ = unsafe { Box::from_raw(self.inner) };
+    let _ = unsafe { Box::from_raw(self.inner.as_ptr()) };
   }
 }
 
@@ -84,7 +85,7 @@ impl<T: ?Sized> Deref for SBox<T> {
   type Target = T;
 
   fn deref(&self) -> &T {
-    unsafe { &(*self.inner).data }
+    unsafe { &self.inner.as_ref().data }
   }
 }
 impl<T> SBox<T> {
@@ -96,7 +97,9 @@ impl<T> SBox<MaybeUninit<T>> {
   pub unsafe fn assume_init(self) -> SBox<T> {
     let inner = self.inner;
     std::mem::forget(self);
-    SBox { inner: inner as _ }
+    SBox {
+      inner: inner.cast(),
+    }
   }
 }
 

@@ -19,7 +19,7 @@ use crate::{
   error, info,
   metrics::MetricsRegistry,
   trace,
-  utils::{ToArc, ToBox, UnsafeBorrowMut},
+  utils::{ToArc, ToBox},
   wal::{LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WAL},
   Result,
 };
@@ -276,7 +276,8 @@ fn run_tick<F: Fn(usize) -> usize>(
   metrics: &MetricsRegistry,
   calc_batch_size: &F,
 ) -> Result {
-  let cycle = cycle.as_ptr().borrow_mut_unsafe();
+  // SAFETY: single threaded access to cycle.
+  let cycle = unsafe { &mut *cycle.as_ptr() };
   let Some(current) = cycle else {
     let log_id = wal.current_log_id();
     let new = CheckpointCycle::new(

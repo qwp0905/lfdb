@@ -2,33 +2,33 @@ use std::{
   borrow::Borrow,
   hash::{BuildHasher, Hash},
   mem::MaybeUninit,
+  ptr::NonNull,
 };
 
 use hashbrown::Equivalent;
 
 use super::{ShrinkQueue, ShrinkTable};
-use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
-) -> impl Fn(&*mut CacheEntry<K, V>) -> bool + 'a {
-  move |ptr| key.equivalent(ptr.borrow_unsafe().get_key())
+) -> impl Fn(&NonNull<CacheEntry<K, V>>) -> bool + 'a {
+  move |ptr| unsafe { key.equivalent(ptr.as_ref().get_key()) }
 }
 
 const fn ptr_eq<K, V>(
-  ptr: *mut CacheEntry<K, V>,
-) -> impl Fn(&*mut CacheEntry<K, V>) -> bool {
+  ptr: NonNull<CacheEntry<K, V>>,
+) -> impl Fn(&NonNull<CacheEntry<K, V>>) -> bool {
   move |p| ptr == *p
 }
 
 const fn make_hasher<'a, K, V, S>(
   hash_builder: &'a S,
-) -> impl Fn(&*mut CacheEntry<K, V>) -> u64 + 'a
+) -> impl Fn(&NonNull<CacheEntry<K, V>>) -> u64 + 'a
 where
   K: Hash,
   S: BuildHasher,
 {
-  move |ptr| hash_builder.hash_one(ptr.borrow_unsafe().get_key())
+  move |ptr| unsafe { hash_builder.hash_one(ptr.as_ref().get_key()) }
 }
 
 enum State {
@@ -115,10 +115,10 @@ const MAX_FREQ: u8 = 3;
  * reserves a new value slot directly in `main`.
  */
 pub struct CacheNode<K, V> {
-  table: ShrinkTable<*mut CacheEntry<K, V>>,
-  small: ShrinkQueue<*mut CacheEntry<K, V>>,
-  main: ShrinkQueue<*mut CacheEntry<K, V>>,
-  ghost: ShrinkQueue<*mut CacheEntry<K, V>>,
+  table: ShrinkTable<NonNull<CacheEntry<K, V>>>,
+  small: ShrinkQueue<NonNull<CacheEntry<K, V>>>,
+  main: ShrinkQueue<NonNull<CacheEntry<K, V>>>,
+  ghost: ShrinkQueue<NonNull<CacheEntry<K, V>>>,
   capacity: usize,
   small_cap: usize,
   small_count: usize,
@@ -164,12 +164,12 @@ where
     let hasher = make_hasher(hash_builder);
     let evicted = self.evict(&hasher, &try_evict)?;
 
-    let ptr = Box::into_raw(Box::new(CacheEntry::new_small(key.clone())));
+    let mut ptr = NonNull::from(Box::leak(Box::new(CacheEntry::new_small(key.clone()))));
     self.table.insert(hash, ptr, &hasher);
 
     self.small.push(ptr);
     self.small_count += 1;
-    Ok(Reserved::new(evicted, ptr.borrow_mut_unsafe().value_ptr()))
+    Ok(Reserved::new(evicted, unsafe { ptr.as_mut() }.value_ptr()))
   }
 
   /**
@@ -198,30 +198,31 @@ where
 
     let hasher = make_hasher(hash_builder);
 
-    let entry = unsafe { *bucket.as_ptr() }.borrow_mut_unsafe();
+    let entry = unsafe { (*bucket.as_ptr()).as_mut() };
     match entry.get_state_mut() {
       State::Small { freq } | State::Main { freq } => {
         *freq = (*freq + 1).min(MAX_FREQ);
         Ok(GetOrReserve::Hit(entry.get_value()))
       }
       State::Ghost => {
-        let (old, _) = unsafe { self.table.remove(bucket) };
+        let (mut old, _) = unsafe { self.table.remove(bucket) };
 
         // Do not revive the ghost entry in place. Its pointer is still queued in the
         // ghost FIFO, so reusing it as a live entry would let that queue observe the
         // live entry again later. Leave the old pointer as a tombstone and insert a
         // fresh main entry instead.
-        old.borrow_mut_unsafe().set_state(State::Tombstone);
+        unsafe { old.as_mut() }.set_state(State::Tombstone);
 
         let evicted = self.evict(&hasher, &try_evict)?;
 
-        let ptr = Box::into_raw(Box::new(CacheEntry::new_main(key.clone())));
+        let mut ptr =
+          NonNull::from(Box::leak(Box::new(CacheEntry::new_main(key.clone()))));
         self.table.insert(hash, ptr, make_hasher(hash_builder));
         self.main.push(ptr);
         self.main_count += 1;
         Ok(GetOrReserve::Reserved(Reserved::new(
           evicted,
-          ptr.borrow_mut_unsafe().value_ptr(),
+          unsafe { ptr.as_mut() }.value_ptr(),
         )))
       }
       State::Tombstone => unreachable!(),
@@ -235,7 +236,7 @@ where
   ) -> std::result::Result<Option<(K, V, R, u64)>, ()>
   where
     K: Clone,
-    S: Fn(&*mut CacheEntry<K, V>) -> u64,
+    S: Fn(&NonNull<CacheEntry<K, V>>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
     while self.is_full() {
@@ -258,12 +259,12 @@ where
   ) -> std::result::Result<(K, V, R, u64), ()>
   where
     K: Clone,
-    S: Fn(&*mut CacheEntry<K, V>) -> u64,
+    S: Fn(&NonNull<CacheEntry<K, V>>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
     loop {
-      let ptr = self.small.pop().unwrap();
-      let entry = ptr.borrow_mut_unsafe();
+      let mut ptr = self.small.pop().unwrap();
+      let entry = unsafe { ptr.as_mut() };
       match entry.get_state() {
         State::Small { freq } if *freq > 1 => {
           let Ok(evicted) = self.evict_main(hasher, try_evict) else {
@@ -297,7 +298,9 @@ where
             hasher(&ptr),
           ));
         }
-        State::Tombstone => ptr.drop_unsafe(),
+        State::Tombstone => {
+          let _ = unsafe { Box::from_raw(ptr.as_ptr()) };
+        }
         State::Ghost | State::Main { .. } => unreachable!(),
       }
     }
@@ -308,11 +311,11 @@ where
     try_evict: &F,
   ) -> std::result::Result<Option<(K, V, R, u64)>, ()>
   where
-    S: Fn(&*mut CacheEntry<K, V>) -> u64,
+    S: Fn(&NonNull<CacheEntry<K, V>>) -> u64,
     F: Fn(&V) -> Option<R>,
   {
-    while let Some(ptr) = self.main.pop() {
-      let entry = ptr.borrow_mut_unsafe();
+    while let Some(mut ptr) = self.main.pop() {
+      let entry = unsafe { ptr.as_mut() };
       match entry.get_state_mut() {
         State::Main { freq } if *freq > 0 => {
           *freq -= 1;
@@ -331,13 +334,15 @@ where
             .remove_and_shrink(hash, ptr_eq(ptr), hasher)
             .unwrap_or_else(|| unreachable!());
 
-          let entry = ptr.take_unsafe();
+          let entry = unsafe { Box::from_raw(ptr.as_ptr()) };
           let value = entry.take_value();
           self.main_count -= 1;
           return Ok(Some((entry.take_key(), value, reserved, hash)));
         }
         State::Ghost | State::Small { .. } => unreachable!(),
-        State::Tombstone => ptr.drop_unsafe(),
+        State::Tombstone => {
+          let _ = unsafe { Box::from_raw(ptr.as_ptr()) };
+        }
       }
     }
 
@@ -345,24 +350,24 @@ where
   }
   fn evict_ghost<F>(&mut self, hasher: &F)
   where
-    F: Fn(&*mut CacheEntry<K, V>) -> u64,
+    F: Fn(&NonNull<CacheEntry<K, V>>) -> u64,
   {
     // Ghost entries stay in the lookup table but no longer count as live cache
     // values. Their count is `table.len() - len()`, so no separate ghost counter
     // is needed.
     while self.table.len() - self.len() >= self.ghost_cap {
       let ptr = self.ghost.pop().unwrap_or_else(|| unreachable!());
-      match ptr.borrow_unsafe().get_state() {
+      match unsafe { ptr.as_ref() }.get_state() {
         State::Main { .. } | State::Small { .. } => unreachable!(),
         State::Ghost => {
           self
             .table
             .remove_and_shrink(hasher(&ptr), ptr_eq(ptr), hasher)
             .unwrap_or_else(|| unreachable!());
-          ptr.drop_unsafe();
         }
-        State::Tombstone => ptr.drop_unsafe(),
+        State::Tombstone => {}
       }
+      let _ = unsafe { Box::from_raw(ptr.as_ptr()) };
     }
   }
 
@@ -373,10 +378,12 @@ where
     Q: Hash + Eq + ?Sized,
     S: BuildHasher,
   {
-    let entry = self
-      .table
-      .remove_and_shrink(hash, equivalent(key), make_hasher(hasher))?
-      .borrow_mut_unsafe();
+    let entry = unsafe {
+      self
+        .table
+        .remove_and_shrink(hash, equivalent(key), make_hasher(hasher))?
+        .as_mut()
+    };
     match entry.get_state_mut() {
       State::Main { .. } => {
         entry.set_state(State::Tombstone);
@@ -418,18 +425,18 @@ impl<K, V> Drop for CacheNode<K, V> {
       .drain(..)
       .chain(self.small.drain(..))
       .chain(self.ghost.drain(..))
-      .filter(|ptr| matches!(ptr.borrow_unsafe().get_state(), State::Tombstone))
+      .filter(|ptr| matches!(unsafe { ptr.as_ref() }.get_state(), State::Tombstone))
     {
-      ptr.drop_unsafe();
+      let _ = unsafe { Box::from_raw(ptr.as_ptr()) };
     }
-    for ptr in self.table.drain() {
+    for mut ptr in self.table.drain() {
       if matches!(
-        ptr.borrow_unsafe().get_state(),
+        unsafe { ptr.as_ref() }.get_state(),
         State::Small { .. } | State::Main { .. }
       ) {
-        ptr.borrow_mut_unsafe().drop_value();
+        unsafe { ptr.as_mut() }.drop_value();
       }
-      ptr.drop_unsafe();
+      let _ = unsafe { Box::from_raw(ptr.as_ptr()) };
     }
   }
 }

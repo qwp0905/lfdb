@@ -1,10 +1,8 @@
 /**
- * Small convenience traits for common pointer and ownership operations.
+ * Small convenience traits for common pointer.
  *
  * This module is intentionally lightweight. It only shortens repetitive code
- * such as `Arc::new(value)`, `Box::new(value)`, and simple raw-pointer
- * conversions that would otherwise require local `unsafe` blocks at every call
- * site.
+ * such as `Arc::new(value)`, `Box::new(value)`.
  */
 use std::sync::Arc;
 
@@ -25,51 +23,5 @@ impl<T> ToBox for T {
   #[inline(always)]
   fn to_box(self) -> Box<Self> {
     Box::new(self)
-  }
-}
-
-pub trait UnsafeBorrow<'a, T: 'a> {
-  fn borrow_unsafe(self) -> &'a T;
-}
-impl<'a, T: 'a> UnsafeBorrow<'a, T> for *const T {
-  #[inline(always)]
-  fn borrow_unsafe(self) -> &'a T {
-    unsafe { &*self }
-  }
-}
-impl<'a, T: 'a> UnsafeBorrow<'a, T> for *mut T {
-  #[inline(always)]
-  fn borrow_unsafe(self) -> &'a T {
-    unsafe { &*self }
-  }
-}
-
-pub trait UnsafeBorrowMut<'a, T: 'a> {
-  fn borrow_mut_unsafe(self) -> &'a mut T;
-}
-impl<'a, T: 'a> UnsafeBorrowMut<'a, T> for *mut T {
-  #[inline(always)]
-  fn borrow_mut_unsafe(self) -> &'a mut T {
-    unsafe { &mut *self }
-  }
-}
-
-pub trait UnsafeTake<T> {
-  fn take_unsafe(self) -> T;
-}
-impl<T> UnsafeTake<T> for *mut T {
-  #[inline(always)]
-  fn take_unsafe(self) -> T {
-    unsafe { *Box::from_raw(self) }
-  }
-}
-
-pub trait UnsafeDrop<T> {
-  fn drop_unsafe(self);
-}
-impl<T> UnsafeDrop<T> for *mut T {
-  #[inline(always)]
-  fn drop_unsafe(self) {
-    let _ = self.take_unsafe();
   }
 }

@@ -1,5 +1,6 @@
 use std::{
   mem::ManuallyDrop,
+  ptr::NonNull,
   sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -18,18 +19,18 @@ impl<F> BatchFn<F> {
   where
     F: FnOnce(&mut RefedSlot),
   {
-    BatchTask::new(self as *mut _)
+    BatchTask::new(NonNull::from_mut(self))
   }
   unsafe fn take(&mut self) -> F {
     unsafe { ManuallyDrop::take(&mut self.0) }
   }
 }
 pub struct BatchTask {
-  ptr: *mut (),
-  call: unsafe fn(*mut (), &mut RefedSlot),
+  ptr: NonNull<()>,
+  call: unsafe fn(NonNull<()>, &mut RefedSlot),
 }
 impl BatchTask {
-  const fn new<F>(ptr: *mut BatchFn<F>) -> Self
+  const fn new<F>(ptr: NonNull<BatchFn<F>>) -> Self
   where
     F: FnOnce(&mut RefedSlot),
   {
@@ -42,11 +43,11 @@ impl BatchTask {
     unsafe { (self.call)(self.ptr, slot) };
   }
 }
-unsafe fn call<F>(ptr: *mut (), slot: &mut RefedSlot)
+unsafe fn call<F>(ptr: NonNull<()>, slot: &mut RefedSlot)
 where
   F: FnOnce(&mut RefedSlot),
 {
-  let f = unsafe { (*ptr.cast::<BatchFn<F>>()).take() };
+  let f = unsafe { ptr.cast::<BatchFn<F>>().as_mut().take() };
   f(slot);
 }
 
