@@ -6,13 +6,11 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheNode, GetOrReserve, Reserved};
+use super::{CacheNode, GetOrReserve, HashSet, Reserved};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{
-    ChunkQueue, ExclusivePin, ExclusiveToken, HashSet, SharedToken, ShortenedMutex,
-  },
+  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);

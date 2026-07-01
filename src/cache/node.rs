@@ -6,9 +6,8 @@ use std::{
 
 use hashbrown::Equivalent;
 
-use crate::utils::{
-  HashTable, ShrinkQueue, UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake,
-};
+use super::{HashTable, ShrinkQueue};
+use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,

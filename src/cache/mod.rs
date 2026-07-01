@@ -18,3 +18,6 @@ use node::*;
 
 mod batch;
 pub use batch::*;
+
+mod shrink;
+use shrink::*;
