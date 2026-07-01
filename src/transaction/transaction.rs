@@ -260,6 +260,7 @@ impl<'a> Transaction<'a> {
 }
 impl<'a> Drop for Transaction<'a> {
   fn drop(&mut self) {
+    // Since abort operation only returns a transaction closed error, they can be ignored.
     let _ = self.abort();
     self.metrics.transaction_start.record(self.tx_start.take());
     self.clear();
