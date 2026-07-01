@@ -6,8 +6,8 @@ use std::{
 
 use hashbrown::{raw::RawTable, Equivalent};
 
-pub struct HashTable<T>(RawTable<T>);
-impl<T> HashTable<T> {
+pub struct ShrinkTable<T>(RawTable<T>);
+impl<T> ShrinkTable<T> {
   pub const fn new() -> Self {
     Self(RawTable::new())
   }
@@ -32,23 +32,23 @@ impl<T> HashTable<T> {
     Some(v)
   }
 }
-impl<T> Deref for HashTable<T> {
+impl<T> Deref for ShrinkTable<T> {
   type Target = RawTable<T>;
 
   fn deref(&self) -> &Self::Target {
     &self.0
   }
 }
-impl<T> DerefMut for HashTable<T> {
+impl<T> DerefMut for ShrinkTable<T> {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.0
   }
 }
 
-pub struct HashSet<K>(HashTable<K>);
-impl<K> HashSet<K> {
+pub struct ShrinkSet<K>(ShrinkTable<K>);
+impl<K> ShrinkSet<K> {
   pub const fn new() -> Self {
-    Self(HashTable::new())
+    Self(ShrinkTable::new())
   }
   pub fn contains<Q>(&self, hash: u64, key: &Q) -> bool
   where

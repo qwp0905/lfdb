@@ -6,7 +6,7 @@ use std::{
 
 use hashbrown::Equivalent;
 
-use super::{HashTable, ShrinkQueue};
+use super::{ShrinkQueue, ShrinkTable};
 use crate::utils::{UnsafeBorrow, UnsafeBorrowMut, UnsafeDrop, UnsafeTake};
 
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
@@ -115,7 +115,7 @@ const MAX_FREQ: u8 = 3;
  * reserves a new value slot directly in `main`.
  */
 pub struct CacheNode<K, V> {
-  table: HashTable<*mut CacheEntry<K, V>>,
+  table: ShrinkTable<*mut CacheEntry<K, V>>,
   small: ShrinkQueue<*mut CacheEntry<K, V>>,
   main: ShrinkQueue<*mut CacheEntry<K, V>>,
   ghost: ShrinkQueue<*mut CacheEntry<K, V>>,
@@ -136,7 +136,7 @@ where
     let small_cap = capacity / 10;
     let main_cap = capacity - small_cap;
     Self {
-      table: HashTable::new(),
+      table: ShrinkTable::new(),
       small: ShrinkQueue::new(),
       main: ShrinkQueue::new(),
       ghost: ShrinkQueue::new(),

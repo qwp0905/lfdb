@@ -6,7 +6,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheNode, GetOrReserve, HashSet, Reserved};
+use super::{CacheNode, GetOrReserve, Reserved, ShrinkSet};
 use crate::{
   disk::Pointer,
   table::TableId,
@@ -27,7 +27,7 @@ const U32_MASK: u64 = u32::MAX as u64;
  */
 struct Shard {
   node: CacheNode<Key, BlockId>,
-  eviction: HashSet<Key>, // evicting pointers
+  eviction: ShrinkSet<Key>, // evicting pointers
   allocated: BlockId,
 
   /**
@@ -153,7 +153,7 @@ impl MappingTable {
     for i in 0..shard_count {
       let shard = Shard {
         node: CacheNode::new(cap_per_shard),
-        eviction: HashSet::new(),
+        eviction: ShrinkSet::new(),
         allocated: 0,
         aborted: ChunkQueue::new(),
       };
