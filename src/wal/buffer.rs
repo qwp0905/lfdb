@@ -1,8 +1,7 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, UnsafeCell},
   io::Result as IOResult,
   mem::MaybeUninit,
-  ptr::copy_nonoverlapping,
   sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
@@ -36,7 +35,7 @@ struct SegmentState {
   /**
    * rotated and written complete data block count for current segment
    */
-  written_count: AtomicU64,
+  rotated_count: AtomicU64,
   /**
    * flag which segment has been taken to check drop.
    */
@@ -47,7 +46,7 @@ impl SegmentState {
     Self {
       segment: MaybeUninit::new(segment),
       pin: ExclusivePin::new(),
-      written_count: AtomicU64::new(0),
+      rotated_count: AtomicU64::new(0),
       taken: Cell::new(false),
     }
   }
@@ -84,7 +83,7 @@ pub struct LogBuffer {
    * must mark records count before write to disk.
    * records count can be obtained from pinning entry.
    */
-  entry: PageRef<WAL_BLOCK_SIZE>,
+  entry: UnsafeCell<PageRef<WAL_BLOCK_SIZE>>,
   /**
    * written complete count for data entry which has valid offset
    */
@@ -136,7 +135,7 @@ impl LogBuffer {
   ) -> Self {
     Self {
       offset: AtomicU64::new(offset as u64),
-      entry,
+      entry: UnsafeCell::new(entry),
       commit_count: AtomicU32::new(0),
       segment_ptr,
       segment_state,
@@ -155,33 +154,31 @@ impl LogBuffer {
    * of records already in the block — used by flush callers to write the correct
    * record count header and to wait for all prior writers to finish.
    */
-  pub fn reserve_entry(&self, len: usize) -> (usize, u32) {
+  pub fn reserve_append(&self, len: usize) -> (usize, u32) {
     let prev = self
       .offset
       .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
     ((prev & MASK) as usize, (prev >> BITS) as u32)
   }
-  pub fn write_at(&self, record: &[u8], offset: usize) {
-    let ptr = self.entry.as_ptr();
-    let len = record.len();
-    unsafe { copy_nonoverlapping(record.as_ptr(), ptr.add(offset), len) };
+  pub fn append_at(&self, record: &[u8], offset: usize) {
+    unsafe { (*self.entry.get()).copy_from(record, offset) };
   }
-  pub fn load_commit(&self) -> u32 {
+  pub fn load_committed_append(&self) -> u32 {
     self.commit_count.load(Ordering::Acquire)
   }
-  pub fn flush(&self) -> FsyncResult {
+  pub fn sync_segment(&self) -> FsyncResult {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn write_to_disk(&'static self) -> Oneshot<IOResult<()>> {
+  pub fn flush_block(&'static self) -> Oneshot<IOResult<()>> {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
-      .write_async(self.segment_ptr, &self.entry)
+      .write_async(self.segment_ptr, unsafe { &*self.entry.get() })
   }
   /**
    * to complete writing data to entry
    */
-  pub fn commit_entry(&self) {
+  pub fn commit_append(&self) {
     self.commit_count.fetch_add(1, Ordering::Release);
   }
 
@@ -199,10 +196,10 @@ impl LogBuffer {
     self.segment_state.taken.set(true);
     unsafe { self.segment_state.segment.assume_init_read() }
   }
-  pub fn increase_written_count(&self) {
+  pub fn increase_rotated_count(&self) {
     self
       .segment_state
-      .written_count
+      .rotated_count
       .fetch_add(1, Ordering::Release);
   }
   /**
@@ -210,8 +207,8 @@ impl LogBuffer {
    * written_count increments after each block rotation completes its disk write,
    * so segment_ptr <= written_count + 1 means blocks 0..segment_ptr-1 are persisted.
    */
-  pub fn is_ready_to_flush(&self) -> bool {
-    self.segment_ptr <= self.segment_state.written_count.load(Ordering::Acquire) + 1
+  pub fn prev_blocks_rotated(&self) -> bool {
+    self.segment_ptr <= self.segment_state.rotated_count.load(Ordering::Acquire) + 1
   }
   pub const fn get_generation(&self) -> SegmentGeneration {
     self.generation

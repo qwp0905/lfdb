@@ -103,7 +103,7 @@ impl<'a> CachedSlot<'a> {
     let mut shadow = self.page_pool.acquire();
     let latch = self.block.latch();
     self.dirty.insert(self.block_id);
-    shadow.copy_from(self.block.load_page().as_slice());
+    shadow.copy_from(self.block.load_page().as_slice(), 0);
     WritableSlot {
       shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
 
@@ -197,7 +197,7 @@ impl<'a> BatchSlot<'a> {
       {
         let mut latch = self.block.latch();
         self.dirty.insert(self.block_id);
-        page.copy_from(self.block.load_page().as_slice());
+        page.copy_from(self.block.load_page().as_slice(), 0);
 
         let mut slot = RefedSlot::new(self.block.get_pointer(), page);
         // SAFETY: Since `BatchFn` is pinned and its address does not change,

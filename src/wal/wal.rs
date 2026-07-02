@@ -169,19 +169,19 @@ impl WAL {
     backoff: &Backoff,
   ) -> Result {
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
-    buffer.write_at(&record.init(log_id), offset);
+    buffer.append_at(&record.init(log_id), offset);
     if !flush {
-      buffer.commit_entry();
+      buffer.commit_append();
       return Ok(());
     }
 
-    while commit_order > buffer.load_commit() {
+    while commit_order > buffer.load_committed_append() {
       backoff.snooze();
     }
-    buffer.commit_entry();
+    buffer.commit_append();
 
-    let done = buffer.write_to_disk();
-    while !buffer.is_ready_to_flush() {
+    let done = buffer.flush_block();
+    while !buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
     if let Err(err) = done.wait().unwrap() {
@@ -192,7 +192,7 @@ impl WAL {
   }
 
   fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> Result {
-    let done = buffer.flush();
+    let done = buffer.sync_segment();
     drop(token);
 
     if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
@@ -217,13 +217,13 @@ impl WAL {
     backoff: &Backoff,
     token: SharedToken,
   ) -> Result {
-    let mut record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
-    let remain = record.split_off(WAL_BLOCK_SIZE - offset);
-    buffer.write_at(&record, offset);
+    let record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
+    let (remain, overflow) = record.split_at(WAL_BLOCK_SIZE - offset);
+    buffer.append_at(remain, offset);
 
     let mut new_page = self.page_pool.acquire();
-    new_page.range_mut(0..remain.len()).copy_from_slice(&remain);
-    let new_buffer = buffer.init_next(new_page, remain.len());
+    new_page.copy_from(overflow, 0);
+    let new_buffer = buffer.init_next(new_page, overflow.len());
     let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
       buffer_ptr,
       Owned::new(new_buffer),
@@ -235,26 +235,26 @@ impl WAL {
     };
 
     unsafe { guard.defer_destroy(buffer_ptr) };
-    while commit_order > buffer.load_commit() {
+    while commit_order > buffer.load_committed_append() {
       backoff.snooze();
     }
 
     if !flush {
-      let result = buffer.write_to_disk().wait().unwrap();
-      buffer.increase_written_count();
+      let result = buffer.flush_block().wait().unwrap();
+      buffer.increase_rotated_count();
       return result.map_err(|err| self.failover(err.kind()));
     }
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
-    let done = new_buffer.write_to_disk();
+    let done = new_buffer.flush_block();
 
-    let result = buffer.write_to_disk().wait().unwrap();
-    buffer.increase_written_count();
+    let result = buffer.flush_block().wait().unwrap();
+    buffer.increase_rotated_count();
     if let Err(err) = result {
       return Err(self.failover(err.kind()));
     };
 
-    while !new_buffer.is_ready_to_flush() {
+    while !new_buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
     if let Err(err) = done.wait().unwrap() {
@@ -286,11 +286,11 @@ impl WAL {
       .store(Owned::init(replacement), Ordering::Release);
     unsafe { guard.defer_destroy(buffer_ptr) };
 
-    while commit_order > buffer.load_commit() {
+    while commit_order > buffer.load_committed_append() {
       backoff.snooze();
     }
 
-    let done = buffer.write_to_disk();
+    let done = buffer.flush_block();
     loop {
       match token.try_upgrade() {
         Ok(t) => break forget(t),
@@ -299,7 +299,7 @@ impl WAL {
       backoff.snooze();
     }
 
-    while !buffer.is_ready_to_flush() {
+    while !buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
     if let Err(err) = done.wait().unwrap() {
@@ -330,7 +330,7 @@ impl WAL {
         continue;
       };
 
-      let (offset, commit_order) = buffer.reserve_entry(len);
+      let (offset, commit_order) = buffer.reserve_append(len);
       if offset > WAL_BLOCK_SIZE {
         drop(token);
         backoff.snooze();
