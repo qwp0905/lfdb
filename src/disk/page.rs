@@ -46,13 +46,13 @@ impl<const T: usize> Page<T> {
     self.0
   }
   #[inline]
-  pub fn copy_from(&mut self, data: &[u8]) {
+  pub fn copy_from(&mut self, data: &[u8], offset: usize) {
     let len = data.len();
     assert!(
-      len <= T,
+      offset + len <= T,
       "cannot copy from data since overflow bytes. required {T} but received {len}"
     );
-    unsafe { copy_nonoverlapping(data.as_ptr(), self.0, len) };
+    unsafe { copy_nonoverlapping(data.as_ptr(), self.0.add(offset), len) };
   }
   #[inline]
   pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
@@ -89,16 +89,6 @@ impl<const T: usize> Drop for Page<T> {
   #[inline(always)]
   fn drop(&mut self) {
     unsafe { dealloc(self.0, Self::LAYOUT) };
-  }
-}
-
-impl<const T: usize> From<&[u8]> for Page<T> {
-  #[inline]
-  fn from(value: &[u8]) -> Self {
-    let page = Self::new();
-    let len = value.len().min(T);
-    unsafe { copy_nonoverlapping(value.as_ptr(), page.as_ptr(), len) };
-    page
   }
 }
 
