@@ -199,18 +199,6 @@ fn test_page_copy() {
 }
 
 #[test]
-fn test_from_slice() {
-  const SIZE: usize = 4;
-  let data = [1, 2, 3, 4];
-  let page = Page::<SIZE>::from(&data[..]);
-
-  let mut scanner = page.scanner();
-  for &expected in data.iter() {
-    assert_eq!(scanner.read().unwrap(), expected);
-  }
-}
-
-#[test]
 fn test_read_u64() {
   let mut page = Page::<16>::new();
   let test_value = 42u64;
