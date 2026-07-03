@@ -1,6 +1,7 @@
 use std::{
   collections::{vec_deque::Drain, VecDeque},
-  hash::{BuildHasher, Hash},
+  hash::{BuildHasher, Hash, RandomState},
+  mem::replace,
   ops::{Deref, DerefMut, RangeBounds},
 };
 
@@ -72,6 +73,67 @@ impl<K> ShrinkSet<K> {
     self
       .0
       .remove_and_shrink(hash, |k| key.equivalent(k), |k| hasher.hash_one(k));
+  }
+}
+
+pub struct ShrinkMap<K, V> {
+  table: ShrinkTable<(K, V)>,
+  hasher: RandomState,
+}
+impl<K, V> ShrinkMap<K, V> {
+  pub fn new() -> Self {
+    Self {
+      table: ShrinkTable::new(),
+      hasher: RandomState::new(),
+    }
+  }
+  pub fn insert(&mut self, key: K, value: V) -> Option<V>
+  where
+    K: Hash + Equivalent<K>,
+  {
+    let hash = self.hasher.hash_one(&key);
+    match self.table.find_or_find_insert_slot(
+      hash,
+      |(k, _)| key.equivalent(k),
+      |(k, _)| self.hasher.hash_one(k),
+    ) {
+      Ok(bucket) => Some(replace(&mut unsafe { bucket.as_mut() }.1, value)),
+      Err(slot) => {
+        unsafe { self.table.insert_in_slot(hash, slot, (key, value)) };
+        None
+      }
+    }
+  }
+  pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+  where
+    Q: Equivalent<K> + Hash,
+    K: Hash,
+  {
+    let hash = self.hasher.hash_one(key);
+    let (_, v) = self.table.remove_and_shrink(
+      hash,
+      |(k, _)| key.equivalent(k),
+      |(k, _)| self.hasher.hash_one(k),
+    )?;
+    Some(v)
+  }
+
+  pub fn get<Q>(&self, key: &Q) -> Option<&'_ V>
+  where
+    Q: Equivalent<K> + Hash,
+  {
+    let hash = self.hasher.hash_one(key);
+    let bucket = self.table.find(hash, |(k, _)| key.equivalent(k))?;
+    Some(unsafe { &bucket.as_ref().1 })
+  }
+
+  pub fn values(&self) -> impl Iterator<Item = &'_ V> + '_ {
+    unsafe { self.table.iter().map(|bucket| &bucket.as_ref().1) }
+  }
+}
+impl<K, V> Default for ShrinkMap<K, V> {
+  fn default() -> Self {
+    Self::new()
   }
 }
 
