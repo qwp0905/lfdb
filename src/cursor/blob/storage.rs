@@ -1,4 +1,5 @@
 use crate::{
+  cache::ShrinkMap,
   debug,
   disk::{AlignedBuf, IOPool},
   utils::{uuid_simple, SBox, ShortenedRwLock},
@@ -7,7 +8,6 @@ use crate::{
 
 use super::{BlobHandle, BlobId, BlobLen, BlobOffset, BlobReserved};
 use std::{
-  collections::HashMap,
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -29,8 +29,8 @@ fn filename() -> PathBuf {
  * returning the blob reference.
  */
 pub struct BlobStorage {
-  readonly: RwLock<HashMap<BlobId, SBox<BlobHandle>>>,
-  writable: RwLock<HashMap<BlobId, SBox<BlobHandle>>>,
+  readonly: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
+  writable: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
   last_id: AtomicU64,
   io_pool: Arc<IOPool>,
 }
@@ -41,7 +41,7 @@ impl BlobStorage {
     // append frontier inside each blob segment. Any unused tail space is accepted as
     // fragmentation.
 
-    let mut readonly = HashMap::new();
+    let mut readonly = ShrinkMap::new();
     let mut last_id = 0;
     for entry in io_pool.read_dir()? {
       let filename = PathBuf::from(entry.file_name());
@@ -56,7 +56,7 @@ impl BlobStorage {
 
     Ok(Self {
       readonly: RwLock::new(readonly),
-      writable: RwLock::new(HashMap::new()),
+      writable: RwLock::new(ShrinkMap::new()),
       last_id: AtomicU64::new(last_id),
       io_pool,
     })

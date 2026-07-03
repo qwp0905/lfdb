@@ -19,12 +19,6 @@ pub type BlockId = usize;
 
 const U32_MASK: u64 = u32::MAX as u64;
 
-/**
- * BTreeSet/BTreeMap instead of HashMap: hashbrown (swisstable) does not
- * shrink its allocation on removal, which is problematic for long-running
- * servers. Since the number of entries here is expected to be very small
- * at any given time, the performance difference is negligible.
- */
 struct Shard {
   node: CacheNode<Key, BlockId>,
   eviction: ShrinkSet<Key>, // evicting pointers

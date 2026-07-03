@@ -20,4 +20,4 @@ mod batch;
 pub use batch::*;
 
 mod shrink;
-use shrink::*;
+pub use shrink::*;
