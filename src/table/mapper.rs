@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap, HashSet},
+  collections::HashSet,
   path::PathBuf,
   sync::{atomic::Ordering, Arc, RwLock},
 };
@@ -9,6 +9,7 @@ use super::{
   META_TABLE,
 };
 use crate::{
+  cache::ShrinkMap,
   disk::{BlockIOHandle, IOPool},
   utils::{uuid_simple, SBox, ShortenedRwLock},
   Result,
@@ -33,7 +34,7 @@ fn to_path(table_name: &TableName) -> PathBuf {
  * and reconciles table files during replay.
  */
 pub struct TableMapper {
-  open_handles: RwLock<HashMap<TableId, TableHandleRef>>,
+  open_handles: RwLock<ShrinkMap<TableId, TableHandleRef>>,
   metadata: TableHandleRef,
   io_pool: Arc<IOPool>,
   last_table_id: AtomicTableId,
