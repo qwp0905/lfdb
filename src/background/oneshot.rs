@@ -4,12 +4,11 @@ use std::{
   ops::Deref,
   ptr::NonNull,
   sync::atomic::{fence, AtomicBool, Ordering},
-  thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::utils::Backoff;
+use crate::{background::OnceParker, utils::Backoff};
 
 struct Pair<T: ?Sized>(NonNull<(AtomicBool, T)>);
 impl<T> Pair<T> {
@@ -83,21 +82,21 @@ enum State {
 struct OneshotInner<T> {
   state: AtomicCell<State>,
   value: UnsafeCell<MaybeUninit<T>>,
-  caller: AtomicCell<Option<Thread>>,
+  parker: OnceParker,
 }
 impl<T> OneshotInner<T> {
   const fn new() -> Self {
     Self {
       state: AtomicCell::new(State::Waiting),
       value: UnsafeCell::new(MaybeUninit::uninit()),
-      caller: AtomicCell::new(None),
+      parker: OnceParker::new(),
     }
   }
   const fn fulfilled(value: T) -> Self {
     Self {
       state: AtomicCell::new(State::Fulfilled),
       value: UnsafeCell::new(MaybeUninit::new(value)),
-      caller: AtomicCell::new(None),
+      parker: OnceParker::new(),
     }
   }
   #[inline]
@@ -144,10 +143,7 @@ impl<T> Oneshot<T> {
   }
   pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
     let backoff = Backoff::new();
-    // Register the caller thread before checking state. If fulfill() runs
-    // first and finds caller as None, it won't call unpark() — causing park()
-    // to block forever.
-    self.0.caller.store(Some(current()));
+
     loop {
       match self.try_wait() {
         Ok(v) => return Ok(v),
@@ -159,7 +155,7 @@ impl<T> Oneshot<T> {
         continue;
       }
 
-      park();
+      self.0.parker.park();
       backoff.reset();
     }
   }
@@ -183,11 +179,7 @@ impl<T> OneshotFulfill<T> {
       .compare_exchange(State::Waiting, State::Fulfilled)
       .unwrap_or_else(|s| s)
     {
-      State::Waiting => {
-        if let Some(th) = self.0.caller.take() {
-          th.unpark()
-        }
-      }
+      State::Waiting => self.0.parker.wake_all(),
       State::Disconnected => unsafe { value.assume_init_drop() },
       State::Fulfilled => unreachable!(),
     }
@@ -202,10 +194,7 @@ impl<T> Drop for OneshotFulfill<T> {
     else {
       return;
     };
-    let Some(th) = self.0.caller.take() else {
-      return;
-    };
-    th.unpark();
+    self.0.parker.wake_all()
   }
 }
 
