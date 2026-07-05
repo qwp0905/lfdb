@@ -1,5 +1,14 @@
-use super::{oneshot, Context, EventBindings, Oneshot, OwnedSubscription};
+use super::{
+  oneshot, BufferingThread, Context, EventBindings, IntervalWorkThread, Oneshot,
+  OwnedSubscription, PreloadThread, SharedWorkThread,
+};
 
+pub enum ThreadTypes<T, R> {
+  Shared(SharedWorkThread<T, R>),
+  Preload(PreloadThread<T, R>),
+  Interval(IntervalWorkThread<T, R>),
+  Buffering(BufferingThread<T, R>),
+}
 /**
  * Common interface for all background runtimes used by the engine.
  *
@@ -8,11 +17,13 @@ use super::{oneshot, Context, EventBindings, Oneshot, OwnedSubscription};
  * as a single worker, a shared worker pool, an eager worker, or an interval
  * task, but they all expose the same way to submit work, dispatch fire-and-
  * forget messages, and shut the runtime down.
- *
- * This trait hides the scheduling model behind each background thread type so
- * callers do not need to know how the work is actually executed.
  */
-pub trait BackgroundThread<T, R = ()>: Send + Sync {
+pub struct BackgroundThread<T, R = ()>(ThreadTypes<T, R>);
+impl<T, R> BackgroundThread<T, R> {
+  pub const fn new(types: ThreadTypes<T, R>) -> Self {
+    Self(types)
+  }
+
   /**
    * Submit a raw execution context to the runtime.
    *
@@ -21,17 +32,18 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync {
    * caller's request, while each concrete runtime decides how that context
    * should be queued, scheduled, or handled.
    */
-  fn register(&self, ctx: Context<T, R>);
-  /**
-   * Stop the runtime and join its worker thread(s).
-   *
-   * `close` is the synchronization boundary for background runtimes. After it
-   * is called, the runtime stops accepting requests and the caller waits for
-   * the underlying thread(s) to terminate. Implementations use this point to
-   * join the worker thread(s), which also makes background panics observable by
-   * the caller.
-   */
-  fn close(&self);
+  fn register(&self, ctx: Context<T, R>)
+  where
+    T: Send,
+    R: Send,
+  {
+    match &self.0 {
+      ThreadTypes::Shared(t) => t.register(ctx),
+      ThreadTypes::Preload(t) => t.register(ctx),
+      ThreadTypes::Interval(t) => t.register(ctx),
+      ThreadTypes::Buffering(t) => t.register(ctx),
+    };
+  }
 
   /**
    * Submit a command and return a completion handle.
@@ -41,10 +53,19 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync {
    * oneshot fulfiller, and the returned `Oneshot` can be waited on by the
    * caller.
    */
-  #[inline]
-  fn execute(&self, v: T) -> Oneshot<R> {
+  pub fn execute(&self, value: T) -> Oneshot<R>
+  where
+    T: Send,
+    R: Send,
+  {
     let (done_r, done_t) = oneshot();
-    self.register(Context::Work(v, done_t));
+    let ctx = Context::Work(value, done_t);
+    match &self.0 {
+      ThreadTypes::Shared(t) => t.register(ctx),
+      ThreadTypes::Preload(t) => t.register(ctx),
+      ThreadTypes::Interval(t) => t.register(ctx),
+      ThreadTypes::Buffering(t) => t.register(ctx),
+    };
     done_r
   }
 
@@ -55,8 +76,34 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync {
    * runtime and does not need a response. In DDD terms, `execute` behaves like a
    * command with a reply, while `dispatch` behaves like an event.
    */
-  fn dispatch(&self, v: T) {
-    self.register(Context::Dispatch(v));
+  pub fn dispatch(&self, value: T)
+  where
+    T: Send,
+    R: Send,
+  {
+    self.register(Context::Dispatch(value));
+  }
+
+  /**
+   * Stop the runtime and join its worker thread(s).
+   *
+   * `close` is the synchronization boundary for background runtimes. After it
+   * is called, the runtime stops accepting requests and the caller waits for
+   * the underlying thread(s) to terminate. Implementations use this point to
+   * join the worker thread(s), which also makes background panics observable by
+   * the caller.
+   */
+  pub fn close(&self)
+  where
+    T: Send,
+    R: Send,
+  {
+    match &self.0 {
+      ThreadTypes::Shared(t) => t.close(),
+      ThreadTypes::Preload(t) => t.close(),
+      ThreadTypes::Interval(t) => t.close(),
+      ThreadTypes::Buffering(t) => t.close(),
+    };
   }
 }
 
@@ -68,15 +115,19 @@ pub trait BackgroundThread<T, R = ()>: Send + Sync {
  * `binding_events!` macro: a background thread can act as the runtime for an
  * event subscription without exposing its concrete runtime type.
  */
-impl<T, R> OwnedSubscription<T> for dyn BackgroundThread<T, R> {
+impl<T, R> OwnedSubscription<T> for BackgroundThread<T, R>
+where
+  T: Send,
+  R: Send,
+{
   fn handle(&self, event: T) {
     self.dispatch(event);
   }
 }
-impl<T, R> EventBindings for dyn BackgroundThread<T, R>
+impl<T, R> EventBindings for BackgroundThread<T, R>
 where
   T: Send + Sync + 'static,
-  R: 'static,
+  R: Send + 'static,
 {
   type Owned = (T, ());
 
