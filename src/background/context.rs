@@ -21,11 +21,7 @@ pub enum Context<T, R> {
  * handler wrappers used to move user-provided functions into worker threads.
  */
 pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + Send + Sync + 'a>);
-impl<'a, T, R> SharedFn<'a, T, R>
-where
-  T: Send + 'a,
-  R: Send + 'a,
-{
+impl<'a, T, R> SharedFn<'a, T, R> {
   pub const fn new(f: Arc<dyn Fn(T) -> R + Send + Sync + 'a>) -> Self {
     Self(f)
   }
@@ -41,11 +37,7 @@ impl<'a, T, R> Clone for SharedFn<'a, T, R> {
 }
 
 pub struct SingleFn<'a, T, R>(Box<dyn FnMut(T) -> R + Send + 'a>);
-impl<'a, T, R> SingleFn<'a, T, R>
-where
-  T: Send,
-  R: Send,
-{
+impl<'a, T, R> SingleFn<'a, T, R> {
   pub fn new<F>(f: F) -> Self
   where
     F: FnMut(T) -> R + Send + 'a,

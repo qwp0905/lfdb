@@ -1,3 +1,4 @@
+use super::super::ThreadBuilder;
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,12 +27,11 @@ fn test_no_timeout() {
   };
 
   let thread_count = 4;
-  let thread = SharedWorkThread::new(
-    "test-no-timeout",
-    DEFAULT_STACK_SIZE,
-    thread_count,
-    SharedFn::new(Arc::new(work)),
-  );
+  let thread = ThreadBuilder::new()
+    .name("test-no-timeout")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .multi(thread_count)
+    .shared(work);
 
   // Send multiple tasks
   let receivers: Vec<_> = (1..=(thread_count << 1))
@@ -65,12 +65,11 @@ fn test_multiple_threads() {
   };
 
   let thread_count = 4;
-  let thread = SharedWorkThread::new(
-    "test-multi",
-    DEFAULT_STACK_SIZE,
-    thread_count,
-    SharedFn::new(Arc::new(work)),
-  );
+  let thread = ThreadBuilder::new()
+    .name("test-multi")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .multi(thread_count)
+    .shared(work);
 
   let receivers: Vec<_> = (0..(thread_count << 1))
     .map(|i| thread.execute(i))

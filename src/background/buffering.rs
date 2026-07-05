@@ -3,9 +3,7 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use super::{
-  BackgroundThread, Context, OneshotFulfill, SingleFn, ThreadSlot, UnwindSpawner,
-};
+use super::{Context, OneshotFulfill, SingleFn, ThreadSlot, UnwindSpawner};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
@@ -93,17 +91,17 @@ pub struct BufferingThread<T, R> {
   waker: Thread,
   slot: ThreadSlot,
 }
-impl<T, R> BufferingThread<T, R>
-where
-  T: Send + 'static,
-  R: Send + Clone + 'static,
-{
+impl<T, R> BufferingThread<T, R> {
   pub fn new<S: ToString>(
     name: S,
     size: usize,
     count: usize,
     when_buffered: SingleFn<'static, Vec<T>, R>,
-  ) -> Self {
+  ) -> Self
+  where
+    T: Send + 'static,
+    R: Send + Clone + 'static,
+  {
     let queue = Arc::new(SegQueue::new());
     let handle = Builder::new()
       .name(name.to_string())
@@ -116,17 +114,13 @@ where
       slot: ThreadSlot::new(handle),
     }
   }
-}
-unsafe impl<T, R> Send for BufferingThread<T, R> {}
-unsafe impl<T, R> Sync for BufferingThread<T, R> {}
 
-impl<T, R> BackgroundThread<T, R> for BufferingThread<T, R> {
-  fn register(&self, ctx: Context<T, R>) {
+  pub fn register(&self, ctx: Context<T, R>) {
     self.queue.push(ctx);
     self.waker.unpark();
   }
 
-  fn close(&self) {
+  pub fn close(&self) {
     if let Some(th) = self.slot.close() {
       self.queue.push(Context::Term);
       self.waker.unpark();

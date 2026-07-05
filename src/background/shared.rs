@@ -13,7 +13,7 @@ use crossbeam::{
 
 use crate::utils::{SBox, ShortenedMutex};
 
-use super::{BackgroundThread, Context, SharedFn, UnwindSpawner};
+use super::{Context, SharedFn, UnwindSpawner};
 
 /*
  * Standard work-stealing priority:
@@ -52,11 +52,7 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
  * into its local queue are returned to the global injector so another worker,
  * or the close-time cleanup path, can handle them.
  */
-fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
-where
-  T: Send,
-  R: Send,
-{
+fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool {
   match ctx {
     Context::Work(v, done) => done.fulfill(work.call(v)),
     Context::Dispatch(v) => {
@@ -176,17 +172,17 @@ pub struct SharedWorkThread<T, R = ()> {
   threads: Mutex<Vec<JoinHandle<()>>>,
   work: SharedFn<'static, T, R>,
 }
-impl<T, R> SharedWorkThread<T, R>
-where
-  T: Send + 'static,
-  R: Send + 'static,
-{
+impl<T, R> SharedWorkThread<T, R> {
   pub fn new<S: ToString>(
     name: S,
     size: usize,
     count: usize,
     work: SharedFn<'static, T, R>,
-  ) -> Self {
+  ) -> Self
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+  {
     let idle = Arc::new(SegQueue::new());
     let (stealers, workers): (Vec<_>, Vec<_>) = (0..count)
       .map(|_| Worker::<Context<T, R>>::new_fifo())
@@ -222,17 +218,8 @@ where
       work,
     }
   }
-}
 
-unsafe impl<T, R> Send for SharedWorkThread<T, R> {}
-unsafe impl<T, R> Sync for SharedWorkThread<T, R> {}
-
-impl<T, R> BackgroundThread<T, R> for SharedWorkThread<T, R>
-where
-  T: Send,
-  R: Send,
-{
-  fn register(&self, ctx: Context<T, R>) {
+  pub fn register(&self, ctx: Context<T, R>) {
     self.global.push(ctx);
 
     let Some(idle) = self.idle.pop() else {
@@ -256,7 +243,7 @@ where
    * the important guarantee: work submitted before `close` begins is completed
    * even if some workers encounter `Term` before processing all local work.
    */
-  fn close(&self) {
+  pub fn close(&self) {
     let threads = take(&mut *self.threads.l());
     if threads.is_empty() {
       return;
