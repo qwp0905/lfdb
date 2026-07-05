@@ -31,8 +31,8 @@ impl SegmentReuseable {
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  reuse: Arc<dyn BackgroundThread<WALSegment, ()>>,
-  preload: Box<dyn BackgroundThread<(), Result<WALSegment>>>,
+  reuse: Arc<BackgroundThread<WALSegment, ()>>,
+  preload: Box<BackgroundThread<(), Result<WALSegment>>>,
   ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
@@ -141,7 +141,7 @@ const fn handle_preload(
   ready: Arc<SegQueue<WALSegment>>,
   io_pool: Arc<IOPool>,
   max_len: Pointer,
-) -> impl FnMut(()) -> Result<WALSegment> {
+) -> impl FnMut(Option<()>) -> Result<WALSegment> {
   move |_| {
     if let Some(segment) = ready.pop() {
       return Ok(segment);

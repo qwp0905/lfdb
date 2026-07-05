@@ -75,7 +75,7 @@ pub struct BlockCache {
   batch_handles: Box<[BatchHandle]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
+  flush_executor: Arc<BackgroundThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
@@ -295,13 +295,13 @@ impl Drop for BlockCache {
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
+  executor: Arc<BackgroundThread<FlushTask, Result>>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<dyn BackgroundThread<FlushTask, Result>>,
+    executor: Arc<BackgroundThread<FlushTask, Result>>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
     Self {
