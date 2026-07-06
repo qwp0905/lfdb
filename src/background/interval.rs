@@ -1,6 +1,6 @@
 use std::{thread::Builder, time::Duration};
 
-use super::{BackgroundThread, Context, SingleFn, ThreadSlot, UnwindSpawner};
+use super::{Context, SingleFn, ThreadSlot, UnwindSpawner};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
 const fn worker_loop<T, R>(
@@ -45,17 +45,17 @@ pub struct IntervalWorkThread<T, R> {
   channel: Sender<Context<T, R>>,
   slot: ThreadSlot,
 }
-impl<T, R> IntervalWorkThread<T, R>
-where
-  T: Send + 'static,
-  R: Send + 'static,
-{
+impl<T, R> IntervalWorkThread<T, R> {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
     work: SingleFn<'static, Option<T>, R>,
-  ) -> Self {
+  ) -> Self
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+  {
     let (channel, receiver) = unbounded();
     let handle = Builder::new()
       .name(name.to_string())
@@ -66,15 +66,12 @@ where
       slot: ThreadSlot::new(handle),
     }
   }
-}
-unsafe impl<T, R> Send for IntervalWorkThread<T, R> {}
-unsafe impl<T, R> Sync for IntervalWorkThread<T, R> {}
-impl<T, R> BackgroundThread<T, R> for IntervalWorkThread<T, R> {
-  fn register(&self, ctx: Context<T, R>) {
+
+  pub fn register(&self, ctx: Context<T, R>) {
     self.channel.send(ctx).unwrap()
   }
 
-  fn close(&self) {
+  pub fn close(&self) {
     if let Some(v) = self.slot.close() {
       self.channel.send(Context::Term).unwrap();
       v.join().unwrap();

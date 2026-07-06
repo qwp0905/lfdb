@@ -1,3 +1,4 @@
+use super::super::ThreadBuilder;
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -11,17 +12,17 @@ fn test_shared_work_thread_with_timeout() {
   let counter = Arc::new(AtomicUsize::new(0));
   let counter_clone = counter.clone();
 
-  let work = SingleFn::new(move |x: Option<usize>| {
+  let work = move |x: Option<usize>| {
     if x.is_none() {
       counter_clone.store(1, Ordering::Release);
     }
-  });
-  let thread = IntervalWorkThread::new(
-    "test-timeout",
-    DEFAULT_STACK_SIZE,
-    Duration::from_millis(100),
-    work,
-  );
+  };
+  let interval = Duration::from_millis(100);
+  let thread = ThreadBuilder::new()
+    .name("test-timeout")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .interval(interval, work);
 
   // Send a task
   thread.execute(5).wait().unwrap();

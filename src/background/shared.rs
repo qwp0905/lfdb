@@ -13,7 +13,7 @@ use crossbeam::{
 
 use crate::utils::{SBox, ShortenedMutex};
 
-use super::{BackgroundThread, Context, SharedFn, UnwindSpawner};
+use super::{Context, SharedFn, UnwindSpawner};
 
 /*
  * Standard work-stealing priority:
@@ -24,7 +24,7 @@ use super::{BackgroundThread, Context, SharedFn, UnwindSpawner};
 fn pop_or_steal<'a, A: 'a>(
   local: &Worker<A>,
   global: &Injector<A>,
-  stealers: impl Iterator<Item = &'a Stealer<A>>,
+  mut stealers: impl Iterator<Item = &'a Stealer<A>>,
 ) -> Option<A> {
   if let Some(task) = local.pop() {
     return Some(task);
@@ -33,12 +33,7 @@ fn pop_or_steal<'a, A: 'a>(
     return Some(task);
   }
 
-  for stealer in stealers {
-    if let Some(task) = stealer.steal().success() {
-      return Some(task);
-    }
-  }
-  None
+  stealers.find_map(|stealer| stealer.steal().success())
 }
 
 fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
@@ -52,11 +47,7 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
  * into its local queue are returned to the global injector so another worker,
  * or the close-time cleanup path, can handle them.
  */
-fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
-where
-  T: Send,
-  R: Send,
-{
+fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool {
   match ctx {
     Context::Work(v, done) => done.fulfill(work.call(v)),
     Context::Dispatch(v) => {
@@ -70,7 +61,7 @@ where
 const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: Arc<Injector<Context<T, R>>>,
-  stealers: Arc<Vec<Stealer<Context<T, R>>>>,
+  stealers: Arc<[Stealer<Context<T, R>>]>,
   idle: Arc<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
@@ -83,8 +74,11 @@ where
     let state = SBox::new(AtomicCell::new(State::Unqueued));
 
     let backoff = Backoff::new();
-    let mut cycle = stealers.iter().cycle();
-    let size = stealers.len();
+    let mut cycle = (0..stealers.len())
+      .filter(|i| *i != id)
+      .map(|i| &stealers[i])
+      .cycle();
+    let size = stealers.len() - 1;
 
     loop {
       while !backoff.is_completed() {
@@ -176,17 +170,17 @@ pub struct SharedWorkThread<T, R = ()> {
   threads: Mutex<Vec<JoinHandle<()>>>,
   work: SharedFn<'static, T, R>,
 }
-impl<T, R> SharedWorkThread<T, R>
-where
-  T: Send + 'static,
-  R: Send + 'static,
-{
+impl<T, R> SharedWorkThread<T, R> {
   pub fn new<S: ToString>(
     name: S,
     size: usize,
     count: usize,
     work: SharedFn<'static, T, R>,
-  ) -> Self {
+  ) -> Self
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+  {
     let idle = Arc::new(SegQueue::new());
     let (stealers, workers): (Vec<_>, Vec<_>) = (0..count)
       .map(|_| Worker::<Context<T, R>>::new_fifo())
@@ -194,7 +188,7 @@ where
       .unzip();
 
     let global = Arc::new(Injector::new());
-    let stealers = Arc::new(stealers);
+    let stealers = Arc::from(stealers.into_boxed_slice());
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -222,17 +216,8 @@ where
       work,
     }
   }
-}
 
-unsafe impl<T, R> Send for SharedWorkThread<T, R> {}
-unsafe impl<T, R> Sync for SharedWorkThread<T, R> {}
-
-impl<T, R> BackgroundThread<T, R> for SharedWorkThread<T, R>
-where
-  T: Send,
-  R: Send,
-{
-  fn register(&self, ctx: Context<T, R>) {
+  pub fn register(&self, ctx: Context<T, R>) {
     self.global.push(ctx);
 
     let Some(idle) = self.idle.pop() else {
@@ -256,7 +241,7 @@ where
    * the important guarantee: work submitted before `close` begins is completed
    * even if some workers encounter `Term` before processing all local work.
    */
-  fn close(&self) {
+  pub fn close(&self) {
     let threads = take(&mut *self.threads.l());
     if threads.is_empty() {
       return;
@@ -265,8 +250,8 @@ where
     for _ in 0..threads.len() {
       self.global.push(Context::Term);
     }
-    for (i, th) in threads.into_iter().enumerate() {
-      self.wakers[i].unpark();
+    for th in threads {
+      th.thread().unpark();
       th.join().unwrap();
     }
 

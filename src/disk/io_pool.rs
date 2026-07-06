@@ -18,7 +18,7 @@ use crate::{
   background::{Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
-  utils::{SBox, ShortenedMutex, ToArc},
+  utils::{SBox, ShortenedMutex},
   Error, Result,
 };
 
@@ -45,7 +45,7 @@ impl<T> AsyncIO<T> {
  * inside the engine, not just a handle factory.
  */
 pub struct IOPool {
-  thread: Arc<IOThread>,
+  thread: SBox<IOThread>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
 }
@@ -59,8 +59,8 @@ impl IOPool {
     let thread = ThreadBuilder::new()
       .name("io pool")
       .multi(thread_count)
-      .shared(create_io_thread(metrics.clone()))
-      .to_arc();
+      .shared(create_io_thread(metrics.clone()));
+    let thread = SBox::new(thread);
 
     // The base directory lock prevents multiple engine processes from using the
     // same database directory. Retry is a courtesy delay, not a recovery protocol:
@@ -180,7 +180,7 @@ pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
   write_handle: SBox<TaskPublisher<WriteTask>>,
   sync_handle: SBox<TaskPublisher<()>>,
-  thread: Arc<IOThread>,
+  thread: SBox<IOThread>,
   state: SBox<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
@@ -220,7 +220,7 @@ impl IOHandle {
   ) -> Oneshot<IOResult<()>> {
     self.write_handle.publish_alloc_and_write(
       &self.state,
-      &*self.thread,
+      &self.thread,
       &self.backend,
       &self.allocated,
       (offset, IoSlice::new(buf)),
@@ -229,7 +229,7 @@ impl IOHandle {
   pub fn write_only(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
     self.write_handle.publish_write_only(
       &self.state,
-      &*self.thread,
+      &self.thread,
       &self.backend,
       (offset, IoSlice::new(buf)),
     )
@@ -238,7 +238,7 @@ impl IOHandle {
   pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
-      .publish_sync(&self.state, &*self.thread, &self.backend)
+      .publish_sync(&self.state, &self.thread, &self.backend)
   }
 
   pub fn fsync(&self) -> IOResult<()> {

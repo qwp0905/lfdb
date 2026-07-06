@@ -411,7 +411,7 @@ pub struct Compactor {
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<dyn BackgroundThread<()>>,
+  ticker: Box<BackgroundThread<()>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   wal: Arc<WAL>,

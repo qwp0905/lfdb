@@ -1,25 +1,31 @@
 use crate::background::SingleFn;
 
-use super::{BackgroundThread, Context, ThreadSlot, UnwindSpawner};
+use super::{Context, ThreadSlot, UnwindSpawner};
 use std::{thread::Builder, time::Duration};
 
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
-const fn worker_loop<T>(
+const fn worker_loop<T, R>(
   timeout: Duration,
-  mut preload: SingleFn<'static, (), T>,
-  mut fallback: SingleFn<'static, Option<T>, ()>,
-  receiver: Receiver<Context<(), T>>,
+  mut preload: SingleFn<'static, Option<T>, R>,
+  mut fallback: SingleFn<'static, Option<R>, ()>,
+  receiver: Receiver<Context<T, R>>,
 ) -> impl FnOnce()
 where
   T: Send,
+  R: Send,
 {
   let mut preloaded = None;
+  let mut arg = None;
   move || loop {
-    let result = preloaded.take().unwrap_or_else(|| preload.call(()));
+    let result = preloaded.take().unwrap_or_else(|| preload.call(arg.take()));
     match receiver.recv_timeout(timeout) {
-      Ok(Context::Work(_, done)) => done.fulfill(result),
-      Ok(Context::Dispatch(_)) | Err(RecvTimeoutError::Timeout) => {
+      Ok(Context::Work(v, done)) => {
+        done.fulfill(result);
+        arg = Some(v);
+      }
+      Ok(Context::Dispatch(v)) => arg = Some(v),
+      Err(RecvTimeoutError::Timeout) => {
         fallback.call(None);
         preloaded = Some(result);
       }
@@ -46,21 +52,22 @@ where
  * On shutdown, any unused preloaded value is passed to `fallback(Some(value))`
  * so the caller can clean it up or return it to another owner.
  */
-pub struct PreloadThread<T> {
-  channel: Sender<Context<(), T>>,
+pub struct PreloadThread<T, R> {
+  channel: Sender<Context<T, R>>,
   slot: ThreadSlot,
 }
-impl<T> PreloadThread<T>
-where
-  T: Send + 'static,
-{
+impl<T, R> PreloadThread<T, R> {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
-    preload: SingleFn<'static, (), T>,
-    fallback: SingleFn<'static, Option<T>, ()>,
-  ) -> Self {
+    preload: SingleFn<'static, Option<T>, R>,
+    fallback: SingleFn<'static, Option<R>, ()>,
+  ) -> Self
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+  {
     let (tx, rx) = unbounded();
     let handle = Builder::new()
       .name(name.to_string())
@@ -72,16 +79,12 @@ where
       slot: ThreadSlot::new(handle),
     }
   }
-}
-unsafe impl<T> Send for PreloadThread<T> {}
-unsafe impl<T> Sync for PreloadThread<T> {}
 
-impl<T> BackgroundThread<(), T> for PreloadThread<T> {
-  fn register(&self, ctx: Context<(), T>) {
+  pub fn register(&self, ctx: Context<T, R>) {
     self.channel.send(ctx).unwrap()
   }
 
-  fn close(&self) {
+  pub fn close(&self) {
     if let Some(v) = self.slot.close() {
       self.channel.send(Context::Term).unwrap();
       v.join().unwrap();

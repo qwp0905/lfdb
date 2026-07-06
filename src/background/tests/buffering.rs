@@ -1,4 +1,4 @@
-use super::*;
+use super::super::ThreadBuilder;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -8,12 +8,11 @@ const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
 #[test]
 fn test_basic_send_and_receive() {
-  let thread = BufferingThread::new(
-    "test-basic",
-    DEFAULT_STACK_SIZE,
-    16,
-    SingleFn::new(|values: Vec<usize>| values.iter().sum::<usize>()),
-  );
+  let thread = ThreadBuilder::new()
+    .name("test-basic")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(16, |values: Vec<usize>| values.iter().sum::<usize>());
 
   let result = thread.execute(10).wait().unwrap();
   assert_eq!(result, 10);
@@ -29,17 +28,16 @@ fn test_try_recv_drains_pending() {
   let batch_sizes = Arc::new(Mutex::new(vec![]));
   let batch_sizes_c = batch_sizes.clone();
 
-  let thread = BufferingThread::new(
-    "test-drain",
-    DEFAULT_STACK_SIZE,
-    64,
-    SingleFn::new(move |values: Vec<usize>| {
+  let thread = ThreadBuilder::new()
+    .name("test-drain")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(64, move |values: Vec<usize>| {
       batch_sizes_c.lock().unwrap().push(values.len());
       // slow processing so requests accumulate
       thread::sleep(Duration::from_millis(50));
       0usize
-    }),
-  );
+    });
 
   // trigger first recv (blocking) and wait
   thread.execute(1).wait().unwrap();
@@ -70,16 +68,15 @@ fn test_max_count_respected() {
   let batch_sizes_c = batch_sizes.clone();
   let max_count = 5;
 
-  let thread = BufferingThread::new(
-    "test-max-count",
-    DEFAULT_STACK_SIZE,
-    max_count,
-    SingleFn::new(move |values: Vec<usize>| {
+  let thread = ThreadBuilder::new()
+    .name("test-max-count")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(max_count, move |values: Vec<usize>| {
       let len = values.len();
       batch_sizes_c.lock().unwrap().push(len);
       len
-    }),
-  );
+    });
 
   // send more than max_count
   let pending: Vec<_> = (0..20).map(|i| thread.execute(i)).collect();
@@ -103,12 +100,13 @@ fn test_max_count_respected() {
 
 #[test]
 fn test_result_per_item() {
-  let thread = BufferingThread::new(
-    "test-result",
-    DEFAULT_STACK_SIZE,
-    16,
-    SingleFn::new(|values: Vec<usize>| values.iter().map(|v| v * 3).collect::<Vec<_>>()),
-  );
+  let thread = ThreadBuilder::new()
+    .name("test-result")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(16, |values: Vec<usize>| {
+      values.iter().map(|v| v * 3).collect::<Vec<_>>()
+    });
 
   // each sender should get the shared result
   let r1 = thread.execute(5);
@@ -122,16 +120,14 @@ fn test_result_per_item() {
 fn test_close_flushes_remaining() {
   let total = Arc::new(AtomicUsize::new(0));
   let total_c = total.clone();
-
-  let thread = BufferingThread::new(
-    "test-close-flush",
-    DEFAULT_STACK_SIZE,
-    1024,
-    SingleFn::new(move |values: Vec<usize>| {
+  let thread = ThreadBuilder::new()
+    .name("test-close-flush")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(1024, move |values: Vec<usize>| {
       total_c.fetch_add(values.len(), Ordering::Release);
       values.len()
-    }),
-  );
+    });
 
   // send items
   for i in 0..5 {
@@ -146,12 +142,11 @@ fn test_close_flushes_remaining() {
 
 #[test]
 fn test_multiple_close() {
-  let thread = BufferingThread::new(
-    "test-multi-close",
-    DEFAULT_STACK_SIZE,
-    16,
-    SingleFn::new(|v: Vec<()>| v.len()),
-  );
+  let thread = ThreadBuilder::new()
+    .name("test-multi-close")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(16, |v: Vec<()>| v.len());
 
   thread.close();
   thread.close();
@@ -163,16 +158,16 @@ fn test_concurrent_senders() {
   let total = Arc::new(AtomicUsize::new(0));
   let total_c = total.clone();
 
-  let thread = Arc::new(BufferingThread::new(
-    "test-concurrent",
-    DEFAULT_STACK_SIZE,
-    64,
-    SingleFn::new(move |values: Vec<usize>| {
+  let thread = ThreadBuilder::new()
+    .name("test-concurrent")
+    .stack_size(DEFAULT_STACK_SIZE)
+    .single()
+    .buffering(64, move |values: Vec<usize>| {
       let sum: usize = values.iter().sum();
       total_c.fetch_add(sum, Ordering::Release);
       sum
-    }),
-  ));
+    });
+  let thread = Arc::new(thread);
 
   let mut handles = vec![];
   for i in 0..4 {

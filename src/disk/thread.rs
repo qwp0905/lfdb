@@ -262,7 +262,7 @@ pub enum IOTask {
   Sync(SBox<TaskPublisher<()>>),
 }
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
-pub type IOThread = dyn BackgroundThread<ThreadArg, ()>;
+pub type IOThread = BackgroundThread<ThreadArg, ()>;
 
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   move |(backend, task, state)| {

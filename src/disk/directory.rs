@@ -20,7 +20,7 @@ pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
   sync_handle: SBox<TaskPublisher<()>>,
-  thread: Arc<IOThread>,
+  thread: SBox<IOThread>,
   state: SBox<HandleState>,
   path: PathBuf,
 }
@@ -28,7 +28,7 @@ impl DirHandle {
   pub fn ensure(
     path: &Path,
     disk_backend: Box<dyn DiskBackend>,
-    thread: Arc<IOThread>,
+    thread: SBox<IOThread>,
   ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
@@ -46,7 +46,7 @@ impl DirHandle {
   pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
-      .publish_sync(&self.state, &*self.thread, &self.io_backend)
+      .publish_sync(&self.state, &self.thread, &self.io_backend)
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()

@@ -90,7 +90,7 @@ impl CheckpointCycle {
 
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
-  ticker: Box<dyn BackgroundThread<()>>,
+  ticker: Box<BackgroundThread<()>>,
   /**
    * Shared storage for the active checkpoint cycle.
    *

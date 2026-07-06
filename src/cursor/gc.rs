@@ -38,9 +38,9 @@ const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
-  main: Box<dyn BackgroundThread<()>>,
-  entry: Arc<dyn BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>>,
-  table: Arc<dyn BackgroundThread<()>>,
+  main: Box<BackgroundThread<()>>,
+  entry: Arc<BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>>,
+  table: Arc<BackgroundThread<()>>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -362,7 +362,7 @@ fn run_tick(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
-  entry_worker: &dyn BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>,
+  entry_worker: &BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>,
   event_bus: &EventBus,
   blob: &BlobStorage,
   key_count: usize,
@@ -472,9 +472,7 @@ fn gc_main_loop(
   block_cache: Arc<BlockCache>,
   tables: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-  entry_worker: Arc<
-    dyn BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>,
-  >,
+  entry_worker: Arc<BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>>,
   event_bus: Arc<EventBus>,
   blob: Arc<BlobStorage>,
   key_count: usize,
@@ -491,7 +489,7 @@ fn gc_main_loop(
       &block_cache,
       &tables,
       &version_visibility,
-      &*entry_worker,
+      &entry_worker,
       &event_bus,
       &blob,
       key_count,
