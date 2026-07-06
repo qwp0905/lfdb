@@ -99,16 +99,26 @@ mod futex {
       }
     }
 
+    pub fn try_acquire(&self) -> Option<Permit<'_>> {
+      let n = self.permits.load(Ordering::Acquire);
+      if n == 0 {
+        return None;
+      }
+      if self
+        .permits
+        .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+      {
+        return None;
+      }
+
+      Some(Permit(self))
+    }
+
     pub fn acquire(&self) -> Permit<'_> {
       loop {
-        let n = self.permits.load(Ordering::Acquire);
-        if n > 0
-          && self
-            .permits
-            .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-          return Permit(self);
+        if let Some(permit) = self.try_acquire() {
+          return permit;
         }
 
         self.waiting.fetch_add(1, Ordering::Relaxed);
