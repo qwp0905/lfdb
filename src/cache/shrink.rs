@@ -48,6 +48,18 @@ impl<T> DerefMut for ShrinkTable<T> {
 
 pub struct ShrinkSet<K>(ShrinkTable<K>);
 impl<K> ShrinkSet<K> {
+  const fn equivalent<'a, Q: ?Sized + Equivalent<K>>(
+    key: &'a Q,
+  ) -> impl Fn(&K) -> bool + 'a {
+    |k| key.equivalent(k)
+  }
+  const fn make_hasher<'a, S: BuildHasher>(build_hasher: &'a S) -> impl Fn(&K) -> u64 + 'a
+  where
+    K: Hash,
+  {
+    |k| build_hasher.hash_one(k)
+  }
+
   pub const fn new() -> Self {
     Self(ShrinkTable::new())
   }
@@ -55,14 +67,16 @@ impl<K> ShrinkSet<K> {
   where
     Q: Equivalent<K> + ?Sized,
   {
-    self.0.find(hash, |k| key.equivalent(k)).is_some()
+    let eq = Self::equivalent(key);
+    self.0.find(hash, eq).is_some()
   }
   pub fn insert<S>(&mut self, key: K, hash: u64, hasher: &S)
   where
     K: Hash,
     S: BuildHasher,
   {
-    self.0.insert(hash, key, |k| hasher.hash_one(k));
+    let hasher = Self::make_hasher(hasher);
+    self.0.insert(hash, key, hasher);
   }
   pub fn remove<Q, S>(&mut self, hash: u64, key: &Q, hasher: &S)
   where
@@ -70,9 +84,9 @@ impl<K> ShrinkSet<K> {
     K: Hash,
     S: BuildHasher,
   {
-    self
-      .0
-      .remove_and_shrink(hash, |k| key.equivalent(k), |k| hasher.hash_one(k));
+    let eq = Self::equivalent(key);
+    let hasher = Self::make_hasher(hasher);
+    self.0.remove_and_shrink(hash, eq, hasher);
   }
 }
 
@@ -81,6 +95,20 @@ pub struct ShrinkMap<K, V> {
   hasher: RandomState,
 }
 impl<K, V> ShrinkMap<K, V> {
+  const fn equivalent<'a, Q: ?Sized + Equivalent<K>>(
+    key: &'a Q,
+  ) -> impl Fn(&(K, V)) -> bool + 'a {
+    |(k, _)| key.equivalent(k)
+  }
+  const fn make_hasher<'a, S: BuildHasher>(
+    build_hasher: &'a S,
+  ) -> impl Fn(&(K, V)) -> u64 + 'a
+  where
+    K: Hash,
+  {
+    |(k, _)| build_hasher.hash_one(k)
+  }
+
   pub fn new() -> Self {
     Self {
       table: ShrinkTable::new(),
@@ -89,15 +117,13 @@ impl<K, V> ShrinkMap<K, V> {
   }
   pub fn insert(&mut self, key: K, value: V) -> Option<V>
   where
-    K: Hash + Equivalent<K>,
+    K: Hash + Eq,
   {
     let hash = self.hasher.hash_one(&key);
-    match self.table.find_or_find_insert_slot(
-      hash,
-      |(k, _)| key.equivalent(k),
-      |(k, _)| self.hasher.hash_one(k),
-    ) {
-      Ok(bucket) => Some(replace(&mut unsafe { bucket.as_mut() }.1, value)),
+    let eq = Self::equivalent(&key);
+    let hasher = Self::make_hasher(&self.hasher);
+    match self.table.find_or_find_insert_slot(hash, eq, hasher) {
+      Ok(bucket) => Some(replace(unsafe { &mut bucket.as_mut().1 }, value)),
       Err(slot) => {
         unsafe { self.table.insert_in_slot(hash, slot, (key, value)) };
         None
@@ -106,24 +132,23 @@ impl<K, V> ShrinkMap<K, V> {
   }
   pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
   where
-    Q: Equivalent<K> + Hash,
+    Q: Equivalent<K> + Hash + ?Sized,
     K: Hash,
   {
     let hash = self.hasher.hash_one(key);
-    let (_, v) = self.table.remove_and_shrink(
-      hash,
-      |(k, _)| key.equivalent(k),
-      |(k, _)| self.hasher.hash_one(k),
-    )?;
+    let eq = Self::equivalent(key);
+    let hasher = Self::make_hasher(&self.hasher);
+    let (_, v) = self.table.remove_and_shrink(hash, eq, hasher)?;
     Some(v)
   }
 
   pub fn get<Q>(&self, key: &Q) -> Option<&'_ V>
   where
-    Q: Equivalent<K> + Hash,
+    Q: Equivalent<K> + Hash + ?Sized,
   {
     let hash = self.hasher.hash_one(key);
-    let bucket = self.table.find(hash, |(k, _)| key.equivalent(k))?;
+    let eq = Self::equivalent(key);
+    let bucket = self.table.find(hash, eq)?;
     Some(unsafe { &bucket.as_ref().1 })
   }
 

@@ -127,6 +127,7 @@ impl ActiveSet {
    * section prevents a newly issued transaction from being missed by snapshots.
    */
   pub fn new_state(&self) -> SBox<ActiveState> {
+    // heap allocation first without mutex
     let mut uninit = SBox::new_uninit();
     let mut inner = self.inner.wl();
 
@@ -137,6 +138,7 @@ impl ActiveSet {
 
     inner
       .entry(tx_id)
+      .and_modify(|_| unreachable!())
       .or_insert(unsafe { uninit.assume_init() })
       .clone()
   }
