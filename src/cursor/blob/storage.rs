@@ -20,7 +20,7 @@ fn filename() -> PathBuf {
   PathBuf::from(uuid_simple()).with_extension(FILE_EXT)
 }
 
-const MAX_PERMIT: usize = 5;
+const MAX_PERMIT: u32 = 5;
 
 /**
  * Blob segment registry.

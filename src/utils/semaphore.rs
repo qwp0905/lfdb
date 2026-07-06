@@ -4,14 +4,14 @@ mod fallback {
 
   struct State {
     waiting: usize,
-    permits: usize,
+    permits: u32,
   }
   pub struct Semaphore {
     state: Mutex<State>,
     cvar: Condvar,
   }
   impl Semaphore {
-    pub const fn new(permits: usize) -> Self {
+    pub const fn new(permits: u32) -> Self {
       Self {
         state: Mutex::new(State {
           waiting: 0,
@@ -92,7 +92,7 @@ mod futex {
     waiting: AtomicUsize,
   }
   impl Semaphore {
-    pub const fn new(permits: usize) -> Self {
+    pub const fn new(permits: u32) -> Self {
       Self {
         permits: AtomicU32::new(permits),
         waiting: AtomicUsize::new(0),
@@ -121,7 +121,7 @@ mod futex {
 
     fn release(&self) {
       self.permits.fetch_add(1, Ordering::Release);
-      if self.waiters.load(Ordering::Acquire) > 0 {
+      if self.waiting.load(Ordering::Acquire) > 0 {
         wake_one(&self.permits);
       }
     }
