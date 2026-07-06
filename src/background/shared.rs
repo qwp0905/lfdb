@@ -24,7 +24,7 @@ use super::{Context, SharedFn, UnwindSpawner};
 fn pop_or_steal<'a, A: 'a>(
   local: &Worker<A>,
   global: &Injector<A>,
-  stealers: impl Iterator<Item = &'a Stealer<A>>,
+  mut stealers: impl Iterator<Item = &'a Stealer<A>>,
 ) -> Option<A> {
   if let Some(task) = local.pop() {
     return Some(task);
@@ -33,12 +33,7 @@ fn pop_or_steal<'a, A: 'a>(
     return Some(task);
   }
 
-  for stealer in stealers {
-    if let Some(task) = stealer.steal().success() {
-      return Some(task);
-    }
-  }
-  None
+  stealers.find_map(|stealer| stealer.steal().success())
 }
 
 fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
@@ -66,7 +61,7 @@ fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
 const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: Arc<Injector<Context<T, R>>>,
-  stealers: Arc<Vec<Stealer<Context<T, R>>>>,
+  stealers: Arc<[Stealer<Context<T, R>>]>,
   idle: Arc<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
@@ -79,8 +74,11 @@ where
     let state = SBox::new(AtomicCell::new(State::Unqueued));
 
     let backoff = Backoff::new();
-    let mut cycle = stealers.iter().cycle();
-    let size = stealers.len();
+    let mut cycle = (0..stealers.len())
+      .filter(|i| *i != id)
+      .map(|i| &stealers[i])
+      .cycle();
+    let size = stealers.len() - 1;
 
     loop {
       while !backoff.is_completed() {
@@ -190,7 +188,7 @@ impl<T, R> SharedWorkThread<T, R> {
       .unzip();
 
     let global = Arc::new(Injector::new());
-    let stealers = Arc::new(stealers);
+    let stealers = Arc::from(stealers.into_boxed_slice());
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -252,8 +250,8 @@ impl<T, R> SharedWorkThread<T, R> {
     for _ in 0..threads.len() {
       self.global.push(Context::Term);
     }
-    for (i, th) in threads.into_iter().enumerate() {
-      self.wakers[i].unpark();
+    for th in threads {
+      th.thread().unpark();
       th.join().unwrap();
     }
 
