@@ -99,7 +99,7 @@ mod futex {
       }
     }
 
-    pub fn try_acquire(&self) -> Option<Permit<'_>> {
+    fn try_acquire(&self) -> Option<Permit<'_>> {
       let n = self.permits.load(Ordering::Acquire);
       if n == 0 {
         return None;
