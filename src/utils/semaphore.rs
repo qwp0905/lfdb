@@ -139,3 +139,7 @@ mod futex {
 pub use fallback::*;
 #[cfg(target_os = "linux")]
 pub use futex::*;
+
+#[cfg(test)]
+#[path = "tests/semaphore.rs"]
+mod tests;
