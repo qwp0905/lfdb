@@ -32,11 +32,7 @@ impl<T, R> BackgroundThread<T, R> {
    * caller's request, while each concrete runtime decides how that context
    * should be queued, scheduled, or handled.
    */
-  fn register(&self, ctx: Context<T, R>)
-  where
-    T: Send,
-    R: Send,
-  {
+  fn register(&self, ctx: Context<T, R>) {
     match &self.0 {
       ThreadTypes::Shared(t) => t.register(ctx),
       ThreadTypes::Preload(t) => t.register(ctx),
@@ -53,11 +49,7 @@ impl<T, R> BackgroundThread<T, R> {
    * oneshot fulfiller, and the returned `Oneshot` can be waited on by the
    * caller.
    */
-  pub fn execute(&self, value: T) -> Oneshot<R>
-  where
-    T: Send,
-    R: Send,
-  {
+  pub fn execute(&self, value: T) -> Oneshot<R> {
     let (done_r, done_t) = oneshot();
     let ctx = Context::Work(value, done_t);
     match &self.0 {
@@ -76,11 +68,7 @@ impl<T, R> BackgroundThread<T, R> {
    * runtime and does not need a response. In DDD terms, `execute` behaves like a
    * command with a reply, while `dispatch` behaves like an event.
    */
-  pub fn dispatch(&self, value: T)
-  where
-    T: Send,
-    R: Send,
-  {
+  pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }
 
@@ -93,11 +81,7 @@ impl<T, R> BackgroundThread<T, R> {
    * join the worker thread(s), which also makes background panics observable by
    * the caller.
    */
-  pub fn close(&self)
-  where
-    T: Send,
-    R: Send,
-  {
+  pub fn close(&self) {
     match &self.0 {
       ThreadTypes::Shared(t) => t.close(),
       ThreadTypes::Preload(t) => t.close(),
@@ -115,11 +99,7 @@ impl<T, R> BackgroundThread<T, R> {
  * `binding_events!` macro: a background thread can act as the runtime for an
  * event subscription without exposing its concrete runtime type.
  */
-impl<T, R> OwnedSubscription<T> for BackgroundThread<T, R>
-where
-  T: Send,
-  R: Send,
-{
+impl<T, R> OwnedSubscription<T> for BackgroundThread<T, R> {
   fn handle(&self, event: T) {
     self.dispatch(event);
   }
