@@ -2,7 +2,7 @@ use crate::{
   cache::ShrinkMap,
   debug,
   disk::{AlignedBuf, IOPool},
-  utils::{uuid_simple, SBox, ShortenedRwLock},
+  utils::{uuid_simple, SBox, Semaphore, ShortenedRwLock},
   Result,
 };
 
@@ -20,6 +20,8 @@ fn filename() -> PathBuf {
   PathBuf::from(uuid_simple()).with_extension(FILE_EXT)
 }
 
+const MAX_APPEND: u32 = 5;
+
 /**
  * Blob segment registry.
  *
@@ -33,6 +35,7 @@ pub struct BlobStorage {
   writable: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
   last_id: AtomicU64,
   io_pool: Arc<IOPool>,
+  append_gate: Semaphore,
 }
 impl BlobStorage {
   pub fn replay(io_pool: Arc<IOPool>) -> Result<Self> {
@@ -59,6 +62,7 @@ impl BlobStorage {
       writable: RwLock::new(ShrinkMap::new()),
       last_id: AtomicU64::new(last_id),
       io_pool,
+      append_gate: Semaphore::new(MAX_APPEND),
     })
   }
 
@@ -90,10 +94,14 @@ impl BlobStorage {
     let buf = AlignedBuf::from_vec(buf);
     let len = buf.len();
     let size = buf.size() as BlobOffset;
+
     loop {
+      let permit = self.append_gate.acquire();
+
       for handle in self.writable_handles() {
         match handle.reserve(size) {
           BlobReserved::Ok(offset) => {
+            drop(permit);
             handle.write(&buf, offset)?;
             // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
             // before returning a reference that may be persisted into the tree.
@@ -106,6 +114,7 @@ impl BlobStorage {
             ));
           }
           BlobReserved::Last(offset) => {
+            drop(permit);
             handle.write(&buf, offset)?;
             handle.sync().wait()?;
             return Ok(BlobAppendGuard::new(

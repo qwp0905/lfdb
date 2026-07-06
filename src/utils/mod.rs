@@ -29,3 +29,6 @@ pub use chunk_queue::*;
 
 mod backoff;
 pub use backoff::*;
+
+mod semaphore;
+pub use semaphore::*;
