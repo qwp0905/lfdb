@@ -164,8 +164,9 @@ where
     let hasher = make_hasher(hash_builder);
     let evicted = self.evict(&hasher, &try_evict)?;
 
-    let mut ptr = NonNull::from(Box::leak(Box::new(CacheEntry::new_small(key.clone()))));
-    self.table.insert(hash, ptr, &hasher);
+    let mut ptr =
+      NonNull::from_mut(Box::leak(Box::new(CacheEntry::new_small(key.clone()))));
+    self.table.insert_unique(hash, ptr, &hasher);
 
     self.small.push(ptr);
     self.small_count += 1;
@@ -190,7 +191,7 @@ where
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
-    let Some(bucket) = self.table.find(hash, equivalent(key)) else {
+    let Ok(mut bucket) = self.table.find_entry(hash, equivalent(key)) else {
       return self
         .reserve(key, hash, hash_builder, try_evict)
         .map(GetOrReserve::Reserved);
@@ -198,14 +199,14 @@ where
 
     let hasher = make_hasher(hash_builder);
 
-    let entry = unsafe { (*bucket.as_ptr()).as_mut() };
+    let entry = unsafe { bucket.get_mut().as_mut() };
     match entry.get_state_mut() {
       State::Small { freq } | State::Main { freq } => {
         *freq = (*freq + 1).min(MAX_FREQ);
         Ok(GetOrReserve::Hit(entry.get_value()))
       }
       State::Ghost => {
-        let (mut old, _) = unsafe { self.table.remove(bucket) };
+        let (mut old, _) = bucket.remove();
 
         // Do not revive the ghost entry in place. Its pointer is still queued in the
         // ghost FIFO, so reusing it as a live entry would let that queue observe the
@@ -216,8 +217,10 @@ where
         let evicted = self.evict(&hasher, &try_evict)?;
 
         let mut ptr =
-          NonNull::from(Box::leak(Box::new(CacheEntry::new_main(key.clone()))));
-        self.table.insert(hash, ptr, make_hasher(hash_builder));
+          NonNull::from_mut(Box::leak(Box::new(CacheEntry::new_main(key.clone()))));
+        self
+          .table
+          .insert_unique(hash, ptr, make_hasher(hash_builder));
         self.main.push(ptr);
         self.main_count += 1;
         Ok(GetOrReserve::Reserved(Reserved::new(
