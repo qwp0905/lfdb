@@ -105,17 +105,17 @@ mod futex {
         if n > 0
           && self
             .permits
-            .compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
           return Permit(self);
         }
 
-        self.waiting.fetch_add(1, Ordering::Release);
+        self.waiting.fetch_add(1, Ordering::Relaxed);
         while self.permits.load(Ordering::Acquire) == 0 {
           wait(&self.permits, 0);
         }
-        self.waiting.fetch_sub(1, Ordering::Release);
+        self.waiting.fetch_sub(1, Ordering::Relaxed);
       }
     }
 
