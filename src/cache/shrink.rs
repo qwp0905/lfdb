@@ -5,12 +5,12 @@ use std::{
   ops::{Deref, DerefMut, RangeBounds},
 };
 
-use hashbrown::{raw::RawTable, Equivalent};
+use hashbrown::{hash_table::Entry, Equivalent, HashTable};
 
-pub struct ShrinkTable<T>(RawTable<T>);
+pub struct ShrinkTable<T>(HashTable<T>);
 impl<T> ShrinkTable<T> {
   pub const fn new() -> Self {
-    Self(RawTable::new())
+    Self(HashTable::new())
   }
 
   pub fn remove_and_shrink(
@@ -22,7 +22,11 @@ impl<T> ShrinkTable<T> {
     if self.0.is_empty() {
       return None;
     }
-    let v = self.0.remove_entry(hash, eq)?;
+
+    let Ok(entry) = self.0.find_entry(hash, eq) else {
+      return None;
+    };
+    let (v, _) = entry.remove();
 
     let cap = self.0.capacity();
     let threshold = (cap >> 3) * 3;
@@ -34,7 +38,7 @@ impl<T> ShrinkTable<T> {
   }
 }
 impl<T> Deref for ShrinkTable<T> {
-  type Target = RawTable<T>;
+  type Target = HashTable<T>;
 
   fn deref(&self) -> &Self::Target {
     &self.0
@@ -72,11 +76,12 @@ impl<K> ShrinkSet<K> {
   }
   pub fn insert<S>(&mut self, key: K, hash: u64, hasher: &S)
   where
-    K: Hash,
+    K: Hash + Eq,
     S: BuildHasher,
   {
+    let eq = Self::equivalent(&key);
     let hasher = Self::make_hasher(hasher);
-    self.0.insert(hash, key, hasher);
+    self.0.entry(hash, eq, hasher).or_insert(key);
   }
   pub fn remove<Q, S>(&mut self, hash: u64, key: &Q, hasher: &S)
   where
@@ -122,10 +127,13 @@ impl<K, V> ShrinkMap<K, V> {
     let hash = self.hasher.hash_one(&key);
     let eq = Self::equivalent(&key);
     let hasher = Self::make_hasher(&self.hasher);
-    match self.table.find_or_find_insert_slot(hash, eq, hasher) {
-      Ok(bucket) => Some(replace(unsafe { &mut bucket.as_mut().1 }, value)),
-      Err(slot) => {
-        unsafe { self.table.insert_in_slot(hash, slot, (key, value)) };
+    match self.table.entry(hash, eq, hasher) {
+      Entry::Occupied(mut entry) => {
+        let (_, old) = entry.get_mut();
+        Some(replace(old, value))
+      }
+      Entry::Vacant(entry) => {
+        entry.insert((key, value));
         None
       }
     }
@@ -148,12 +156,12 @@ impl<K, V> ShrinkMap<K, V> {
   {
     let hash = self.hasher.hash_one(key);
     let eq = Self::equivalent(key);
-    let bucket = self.table.find(hash, eq)?;
-    Some(unsafe { &bucket.as_ref().1 })
+    let (_, v) = self.table.find(hash, eq)?;
+    Some(v)
   }
 
   pub fn values(&self) -> impl Iterator<Item = &'_ V> + '_ {
-    unsafe { self.table.iter().map(|bucket| &bucket.as_ref().1) }
+    self.table.iter().map(|(_, v)| v)
   }
 }
 impl<K, V> Default for ShrinkMap<K, V> {

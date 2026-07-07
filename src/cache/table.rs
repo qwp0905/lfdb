@@ -194,12 +194,7 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(hash, &key) {
-        drop(shard);
-        backoff.snooze();
-        continue;
-      }
-
+      debug_assert!(!shard.eviction.contains(hash, &key));
       let Ok(reserved) = shard.node.reserve(&key, hash, hasher, try_evict) else {
         drop(shard);
         backoff.snooze();
