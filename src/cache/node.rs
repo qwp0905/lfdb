@@ -12,7 +12,7 @@ use super::{ShrinkQueue, ShrinkTable};
 const fn equivalent<'a, K, V, Q: ?Sized + Equivalent<K>>(
   key: &'a Q,
 ) -> impl Fn(&NonNull<CacheEntry<K, V>>) -> bool + 'a {
-  move |ptr| unsafe { key.equivalent(ptr.as_ref().get_key()) }
+  |ptr| unsafe { key.equivalent(ptr.as_ref().get_key()) }
 }
 
 const fn ptr_eq<K, V>(
@@ -28,7 +28,7 @@ where
   K: Hash,
   S: BuildHasher,
 {
-  move |ptr| unsafe { hash_builder.hash_one(ptr.as_ref().get_key()) }
+  |ptr| unsafe { hash_builder.hash_one(ptr.as_ref().get_key()) }
 }
 
 enum State {
