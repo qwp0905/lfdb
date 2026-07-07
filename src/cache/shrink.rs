@@ -128,7 +128,10 @@ impl<K, V> ShrinkMap<K, V> {
     let eq = Self::equivalent(&key);
     let hasher = Self::make_hasher(&self.hasher);
     match self.table.entry(hash, eq, hasher) {
-      Entry::Occupied(mut entry) => Some(replace(&mut entry.get_mut().1, value)),
+      Entry::Occupied(mut entry) => {
+        let (_, old) = entry.get_mut();
+        Some(replace(old, value))
+      }
       Entry::Vacant(entry) => {
         entry.insert((key, value));
         None
@@ -153,7 +156,8 @@ impl<K, V> ShrinkMap<K, V> {
   {
     let hash = self.hasher.hash_one(key);
     let eq = Self::equivalent(key);
-    Some(&self.table.find(hash, eq)?.1)
+    let (_, v) = self.table.find(hash, eq)?;
+    Some(v)
   }
 
   pub fn values(&self) -> impl Iterator<Item = &'_ V> + '_ {
