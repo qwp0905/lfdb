@@ -1,5 +1,5 @@
 use std::{
-  collections::BTreeMap,
+  collections::{btree_map::Entry, BTreeMap},
   sync::{
     atomic::{AtomicU8, Ordering},
     RwLock,
@@ -105,13 +105,13 @@ impl ActiveState {
  * state is removed.
  */
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
+  inner: RwLock<BucketMap<SBox<ActiveState>>>,
   last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
   pub const fn new(last_tx_id: TxId) -> Self {
     Self {
-      inner: RwLock::new(BTreeMap::new()),
+      inner: RwLock::new(BucketMap::new()),
       last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
@@ -137,9 +137,7 @@ impl ActiveSet {
       .write(ActiveState::new(tx_id));
 
     inner
-      .entry(tx_id)
-      .and_modify(|_| unreachable!())
-      .or_insert(unsafe { uninit.assume_init() })
+      .insert_mut(tx_id, unsafe { uninit.assume_init() })
       .clone()
   }
   /**
@@ -150,12 +148,12 @@ impl ActiveSet {
    */
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
     let inner = self.inner.rl();
-    let Some((&offset, _)) = inner.first_key_value() else {
+    let Some((offset, _)) = inner.first_key_value() else {
       return OffsetBitmap::new(0, 0);
     };
     let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
-    for (id, _) in inner.range(..max) {
-      snapshot.insert(*id);
+    for (id, _) in inner.until(max) {
+      snapshot.insert(id);
     }
     snapshot
   }
@@ -166,13 +164,13 @@ impl ActiveSet {
     state.parker.wake_all();
   }
   pub fn min_version(&self) -> Option<TxId> {
-    self.inner.rl().first_key_value().map(|(k, _)| *k)
+    self.inner.rl().first_key_value().map(|(k, _)| k)
   }
   pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
     self.inner.rl().get(tx_id).cloned()
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
-    self.inner.rl().range(..max).map(|(k, _)| *k).collect()
+    self.inner.rl().until(max).map(|(k, _)| k).collect()
   }
   pub fn wait(&self, tx_id: &TxId) {
     if let Some(state) = self.get(tx_id) {
@@ -181,5 +179,94 @@ impl ActiveSet {
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
     self.inner.rl().values().cloned().collect()
+  }
+}
+
+const BUCKET_SIZE_BIT: usize = 3;
+const BUCKET_SIZE: usize = 1 << BUCKET_SIZE_BIT;
+const BUCKET_MASK: TxId = (BUCKET_SIZE - 1) as TxId;
+struct Bucket<T> {
+  len: u8,
+  items: [Option<T>; BUCKET_SIZE],
+}
+impl<T> Bucket<T> {
+  fn iter(&self) -> impl Iterator<Item = (TxId, &'_ T)> + '_ {
+    (0..BUCKET_SIZE).filter_map(|i| self.items[i].as_ref().map(|v| (i as TxId, v)))
+  }
+}
+impl<T> Default for Bucket<T> {
+  fn default() -> Self {
+    Self {
+      len: 0,
+      items: [const { None }; BUCKET_SIZE],
+    }
+  }
+}
+
+struct BucketMap<T>(BTreeMap<TxId, Bucket<T>>);
+impl<T> BucketMap<T> {
+  const fn new() -> Self {
+    Self(BTreeMap::new())
+  }
+
+  fn get(&self, &key: &TxId) -> Option<&T> {
+    let i = key >> BUCKET_SIZE_BIT;
+    let bucket = self.0.get(&i)?;
+    let j = key & BUCKET_MASK;
+    bucket.items[j as usize].as_ref()
+  }
+
+  fn remove(&mut self, &key: &TxId) -> Option<T> {
+    let i = key >> BUCKET_SIZE_BIT;
+    let Entry::Occupied(mut entry) = self.0.entry(i) else {
+      return None;
+    };
+
+    let bucket = entry.get_mut();
+    let j = (key & BUCKET_MASK) as usize;
+    let old = bucket.items[j].take()?;
+    if bucket.len > 1 {
+      bucket.len -= 1;
+      return Some(old);
+    }
+
+    entry.remove_entry();
+    Some(old)
+  }
+
+  fn first_key_value(&self) -> Option<(TxId, &T)> {
+    let (i, bucket) = self.0.first_key_value()?;
+    for j in 0..BUCKET_SIZE {
+      if let Some(v) = bucket.items[j].as_ref() {
+        return Some(((i << BUCKET_SIZE_BIT) + (j as TxId), v));
+      }
+    }
+    None
+  }
+
+  fn insert_mut(&mut self, key: TxId, value: T) -> &mut T {
+    let bucket = self.0.entry(key >> BUCKET_SIZE_BIT).or_default();
+    let slot = &mut bucket.items[(key & BUCKET_MASK) as usize];
+    if slot.is_none() {
+      bucket.len += 1;
+    }
+    slot.insert(value)
+  }
+
+  fn iter(&self) -> impl Iterator<Item = (TxId, &T)> + '_ {
+    self.0.iter().flat_map(|(i, bucket)| {
+      bucket.iter().map(|(j, v)| ((*i << BUCKET_SIZE_BIT) + j, v))
+    })
+  }
+
+  fn values(&self) -> impl Iterator<Item = &T> + '_ {
+    self
+      .0
+      .iter()
+      .flat_map(|(_, bucket)| bucket.iter().map(|(_, v)| v))
+  }
+
+  fn until(&self, max: TxId) -> impl Iterator<Item = (TxId, &T)> + '_ {
+    self.iter().take_while(move |(i, _)| *i < max)
   }
 }
