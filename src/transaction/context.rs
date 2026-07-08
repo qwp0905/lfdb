@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
-  background::EventBus,
   cache::RefedSlot,
   cursor::{AtomicRecordId, CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
@@ -24,7 +23,6 @@ pub struct TxContext<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
   record_id: AtomicRecordId,
-  event_bus: &'a EventBus,
   modified: AtomicBool,
 }
 impl<'a> TxContext<'a> {
@@ -33,14 +31,12 @@ impl<'a> TxContext<'a> {
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,
-    event_bus: &'a EventBus,
   ) -> Self {
     Self {
       orchestrator,
       state,
       snapshot,
       record_id: AtomicRecordId::new(0),
-      event_bus,
       modified: AtomicBool::new(false),
     }
   }
@@ -58,10 +54,6 @@ impl<'a> TxContext<'a> {
   #[inline]
   pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
-  }
-
-  pub const fn event_bus(&self) -> &'_ EventBus {
-    self.event_bus
   }
 }
 
