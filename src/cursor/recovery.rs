@@ -190,7 +190,9 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
   let mut used = HEADER_POINTER;
 
   while let Some(ptr) = node_stack.pop() {
-    visited.insert(ptr);
+    if !visited.insert(ptr) {
+      continue;
+    };
     used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
@@ -198,8 +200,16 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
       .as_ref()
       .view::<BTreeNodeView>()?
     {
-      BTreeNodeView::Internal(node) => node_stack.extend(node.get_all_child()?),
+      BTreeNodeView::Internal(node) => {
+        if let Some((_, p)) = node.get_right() {
+          node_stack.push(p);
+        }
+        node_stack.extend(node.get_all_child()?);
+      }
       BTreeNodeView::Leaf(node) => {
+        if let Some(p) = node.get_next() {
+          node_stack.push(p);
+        }
         let mut iter = node.get_entries();
         while let Some((_, _, _, ptr)) = iter.try_next()? {
           entry_stack.push(ptr);
@@ -209,7 +219,9 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
   }
 
   while let Some(ptr) = entry_stack.pop() {
-    visited.insert(ptr);
+    if !visited.insert(ptr) {
+      continue;
+    };
     used = used.max(ptr);
     if let Some(i) = block_cache
       .read(ptr, table)?
