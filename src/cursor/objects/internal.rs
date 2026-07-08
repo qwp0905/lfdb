@@ -286,6 +286,10 @@ impl<'a> InternalNodeView<'a> {
     scanner.read_u64()
   }
 
+  pub fn get_right(&self) -> Option<(StaticKey, Pointer)> {
+    self.right.map(|(p, s, e)| (self.page.copy_range(s..e), p))
+  }
+
   pub fn get_all_child(&self) -> Result<Vec<Pointer>> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
