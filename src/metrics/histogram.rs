@@ -46,11 +46,12 @@ impl AtomicF64 {
     let mut old = self.0.load(Ordering::Acquire);
     loop {
       let new = f64::from_bits(old) + value;
-      let Err(err) =
-        self
-          .0
-          .compare_exchange(old, new.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
-      else {
+      let Err(err) = self.0.compare_exchange_weak(
+        old,
+        new.to_bits(),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      ) else {
         return;
       };
 

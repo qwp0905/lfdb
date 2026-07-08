@@ -284,7 +284,9 @@ impl MappingTable {
       // but the slot may still contain the old page until the caller finishes the
       // eviction/load work, so keep the old key blocked during the transition.
       reserved.fulfill(bid);
-      shard.eviction.insert(evicted, evicted_hash, &self.hasher);
+      shard
+        .eviction
+        .insert_unchecked(evicted, evicted_hash, &self.hasher);
       return Some(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,
@@ -321,7 +323,9 @@ impl MappingTable {
     };
 
     if let Some(token) = try_evict(&bid) {
-      shard.eviction.insert(evicted, evicted_hash, &self.hasher);
+      shard
+        .eviction
+        .insert_unchecked(evicted, evicted_hash, &self.hasher);
       return Some(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,

@@ -49,7 +49,7 @@ impl ExclusivePin {
 
       if self
         .0
-        .compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
+        .compare_exchange_weak(current, current + 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
       {
         return Some(SharedToken(&self.0));
