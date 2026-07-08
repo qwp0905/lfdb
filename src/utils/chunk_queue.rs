@@ -31,9 +31,9 @@ impl<T> Block<T> {
     }
   }
   const fn pop(&mut self) -> T {
-    let value = unsafe { self.data[self.head].assume_init_read() };
-    self.head += 1;
-    value
+    let i = self.head;
+    self.head = i + 1;
+    unsafe { self.data[i].assume_init_read() }
   }
   const fn is_full(&self) -> bool {
     self.tail == CAP
@@ -47,8 +47,8 @@ impl<T> Block<T> {
  */
 impl<T> Drop for Block<T> {
   fn drop(&mut self) {
-    for i in self.head..self.tail {
-      unsafe { self.data[i].assume_init_drop() };
+    for slot in &mut self.data[self.head..self.tail] {
+      unsafe { slot.assume_init_drop() };
     }
   }
 }
