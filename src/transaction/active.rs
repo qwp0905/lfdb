@@ -193,6 +193,10 @@ impl<T> Bucket<T> {
   fn iter(&self) -> impl Iterator<Item = (TxId, &'_ T)> + '_ {
     (0..BUCKET_SIZE).filter_map(|i| self.items[i].as_ref().map(|v| (i as TxId, v)))
   }
+
+  fn first(&self) -> Option<(TxId, &T)> {
+    (0..BUCKET_SIZE).find_map(|i| self.items[i].as_ref().map(|v| (i as TxId, v)))
+  }
 }
 impl<T> Default for Bucket<T> {
   fn default() -> Self {
@@ -236,12 +240,8 @@ impl<T> BucketMap<T> {
 
   fn first_key_value(&self) -> Option<(TxId, &T)> {
     let (i, bucket) = self.0.first_key_value()?;
-    for j in 0..BUCKET_SIZE {
-      if let Some(v) = bucket.items[j].as_ref() {
-        return Some(((i << BUCKET_SIZE_BIT) + (j as TxId), v));
-      }
-    }
-    None
+    let (j, v) = bucket.first()?;
+    Some(((i << BUCKET_SIZE_BIT) + j, v))
   }
 
   fn insert_mut(&mut self, key: TxId, value: T) -> &mut T {
@@ -254,9 +254,11 @@ impl<T> BucketMap<T> {
   }
 
   fn iter(&self) -> impl Iterator<Item = (TxId, &T)> + '_ {
-    self.0.iter().flat_map(|(i, bucket)| {
-      bucket.iter().map(|(j, v)| ((*i << BUCKET_SIZE_BIT) + j, v))
-    })
+    self
+      .0
+      .iter()
+      .map(|(i, bucket)| (i << BUCKET_SIZE_BIT, bucket))
+      .flat_map(|(i, bucket)| bucket.iter().map(move |(j, v)| (i + j, v)))
   }
 
   fn values(&self) -> impl Iterator<Item = &T> + '_ {
