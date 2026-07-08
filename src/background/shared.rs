@@ -1,6 +1,6 @@
 use std::{
   mem::take,
-  sync::{Arc, Mutex},
+  sync::Arc,
   thread::{park, Builder, JoinHandle, Thread},
 };
 
@@ -10,8 +10,9 @@ use crossbeam::{
   queue::SegQueue,
   utils::Backoff,
 };
+use parking_lot::Mutex;
 
-use crate::utils::{SBox, ShortenedMutex};
+use crate::utils::SBox;
 
 use super::{Context, SharedFn, UnwindSpawner};
 
@@ -242,7 +243,7 @@ impl<T, R> SharedWorkThread<T, R> {
    * even if some workers encounter `Term` before processing all local work.
    */
   pub fn close(&self) {
-    let threads = take(&mut *self.threads.l());
+    let threads = take(&mut *self.threads.lock());
     if threads.is_empty() {
       return;
     }

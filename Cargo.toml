@@ -9,13 +9,17 @@ edition = "2021"
 crossbeam = "0.8.2"
 thiserror = "1.0.51"
 crc32fast = "1.5.0"
-libc = "0.2.182"
-winapi = "0.3.9"
 crossbeam-skiplist = "0.1.3"
 log = { version = "0.4.29" }
 uuid = { version = "1.23.2", features = ["v4"] }
 hashbrown = { version = "0.17.1" }
+parking_lot = "0.12.5"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.182"
+
+[target.'cfg(windows)'.dependencies]
+winapi = "0.3.9"
 
 [dev-dependencies]
 tempfile = "3.10.1"
@@ -35,3 +39,4 @@ clippy.type_complexity = "allow"
 clippy.upper_case_acronyms = "allow"
 clippy.manual_is_multiple_of = "allow"
 clippy.big_endian_bytes = "deny"
+clippy.host_endian_bytes = "deny"

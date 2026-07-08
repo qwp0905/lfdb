@@ -1,8 +1,10 @@
+use parking_lot::RwLock;
+
 use crate::{
   cache::ShrinkMap,
   debug,
   disk::{AlignedBuf, IOPool},
-  utils::{uuid_simple, SBox, Semaphore, ShortenedRwLock},
+  utils::{uuid_simple, SBox, Semaphore},
   Result,
 };
 
@@ -11,7 +13,7 @@ use std::{
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc,
   },
 };
 
@@ -67,15 +69,15 @@ impl BlobStorage {
   }
 
   pub fn readonly_handle_ids(&self) -> Vec<BlobId> {
-    self.readonly.rl().values().map(|h| h.get_id()).collect()
+    self.readonly.read().values().map(|h| h.get_id()).collect()
   }
   fn writable_handles(&self) -> Vec<SBox<BlobHandle>> {
-    self.writable.rl().values().cloned().collect()
+    self.writable.read().values().cloned().collect()
   }
 
   pub fn truncate(&self, blob_id: BlobId) -> Result {
     debug!("blob {blob_id} unreachable.");
-    let Some(handle) = self.readonly.wl().remove(&blob_id) else {
+    let Some(handle) = self.readonly.write().remove(&blob_id) else {
       return Ok(());
     };
     handle.truncate()
@@ -84,10 +86,10 @@ impl BlobStorage {
   pub fn get(&self, blob_id: BlobId) -> Option<SBox<BlobHandle>> {
     self
       .readonly
-      .rl()
+      .read()
       .get(&blob_id)
       .cloned()
-      .or_else(|| self.writable.rl().get(&blob_id).cloned())
+      .or_else(|| self.writable.read().get(&blob_id).cloned())
   }
 
   pub fn append(&self, buf: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
@@ -135,7 +137,7 @@ impl BlobStorage {
       // discover and account for it. Blob contents and directory namespace durability
       // are handled as separate boundaries.
       self.io_pool.sync_dir()?;
-      self.writable.wl().insert(last_id, SBox::new(new));
+      self.writable.write().insert(last_id, SBox::new(new));
     }
   }
 }
@@ -186,8 +188,8 @@ impl<'a> Drop for BlobAppendGuard<'a> {
     };
     storage
       .readonly
-      .wl()
+      .write()
       .insert(handle.get_id(), handle.clone());
-    storage.writable.wl().remove(&handle.get_id());
+    storage.writable.write().remove(&handle.get_id());
   }
 }

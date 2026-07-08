@@ -1,8 +1,10 @@
 use std::{
   collections::HashSet,
   path::PathBuf,
-  sync::{atomic::Ordering, Arc, RwLock},
+  sync::{atomic::Ordering, Arc},
 };
+
+use parking_lot::RwLock;
 
 use super::{
   AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata, TableName,
@@ -11,7 +13,7 @@ use super::{
 use crate::{
   cache::ShrinkMap,
   disk::{BlockIOHandle, IOPool},
-  utils::{uuid_simple, SBox, ShortenedRwLock},
+  utils::{uuid_simple, SBox},
   Result,
 };
 
@@ -98,7 +100,7 @@ impl TableMapper {
       exists.remove(metadata.get_filename());
       let id = metadata.get_id();
       self.last_table_id.fetch_max(id + 1, Ordering::Relaxed);
-      self.open_handles.wl().insert(id, table);
+      self.open_handles.write().insert(id, table);
     }
 
     for filename in exists {
@@ -112,14 +114,14 @@ impl TableMapper {
   }
 
   pub fn get(&self, id: TableId) -> Option<TableHandleRef> {
-    self.open_handles.rl().get(&id).cloned()
+    self.open_handles.read().get(&id).cloned()
   }
 
   pub fn insert(&self, handle: TableHandleRef) {
-    self.open_handles.wl().insert(handle.get_id(), handle);
+    self.open_handles.write().insert(handle.get_id(), handle);
   }
   pub fn remove(&self, id: TableId) {
-    self.open_handles.wl().remove(&id);
+    self.open_handles.write().remove(&id);
   }
 
   /**
@@ -143,7 +145,7 @@ impl TableMapper {
   pub fn get_all(&self) -> Vec<TableHandleRef> {
     self
       .open_handles
-      .rl()
+      .read()
       .values()
       .cloned()
       .chain([self.metadata.clone()])

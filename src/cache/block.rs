@@ -1,14 +1,13 @@
-use std::{
-  mem::transmute,
-  sync::{Mutex, MutexGuard},
-};
+use std::mem::transmute;
 
 use crate::{
   disk::{AsyncIO, Page, PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{AtomicSBox, SBox, ShortenedMutex},
+  utils::{AtomicSBox, SBox},
   Result,
 };
+
+use parking_lot::{Mutex, MutexGuard};
 
 /**
  * Exclusive update guard for a cached block.
@@ -107,7 +106,7 @@ impl CachedBlock {
   pub fn latch(&self) -> BlockLatch<'_> {
     BlockLatch {
       pages: &self.page,
-      guard: self.latch.l(),
+      guard: self.latch.lock(),
     }
   }
 
@@ -137,7 +136,7 @@ impl CachedBlock {
       pages: &self.page,
       handle: &self.handle,
       pointer: self.pointer,
-      guard: self.latch.l(),
+      guard: self.latch.lock(),
     }
   }
 }

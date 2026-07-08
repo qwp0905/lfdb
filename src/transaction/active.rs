@@ -1,14 +1,13 @@
 use std::{
   collections::BTreeMap,
-  sync::{
-    atomic::{AtomicU8, Ordering},
-    RwLock,
-  },
+  sync::atomic::{AtomicU8, Ordering},
 };
+
+use parking_lot::RwLock;
 
 use crate::{
   background::OnceParker,
-  utils::{OffsetBitmap, SBox, ShortenedRwLock},
+  utils::{OffsetBitmap, SBox},
   wal::{AtomicTxId, TxId},
 };
 
@@ -129,7 +128,7 @@ impl ActiveSet {
   pub fn new_state(&self) -> SBox<ActiveState> {
     // heap allocation first without mutex
     let mut uninit = SBox::new_uninit();
-    let mut inner = self.inner.wl();
+    let mut inner = self.inner.write();
 
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
     SBox::get_mut(&mut uninit)
@@ -149,7 +148,7 @@ impl ActiveSet {
    * storing every possible transaction id up to `max`.
    */
   pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
-    let inner = self.inner.rl();
+    let inner = self.inner.read();
     let Some((&offset, _)) = inner.first_key_value() else {
       return OffsetBitmap::new(0, 0);
     };
@@ -160,19 +159,19 @@ impl ActiveSet {
     snapshot
   }
   pub fn remove(&self, tx_id: &TxId) {
-    let Some(state) = self.inner.wl().remove(tx_id) else {
+    let Some(state) = self.inner.write().remove(tx_id) else {
       return;
     };
     state.parker.wake_all();
   }
   pub fn min_version(&self) -> Option<TxId> {
-    self.inner.rl().first_key_value().map(|(k, _)| *k)
+    self.inner.read().first_key_value().map(|(k, _)| *k)
   }
   pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.rl().get(tx_id).cloned()
+    self.inner.read().get(tx_id).cloned()
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
-    self.inner.rl().range(..max).map(|(k, _)| *k).collect()
+    self.inner.read().range(..max).map(|(k, _)| *k).collect()
   }
   pub fn wait(&self, tx_id: &TxId) {
     if let Some(state) = self.get(tx_id) {
@@ -180,6 +179,6 @@ impl ActiveSet {
     }
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
-    self.inner.rl().values().cloned().collect()
+    self.inner.read().values().cloned().collect()
   }
 }

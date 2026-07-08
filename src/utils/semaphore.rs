@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "linux"))]
 mod fallback {
-  use std::sync::{Condvar, Mutex};
+  use parking_lot::{Condvar, Mutex};
 
   struct State {
     waiting: usize,
@@ -22,10 +22,10 @@ mod fallback {
     }
 
     pub fn acquire(&self) -> Permit<'_> {
-      let mut state = self.state.lock().unwrap();
+      let mut state = self.state.lock();
       while state.permits == 0 {
         state.waiting += 1;
-        state = self.cvar.wait(state).unwrap();
+        self.cvar.wait(&mut state);
         state.waiting -= 1;
       }
       state.permits -= 1;
@@ -33,7 +33,7 @@ mod fallback {
     }
 
     fn release(&self) {
-      let mut state = self.state.lock().unwrap();
+      let mut state = self.state.lock();
       state.permits += 1;
       if state.waiting > 0 {
         self.cvar.notify_one();
