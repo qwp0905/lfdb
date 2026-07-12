@@ -1,4 +1,8 @@
-use std::{collections::HashSet, ops::Bound, sync::Arc};
+use std::{
+  collections::{HashMap, HashSet},
+  ops::Bound,
+  sync::Arc,
+};
 
 use crossbeam::queue::SegQueue;
 
@@ -140,7 +144,11 @@ pub fn open_tables(
   Ok((handles, compactions))
 }
 
-pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
+pub fn recovery(
+  block_cache: Arc<BlockCache>,
+  recorder: Arc<PageRecorder>,
+  tables: &TableMapper,
+) -> Result {
   let open_handles = Arc::new(SegQueue::new());
   tables
     .get_all()
@@ -151,13 +159,14 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
     .map(|_| {
       let block_cache = block_cache.clone();
       let open_handles = open_handles.clone();
+      let recorder = recorder.clone();
       once(move || {
         while let Some(table) = open_handles.pop() {
           debug!(
             "table {} start to collect orphaned blocks.",
             table.get_name(),
           );
-          release_orphaned(&block_cache, &table)?;
+          recovery_table(&block_cache, &recorder, &table)?;
         }
         Ok(())
       })
@@ -169,15 +178,75 @@ pub fn recovery(block_cache: Arc<BlockCache>, tables: &TableMapper) -> Result {
   Ok(())
 }
 
+struct RecoveryPolicy<'a> {
+  block_cache: &'a BlockCache,
+  recorder: &'a PageRecorder,
+}
+impl<'a> ReadonlyPolicy for RecoveryPolicy<'a> {
+  fn is_aborted(&self, _: TxId) -> bool {
+    unreachable!()
+  }
+  fn is_owned(&self, _: TxId) -> bool {
+    unreachable!()
+  }
+  fn is_readable(&self, _: TxId) -> bool {
+    unreachable!()
+  }
+  fn is_active(&self, _: TxId) -> bool {
+    unreachable!()
+  }
+  fn fetch_slot(
+    &self,
+    pointer: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<crate::cache::CachedSlot<'_>> {
+    self.block_cache.read(pointer, table)
+  }
+  fn read_blob(
+    &self,
+    _: super::BlobId,
+    _: super::BlobOffset,
+    _: super::BlobLen,
+  ) -> Result<AlignedBuf> {
+    unreachable!()
+  }
+}
+impl<'a> WritablePolicy for RecoveryPolicy<'a> {
+  fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+    unreachable!()
+  }
+  fn serialize_and_log<T: crate::serialize::Serializable>(
+    &self,
+    slot: &mut crate::cache::RefedSlot,
+    data: &T,
+    table: &TableHandleRef,
+  ) -> Result {
+    self
+      .recorder
+      .serialize_and_log(RESERVED_TX, table.get_id(), RESERVED_TX, slot, data)
+  }
+  fn alloc_slot(
+    &self,
+    pointer: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<crate::cache::CachedSlot<'_>> {
+    self.block_cache.alloc(pointer, table)
+  }
+}
+
 /**
- * Rebuild the table free list from reachable table pages.
+ * Rebuild the table free list from reachable table pages and recovery half splits.
  *
  * Pages reachable from the table header, B-tree nodes, and data-entry chains are
  * treated as live. Unvisited pages below the highest reachable pointer are
  * returned to the free list. Pages above that point are treated as never
  * allocated by this table and become the next allocation range.
  */
-fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result {
+fn recovery_table(
+  block_cache: &BlockCache,
+  recorder: &PageRecorder,
+  table: &TableHandleRef,
+) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let root = block_cache
     .read(HEADER_POINTER, table)?
@@ -185,14 +254,17 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
     .as_ref()
     .deserialize::<TreeHeader>()?
     .get_root();
-  let mut node_stack = vec![root];
+  let mut node_stack = vec![(root, 0)];
   let mut entry_stack = vec![];
+  let mut half_split = HashMap::new();
   let mut used = HEADER_POINTER;
 
-  while let Some(ptr) = node_stack.pop() {
+  while let Some((ptr, height)) = node_stack.pop() {
     if !visited.insert(ptr) {
+      half_split.remove(&ptr);
       continue;
     };
+
     used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
@@ -201,14 +273,18 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
       .view::<BTreeNodeView>()?
     {
       BTreeNodeView::Internal(node) => {
-        if let Some((_, p)) = node.get_right() {
-          node_stack.push(p);
+        if let Some((k, p)) = node.get_right() {
+          half_split.insert(p, (Some(k), height));
+          node_stack.push((p, height));
         }
-        node_stack.extend(node.get_all_child()?);
+        for c in node.get_all_child()? {
+          node_stack.push((c, height + 1));
+        }
       }
       BTreeNodeView::Leaf(node) => {
         if let Some(p) = node.get_next() {
-          node_stack.push(p);
+          half_split.insert(p, (None, height));
+          node_stack.push((p, height));
         }
         let mut iter = node.get_entries();
         while let Some((_, _, _, ptr)) = iter.try_next()? {
@@ -238,6 +314,24 @@ fn release_orphaned(block_cache: &BlockCache, table: &TableHandleRef) -> Result 
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
   table.free().replay(used + 1);
+
+  let index = BTreeIndex::new(RecoveryPolicy {
+    block_cache,
+    recorder,
+  });
+
+  for (split_ptr, (split_key, height)) in half_split {
+    if let Some(k) = split_key {
+      index.recovery_half_split(k, split_ptr, height, table)?;
+      continue;
+    }
+
+    let slot = block_cache.read(split_ptr, table)?.for_read();
+    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+
+    let key = node.top()?.to_vec();
+    index.recovery_half_split(key, split_ptr, height, table)?;
+  }
 
   Ok(())
 }
