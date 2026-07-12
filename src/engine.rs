@@ -209,7 +209,7 @@ impl Engine {
     }
 
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), &tables)?;
+    recovery(block_cache.clone(), recorder.clone(), &tables)?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),
