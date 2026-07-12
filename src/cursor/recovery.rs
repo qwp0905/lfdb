@@ -257,11 +257,11 @@ fn recovery_table(
   let mut node_stack = vec![(root, 0)];
   let mut entry_stack = vec![];
   let mut half_split = HashMap::new();
+  let mut child_reachable = HashSet::new();
   let mut used = HEADER_POINTER;
 
   while let Some((ptr, height)) = node_stack.pop() {
     if !visited.insert(ptr) {
-      half_split.remove(&ptr);
       continue;
     };
 
@@ -279,6 +279,7 @@ fn recovery_table(
         }
         for c in node.get_all_child()? {
           node_stack.push((c, height + 1));
+          child_reachable.insert(c);
         }
       }
       BTreeNodeView::Leaf(node) => {
@@ -321,6 +322,9 @@ fn recovery_table(
   });
 
   for (split_ptr, (split_key, height)) in half_split {
+    if child_reachable.contains(&split_ptr) {
+      continue;
+    }
     if let Some(k) = split_key {
       index.recovery_half_split(k, split_ptr, height, table)?;
       continue;
