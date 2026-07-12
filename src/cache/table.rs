@@ -1,16 +1,16 @@
 use std::{
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
+  sync::{Mutex, MutexGuard},
 };
 
 use crossbeam::utils::Backoff;
-use parking_lot::{Mutex, MutexGuard};
 
 use super::{CacheNode, GetOrReserve, Reserved, ShrinkSet};
 use crate::{
   disk::Pointer,
   table::TableId,
-  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -99,13 +99,13 @@ impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
       if let Some((k, h)) = self.evicted {
-        self.guard.lock().eviction.remove(h, &k, self.hasher);
+        self.guard.l().eviction.remove(h, &k, self.hasher);
       }
       return;
     }
 
     // rollback
-    let mut shard = self.guard.lock();
+    let mut shard = self.guard.l();
     if let Some((k, h)) = self.evicted {
       shard.eviction.remove(h, &k, self.hasher);
       shard.aborted.push((self.block_id, Some((k, h))));
@@ -193,7 +193,7 @@ impl MappingTable {
     let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
 
     loop {
-      let mut shard = s.lock();
+      let mut shard = s.l();
       debug_assert!(!shard.eviction.contains(hash, &key));
       let Ok(reserved) = shard.node.reserve(&key, hash, hasher, try_evict) else {
         drop(shard);
@@ -233,7 +233,7 @@ impl MappingTable {
     let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
 
     loop {
-      let mut shard = s.lock();
+      let mut shard = s.l();
       if shard.eviction.contains(hash, &key) {
         drop(shard);
         backoff.snooze();
@@ -347,7 +347,7 @@ impl MappingTable {
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.lock().allocated, self.offsets[i]))
+      .map(|(i, s)| (s.l().allocated, self.offsets[i]))
   }
 }
 

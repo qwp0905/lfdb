@@ -3,13 +3,12 @@ use std::{
   io::{Error as IoError, ErrorKind, IoSlice, Result as IOResult},
   mem::forget,
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex},
   thread::sleep,
   time::Duration,
 };
 
 use crossbeam::utils::Backoff;
-use parking_lot::Mutex;
 
 use super::{
   create_io_thread, AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState,
@@ -19,7 +18,7 @@ use crate::{
   background::{Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
-  utils::SBox,
+  utils::{SBox, ShortenedMutex},
   Error, Result,
 };
 
@@ -265,12 +264,12 @@ impl IOHandle {
       backoff.snooze();
     }
 
-    self.base_dir.remove(&self.filename.lock())
+    self.base_dir.remove(&self.filename.l())
   }
 
   pub fn rename(&self, new_filename: PathBuf) -> IOResult<()> {
     {
-      let mut filename = self.filename.lock();
+      let mut filename = self.filename.l();
       self.base_dir.rename(&filename, &new_filename)?;
       *filename = new_filename;
     }
@@ -281,6 +280,6 @@ impl IOHandle {
     self.backend.fallocate(offset, len)
   }
   pub fn filename(&self) -> PathBuf {
-    self.filename.lock().clone()
+    self.filename.l().clone()
   }
 }
