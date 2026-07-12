@@ -17,6 +17,7 @@ pub struct Transaction<'a> {
   orchestrator: &'a TxOrchestrator,
   context: TxContext<'a>,
   metrics: &'a MetricsRegistry,
+  event_bus: &'a EventBus,
   tx_start: Option<Instant>,
   created_tables: Vec<TableHandleRef>,
   dropped_tables: Vec<TableHandleRef>,
@@ -31,11 +32,12 @@ impl<'a> Transaction<'a> {
     metrics: &'a MetricsRegistry,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
-    let context = TxContext::new(orchestrator, state, snapshot, event_bus);
+    let context = TxContext::new(orchestrator, state, snapshot);
     Self {
       orchestrator,
       context,
       metrics,
+      event_bus,
       tx_start,
       created_tables: Vec::new(),
       dropped_tables: Vec::new(),
@@ -206,13 +208,13 @@ impl<'a> Transaction<'a> {
       .dropped_tables
       .drain(..)
       .map(|table| DropTableCommitted::new(table, id, version));
-    self.context.event_bus().batch_publish(events);
+    self.event_bus.batch_publish(events);
 
     let events = self
       .compacted_tables
       .drain(..)
       .map(|(old, new, metadata)| CompactionCommitted::new(old, new, metadata, version));
-    self.context.event_bus().batch_publish(events);
+    self.event_bus.batch_publish(events);
     self.created_tables.clear();
 
     Ok(())
@@ -249,13 +251,13 @@ impl<'a> Transaction<'a> {
       .created_tables
       .drain(..)
       .map(|table| DropTableCommitted::new(table, id, version));
-    self.context.event_bus().batch_publish(events);
+    self.event_bus.batch_publish(events);
 
     let events = self
       .compacted_tables
       .drain(..)
       .map(|(_, new, _)| DropTableCommitted::new(new, id, version));
-    self.context.event_bus().batch_publish(events);
+    self.event_bus.batch_publish(events);
   }
 }
 impl<'a> Drop for Transaction<'a> {

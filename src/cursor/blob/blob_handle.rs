@@ -66,11 +66,12 @@ impl BlobHandle {
       if new > BLOB_SIZE {
         return BlobReserved::Eof;
       }
-      let Err(c) =
-        self
-          .reserved
-          .compare_exchange(offset, new, Ordering::Release, Ordering::Acquire)
-      else {
+      let Err(c) = self.reserved.compare_exchange_weak(
+        offset,
+        new,
+        Ordering::Release,
+        Ordering::Acquire,
+      ) else {
         if new > BLOB_THRESHOLD {
           return BlobReserved::Last(offset);
         }

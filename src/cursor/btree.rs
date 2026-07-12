@@ -249,6 +249,33 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     }
   }
 
+  pub fn recovery_half_split(
+    &self,
+    split_key: StaticKey,
+    split_pointer: Pointer,
+    height: usize,
+    table: &TableHandleRef,
+  ) -> Result {
+    let mut ptr = self
+      .0
+      .fetch_slot(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let mut stack = vec![];
+    while stack.len() < height {
+      let slot = self.0.fetch_slot(ptr, table)?.for_read();
+      let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
+      match node.find(&split_key)? {
+        Ok(i) => stack.push(replace(&mut ptr, i)),
+        Err(i) => ptr = i,
+      }
+    }
+    self.propagate_split(split_key, split_pointer, stack, table)
+  }
+
   fn propagate_split(
     &self,
     mut split_key: StaticKey,

@@ -288,6 +288,13 @@ impl<'a> LeafNodeView<'a> {
     Ok(LeafNode::new(entries, self.next, self.bias))
   }
 
+  pub fn top(&self) -> Result<StaticKeyRef<'_>> {
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+    let l = scanner.read_u16()? as usize;
+    Ok(self.page.range(self.offset..self.offset + l))
+  }
+
   pub fn get_entries(&self) -> LeafNodeIter<'_> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
