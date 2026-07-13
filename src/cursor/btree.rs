@@ -256,19 +256,14 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     level: u16,
     table: &TableHandleRef,
   ) -> Result {
-    let (mut ptr, height) = {
-      let header = self
-        .0
-        .fetch_slot(HEADER_POINTER, table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<TreeHeader>()?;
-      (header.get_root(), header.get_height())
-    };
+    let mut slot = self.0.fetch_slot(HEADER_POINTER, table)?.for_write();
+    let mut header: TreeHeader = slot.as_ref().deserialize()?;
 
-    let len = (height - level) as usize;
+    let mut ptr = header.get_root();
+    let height = (header.get_height() - level) as usize;
     let mut stack = vec![];
-    while stack.len() < len {
+
+    while stack.len() < height {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
       match node.find(&split_key)? {
@@ -285,10 +280,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       (split_key, split_pointer) = (k, p);
     }
 
-    let mut slot = self.0.fetch_slot(HEADER_POINTER, table)?.for_write();
-    let mut header: TreeHeader = slot.as_ref().deserialize()?;
-
-    let new_root = InternalNode::initialize(split_key, ptr, split_pointer);
+    let new_root = InternalNode::initialize(split_key, header.get_root(), split_pointer);
     let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
 
     header.set_root(new_root_ptr);
