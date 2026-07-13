@@ -251,20 +251,18 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
 
   pub fn recovery_half_split(
     &self,
-    split_key: StaticKey,
-    split_pointer: Pointer,
-    height: usize,
+    mut split_key: StaticKey,
+    mut split_pointer: Pointer,
+    level: u16,
     table: &TableHandleRef,
   ) -> Result {
-    let mut ptr = self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
+    let mut slot = self.0.fetch_slot(HEADER_POINTER, table)?.for_write();
+    let mut header: TreeHeader = slot.as_ref().deserialize()?;
 
+    let mut ptr = header.get_root();
+    let height = (header.get_height() - level) as usize;
     let mut stack = vec![];
+
     while stack.len() < height {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
@@ -273,7 +271,22 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         Err(i) => ptr = i,
       }
     }
-    self.propagate_split(split_key, split_pointer, stack, table)
+
+    while let Some(ptr) = stack.pop() {
+      let Some((k, p)) = self.apply_split(split_key, split_pointer, ptr, table)? else {
+        return Ok(());
+      };
+
+      (split_key, split_pointer) = (k, p);
+    }
+
+    let new_root = InternalNode::initialize(split_key, header.get_root(), split_pointer);
+    let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
+
+    header.set_root(new_root_ptr);
+    header.increase_height();
+    self.0.serialize_and_log(&mut slot, &header, table)?;
+    Ok(())
   }
 
   fn propagate_split(
@@ -302,17 +315,17 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
         let current_height = header.get_height();
         let ptr = header.get_root();
-        if old_height == current_height {
-          let new_root = InternalNode::initialize(split_key.clone(), ptr, split_pointer);
-          let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
-
-          header.set_root(new_root_ptr);
-          header.increase_height();
-          self.0.serialize_and_log(header_slot, &header, table)?;
-          return Ok(None);
+        if old_height != current_height {
+          return Ok(Some((ptr, (current_height - old_height) as usize)));
         }
 
-        Ok(Some((ptr, (current_height - old_height) as usize)))
+        let new_root = InternalNode::initialize(split_key.clone(), ptr, split_pointer);
+        let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
+
+        header.set_root(new_root_ptr);
+        header.increase_height();
+        self.0.serialize_and_log(header_slot, &header, table)?;
+        Ok(None)
       })?
       else {
         return Ok(());
