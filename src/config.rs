@@ -1,5 +1,5 @@
 use super::{Error, Result};
-use std::{path::Path, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 macro_rules! invalid {
   ($msg:tt) => {
@@ -7,11 +7,8 @@ macro_rules! invalid {
   };
 }
 
-pub struct EngineConfig<T>
-where
-  T: AsRef<Path>,
-{
-  pub base_path: T,
+pub struct EngineConfig {
+  pub base_path: PathBuf,
   pub io_thread_count: usize,
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
@@ -25,7 +22,7 @@ where
   pub block_cache_memory_capacity: usize,
   pub transaction_timeout: Duration,
 }
-impl<T: AsRef<Path>> EngineConfig<T> {
+impl EngineConfig {
   pub fn validate(&self) -> Result {
     if self.io_thread_count == 0 {
       return invalid!("io_thread_count must be greater then 0.");
@@ -84,5 +81,24 @@ impl<T: AsRef<Path>> EngineConfig<T> {
     }
 
     Ok(())
+  }
+}
+impl Clone for EngineConfig {
+  fn clone(&self) -> Self {
+    Self {
+      base_path: self.base_path.clone(),
+      io_thread_count: self.io_thread_count,
+      wal_file_size: self.wal_file_size,
+      wal_buffer_size: self.wal_buffer_size,
+      checkpoint_flush_factor: self.checkpoint_flush_factor,
+      gc_batch_size: self.gc_batch_size,
+      gc_thread_count: self.gc_thread_count,
+      compaction_threshold: self.compaction_threshold,
+      compaction_min_size: self.compaction_min_size,
+      compaction_batch_size: self.compaction_batch_size,
+      block_cache_shard_count: self.block_cache_shard_count,
+      block_cache_memory_capacity: self.block_cache_memory_capacity,
+      transaction_timeout: self.transaction_timeout,
+    }
   }
 }

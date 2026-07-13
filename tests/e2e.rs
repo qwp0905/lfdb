@@ -30,7 +30,7 @@ impl Log for TestLogger {
   fn flush(&self) {}
 }
 
-fn default_options(dir: &TempDir) -> EngineBuilder<&Path> {
+fn default_options(dir: &TempDir) -> EngineBuilder {
   let _ = log::set_logger(&TestLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())

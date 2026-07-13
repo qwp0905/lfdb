@@ -1,7 +1,6 @@
 use std::{
   collections::HashMap,
   panic::{RefUnwindSafe, UnwindSafe},
-  path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -44,9 +43,8 @@ pub struct Engine {
   metrics_registry: Arc<MetricsRegistry>,
 }
 impl Engine {
-  pub fn bootstrap<T, B>(backend: B, config: &EngineConfig<T>) -> Result<Self>
+  pub fn bootstrap<B>(backend: B, config: &EngineConfig) -> Result<Self>
   where
-    T: AsRef<Path>,
     B: DiskBackend + 'static,
   {
     let st = Instant::now();

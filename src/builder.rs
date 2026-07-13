@@ -1,19 +1,20 @@
-use std::{path::Path, time::Duration};
+use std::{
+  path::{Path, PathBuf},
+  time::Duration,
+};
 
 use super::{Engine, EngineConfig, Result};
 use crate::disk::{DefaultIOBackend, DiskBackend};
 
-pub struct EngineBuilder<T>(EngineConfig<T>)
-where
-  T: AsRef<Path>;
+pub struct EngineBuilder(EngineConfig);
 
-impl<T> EngineBuilder<T>
-where
-  T: AsRef<Path>,
-{
-  pub const fn new(base_path: T) -> Self {
+impl EngineBuilder {
+  pub fn new<T>(base_path: T) -> Self
+  where
+    T: AsRef<Path>,
+  {
     Self(EngineConfig {
-      base_path,
+      base_path: PathBuf::from(base_path.as_ref()),
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
@@ -136,6 +137,11 @@ where
 
   pub fn with_backend<B: DiskBackend + 'static>(&self, backend: B) -> Result<Engine> {
     Engine::bootstrap(backend, &self.0)
+  }
+}
+impl Clone for EngineBuilder {
+  fn clone(&self) -> Self {
+    Self(self.0.clone())
   }
 }
 
