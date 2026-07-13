@@ -248,19 +248,21 @@ fn recovery_table(
   table: &TableHandleRef,
 ) -> Result {
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
-  let root = block_cache
-    .read(HEADER_POINTER, table)?
-    .for_read()
-    .as_ref()
-    .deserialize::<TreeHeader>()?
-    .get_root();
-  let mut node_stack = vec![(root, 0)];
+  let (root, height) = {
+    let header = block_cache
+      .read(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?;
+    (header.get_root(), header.get_height())
+  };
+  let mut node_stack = vec![(root, height)];
   let mut entry_stack = vec![];
   let mut half_split = HashMap::new();
   let mut child_reachable = HashSet::new();
   let mut used = HEADER_POINTER;
 
-  while let Some((ptr, height)) = node_stack.pop() {
+  while let Some((ptr, level)) = node_stack.pop() {
     if !visited.insert(ptr) {
       continue;
     };
@@ -274,18 +276,18 @@ fn recovery_table(
     {
       BTreeNodeView::Internal(node) => {
         if let Some((k, p)) = node.get_right() {
-          half_split.insert(p, (Some(k), height));
-          node_stack.push((p, height));
+          half_split.insert(p, (Some(k), level));
+          node_stack.push((p, level));
         }
         for c in node.get_all_child()? {
-          node_stack.push((c, height + 1));
+          node_stack.push((c, level - 1));
           child_reachable.insert(c);
         }
       }
       BTreeNodeView::Leaf(node) => {
         if let Some(p) = node.get_next() {
-          half_split.insert(p, (None, height));
-          node_stack.push((p, height));
+          half_split.insert(p, (None, level));
+          node_stack.push((p, level));
         }
         let mut iter = node.get_entries();
         while let Some((_, _, _, ptr)) = iter.try_next()? {
@@ -316,17 +318,31 @@ fn recovery_table(
     .for_each(|i| table.free().dealloc(i));
   table.free().replay(used + 1);
 
+  let half_split = half_split
+    .into_iter()
+    .filter(|(p, _)| !child_reachable.contains(p))
+    .map(|(p, (k, l))| (p, k, l))
+    .collect::<Vec<_>>();
+  if half_split.is_empty() {
+    return Ok(());
+  }
+  info!(
+    "{} half split detected at table {}",
+    half_split.len(),
+    table.get_name()
+  );
+
   let index = BTreeIndex::new(RecoveryPolicy {
     block_cache,
     recorder,
   });
 
-  for (split_ptr, (split_key, height)) in half_split {
+  for (split_ptr, split_key, level) in half_split {
     if child_reachable.contains(&split_ptr) {
       continue;
     }
     if let Some(k) = split_key {
-      index.recovery_half_split(k, split_ptr, height, table)?;
+      index.recovery_half_split(k, split_ptr, level, table)?;
       continue;
     }
 
@@ -334,7 +350,7 @@ fn recovery_table(
     let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
 
     let key = node.top()?.to_vec();
-    index.recovery_half_split(key, split_ptr, height, table)?;
+    index.recovery_half_split(key, split_ptr, level, table)?;
   }
 
   Ok(())
