@@ -318,12 +318,26 @@ fn recovery_table(
     .for_each(|i| table.free().dealloc(i));
   table.free().replay(used + 1);
 
+  let half_split = half_split
+    .into_iter()
+    .filter(|(p, _)| !child_reachable.contains(p))
+    .map(|(p, (k, l))| (p, k, l))
+    .collect::<Vec<_>>();
+  if half_split.is_empty() {
+    return Ok(());
+  }
+  info!(
+    "{} half split detected at table {}",
+    half_split.len(),
+    table.get_name()
+  );
+
   let index = BTreeIndex::new(RecoveryPolicy {
     block_cache,
     recorder,
   });
 
-  for (split_ptr, (split_key, level)) in half_split {
+  for (split_ptr, split_key, level) in half_split {
     if child_reachable.contains(&split_ptr) {
       continue;
     }
