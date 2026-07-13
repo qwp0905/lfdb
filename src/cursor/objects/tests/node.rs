@@ -54,6 +54,8 @@ fn test_serialize_leaf() {
     .into_leaf()
     .expect("desirialize leaf error");
 
+  assert_eq!(d.top().unwrap(), &[49, 50, 51]);
+
   let mut iter = d.get_entries();
   let mut i = 0;
   while let Some((s, e, r, ptr)) = iter.try_next().unwrap() {
