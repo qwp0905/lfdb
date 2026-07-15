@@ -268,22 +268,24 @@ impl BlockCache {
   }
 }
 
+impl Drop for BlockCache {
+  fn drop(&mut self) {
+    for i in self
+      .table
+      .len_per_shard()
+      .flat_map(|(len, offset)| offset..offset + len)
+    {
+      self.cached_blocks[i].drop_in_place();
+    }
+  }
+}
+
 /**
  * Coarse locality bucket used to order checkpoint writes by table and nearby
  * disk range.
  */
 const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
 const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
-
-impl Drop for BlockCache {
-  fn drop(&mut self) {
-    for (len, offset) in self.table.len_per_shard() {
-      for i in offset..offset + len {
-        self.cached_blocks[i].drop_in_place();
-      }
-    }
-  }
-}
 
 /**
  * Incremental dirty-page flusher.
@@ -325,11 +327,11 @@ impl CacheFlusher {
   }
 
   pub fn flush_hard(&mut self) -> Result {
-    self.advance(self.len())?;
+    self.advance(self.remaining())?;
     self.finish()
   }
 
-  pub fn len(&self) -> usize {
+  pub fn remaining(&self) -> usize {
     self.dirty_blocks.len()
   }
 

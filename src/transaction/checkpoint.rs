@@ -78,13 +78,13 @@ impl CheckpointCycle {
     self.segments.len()
   }
   fn dirty_len(&self) -> usize {
-    self.flusher.len()
+    self.flusher.remaining()
   }
   const fn take_start(&mut self) -> Option<Instant> {
     self.start.take()
   }
   fn is_empty(&self) -> bool {
-    self.segments.is_empty() && self.flusher.len() == 0
+    self.segments.is_empty() && self.flusher.is_done()
   }
 }
 
