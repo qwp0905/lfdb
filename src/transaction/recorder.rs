@@ -44,7 +44,7 @@ impl PageRecorder {
       table_id,
       ptr,
       current_version,
-      page.copy_range(0..byte_len),
+      page.range(0..byte_len),
     )
   }
 }
