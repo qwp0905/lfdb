@@ -1,6 +1,6 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use super::{LogId, TxId};
+use super::{LogId, RecordEncoding, TxId};
 use crate::{
   disk::{Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
@@ -12,9 +12,11 @@ use crate::{
 pub enum Operation {
   Insert {
     table_id: TableId,
-    pointer: Pointer,      // disk pointer of the page
-    current_version: TxId, // current version at the time the wal record was written
-    data: Vec<u8>,         // data
+    pointer: Pointer,         // disk pointer of the page
+    current_version: TxId,    // current version at the time the wal record was written
+    data: Vec<u8>,            // data
+    original_len: u16,        // original len before compression
+    encoding: RecordEncoding, // encoding of compression
   },
   Commit,
   /**
@@ -41,7 +43,7 @@ impl Operation {
   fn byte_len(&self) -> usize {
     1 + match self {
       Self::Insert { data, .. } => {
-        POINTER_BYTES + TABLE_ID_BYTES + TX_ID_BYTES + data.len()
+        POINTER_BYTES + TABLE_ID_BYTES + TX_ID_BYTES + data.len() + 1 + 2
       }
       Self::Checkpoint { snapshot, .. } => {
         TX_ID_BYTES + LOG_ID_BYTES + snapshot.as_os_str().len()
@@ -87,12 +89,16 @@ impl LogRecord {
         let table_id = reader.read_u32()?;
         let pointer = reader.read_u64()?;
         let current_version = reader.read_u64()?;
+        let original_len = reader.read_u16()?;
+        let encoding = RecordEncoding::from_byte(reader.read_byte()?)?;
         let data = reader.read_all();
         Operation::Insert {
           table_id,
           pointer,
           current_version,
           data: data.to_vec(),
+          original_len,
+          encoding,
         }
       }
       2 => (reader.is_eof()).then_some(Operation::Commit)?,
@@ -123,11 +129,15 @@ impl LogRecord {
         table_id,
         pointer,
         data,
-        current_version: record_version,
+        current_version,
+        original_len,
+        encoding,
       } => {
         writer.write_u32(*table_id);
         writer.write_u64(*pointer);
-        writer.write_u64(*record_version);
+        writer.write_u64(*current_version);
+        writer.write_u16(*original_len);
+        writer.write_u8(*encoding as u8);
         writer.write(data);
       }
       Operation::Checkpoint {
@@ -186,8 +196,11 @@ impl LogRecordUninit {
     table_id: TableId,
     pointer: Pointer,
     current_version: TxId,
-    data: Vec<u8>,
+    encoding: RecordEncoding,
+    data: &[u8],
   ) -> Self {
+    let original_len = data.len() as u16;
+    let data = encoding.compress(data);
     Self::new(
       tx_id,
       Operation::Insert {
@@ -195,6 +208,8 @@ impl LogRecordUninit {
         pointer,
         data,
         current_version,
+        encoding,
+        original_len,
       },
     )
   }
