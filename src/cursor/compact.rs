@@ -4,7 +4,7 @@ use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{
   BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, RecordId,
-  Snapshotter, WritablePolicy,
+  Snapshotter, WritablePolicy, WriteOp,
 };
 use crate::{
   background::{
@@ -326,9 +326,11 @@ fn create_compaction(
   let table_meta = tables.create_metadata(table_name);
   metadata.set_compaction(&table_meta);
 
-  if let Err(err) =
-    index.insert_if_matched(table_name.as_bytes(), Some(metadata.to_vec()), meta_table)
-  {
+  if let Err(err) = index.insert_if_matched(
+    table_name.as_bytes(),
+    WriteOp::Insert(metadata.to_vec()),
+    meta_table,
+  ) {
     if matches!(err, Error::WriteConflict) {
       info!("table {table_name} already set compaction state");
       return Ok(None);
@@ -615,7 +617,7 @@ fn remove_compaction(
 
   if let Err(err) = index.insert_if_matched(
     table_name.as_bytes(),
-    Some(table_metadata.to_vec()),
+    WriteOp::Insert(table_metadata.to_vec()),
     meta_table,
   ) {
     if matches!(err, Error::WriteConflict) {
