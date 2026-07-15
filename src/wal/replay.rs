@@ -8,6 +8,7 @@ use crate::{
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
+  Error,
 };
 
 pub const RESERVED_TX: TxId = 0;
@@ -111,8 +112,13 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
           pointer,
           data,
           current_version,
+          encoding,
+          original_len,
         } => {
-          redo.insert(record.log_id, (table_id, pointer, data));
+          let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
+            return Err(Error::CompressionCrashed(encoding));
+          };
+          redo.insert(record.log_id, (table_id, pointer, decoded));
           started.insert(record.log_id, record.tx_id);
           tx_id = tx_id.max(current_version);
         }

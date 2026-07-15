@@ -21,13 +21,14 @@ use crate::{
 };
 
 use super::{
-  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, ReplayResult, SegmentPreload,
-  SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, RecordEncoding, ReplayResult,
+  SegmentPreload, SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
   pub max_file_size: usize,
   pub max_buffer_size: usize,
+  pub compression: RecordEncoding,
 }
 
 pub struct WALSegmentRotated(WALSegment);
@@ -87,6 +88,8 @@ pub struct WAL {
    */
   state: AtomicCell<State>,
 
+  encoding: RecordEncoding,
+
   /**
    *  preload wal segment
    *  reuse synced + checkpoint complete segment
@@ -134,6 +137,7 @@ impl WAL {
         state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
+        encoding: config.compression,
       },
       replay_result,
     ))
@@ -377,10 +381,17 @@ impl WAL {
     table_id: TableId,
     ptr: Pointer,
     record_version: TxId,
-    data: Vec<u8>,
+    data: &[u8],
   ) -> Result {
     self.append(
-      LogRecordUninit::new_insert(tx_id, table_id, ptr, record_version, data),
+      LogRecordUninit::new_insert(
+        tx_id,
+        table_id,
+        ptr,
+        record_version,
+        self.encoding,
+        data,
+      ),
       false,
     )
   }

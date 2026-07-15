@@ -4,7 +4,10 @@ use std::{
 };
 
 use super::{Engine, EngineConfig, Result};
-use crate::disk::{DefaultIOBackend, DiskBackend};
+use crate::{
+  disk::{DefaultIOBackend, DiskBackend},
+  wal::RecordEncoding,
+};
 
 pub struct EngineBuilder(EngineConfig);
 
@@ -18,6 +21,7 @@ impl EngineBuilder {
       io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
+      wal_compression: DEFAULT_WAL_COMPRESSION,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
       gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       gc_batch_size: DEFAULT_GC_BATCH_SIZE,
@@ -53,6 +57,14 @@ impl EngineBuilder {
    */
   pub const fn wal_buffer_size(mut self, size: usize) -> Self {
     self.0.wal_buffer_size = size;
+    self
+  }
+
+  /**
+   * WAL record compression algorithm.
+   */
+  pub const fn wal_compression(mut self, algorithm: RecordEncoding) -> Self {
+    self.0.wal_compression = algorithm;
     self
   }
   /**
@@ -147,6 +159,7 @@ impl Clone for EngineBuilder {
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
+const DEFAULT_WAL_COMPRESSION: RecordEncoding = RecordEncoding::Zstd;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;

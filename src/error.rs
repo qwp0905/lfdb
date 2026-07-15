@@ -6,6 +6,8 @@ use std::{
 
 use thiserror::Error;
 
+use crate::wal::RecordEncoding;
+
 #[derive(Debug, Error)]
 pub enum Error {
   #[error("table {0} not found")]
@@ -64,6 +66,9 @@ pub enum Error {
 
   #[error("invalidate config: {0}.")]
   InvalidConfig(&'static str),
+
+  #[error("compression crashed at algorithm: {0:?}")]
+  CompressionCrashed(RecordEncoding),
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;

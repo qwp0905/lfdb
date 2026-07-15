@@ -28,7 +28,7 @@ fn test_insert_roundtrip() {
   page[0] = 0xAB;
   page[99] = 0xCD;
 
-  let r = LogRecordUninit::new_insert(42, 1, 99, 11, page);
+  let r = LogRecordUninit::new_insert(42, 1, 99, 11, RecordEncoding::Raw, &page);
   let parsed = assert_roundtrip(r, 4);
   match parsed.operation {
     Operation::Insert {
@@ -36,12 +36,16 @@ fn test_insert_roundtrip() {
       pointer,
       data,
       current_version,
+      original_len,
+      encoding,
     } => {
       assert_eq!(table_id, 1);
       assert_eq!(pointer, 99);
       assert_eq!(data[0], 0xAB);
       assert_eq!(data[99], 0xCD);
       assert_eq!(current_version, 11);
+      assert!(matches!(encoding, RecordEncoding::Raw));
+      assert_eq!(original_len, page.len() as u16);
     }
     _ => panic!("expected Insert"),
   }
