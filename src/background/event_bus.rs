@@ -62,13 +62,14 @@ where
   S: OwnedSubscription<E> + ?Sized,
 {
   fn cast_event(&self, event: OwnedEvent) -> bool {
-    if let Some(sub) = self.subscriber.upgrade() {
-      if let Ok(e) = event.downcast::<E>() {
-        sub.handle(*e);
-      }
-      return true;
-    }
-    false
+    let Some(subscriber) = self.subscriber.upgrade() else {
+      return false;
+    };
+    let Ok(casted) = event.downcast::<E>() else {
+      return false;
+    };
+    subscriber.handle(*casted);
+    true
   }
 }
 impl<E, S> SharedEventAdapter for AdapterImpl<E, S>
@@ -77,13 +78,14 @@ where
   S: SharedSubscription<E> + ?Sized,
 {
   fn cast_event(&self, event: SharedEvent) -> bool {
-    if let Some(sub) = self.subscriber.upgrade() {
-      if let Ok(e) = Arc::downcast(event) {
-        sub.handle(e);
-      }
-      return true;
-    }
-    false
+    let Some(subscriber) = self.subscriber.upgrade() else {
+      return false;
+    };
+    let Ok(casted) = Arc::downcast(event) else {
+      return false;
+    };
+    subscriber.handle(casted);
+    true
   }
 }
 impl<E, S: ?Sized> AdapterImpl<E, S> {

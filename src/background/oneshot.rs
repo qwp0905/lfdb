@@ -4,23 +4,38 @@ use std::{
   ops::Deref,
   ptr::NonNull,
   sync::atomic::{fence, AtomicBool, Ordering},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::atomic::AtomicCell;
 
-use crate::{background::OnceParker, utils::Backoff};
+use crate::utils::Backoff;
 
-struct Pair<T: ?Sized>(NonNull<(AtomicBool, T)>);
+struct PairInner<T: ?Sized> {
+  dropped: AtomicBool,
+  value: T,
+}
+impl<T> PairInner<T> {
+  const fn new(value: T) -> Self {
+    Self {
+      dropped: AtomicBool::new(false),
+      value,
+    }
+  }
+}
+
+struct Pair<T: ?Sized>(NonNull<PairInner<T>>);
 impl<T> Pair<T> {
   pub fn new(value: T) -> (Self, Self) {
-    let ptr = NonNull::from_mut(Box::leak(Box::new((AtomicBool::new(false), value))));
+    let inner = PairInner::new(value);
+    let ptr = NonNull::from_mut(Box::leak(Box::new(inner)));
     (Self(ptr), Self(ptr))
   }
 }
 impl<T: ?Sized> Drop for Pair<T> {
   fn drop(&mut self) {
     if !unsafe { self.0.as_ref() }
-      .0
+      .dropped
       .fetch_or(true, Ordering::Release)
     {
       return;
@@ -33,7 +48,7 @@ impl<T: ?Sized> Deref for Pair<T> {
   type Target = T;
 
   fn deref(&self) -> &Self::Target {
-    unsafe { &self.0.as_ref().1 }
+    unsafe { &self.0.as_ref().value }
   }
 }
 unsafe impl<T: Send + Sync + ?Sized> Send for Pair<T> {}
@@ -82,21 +97,21 @@ enum State {
 struct OneshotInner<T> {
   state: AtomicCell<State>,
   value: UnsafeCell<MaybeUninit<T>>,
-  parker: OnceParker,
+  caller: AtomicCell<Option<Thread>>,
 }
 impl<T> OneshotInner<T> {
   const fn new() -> Self {
     Self {
       state: AtomicCell::new(State::Waiting),
       value: UnsafeCell::new(MaybeUninit::uninit()),
-      parker: OnceParker::new(),
+      caller: AtomicCell::new(None),
     }
   }
   const fn fulfilled(value: T) -> Self {
     Self {
       state: AtomicCell::new(State::Fulfilled),
       value: UnsafeCell::new(MaybeUninit::new(value)),
-      parker: OnceParker::new(),
+      caller: AtomicCell::new(None),
     }
   }
   #[inline]
@@ -143,7 +158,7 @@ impl<T> Oneshot<T> {
   }
   pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
     let backoff = Backoff::new();
-
+    self.0.caller.store(Some(current()));
     loop {
       match self.try_wait() {
         Ok(v) => return Ok(v),
@@ -155,7 +170,7 @@ impl<T> Oneshot<T> {
         continue;
       }
 
-      self.0.parker.park();
+      park();
       backoff.reset();
     }
   }
@@ -179,7 +194,12 @@ impl<T> OneshotFulfill<T> {
       .compare_exchange(State::Waiting, State::Fulfilled)
       .unwrap_or_else(|s| s)
     {
-      State::Waiting => self.0.parker.wake_all(),
+      State::Waiting => {
+        let Some(thread) = self.0.caller.take() else {
+          return;
+        };
+        thread.unpark();
+      }
       State::Disconnected => unsafe { value.assume_init_drop() },
       State::Fulfilled => unreachable!(),
     }
@@ -194,7 +214,10 @@ impl<T> Drop for OneshotFulfill<T> {
     else {
       return;
     };
-    self.0.parker.wake_all()
+    let Some(thread) = self.0.caller.take() else {
+      return;
+    };
+    thread.unpark();
   }
 }
 
