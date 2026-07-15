@@ -350,9 +350,9 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
    */
   fn create_record(
     &self,
-    data: Option<Vec<u8>>,
+    op: WriteOp,
   ) -> Result<(RecordData, Option<BlobAppendGuard<'_>>)> {
-    let Some(data) = data else {
+    let WriteOp::Insert(data) = op else {
       return Ok((RecordData::Tombstone, None));
     };
     if data.len() <= LARGE_VALUE {
@@ -549,17 +549,17 @@ where
   fn __insert(
     &self,
     key: StaticKeyRef,
-    mut record: Option<Vec<u8>>,
+    mut op: WriteOp,
     table: &TableHandleRef,
     create: bool,
   ) -> Result<WriteResult> {
     enum State<'a> {
-      Move(Pointer, Option<Vec<u8>>),
+      Move(Pointer, WriteOp),
       Break(WriteResult),
       Conflict(TxId),
       Split(StaticKey, Pointer, WriteResult),
-      CopyOld(Pointer, VersionRecord, Option<Vec<u8>>),
-      New(ReserveGuard<'a>, Option<Vec<u8>>),
+      CopyOld(Pointer, VersionRecord, WriteOp),
+      New(ReserveGuard<'a>, WriteOp),
     }
 
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
@@ -567,7 +567,7 @@ where
       let state = self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
         let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let (mut node, mut result, _guard) = match leaf.find(key)? {
-          NodeFindResult::Move(i) => return Ok(State::Move(i, record)),
+          NodeFindResult::Move(i) => return Ok(State::Move(i, op)),
           NodeFindResult::Found(pos, old, entry_ptr) => {
             if self.0.is_conflict(old.owner, old.version) {
               // Fast-fail before touching the data-entry chain when the latest leaf record
@@ -577,11 +577,11 @@ where
 
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
               let old = old.into_owned_with(slot.as_ref());
-              return Ok(State::CopyOld(entry_ptr, old, record));
+              return Ok(State::CopyOld(entry_ptr, old, op));
             }
 
             let mut node = leaf.into_owned()?;
-            let (record, guard) = self.create_record(record)?;
+            let (record, guard) = self.create_record(op)?;
             let new_record = VersionRecord::new(
               self.0.current_owner(),
               self.0.current_version(),
@@ -598,7 +598,7 @@ where
             }
 
             return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
-              Ok(guard) => State::New(guard, record),
+              Ok(guard) => State::New(guard, op),
               Err(owner) => State::Conflict(owner),
             });
           }
@@ -619,9 +619,9 @@ where
       })?;
 
       match state {
-        State::Move(i, r) => (ptr, record) = (i, r),
+        State::Move(p, o) => (ptr, op) = (p, o),
         State::Break(result) => return Ok(result),
-        State::New(guard, r) => return self.insert_new(key, r, guard, ptr, table, stack),
+        State::New(guard, o) => return self.insert_new(key, o, guard, ptr, table, stack),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
@@ -630,8 +630,8 @@ where
           self.0.wait_close(i);
           return Err(Error::WriteConflict);
         }
-        State::CopyOld(entry_ptr, old, r) => {
-          return self.copy_and_update(key, r, ptr, table, entry_ptr, old, stack);
+        State::CopyOld(entry_ptr, old, o) => {
+          return self.copy_and_update(key, o, ptr, table, entry_ptr, old, stack);
         }
       };
     }
@@ -640,7 +640,7 @@ where
   fn copy_and_update(
     &self,
     key: StaticKeyRef,
-    mut record: Option<Vec<u8>>,
+    mut op: WriteOp,
     mut ptr: Pointer,
     table: &TableHandleRef,
     entry_ptr: Pointer,
@@ -648,7 +648,7 @@ where
     stack: Vec<Pointer>,
   ) -> Result<WriteResult> {
     enum State {
-      Move(Pointer, Option<Vec<u8>>),
+      Move(Pointer, WriteOp),
       Break(WriteResult),
       Split(StaticKey, Pointer, WriteResult),
     }
@@ -663,11 +663,11 @@ where
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
         let pos = match leaf.find_slot(key) {
           FindSlotResult::Replace(i) => i,
-          FindSlotResult::Move(next) => return Ok(State::Move(next, record)),
+          FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
           FindSlotResult::Insert(_) => unreachable!(),
         };
 
-        let (record, _guard) = self.create_record(record)?;
+        let (record, _guard) = self.create_record(op)?;
         let new_record = VersionRecord::new(
           self.0.current_owner(),
           self.0.current_version(),
@@ -690,7 +690,7 @@ where
       })?;
 
       match state {
-        State::Move(i, r) => (ptr, record) = (i, r),
+        State::Move(i, o) => (ptr, op) = (i, o),
         State::Break(result) => return Ok(result),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
@@ -703,14 +703,14 @@ where
   fn insert_new(
     &self,
     key: StaticKeyRef,
-    mut record: Option<Vec<u8>>,
+    mut op: WriteOp,
     _insert_guard: ReserveGuard<'_>,
     mut ptr: Pointer,
     table: &TableHandleRef,
     stack: Vec<Pointer>,
   ) -> Result<WriteResult> {
     enum State {
-      Move(Pointer, Option<Vec<u8>>),
+      Move(Pointer, WriteOp),
       Break(WriteResult),
       Split(StaticKey, Pointer, WriteResult),
     }
@@ -721,11 +721,11 @@ where
         let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
         let pos = match leaf.find_slot(key) {
           FindSlotResult::Replace(_) => unreachable!(),
-          FindSlotResult::Move(next) => return Ok(State::Move(next, record)),
+          FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
           FindSlotResult::Insert(i) => i,
         };
 
-        let (record, _guard) = self.create_record(record)?;
+        let (record, _guard) = self.create_record(op)?;
         let new_record = VersionRecord::new(
           self.0.current_owner(),
           self.0.current_version(),
@@ -752,7 +752,7 @@ where
       })?;
 
       match state {
-        State::Move(i, r) => (ptr, record) = (i, r),
+        State::Move(p, o) => (ptr, op) = (p, o),
         State::Break(result) => return Ok(result),
         State::Split(k, p, result) => {
           self.propagate_split(k, p, stack, table)?;
@@ -770,10 +770,10 @@ where
   pub fn insert_record(
     &self,
     key: StaticKey,
-    record: Option<Vec<u8>>,
+    op: WriteOp,
     table: &TableHandleRef,
   ) -> Result<WriteResult> {
-    self.__insert(&key, record, table, true)
+    self.__insert(&key, op, table, true)
   }
   pub fn insert(
     &self,
@@ -781,10 +781,10 @@ where
     data: Vec<u8>,
     table: &TableHandleRef,
   ) -> Result<WriteResult> {
-    self.insert_record(key, Some(data), table)
+    self.insert_record(key, WriteOp::Insert(data), table)
   }
   pub fn remove(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<WriteResult> {
-    self.insert_if_matched(key, None, table)
+    self.insert_if_matched(key, WriteOp::Remove, table)
   }
   /**
    * Update an existing key only.
@@ -794,10 +794,10 @@ where
   pub fn insert_if_matched(
     &self,
     key: StaticKeyRef,
-    data: Option<Vec<u8>>,
+    op: WriteOp,
     table: &TableHandleRef,
   ) -> Result<WriteResult> {
-    self.__insert(key, data, table, false)
+    self.__insert(key, op, table, false)
   }
 }
 
@@ -828,4 +828,9 @@ impl WriteResult {
       splitted: false,
     }
   }
+}
+
+pub enum WriteOp {
+  Insert(Vec<u8>),
+  Remove,
 }

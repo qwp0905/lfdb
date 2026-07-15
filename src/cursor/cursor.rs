@@ -10,7 +10,7 @@ use std::ops::{Bound, RangeBounds};
 
 use super::{
   BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, StaticKey, StaticKeyRef, VecRef,
-  WriteResult, MAX_KEY, MAX_VALUE,
+  WriteOp, WriteResult, MAX_KEY, MAX_VALUE,
 };
 use crate::{
   measure, metrics::MetricsRegistry, table::TableHandleRef, transaction::TxContext,
@@ -110,7 +110,9 @@ impl<'a> Cursor<'a> {
    */
   fn __remove(&self, key: StaticKeyRef) -> Result<WriteResult> {
     if let Some(table) = self.compaction.as_ref() {
-      return self.index.insert_record(key.to_vec(), None, table);
+      return self
+        .index
+        .insert_record(key.to_vec(), WriteOp::Remove, table);
     }
     self.index.remove(key, &self.table)
   }
