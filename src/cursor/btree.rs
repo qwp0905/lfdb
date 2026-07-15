@@ -476,7 +476,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       })?;
 
       match state {
-        State::Move(i, r) => (ptr, record) = (i, r),
+        State::Move(p, o) => (ptr, record) = (p, o),
         State::Break => return Ok(()),
         State::Split(k, p) => return self.propagate_split(k, p, stack, table),
         State::Apply(entry_ptr, r) => {
