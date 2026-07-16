@@ -159,7 +159,7 @@ impl Clone for EngineBuilder {
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
-const DEFAULT_WAL_COMPRESSION: RecordEncoding = RecordEncoding::Zstd;
+const DEFAULT_WAL_COMPRESSION: RecordEncoding = RecordEncoding::Lz4;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_GC_THREAD_COUNT: usize = 3;
