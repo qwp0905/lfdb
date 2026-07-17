@@ -294,6 +294,7 @@ fn flush_write_only(
   };
 
   let result = exec_write_only(metrics, backend, values).map_err(|err| err.kind());
+  metrics.disk_write_batch.record(waiting.len() as f64);
   waiting
     .into_iter()
     .for_each(|done| done.fulfill(result.map_err(Error::from)));
@@ -320,6 +321,7 @@ fn flush_alloc_and_write(
 
   let result =
     exec_alloc_and_write(metrics, backend, alloc, values).map_err(|err| err.kind());
+  metrics.disk_write_batch.record(waiting.len() as f64);
   waiting
     .into_iter()
     .for_each(|done| done.fulfill(result.map_err(Error::from)));
@@ -342,8 +344,6 @@ fn exec_write_only(
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
-    metrics.disk_write_batch.record(bufs.len() as f64);
-
     let offset = offset[0];
     if bufs.len() == 1 {
       measure!(metrics.disk_write, backend.pwrite_or_fail(&bufs[0], offset))?;
@@ -391,8 +391,6 @@ fn exec_alloc_and_write(
 
   for chunk in buffered.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
     let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
-    metrics.disk_write_batch.record(bufs.len() as f64);
-
     let offset = offset[0];
     if bufs.len() == 1 {
       measure!(metrics.disk_write, backend.pwrite_or_fail(&bufs[0], offset))?;

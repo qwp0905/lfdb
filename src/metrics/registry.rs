@@ -71,6 +71,10 @@ pub struct EngineMetrics {
   pub disk_write_latency_micros_p50: f64,
 
   /**
+   * Number of disk write batch block count.
+   */
+  pub disk_write_batch_count: u64,
+  /**
    * Average disk write batch block count.
    */
   pub disk_write_batch_avg: f64,
@@ -79,6 +83,10 @@ pub struct EngineMetrics {
    */
   pub disk_write_batch_p50: f64,
 
+  /**
+   * Number of disk fsync batch count.
+   */
+  pub disk_sync_batch_count: u64,
   /**
    * Average disk fsync batch count.
    */
@@ -296,11 +304,13 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "io batches: write avg {:.2} p50 {:.2} | sync avg {:.2} p50 {:.2}",
-      self.disk_write_batch_avg,
-      self.disk_write_batch_p50,
-      self.disk_sync_batch_avg,
-      self.disk_sync_batch_p50,
+      "disk write batch: count {} | avg {:.2} | p50 {:.2}",
+      self.disk_write_batch_count, self.disk_write_batch_avg, self.disk_write_batch_p50,
+    )?;
+    writeln!(
+      f,
+      "sync batch: count {} | avg {:.2} | p50 {:.2}",
+      self.disk_sync_batch_count, self.disk_sync_batch_avg, self.disk_sync_batch_p50,
     )?;
     writeln!(
       f,
@@ -404,9 +414,11 @@ impl MetricsRegistry {
       disk_write_latency_micros_avg: disk_write.average(),
       disk_write_latency_micros_p50: disk_write.percentile(0.5),
 
+      disk_write_batch_count: write_batch.total_count(),
       disk_write_batch_avg: write_batch.average(),
       disk_write_batch_p50: write_batch.percentile(0.5),
 
+      disk_sync_batch_count: sync_batch.total_count(),
       disk_sync_batch_avg: sync_batch.average(),
       disk_sync_batch_p50: sync_batch.percentile(0.5),
 
