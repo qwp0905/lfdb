@@ -9,7 +9,7 @@ use std::{
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{ThreadSlot, UnwindSpawner};
-use crate::{error, utils::SBox};
+use crate::utils::SBox;
 
 /**
  * Subscriber for events that may be observed by multiple consumers.
@@ -194,7 +194,7 @@ impl EventRouter {
         *route = Route::Tombstone;
       }
       Route::Shared(shared) => {
-        let event: SharedEvent = Arc::from(event);
+        let event = SharedEvent::from(event);
         shared.retain(|h| h.cast_event(event.clone()));
       }
       Route::Offline(queue) => {
@@ -300,7 +300,7 @@ enum EventMsg {
 
 const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
   move || {
-    let mut map = EventRouter::new();
+    let mut router = EventRouter::new();
     let backoff = Backoff::new();
 
     loop {
@@ -311,17 +311,15 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
         };
 
         match msg {
-          EventMsg::Publish(event) => map.route(event),
+          EventMsg::Publish(event) => router.route(event),
           EventMsg::SubOwned(id, handler) => {
-            if !map.register_owned(id, handler) {
-              error!("error to register {:?} as owned event subscriber", id);
-              std::process::abort();
+            if !router.register_owned(id, handler) {
+              panic!("error to register {:?} as owned event subscriber", id);
             };
           }
           EventMsg::SubShared(id, handler) => {
-            if !map.register_shared(id, handler) {
-              error!("error to register {:?} as owned event subscriber", id);
-              std::process::abort();
+            if !router.register_shared(id, handler) {
+              panic!("error to register {:?} as owned event subscriber", id);
             };
           }
           EventMsg::Terminate => return,
