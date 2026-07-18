@@ -27,7 +27,6 @@ impl PageRecorder {
   #[inline]
   pub fn serialize_and_log<T>(
     &self,
-    tx_id: TxId,
     table_id: TableId,
     current_version: TxId,
     slot: &mut RefedSlot,
@@ -39,12 +38,8 @@ impl PageRecorder {
     let ptr = slot.get_pointer();
     let page = slot.as_mut();
     let byte_len = page.serialize_from(data)?;
-    self.wal.append_insert(
-      tx_id,
-      table_id,
-      ptr,
-      current_version,
-      page.range(0..byte_len),
-    )
+    self
+      .wal
+      .append_insert(table_id, ptr, current_version, page.range(0..byte_len))
   }
 }

@@ -99,7 +99,7 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
         break;
       };
 
-      tx_id = tx_id.max(record.tx_id + 1);
+      tx_id = tx_id.max(record.current_version + 1);
 
       if last_checkpoint.is_some_and(|c| c > record.log_id) {
         continue;
@@ -111,7 +111,6 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
           table_id,
           pointer,
           data,
-          current_version,
           encoding,
           original_len,
         } => {
@@ -119,19 +118,15 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
             return Err(Error::CompressionCrashed(encoding));
           };
           redo.insert(record.log_id, (table_id, pointer, decoded));
-          started.insert(record.log_id, record.tx_id);
-          tx_id = tx_id.max(current_version);
+          started.insert(record.log_id, record.current_version);
         }
         Operation::Commit => {
-          closed.insert(record.log_id, record.tx_id);
+          closed.insert(record.log_id, record.current_version);
         }
         Operation::Checkpoint {
           last_log_id,
-          current_version,
           snapshot,
         } => {
-          tx_id = tx_id.max(current_version);
-
           redo = redo.split_off(&last_log_id);
           started = started.split_off(&last_log_id);
           closed = closed.split_off(&last_log_id);

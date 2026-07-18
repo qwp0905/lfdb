@@ -72,7 +72,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.get_id(), RESERVED_TX, slot, data)
+      .serialize_and_log(table.get_id(), RESERVED_TX, slot, data)
   }
 
   fn alloc_slot(
@@ -223,7 +223,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.get_id(), RESERVED_TX, slot, data)
+      .serialize_and_log(table.get_id(), RESERVED_TX, slot, data)
   }
   fn alloc_slot(
     &self,

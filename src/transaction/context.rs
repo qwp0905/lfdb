@@ -105,7 +105,6 @@ impl<'a> WritablePolicy for TxContext<'a> {
     table: &TableHandleRef,
   ) -> Result {
     self.orchestrator.serialize_and_log(
-      self.state.get_id(),
       table.get_id(),
       self.current_version(),
       slot,

@@ -377,21 +377,13 @@ impl WAL {
 
   pub fn append_insert(
     &self,
-    tx_id: TxId,
     table_id: TableId,
     ptr: Pointer,
     record_version: TxId,
     data: &[u8],
   ) -> Result {
     self.append(
-      LogRecordUninit::new_insert(
-        tx_id,
-        table_id,
-        ptr,
-        record_version,
-        self.encoding,
-        data,
-      ),
+      LogRecordUninit::new_insert(table_id, ptr, record_version, self.encoding, data),
       false,
     )
   }

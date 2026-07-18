@@ -97,7 +97,6 @@ impl TxOrchestrator {
   #[inline]
   pub fn serialize_and_log<T>(
     &self,
-    tx_id: TxId,
     table_id: TableId,
     current_version: TxId,
     slot: &mut RefedSlot,
@@ -108,7 +107,7 @@ impl TxOrchestrator {
   {
     self
       .recorder
-      .serialize_and_log(tx_id, table_id, current_version, slot, data)
+      .serialize_and_log(table_id, current_version, slot, data)
   }
 
   #[inline]

@@ -192,7 +192,7 @@ fn release_entry(
   let min_version = version_visibility.min_version();
 
   let serialize_and_log = |slot: &mut RefedSlot, entry: &DataEntry| {
-    recorder.serialize_and_log(RESERVED_TX, table_id, RESERVED_TX, slot, entry)
+    recorder.serialize_and_log(table_id, RESERVED_TX, slot, entry)
   };
 
   while let Some(ptr) = next.take() {

@@ -141,7 +141,6 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     table: &TableHandleRef,
   ) -> Result {
     self.recorder.serialize_and_log(
-      self.state.get_id(),
       table.get_id(),
       self.current_version(),
       slot,
@@ -275,7 +274,7 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result {
     self
       .recorder
-      .serialize_and_log(RESERVED_TX, table.get_id(), RESERVED_TX, slot, data)
+      .serialize_and_log(table.get_id(), RESERVED_TX, slot, data)
   }
 
   fn alloc_slot(
