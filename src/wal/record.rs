@@ -13,7 +13,6 @@ pub enum Operation {
   Insert {
     table_id: TableId,
     pointer: Pointer,         // disk pointer of the page
-    current_version: TxId,    // current version at the time the wal record was written
     data: Vec<u8>,            // data
     original_len: u16,        // original len before compression
     encoding: RecordEncoding, // encoding of compression
@@ -26,9 +25,8 @@ pub enum Operation {
    * unboundedly.
    */
   Checkpoint {
-    last_log_id: LogId,    // last log id
-    current_version: TxId, // current version
-    snapshot: PathBuf,     // mvcc snapshot path
+    last_log_id: LogId, // last log id
+    snapshot: PathBuf,  // mvcc snapshot path
   },
 }
 impl Operation {
@@ -42,12 +40,8 @@ impl Operation {
 
   fn byte_len(&self) -> usize {
     1 + match self {
-      Self::Insert { data, .. } => {
-        POINTER_BYTES + TABLE_ID_BYTES + TX_ID_BYTES + data.len() + 1 + 2
-      }
-      Self::Checkpoint { snapshot, .. } => {
-        TX_ID_BYTES + LOG_ID_BYTES + snapshot.as_os_str().len()
-      }
+      Self::Insert { data, .. } => POINTER_BYTES + TABLE_ID_BYTES + data.len() + 1 + 2,
+      Self::Checkpoint { snapshot, .. } => LOG_ID_BYTES + snapshot.as_os_str().len(),
       _ => 0,
     }
   }
@@ -56,14 +50,14 @@ impl Operation {
 #[derive(Debug)]
 pub struct LogRecord {
   pub log_id: LogId,
-  pub tx_id: TxId,
+  pub current_version: TxId,
   pub operation: Operation,
 }
 impl LogRecord {
   #[inline]
-  const fn new(log_id: LogId, tx_id: TxId, operation: Operation) -> Self {
+  const fn new(log_id: LogId, current_version: TxId, operation: Operation) -> Self {
     Self {
-      tx_id,
+      current_version,
       operation,
       log_id,
     }
@@ -82,20 +76,18 @@ impl LogRecord {
     }
 
     let log_id = reader.read_u64()?;
-    let tx_id = reader.read_u64()?;
+    let current_version = reader.read_u64()?;
 
     let operation = match reader.read_byte()? {
       1 => {
         let table_id = reader.read_u32()?;
         let pointer = reader.read_u64()?;
-        let current_version = reader.read_u64()?;
         let original_len = reader.read_u16()?;
         let encoding = RecordEncoding::from_byte(reader.read_byte()?)?;
         let data = reader.read_all();
         Operation::Insert {
           table_id,
           pointer,
-          current_version,
           data: data.to_vec(),
           original_len,
           encoding,
@@ -104,23 +96,21 @@ impl LogRecord {
       2 => (reader.is_eof()).then_some(Operation::Commit)?,
       3 => {
         let log_id = reader.read_u64()?;
-        let current_version = reader.read_u64()?;
         let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read_all()) };
         Operation::Checkpoint {
           last_log_id: log_id,
-          current_version,
           snapshot: path.into(),
         }
       }
       _ => return None,
     };
-    Some(LogRecord::new(log_id, tx_id, operation))
+    Some(LogRecord::new(log_id, current_version, operation))
   }
 
   fn write_at(&self, buf: &mut [u8]) {
     let mut writer = OffsetWriter::new(&mut buf[4..]);
     writer.write_u64(self.log_id);
-    writer.write_u64(self.tx_id);
+    writer.write_u64(self.current_version);
 
     writer.write_u8(self.operation.type_byte());
 
@@ -129,24 +119,20 @@ impl LogRecord {
         table_id,
         pointer,
         data,
-        current_version,
         original_len,
         encoding,
       } => {
         writer.write_u32(*table_id);
         writer.write_u64(*pointer);
-        writer.write_u64(*current_version);
         writer.write_u16(*original_len);
         writer.write_u8(*encoding as u8);
         writer.write(data);
       }
       Operation::Checkpoint {
         last_log_id,
-        current_version,
         snapshot,
       } => {
         writer.write_u64(*last_log_id);
-        writer.write_u64(*current_version);
         writer.write(snapshot.as_os_str().as_encoded_bytes());
       }
       Operation::Commit => {}
@@ -192,7 +178,6 @@ impl LogRecordUninit {
   }
 
   pub fn new_insert(
-    tx_id: TxId,
     table_id: TableId,
     pointer: Pointer,
     current_version: TxId,
@@ -202,20 +187,19 @@ impl LogRecordUninit {
     let original_len = data.len() as u16;
     let data = encoding.compress(data);
     Self::new(
-      tx_id,
+      current_version,
       Operation::Insert {
         table_id,
         pointer,
         data,
-        current_version,
         encoding,
         original_len,
       },
     )
   }
 
-  pub fn new_commit(tx_id: TxId) -> Self {
-    Self::new(tx_id, Operation::Commit)
+  pub fn new_commit(current_version: TxId) -> Self {
+    Self::new(current_version, Operation::Commit)
   }
 
   /**
@@ -231,10 +215,9 @@ impl LogRecordUninit {
     snapshot_path: PathBuf,
   ) -> Self {
     Self::new(
-      0,
+      current_version,
       Operation::Checkpoint {
         last_log_id,
-        current_version,
         snapshot: snapshot_path,
       },
     )

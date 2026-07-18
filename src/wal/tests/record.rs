@@ -11,7 +11,7 @@ fn assert_roundtrip(record: LogRecordUninit, log_id: LogId) -> LogRecord {
   );
   let parsed: LogRecord = LogRecord::read_from(&bytes[2..]).unwrap();
   assert_eq!(parsed.log_id, log_id);
-  assert_eq!(parsed.tx_id, tx_id);
+  assert_eq!(parsed.current_version, tx_id);
   parsed
 }
 
@@ -28,14 +28,13 @@ fn test_insert_roundtrip() {
   page[0] = 0xAB;
   page[99] = 0xCD;
 
-  let r = LogRecordUninit::new_insert(42, 1, 99, 11, RecordEncoding::Raw, &page);
+  let r = LogRecordUninit::new_insert(1, 99, 11, RecordEncoding::Raw, &page);
   let parsed = assert_roundtrip(r, 4);
   match parsed.operation {
     Operation::Insert {
       table_id,
       pointer,
       data,
-      current_version,
       original_len,
       encoding,
     } => {
@@ -43,7 +42,6 @@ fn test_insert_roundtrip() {
       assert_eq!(pointer, 99);
       assert_eq!(data[0], 0xAB);
       assert_eq!(data[99], 0xCD);
-      assert_eq!(current_version, 11);
       assert!(matches!(encoding, RecordEncoding::Raw));
       assert_eq!(original_len, page.len() as u16);
     }
@@ -61,11 +59,9 @@ fn test_checkpoint_roundtrip() {
   match parsed.operation {
     Operation::Checkpoint {
       last_log_id,
-      current_version,
       snapshot,
     } => {
       assert_eq!(last_log_id, i);
-      assert_eq!(current_version, cv);
       assert_eq!(path, snapshot);
     }
     _ => panic!("expected Checkpoint"),
