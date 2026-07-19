@@ -12,7 +12,7 @@ use crate::{
   Error,
 };
 
-pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
+pub const PAGE_SIZE: usize = 8 << 10; // 8 kb
 
 pub const ALIGN: usize = 512;
 
