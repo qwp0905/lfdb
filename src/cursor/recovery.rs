@@ -290,8 +290,10 @@ fn recovery_table(
           node_stack.push((p, level));
         }
         let mut iter = node.get_entries();
-        while let Some((_, _, _, ptr)) = iter.try_next()? {
-          entry_stack.push(ptr);
+        while let Some(e) = iter.try_next()? {
+          if let Some(p) = e.entry {
+            entry_stack.push(p);
+          }
         }
       }
     };
