@@ -33,13 +33,6 @@ pub struct DataEntry {
   last_owner: TxId,
 }
 impl DataEntry {
-  pub const fn empty() -> Self {
-    Self {
-      next: None,
-      versions: VecDeque::new(),
-      last_owner: 0,
-    }
-  }
   pub fn init(version: VersionRecord, next: Option<Pointer>, last_owner: TxId) -> Self {
     let mut versions = VecDeque::with_capacity(1);
     versions.push_front(version);

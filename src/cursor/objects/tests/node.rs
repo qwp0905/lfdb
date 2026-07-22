@@ -35,12 +35,11 @@ fn test_serialize_leaf() {
 
   let entries = [(vec![49, 50, 51], (123, 456, vec![1, 2, 3]), 100)];
 
-  for (i, (key, (o, v, d), p)) in entries.iter().enumerate() {
+  for (i, (key, (o, v, d), _)) in entries.iter().enumerate() {
     leaf.insert_at(
       i,
       key.clone(),
       VersionRecord::new(*o, *v, RecordData::Data(d.clone()), 1),
-      *p,
     );
   }
   leaf.set_next(200);
@@ -58,15 +57,14 @@ fn test_serialize_leaf() {
 
   let mut iter = d.get_entries();
   let mut i = 0;
-  while let Some((s, e, r, ptr)) = iter.try_next().unwrap() {
-    let (k, (o, v, d), p) = &entries[i];
+  while let Some(e) = iter.try_next().unwrap() {
+    let (k, (o, v, d), _) = &entries[i];
     i += 1;
-    assert_eq!(page.range(s..e), k);
-    assert_eq!(*p, ptr);
-    assert_eq!(r.owner, *o);
-    assert_eq!(r.version, *v);
+    assert_eq!(page.range(e.start..e.end), k);
+    assert_eq!(e.record.owner, *o);
+    assert_eq!(e.record.version, *v);
     assert!(matches!(
-      r.data,
+      e.record.data,
       RecordDataView::Data(s, e) if d == page.range(s..e)
     ))
   }

@@ -425,16 +425,18 @@ fn run_tick(
     let slot = block_cache.read(ptr, table.handle())?.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
     let mut iter = node.get_entries();
-    while let Some((_, _, record, p)) = iter.try_next()? {
-      current.min_version = current.min_version.min(record.version);
-      buffered.push_back(entry_worker.execute((table.handle().clone(), p)));
+    while let Some(e) = iter.try_next()? {
+      current.min_version = current.min_version.min(e.record.version);
+      if let Some(p) = e.entry {
+        buffered.push_back(entry_worker.execute((table.handle().clone(), p)));
+      }
       task.total += 1;
 
-      if version_visibility.is_aborted(&record.owner) {
+      if version_visibility.is_aborted(&e.record.owner) {
         task.dead += 1;
         continue;
       }
-      match record.data {
+      match e.record.data {
         RecordDataView::Blob(id, _, _) => {
           current.blob_refs.insert(id);
         }
