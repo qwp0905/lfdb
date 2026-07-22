@@ -354,7 +354,7 @@ pub struct LeafNodeIter<'a> {
   closed: bool,
 }
 impl<'a> LeafNodeIter<'a> {
-  pub fn is_completed(&self) -> bool {
+  pub const fn is_completed(&self) -> bool {
     self.pos == self.len
   }
 
