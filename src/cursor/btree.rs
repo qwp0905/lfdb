@@ -448,10 +448,11 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         let mut node = match leaf.find(&key)? {
           NodeFindResult::Move(next) => return Ok(State::Move(next, record)),
           NodeFindResult::Found(pos, old, entry_ptr) => {
+            if let Some(p) = entry_ptr {
+              return Ok(State::Apply(p, record));
+            }
+
             if !self.0.is_aborted(old.owner) {
-              if let Some(p) = entry_ptr {
-                return Ok(State::Apply(p, record));
-              }
               if table.is_reserved(&key) {
                 return Ok(State::Move(ptr, record));
               }
