@@ -1,6 +1,6 @@
 use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue};
+use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
 use super::{
   BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, RecordId,
@@ -339,8 +339,8 @@ fn create_compaction(
   };
 
   let new_table = tables.create_handle(&table_meta)?;
-  tables.insert(new_table.clone());
   index.initialize(&new_table)?;
+  tables.insert(new_table.clone());
 
   tx.commit()?;
   Ok(Some((new_table, tx.current_version(), table_meta)))
@@ -804,6 +804,9 @@ fn run_tick(
     let Some(snap) = snapshotter.next_snapshot()? else {
       break;
     };
+
+    // to protect stale pointer from gc.
+    let _guard = pin();
     new_index.apply_snapshot(snap, new.handle())?;
   }
 
