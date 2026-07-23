@@ -25,13 +25,10 @@ impl FreeList {
   }
 
   pub fn alloc(&self) -> FreePointer {
-    self
-      .released
-      .pop()
-      .map(FreePointer::Reuse)
-      .unwrap_or_else(|| {
-        FreePointer::Alloc(self.file_end.fetch_add(1, Ordering::Relaxed))
-      })
+    if let Some(ptr) = self.released.pop() {
+      return FreePointer::Reuse(ptr);
+    }
+    FreePointer::Alloc(self.file_end.fetch_add(1, Ordering::Relaxed))
   }
 
   pub fn dealloc(&self, pointer: Pointer) {
