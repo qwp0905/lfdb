@@ -20,10 +20,10 @@ use crate::{
 struct LeafEntry {
   key: StaticKey,
   record: VersionRecord,
-  next: Pointer,
+  next: Option<Pointer>,
 }
 impl LeafEntry {
-  const fn new(key: StaticKey, record: VersionRecord, next: Pointer) -> Self {
+  const fn new(key: StaticKey, record: VersionRecord, next: Option<Pointer>) -> Self {
     Self { key, record, next }
   }
 
@@ -65,7 +65,7 @@ impl LeafNode {
       writer.write_u16(entry.key.len() as u16)?;
       writer.write(&entry.key)?;
       entry.record.serialize_to(writer)?;
-      writer.write_u64(entry.next)?;
+      writer.write_u64(entry.next.unwrap_or(0))?;
     }
     Ok(())
   }
@@ -80,7 +80,7 @@ impl LeafNode {
       let key = scanner.read_n(l)?.to_vec();
       let record = VersionRecord::deserialize_from(scanner)?;
       let next = scanner.read_u64()?;
-      entries.push(LeafEntry::new(key, record, next))
+      entries.push(LeafEntry::new(key, record, (next != 0).then_some(next)))
     }
     Ok(Self::new(entries, (next != 0).then_some(next), bias))
   }
@@ -141,20 +141,15 @@ impl LeafNode {
     Some(split)
   }
 
-  pub fn replace_at(&mut self, index: usize, record: VersionRecord) -> VersionRecord {
-    replace(&mut self.entries[index].record, record)
+  pub fn replace_at(&mut self, pos: usize, record: VersionRecord) -> VersionRecord {
+    replace(&mut self.entries[pos].record, record)
   }
-  pub fn insert_at(
-    &mut self,
-    pos: usize,
-    key: StaticKey,
-    record: VersionRecord,
-    pointer: Pointer,
-  ) {
-    self
-      .entries
-      .insert(pos, LeafEntry::new(key, record, pointer));
+  pub fn insert_at(&mut self, pos: usize, key: StaticKey, record: VersionRecord) {
+    self.entries.insert(pos, LeafEntry::new(key, record, None));
     self.bias = update_bias(self.bias, self.entries.len(), pos);
+  }
+  pub fn alloc_entry_at(&mut self, pos: usize, entry_ptr: Pointer) {
+    self.entries[pos].next = Some(entry_ptr);
   }
 
   pub fn top(&self) -> &StaticKey {
@@ -194,7 +189,7 @@ pub enum FindSlotResult {
  * mechanism used at the internal level when a search key >= high key.
  */
 pub enum NodeFindResult {
-  Found(usize, VersionRecordView, Pointer),
+  Found(usize, VersionRecordView, Option<Pointer>),
   Move(Pointer),
   NotFound(usize),
 }
@@ -257,10 +252,12 @@ impl<'a> LeafNodeView<'a> {
       let k = self.page.range(offset..offset + l);
       if k < key {
         continue;
-      } else if k == key {
-        return Ok(NodeFindResult::Found(i, record, ptr));
-      } else {
+      } else if k > key {
         return Ok(NodeFindResult::NotFound(i));
+      } else if ptr == 0 {
+        return Ok(NodeFindResult::Found(i, record, None));
+      } else {
+        return Ok(NodeFindResult::Found(i, record, Some(ptr)));
       }
     }
 
@@ -282,7 +279,7 @@ impl<'a> LeafNodeView<'a> {
       let key = scanner.read_n(l)?.to_vec();
       let record = VersionRecord::deserialize_from(&mut scanner)?;
       let next = scanner.read_u64()?;
-      entries.push(LeafEntry::new(key, record, next))
+      entries.push(LeafEntry::new(key, record, (next != 0).then_some(next)))
     }
 
     Ok(LeafNode::new(entries, self.next, self.bias))
@@ -333,6 +330,13 @@ impl<'a> LeafNodeView<'a> {
   }
 }
 
+pub struct LeafEntryView {
+  pub start: usize,
+  pub end: usize,
+  pub record: VersionRecordView,
+  pub entry: Option<Pointer>,
+}
+
 /**
  * Sequential iterator over entries in a serialized leaf node.
  *
@@ -354,7 +358,7 @@ pub struct LeafNodeIter<'a> {
   closed: bool,
 }
 impl<'a> LeafNodeIter<'a> {
-  pub fn is_completed(&self) -> bool {
+  pub const fn is_completed(&self) -> bool {
     self.pos == self.len
   }
 
@@ -363,9 +367,7 @@ impl<'a> LeafNodeIter<'a> {
    *
    * The returned `(start, end)` is the key byte range in `page`.
    */
-  pub fn try_next(
-    &mut self,
-  ) -> Result<Option<(usize, usize, VersionRecordView, Pointer)>> {
+  pub fn try_next(&mut self) -> Result<Option<LeafEntryView>> {
     loop {
       if self.closed {
         return Ok(None);
@@ -393,19 +395,25 @@ impl<'a> LeafNodeIter<'a> {
         _ => {}
       }
 
-      let result = (offset, offset + l, record, ptr);
+      let e = LeafEntryView {
+        start: offset,
+        end: offset + l,
+        record,
+        entry: (ptr != 0).then_some(ptr),
+      };
+
       match self.end {
         Bound::Included(k) if k.as_slice() >= key => {
           self.pos += 1;
-          return Ok(Some(result));
+          return Ok(Some(e));
         }
         Bound::Excluded(k) if k.as_slice() > key => {
           self.pos += 1;
-          return Ok(Some(result));
+          return Ok(Some(e));
         }
         Bound::Unbounded => {
           self.pos += 1;
-          return Ok(Some(result));
+          return Ok(Some(e));
         }
         _ => {
           self.closed = true;

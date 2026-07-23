@@ -5,9 +5,9 @@ use crate::{disk::Page, serialize::SerializeFrom};
 #[test]
 fn test_entry_with_data_roundtrip() {
   let mut page = Page::new();
-  let mut entry = DataEntry::empty();
-  entry.attach_front(
+  let entry = DataEntry::init(
     VersionRecord::new(1, 100, RecordData::Data(vec![10, 20, 30]), 1),
+    None,
     56,
   );
   page.serialize_from(&entry).expect("serialize error");
@@ -32,8 +32,11 @@ fn test_entry_with_data_roundtrip() {
 #[test]
 fn test_entry_with_tombstone_roundtrip() {
   let mut page = Page::new();
-  let mut entry = DataEntry::empty();
-  entry.attach_front(VersionRecord::new(2, 200, RecordData::Tombstone, 10), 84);
+  let entry = DataEntry::init(
+    VersionRecord::new(2, 200, RecordData::Tombstone, 10),
+    None,
+    84,
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.view().expect("deserialize error");
@@ -55,8 +58,11 @@ fn test_entry_with_tombstone_roundtrip() {
 fn test_entry_with_chunked_roundtrip() {
   let mut page = Page::new();
   let owner = 2;
-  let mut entry = DataEntry::empty();
-  entry.attach_front(VersionRecord::new(2, 200, RecordData::Blob(1, 2, 3), 1), 4);
+  let entry = DataEntry::init(
+    VersionRecord::new(2, 200, RecordData::Blob(1, 2, 3), 1),
+    None,
+    4,
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntryView = page.view().expect("deserialize error");
@@ -83,9 +89,11 @@ fn test_entry_with_chunked_roundtrip() {
 #[test]
 fn test_entry_with_next_roundtrip() {
   let mut page = Page::new();
-  let mut entry = DataEntry::empty();
-  entry.attach_front(VersionRecord::new(1, 10, RecordData::Data(vec![1]), 4), 69);
-  entry.set_next(42);
+  let entry = DataEntry::init(
+    VersionRecord::new(1, 10, RecordData::Data(vec![1]), 4),
+    Some(42),
+    69,
+  );
   page.serialize_from(&entry).expect("serialize error");
 
   let decoded: DataEntry = page.deserialize().expect("deserialize error");
@@ -95,9 +103,9 @@ fn test_entry_with_next_roundtrip() {
 #[test]
 fn test_entry_multiple_versions_roundtrip() {
   let mut page = Page::new();
-  let mut entry = DataEntry::empty();
-  entry.attach_front(
+  let mut entry = DataEntry::init(
     VersionRecord::new(3, 300, RecordData::Data(vec![3]), 32),
+    None,
     68,
   );
   entry.attach_front(VersionRecord::new(2, 200, RecordData::Tombstone, 8), 29);

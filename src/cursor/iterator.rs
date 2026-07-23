@@ -153,17 +153,18 @@ where
         },
         BTreeNodeView::Leaf(node) => {
           let mut iter = node.range_entries(start, end);
-          while let Some((s, e, record, p)) = iter.try_next()? {
-            if policy.is_visible(record.owner, record.version) {
+          while let Some(e) = iter.try_next()? {
+            if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push_back((
-                VecRef::refed(slot.page(), s, e),
-                BufferedRecord::from(&slot, record),
+                VecRef::refed(slot.page(), e.start, e.end),
+                BufferedRecord::from(&slot, e.record),
               ));
               continue;
             }
 
+            let Some(p) = e.entry else { continue };
             if let Some(found) = Self::__find(&policy, table, p)? {
-              buffered.push_back((VecRef::refed(slot.page(), s, e), found));
+              buffered.push_back((VecRef::refed(slot.page(), e.start, e.end), found));
             };
           }
 
@@ -223,19 +224,20 @@ where
     let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
 
     let mut iter = node.range_entries(&Bound::Unbounded, &self.end);
-    while let Some((s, e, record, p)) = iter.try_next()? {
-      if self.policy.is_visible(record.owner, record.version) {
+    while let Some(e) = iter.try_next()? {
+      if self.policy.is_visible(e.record.owner, e.record.version) {
         self.buffered.push_back((
-          VecRef::refed(slot.page(), s, e),
-          BufferedRecord::from(&slot, record),
+          VecRef::refed(slot.page(), e.start, e.end),
+          BufferedRecord::from(&slot, e.record),
         ));
         continue;
       }
 
+      let Some(p) = e.entry else { continue };
       if let Some(found) = self.find_value(p)? {
         self
           .buffered
-          .push_back((VecRef::refed(slot.page(), s, e), found));
+          .push_back((VecRef::refed(slot.page(), e.start, e.end), found));
       };
     }
 
