@@ -16,7 +16,7 @@ use crate::{
   serialize::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
   utils::SBox,
-  wal::{TxId, WAL},
+  wal::{TxId, WriteAheadLog},
 };
 
 pub struct TransactionConfig {
@@ -30,7 +30,7 @@ pub struct TransactionConfig {
  * it wires subsystems together and exposes transaction lifecycle operations.
  */
 pub struct TxOrchestrator {
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   checkpoint: Arc<Checkpoint>,
@@ -47,7 +47,7 @@ pub struct TxOrchestrator {
 impl TxOrchestrator {
   pub fn new(
     config: TransactionConfig,
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     version_visibility: Arc<VersionVisibility>,

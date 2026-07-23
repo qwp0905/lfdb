@@ -125,7 +125,7 @@ impl Histogram {
   }
   fn sample(&self) -> bool {
     let n = self.count.fetch_add(1, Ordering::Relaxed);
-    n % self.sample == 0
+    n.is_multiple_of(self.sample)
   }
 
   pub fn record(&self, value: f64) {

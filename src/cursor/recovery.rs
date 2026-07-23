@@ -105,20 +105,21 @@ pub fn initialize(
   Ok(())
 }
 
+pub struct OpenTablesResult {
+  pub handles: Vec<(TableHandleRef, TableMetadata)>,
+  pub in_compaction: Vec<(
+    (TableHandleRef, TableMetadata),
+    (TableHandleRef, TableMetadata),
+  )>,
+}
 pub fn open_tables(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
   blob: &BlobStorage,
-) -> Result<(
-  Vec<(TableHandleRef, TableMetadata)>,
-  Vec<(
-    (TableHandleRef, TableMetadata),
-    (TableHandleRef, TableMetadata),
-  )>,
-)> {
+) -> Result<OpenTablesResult> {
   let mut handles = vec![];
-  let mut compactions = vec![];
+  let mut in_compaction = vec![];
   let meta_table = tables.meta_table();
 
   let index = BTreeIndex::new(TableOpenPolicy {
@@ -133,7 +134,7 @@ pub fn open_tables(
   while let Some((_, bytes)) = iter.get_next_pair()? {
     let metadata = TableMetadata::from_bytes(&bytes)?;
     match metadata.get_compaction_metadata() {
-      Some(c_meta) => compactions.push((
+      Some(c_meta) => in_compaction.push((
         (tables.create_handle(&metadata)?, metadata),
         (tables.create_handle(&c_meta)?, c_meta),
       )),
@@ -141,7 +142,10 @@ pub fn open_tables(
     }
   }
 
-  Ok((handles, compactions))
+  Ok(OpenTablesResult {
+    handles,
+    in_compaction,
+  })
 }
 
 pub fn recovery(

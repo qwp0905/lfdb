@@ -27,12 +27,6 @@ rand = "0.9.4"
 members = ["bench"]
 
 [lints]
-clippy.unit_arg = "allow"
-clippy.doc_lazy_continuation = "allow"
-clippy.doc_overindented_list_items = "allow"
 clippy.module_inception = "allow"
 clippy.too_many_arguments = "allow"
-clippy.type_complexity = "allow"
-clippy.upper_case_acronyms = "allow"
-clippy.manual_is_multiple_of = "allow"
 clippy.big_endian_bytes = "deny"

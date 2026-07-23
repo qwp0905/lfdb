@@ -5,7 +5,7 @@ use crate::{
   error::Result,
   serialize::{Serializable, SerializeFrom},
   table::TableId,
-  wal::{TxId, WAL},
+  wal::{TxId, WriteAheadLog},
 };
 
 /**
@@ -17,11 +17,11 @@ use crate::{
  * Used by the orchestrator, and GC.
  */
 pub struct PageRecorder {
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
 }
 impl PageRecorder {
   #[inline]
-  pub const fn new(wal: Arc<WAL>) -> Self {
+  pub const fn new(wal: Arc<WriteAheadLog>) -> Self {
     Self { wal }
   }
   #[inline]

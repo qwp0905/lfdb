@@ -1,8 +1,4 @@
-use std::{
-  io,
-  panic::{RefUnwindSafe, UnwindSafe},
-  result,
-};
+use std::{io, result};
 
 use thiserror::Error;
 
@@ -72,7 +68,3 @@ pub enum Error {
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;
-unsafe impl Send for Error {}
-unsafe impl Sync for Error {}
-impl RefUnwindSafe for Error {}
-impl UnwindSafe for Error {}

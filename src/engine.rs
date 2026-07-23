@@ -25,7 +25,7 @@ use crate::{
     VersionVisibility,
   },
   utils::ToArc,
-  wal::{WALConfig, WAL},
+  wal::{WALConfig, WriteAheadLog},
   Error, Result,
 };
 
@@ -91,7 +91,8 @@ impl Engine {
     let tables = TableMapper::new(io_pool.clone())?.to_arc();
     let blob = BlobStorage::replay(io_pool.clone())?.to_arc();
 
-    let (wal, replay) = WAL::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
+    let (wal, replay) =
+      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
     let wal = wal.to_arc();
 
     let recorder = PageRecorder::new(wal.clone()).to_arc();
@@ -181,12 +182,11 @@ impl Engine {
     }
 
     let mut handles = HashMap::new();
-    let (open_handles, compactions) =
-      open_tables(&block_cache, &tables, &version_visibility, &blob)?;
-    for (table, metadata) in open_handles {
+    let found_handles = open_tables(&block_cache, &tables, &version_visibility, &blob)?;
+    for (table, metadata) in found_handles.handles {
       handles.insert(table.get_id(), (metadata, table));
     }
-    for ((table, metadata), (c_table, c_meta)) in compactions.iter() {
+    for ((table, metadata), (c_table, c_meta)) in found_handles.in_compaction.iter() {
       handles.insert(table.get_id(), (metadata.clone(), table.clone()));
       handles.insert(c_table.get_id(), (c_meta.clone(), c_table.clone()));
     }
@@ -231,11 +231,13 @@ impl Engine {
       compaction_config,
     );
 
-    let events = compactions
-      .into_iter()
-      .map(|((table, _), (c_table, c_meta))| {
-        CompactionPublished::new(table, c_table, c_meta)
-      });
+    let events =
+      found_handles
+        .in_compaction
+        .into_iter()
+        .map(|((table, _), (c_table, c_meta))| {
+          CompactionPublished::new(table, c_table, c_meta)
+        });
     event_bus.batch_publish(events);
 
     let checkpoint = Checkpoint::initial_checkpoint(

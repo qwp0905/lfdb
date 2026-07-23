@@ -19,7 +19,7 @@ use crate::{
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox},
-  wal::{TxId, WALFailed, RESERVED_TX, WAL},
+  wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
   warn, Error, Result,
 };
 
@@ -38,7 +38,7 @@ struct MiniTx<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  wal: &'a WAL,
+  wal: &'a WriteAheadLog,
   blob: &'a BlobStorage,
   committed: Cell<bool>,
   modified: Cell<bool>,
@@ -47,7 +47,7 @@ struct MiniTx<'a> {
 impl<'a> MiniTx<'a> {
   fn start(
     version_visibility: &'a VersionVisibility,
-    wal: &'a WAL,
+    wal: &'a WriteAheadLog,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
     blob: &'a BlobStorage,
@@ -301,7 +301,7 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
  */
 fn create_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -416,7 +416,7 @@ pub struct Compactor {
   ticker: Box<BackgroundThread<()>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   recorder: Arc<PageRecorder>,
   blob: Arc<BlobStorage>,
   meta_table: TableHandleRef,
@@ -427,7 +427,7 @@ impl Compactor {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     version_visibility: Arc<VersionVisibility>,
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     event_bus: Arc<EventBus>,
     blob: Arc<BlobStorage>,
     config: CompactionConfig,
@@ -599,7 +599,7 @@ binding_events!(Compactor {
  */
 fn remove_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   blob: &BlobStorage,
@@ -669,7 +669,7 @@ impl CompactionCycle {
  */
 fn check_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   blob: &BlobStorage,
@@ -686,7 +686,7 @@ fn run_tick(
   tables: &TableMapper,
   block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   recorder: &PageRecorder,
   event_bus: &EventBus,
   blob: &BlobStorage,
@@ -746,7 +746,8 @@ fn run_tick(
   };
 
   let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   };
 
   let Some(snapshotter) = &mut current.snapshotter else {
@@ -782,7 +783,8 @@ fn run_tick(
     ));
     drop(old);
     drop(new);
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   }
 
   if !check_compaction(
@@ -797,7 +799,8 @@ fn run_tick(
     warn!("table {} already dropped.", current.metadata.get_name());
     drop(old);
     drop(new);
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   }
 
   for _ in 0..batch_size {
@@ -816,7 +819,7 @@ fn compaction_loop(
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   recorder: Arc<PageRecorder>,
   event_bus: Arc<EventBus>,
   blob: Arc<BlobStorage>,
