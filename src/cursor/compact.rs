@@ -3,18 +3,19 @@ use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
 use super::{
-  BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, RecordId,
-  Snapshotter, WritablePolicy, WriteOp,
+  BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, Snapshotter,
+  WritablePolicy, WriteOp,
 };
 use crate::{
   background::{
     BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
   },
   binding_events,
+  blob::BlobStorage,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   error, info,
-  serialize::Serializable,
+  objects::{RecordId, Serializable},
   table::{TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
@@ -122,9 +123,9 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
   }
   fn read_blob(
     &self,
-    blob_id: super::BlobId,
-    offset: super::BlobOffset,
-    len: super::BlobLen,
+    blob_id: crate::blob::BlobId,
+    offset: crate::blob::BlobOffset,
+    len: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     let blob = self
       .blob
@@ -158,7 +159,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
-  fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
 }
@@ -210,9 +211,9 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   }
   fn read_blob(
     &self,
-    _: super::BlobId,
-    _: super::BlobOffset,
-    _: super::BlobLen,
+    _: crate::blob::BlobId,
+    _: crate::blob::BlobOffset,
+    _: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
@@ -251,9 +252,9 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   }
   fn read_blob(
     &self,
-    _: super::BlobId,
-    _: super::BlobOffset,
-    _: super::BlobLen,
+    _: crate::blob::BlobId,
+    _: crate::blob::BlobOffset,
+    _: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
@@ -285,7 +286,7 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
-  fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, _: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     unreachable!()
   }
 }

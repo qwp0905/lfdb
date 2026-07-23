@@ -11,10 +11,11 @@ use std::{
 use super::EngineConfig;
 use crate::{
   background::EventBus,
+  blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, BlobStorage, CompactionConfig,
-    CompactionPublished, Compactor, GarbageCollectionConfig, GarbageCollector,
+    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
+    GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,

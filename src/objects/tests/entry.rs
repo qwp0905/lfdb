@@ -1,6 +1,6 @@
+use super::super::*;
 use super::*;
-use crate::cursor::objects::*;
-use crate::{disk::Page, serialize::SerializeFrom};
+use crate::disk::Page;
 
 #[test]
 fn test_entry_with_data_roundtrip() {

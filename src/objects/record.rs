@@ -1,9 +1,7 @@
-use super::{
-  BlobId, BlobLen, BlobOffset, RecordId, BLOB_ID_BYTES, BLOB_LEN_BYTES,
-  BLOB_OFFSET_BYTES, RECORD_ID_BYTES,
-};
+use super::{RecordId, RECORD_ID_BYTES};
 
 use crate::{
+  blob::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_LEN_BYTES, BLOB_OFFSET_BYTES},
   disk::{Page, POINTER_BYTES},
   wal::TxId,
   Error,

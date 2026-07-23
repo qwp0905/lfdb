@@ -1,14 +1,19 @@
 use std::{collections::VecDeque, ops::Bound};
 
 use crate::{
-  cache::ReadonlySlot, disk::Pointer, table::TableHandleRef, wal::TxId, Result,
+  blob::{BlobId, BlobLen, BlobOffset},
+  cache::ReadonlySlot,
+  disk::Pointer,
+  objects::{
+    BTreeNodeView, DataEntryView, RecordDataView, RecordId, StaticKey, TreeHeader,
+    VersionRecordView, HEADER_POINTER,
+  },
+  table::TableHandleRef,
+  wal::TxId,
+  Result,
 };
 
-use super::{
-  BTreeNodeView, BlobId, BlobLen, BlobOffset, DataEntryView, MergeSortable,
-  ReadonlyPolicy, RecordDataView, RecordId, StaticKey, TreeHeader, VecRef,
-  VersionRecordView, HEADER_POINTER,
-};
+use super::{MergeSortable, ReadonlyPolicy, VecRef};
 
 /**
  * Buffered record payload used by snapshot-oriented iteration.
