@@ -2,12 +2,12 @@ use std::{
   io::ErrorKind,
   mem::forget,
   path::PathBuf,
-  sync::{atomic::Ordering, Arc},
+  sync::{atomic::Ordering, Arc, OnceLock},
 };
 
 use crossbeam::{
   atomic::AtomicCell,
-  epoch::{self, Atomic, Guard, Owned, Shared},
+  epoch::{Atomic, Collector, Guard, LocalHandle, Owned, Shared},
   utils::Backoff,
 };
 
@@ -49,6 +49,14 @@ impl State {
   fn is_available(&self) -> bool {
     matches!(self, Self::Available)
   }
+}
+
+static COLLECTOR: OnceLock<Collector> = OnceLock::new();
+thread_local! {
+  static LOCAL: LocalHandle = COLLECTOR.get_or_init(Collector::new).register();
+}
+fn pin() -> Guard {
+  LOCAL.with(LocalHandle::pin)
 }
 
 /**
@@ -325,7 +333,7 @@ impl WAL {
         return Err(Error::WALUnavailable);
       }
 
-      let guard = epoch::pin();
+      let guard = pin();
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = unsafe { &*buffer_ptr.as_raw() };
 
@@ -418,7 +426,7 @@ impl WAL {
 
   pub fn close(&self) {
     self.sync_queue.drain();
-    let guard = epoch::pin();
+    let guard = pin();
     let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
     if !ptr.is_null() {
       unsafe { guard.defer_destroy(ptr) };
