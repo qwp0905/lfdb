@@ -1,9 +1,8 @@
-use super::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, RecordId};
-
 use crate::{
+  blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
   cache::{CachedSlot, RefedSlot},
   disk::{AlignedBuf, FreePointer, Pointer},
-  serialize::Serializable,
+  objects::{RecordId, Serializable},
   table::TableHandleRef,
   wal::TxId,
   Result,

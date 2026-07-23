@@ -5,15 +5,14 @@ use super::{
 };
 
 use crate::{
+  blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{
-    BlobAppendGuard, BlobHandle, BlobId, BlobStorage, Compactor, GarbageCollector,
-  },
+  cursor::{Compactor, GarbageCollector},
   disk::{IOPool, Pointer},
   error::Result,
   info, measure,
   metrics::MetricsRegistry,
-  serialize::Serializable,
+  objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
   utils::SBox,
   wal::{TxId, WriteAheadLog},

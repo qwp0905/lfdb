@@ -1,7 +1,9 @@
-use super::{InternalNode, InternalNodeView, LeafNode, LeafNodeView};
+use super::{
+  Deserializable, InternalNode, InternalNodeView, LeafNode, LeafNodeView, Serializable,
+  SerializeType, TypedObject, Viewable,
+};
 use crate::{
   disk::{PageScanner, PageWriter},
-  serialize::{Deserializable, Serializable, SerializeType, TypedObject, Viewable},
   Error, Result,
 };
 

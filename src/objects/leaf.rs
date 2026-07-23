@@ -2,11 +2,10 @@ use std::{mem::replace, ops::Bound};
 
 use super::{
   count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, VersionRecord,
-  VersionRecordView, DEFAULT_BIAS, SPLIT_BIAS_BYTES,
+  VersionRecordView, DEFAULT_BIAS, SERIALIZABLE_BYTES, SPLIT_BIAS_BYTES,
 };
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
-  serialize::SERIALIZABLE_BYTES,
   Result,
 };
 

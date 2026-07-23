@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
   cache::RefedSlot,
   error::Result,
-  serialize::{Serializable, SerializeFrom},
+  objects::{Serializable, SerializeFrom},
   table::TableId,
   wal::{TxId, WriteAheadLog},
 };

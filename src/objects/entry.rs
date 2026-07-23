@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 
-use super::{VersionRecord, VersionRecordView};
+use super::{
+  Deserializable, Serializable, SerializeType, TypedObject, VersionRecord,
+  VersionRecordView, Viewable, SERIALIZABLE_BYTES,
+};
 use crate::{
   disk::{Page, PageScanner, Pointer, POINTER_BYTES},
-  serialize::{
-    Deserializable, Serializable, SerializeType, TypedObject, Viewable,
-    SERIALIZABLE_BYTES,
-  },
   wal::{TxId, TX_ID_BYTES},
   Result,
 };

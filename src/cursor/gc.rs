@@ -6,19 +6,20 @@ use std::{
 
 use crossbeam::{epoch::pin, queue::SegQueue};
 
-use super::{
-  BTreeNodeView, BlobId, BlobStorage, CompactionTriggered, DataEntry, DataEntryView,
-  RecordDataView, TreeHeader, HEADER_POINTER,
-};
+use super::CompactionTriggered;
 use crate::{
   background::{
     BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
     ThreadBuilder,
   },
   binding_events,
+  blob::{BlobId, BlobStorage},
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   error,
+  objects::{
+    BTreeNodeView, DataEntry, DataEntryView, RecordDataView, TreeHeader, HEADER_POINTER,
+  },
   table::{TableHandleRef, TableMapper, META_TABLE_ID},
   transaction::{PageRecorder, VersionVisibility},
   utils::{ChunkQueue, ToArc, ToBox},

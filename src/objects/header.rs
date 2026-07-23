@@ -1,6 +1,6 @@
+use super::{Deserializable, Serializable, SerializeType, TypedObject};
 use crate::{
   disk::{PageScanner, PageWriter, Pointer},
-  serialize::{Deserializable, Serializable, SerializeType, TypedObject},
   Result,
 };
 

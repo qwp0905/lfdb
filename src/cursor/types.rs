@@ -5,9 +5,6 @@ use crate::{
   utils::SBox,
 };
 
-pub type StaticKey = Vec<u8>;
-pub type StaticKeyRef<'a> = &'a [u8];
-
 enum Type {
   Refed(SBox<PageRef<PAGE_SIZE>>, usize, usize),
   Copied(AlignedBuf),
