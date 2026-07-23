@@ -65,7 +65,7 @@ impl State {
  * flush=true callers (commit, checkpoint) wait for all prior segment fsync to
  * complete before returning, guaranteeing durability across segment boundaries.
  */
-pub struct WAL {
+pub struct WriteAheadLog {
   /**
    * last log id (LSN)
    */
@@ -102,7 +102,7 @@ pub struct WAL {
 
   event_bus: Arc<EventBus>,
 }
-impl WAL {
+impl WriteAheadLog {
   pub fn replay(
     config: &WALConfig,
     event_bus: Arc<EventBus>,
@@ -429,5 +429,3 @@ impl WAL {
     self.preloader.close();
   }
 }
-unsafe impl Send for WAL {}
-unsafe impl Sync for WAL {}

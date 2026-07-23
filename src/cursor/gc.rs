@@ -392,7 +392,8 @@ fn run_tick(
       {
         blob.truncate(id)?;
       }
-      return Ok(*cycle = None);
+      *cycle = None;
+      return Ok(());
     };
 
     let Some(table) = task.table.try_pin() else {
