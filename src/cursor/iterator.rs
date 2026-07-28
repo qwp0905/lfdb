@@ -13,7 +13,7 @@ use crate::{
   Result,
 };
 
-use super::{MergeSortable, ReadonlyPolicy, VecRef};
+use super::{MergeSortable, ReadonlyPolicy, ScannedItem, VecRef};
 
 /**
  * Buffered record payload used by snapshot-oriented iteration.
@@ -77,10 +77,10 @@ pub struct KVSnapshot {
  * preserves the visible record metadata and blob pointer so callers can copy the
  * record itself instead of only its value.
  */
-pub struct Snapshotter<Policy>(BTreeIterator<Policy>);
+pub struct Snapshotter<Policy>(BTreeIter<Policy>);
 impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   pub fn open(policy: Policy, table: &TableHandleRef) -> Result<Self> {
-    BTreeIterator::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
+    BTreeIter::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
   }
 
   /**
@@ -121,7 +121,7 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
  * and returns only the key plus live value/tombstone needed by merge-sort users.
  * Blob values are materialized through the policy before they are returned.
  */
-pub struct BTreeIterator<Policy> {
+pub struct BTreeIter<Policy> {
   policy: Policy,
   table: TableHandleRef,
   buffered: VecDeque<(VecRef, Option<BufferedRecord>)>,
@@ -129,7 +129,7 @@ pub struct BTreeIterator<Policy> {
   end: Bound<StaticKey>,
   closed: bool,
 }
-impl<Policy> BTreeIterator<Policy>
+impl<Policy> BTreeIter<Policy>
 where
   Policy: ReadonlyPolicy,
 {
@@ -151,7 +151,7 @@ where
     loop {
       let slot = policy.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => match &start {
+        BTreeNodeView::Internal(node) => match start {
           Bound::Included(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
           Bound::Excluded(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
           Bound::Unbounded => ptr = node.first_child()?,
@@ -266,24 +266,24 @@ where
     }
   }
 
-  fn next_kv(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+  fn next_kv(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     let Some((key, found)) = self.next_record()? else {
       return Ok(None);
     };
     let Some(record) = found else {
-      return Ok(Some((key, None)));
+      return Ok(Some((key, ScannedItem::Deleted)));
     };
     match record.data {
-      BufferedValue::Data(data) => Ok(Some((key, Some(data)))),
+      BufferedValue::Data(data) => Ok(Some((key, ScannedItem::Present(data)))),
       BufferedValue::Blob(id, offset, len) => Ok(Some((
         key,
-        Some(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
+        ScannedItem::Present(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
       ))),
     }
   }
 }
-impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIterator<Policy> {
-  fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIter<Policy> {
+  fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     self.next_kv()
   }
 }

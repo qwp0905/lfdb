@@ -185,6 +185,39 @@ impl<'a> Transaction<'a> {
     Ok(())
   }
 
+  pub fn truncate_table(&mut self, name: &str) -> Result {
+    if !self.context.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+    let name = TableName::from_str(name)?;
+    let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
+
+    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+      return Err(Error::TableNotFound(name.to_string()));
+    };
+
+    let old = TableMetadata::from_bytes(&bytes)?;
+    let new = self.orchestrator.create_table_metadata(&name);
+    cursor.insert(name.as_bytes().to_vec(), new.to_vec())?;
+
+    let table = self.orchestrator.open_table(&new)?;
+    Cursor::initialize(table.clone(), &self.context, self.metrics)?;
+    self.orchestrator.register_table(table.clone());
+    self.created_tables.push(table);
+
+    if let Some(table) = self.orchestrator.get_table(old.get_id()) {
+      self.dropped_tables.push(table);
+    }
+
+    if let Some(table) = old
+      .get_compaction_id()
+      .and_then(|id| self.orchestrator.get_table(id))
+    {
+      self.dropped_tables.push(table);
+    }
+    Ok(())
+  }
+
   pub fn commit(&mut self) -> Result {
     let state = self.context.state();
     if !state.try_commit() {

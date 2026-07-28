@@ -3,6 +3,11 @@ use std::cmp::Ordering;
 use super::VecRef;
 use crate::Result;
 
+pub enum ScannedItem {
+  Present(VecRef),
+  Deleted,
+}
+
 /**
  * Merge two sorted key streams for tree-level compaction/merge work.
  *
@@ -19,14 +24,14 @@ pub trait MergeSortable {
    * tombstones in the stream so they can shadow older values for the same key;
    * callers that need only live key/value pairs can use `get_next_pair`.
    */
-  fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>>;
+  fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>>;
 
   fn get_next_pair(&mut self) -> Result<Option<(VecRef, VecRef)>> {
     loop {
       match self.try_next()? {
-        Some((k, Some(v))) => return Ok(Some((k, v))),
+        Some((k, ScannedItem::Present(v))) => return Ok(Some((k, v))),
         None => return Ok(None),
-        Some((_, None)) => continue,
+        Some((_, ScannedItem::Deleted)) => continue,
       }
     }
   }
@@ -36,9 +41,9 @@ pub enum MergeSorted<T, R = T> {
   Single(T),
   MergeSorted {
     primary: T,
-    primary_buffered: Option<(VecRef, Option<VecRef>)>,
+    primary_buffered: Option<(VecRef, ScannedItem)>,
     secondary: R,
-    secondary_buffered: Option<(VecRef, Option<VecRef>)>,
+    secondary_buffered: Option<(VecRef, ScannedItem)>,
   },
 }
 
@@ -60,7 +65,7 @@ where
   T: MergeSortable,
   R: MergeSortable,
 {
-  fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+  fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     let (primary, primary_buffered, secondary, secondary_buffered) = match self {
       MergeSorted::Single(sorted) => return sorted.try_next(),
       MergeSorted::MergeSorted {

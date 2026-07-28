@@ -34,6 +34,7 @@ let users = tx.table("users")?;
 
 users.insert(b"key1".to_vec(), b"value1".to_vec())?;
 
+assert!(users.contains(b"key1")?);
 let value = users.get(b"key1")?; // returns Option<VecRef> similar to a slice.
 
 users.remove(b"key1")?;
@@ -70,6 +71,14 @@ tx.compact_table("users")?;
 tx.commit()?; 
 // commit dispatches the compaction and returns immediately
 // the compaction itself runs in the background
+```
+
+### Truncate Table
+
+```rust
+let mut tx = engine.new_tx()?;
+tx.truncate_table("users")?;
+tx.commit()?; 
 ```
 
 ### Drop Table

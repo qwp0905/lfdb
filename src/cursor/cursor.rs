@@ -9,7 +9,8 @@
 use std::ops::{Bound, RangeBounds};
 
 use super::{
-  BTreeIndex, BTreeIterator, MergeSortable, MergeSorted, VecRef, WriteOp, WriteResult,
+  BTreeIndex, BTreeIter, GetResult, LookupResult, MergeSortable, MergeSorted, VecRef,
+  WriteOp, WriteResult,
 };
 use crate::{
   measure,
@@ -57,14 +58,38 @@ impl<'a> Cursor<'a> {
     }
   }
 
+  pub fn contains<K: AsRef<[u8]>>(&self, key: &K) -> Result<bool> {
+    if !self.context.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+    let key = key.as_ref();
+    if key.len() > MAX_KEY {
+      return Err(Error::KeyExceeded(MAX_KEY, key.len()));
+    }
+
+    if let Some(table) = self.compaction.as_ref() {
+      match self.index.lookup(key, table)? {
+        LookupResult::Absent => {}
+        LookupResult::Deleted => return Ok(false),
+        LookupResult::Present => return Ok(true),
+      }
+    }
+    self.index.contains(key, &self.table)
+  }
+
   fn __get(&self, key: StaticKeyRef) -> Result<Option<VecRef>> {
     if let Some(table) = self.compaction.as_ref() {
-      if let Some(found) = self.index.get(key, table)? {
-        return Ok(found);
+      match self.index.get(key, table)? {
+        GetResult::Absent => {}
+        GetResult::Deleted => return Ok(None),
+        GetResult::Present(bytes) => return Ok(Some(bytes)),
       }
     }
 
-    Ok(self.index.get(key, &self.table)?.flatten())
+    Ok(match self.index.get(key, &self.table)? {
+      GetResult::Present(bytes) => Some(bytes),
+      _ => None,
+    })
   }
   pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<VecRef>> {
     if !self.context.is_available() {
@@ -140,7 +165,7 @@ impl<'a> Cursor<'a> {
   pub fn scan<'b, 'c, K>(
     &'a self,
     range: impl RangeBounds<&'c K>,
-  ) -> Result<CursorIterator<'b>>
+  ) -> Result<CursorIter<'b>>
   where
     'a: 'b,
     K: AsRef<[u8]> + ?Sized + 'c,
@@ -151,7 +176,7 @@ impl<'a> Cursor<'a> {
 
     // Own range bounds inside the iterator so user-provided key references do not
     // extend into the cursor scan lifetime.
-    CursorIterator::new(
+    CursorIter::new(
       self.context,
       &self.table,
       self.compaction.as_ref(),
@@ -162,11 +187,11 @@ impl<'a> Cursor<'a> {
   }
 }
 
-pub struct CursorIterator<'a> {
+pub struct CursorIter<'a> {
   context: &'a TxContext<'a>,
-  iter: MergeSorted<BTreeIterator<&'a &'a TxContext<'a>>>,
+  iter: MergeSorted<BTreeIter<&'a &'a TxContext<'a>>>,
 }
-impl<'a> CursorIterator<'a> {
+impl<'a> CursorIter<'a> {
   pub fn new(
     context: &'a TxContext,
     table: &'a TableHandleRef,

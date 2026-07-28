@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-  BTreeIterator, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy, Snapshotter,
+  BTreeIter, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy, Snapshotter,
   VecRef, WritablePolicy,
 };
 
@@ -33,11 +33,7 @@ impl<Policy> BTreeIndex<Policy> {
   }
 }
 impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
-  pub fn get(
-    &self,
-    key: StaticKeyRef,
-    table: &TableHandleRef,
-  ) -> Result<Option<Option<VecRef>>> {
+  pub fn get(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<GetResult> {
     let mut ptr = self
       .0
       .fetch_slot(HEADER_POINTER, table)?
@@ -51,22 +47,24 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(None),
+          NodeFindResult::NotFound(_) => return Ok(GetResult::Absent),
           NodeFindResult::Move(next) => ptr = next,
           NodeFindResult::Found(_, record, entry_ptr) => {
             if !self.0.is_visible(record.owner, record.version) {
               match entry_ptr {
                 Some(p) => break ptr = p,
-                None => return Ok(None),
+                None => return Ok(GetResult::Deleted),
               }
             }
-            return Ok(Some(match &record.data {
-              RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
-              RecordDataView::Blob(id, offset, len) => {
-                Some(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+            return Ok(match &record.data {
+              RecordDataView::Data(s, e) => {
+                GetResult::Present(VecRef::refed(slot.page(), *s, *e))
               }
-              RecordDataView::Tombstone => None,
-            }));
+              RecordDataView::Blob(id, offset, len) => {
+                GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+              }
+              RecordDataView::Tombstone => GetResult::Deleted,
+            });
           }
         },
       }
@@ -80,22 +78,28 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       if let Some(record) =
         entry.find(|record| self.0.is_visible(record.owner, record.version))?
       {
-        return Ok(Some(match &record.data {
-          RecordDataView::Data(s, e) => Some(VecRef::refed(slot.page(), *s, *e)),
-          RecordDataView::Blob(id, offset, len) => {
-            Some(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+        return Ok(match &record.data {
+          RecordDataView::Data(s, e) => {
+            GetResult::Present(VecRef::refed(slot.page(), *s, *e))
           }
-          RecordDataView::Tombstone => None,
-        }));
+          RecordDataView::Blob(id, offset, len) => {
+            GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+          }
+          RecordDataView::Tombstone => GetResult::Deleted,
+        });
       }
 
       next = entry.get_next();
     }
 
-    Ok(None)
+    Ok(GetResult::Absent)
   }
 
-  pub fn contains(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<bool> {
+  pub fn lookup(
+    &self,
+    key: StaticKeyRef,
+    table: &TableHandleRef,
+  ) -> Result<LookupResult> {
     let mut ptr = self
       .0
       .fetch_slot(HEADER_POINTER, table)?
@@ -109,15 +113,18 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
         BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(false),
+          NodeFindResult::NotFound(_) => return Ok(LookupResult::Absent),
           NodeFindResult::Move(next) => ptr = next,
           NodeFindResult::Found(_, record, entry_ptr) => {
             if self.0.is_visible(record.owner, record.version) {
-              return Ok(!record.data.is_tombstone());
+              if record.data.is_tombstone() {
+                return Ok(LookupResult::Deleted);
+              }
+              return Ok(LookupResult::Present);
             }
             match entry_ptr {
               Some(p) => break ptr = p,
-              None => return Ok(false),
+              None => return Ok(LookupResult::Absent),
             }
           }
         },
@@ -131,13 +138,20 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       if let Some(record) =
         entry.find(|record| self.0.is_visible(record.owner, record.version))?
       {
-        return Ok(!record.data.is_tombstone());
+        if record.data.is_tombstone() {
+          return Ok(LookupResult::Deleted);
+        }
+        return Ok(LookupResult::Present);
       };
 
       next = entry.get_next();
     }
 
-    Ok(false)
+    Ok(LookupResult::Absent)
+  }
+
+  pub fn contains(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<bool> {
+    Ok(matches!(self.lookup(key, table)?, LookupResult::Present))
   }
 
   /**
@@ -184,8 +198,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
-  ) -> Result<BTreeIterator<&'_ Policy>> {
-    BTreeIterator::open(&self.0, table, start, end)
+  ) -> Result<BTreeIter<&'_ Policy>> {
+    BTreeIter::open(&self.0, table, start, end)
   }
 }
 
@@ -836,6 +850,17 @@ where
   ) -> Result<WriteResult> {
     self.__insert(key, op, table, false)
   }
+}
+
+pub enum LookupResult {
+  Absent,
+  Deleted,
+  Present,
+}
+pub enum GetResult {
+  Absent,
+  Deleted,
+  Present(VecRef),
 }
 
 pub struct WriteResult {
