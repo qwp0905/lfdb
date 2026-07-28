@@ -151,7 +151,7 @@ where
     loop {
       let slot = policy.fetch_slot(ptr, table)?.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => match &start {
+        BTreeNodeView::Internal(node) => match start {
           Bound::Included(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
           Bound::Excluded(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
           Bound::Unbounded => ptr = node.first_child()?,
