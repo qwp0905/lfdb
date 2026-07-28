@@ -13,7 +13,7 @@ use crate::{
   Result,
 };
 
-use super::{MergeSortable, ReadonlyPolicy, VecRef};
+use super::{MergeSortable, ReadonlyPolicy, ScannedItem, VecRef};
 
 /**
  * Buffered record payload used by snapshot-oriented iteration.
@@ -266,24 +266,24 @@ where
     }
   }
 
-  fn next_kv(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+  fn next_kv(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     let Some((key, found)) = self.next_record()? else {
       return Ok(None);
     };
     let Some(record) = found else {
-      return Ok(Some((key, None)));
+      return Ok(Some((key, ScannedItem::Deleted)));
     };
     match record.data {
-      BufferedValue::Data(data) => Ok(Some((key, Some(data)))),
+      BufferedValue::Data(data) => Ok(Some((key, ScannedItem::Present(data)))),
       BufferedValue::Blob(id, offset, len) => Ok(Some((
         key,
-        Some(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
+        ScannedItem::Present(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
       ))),
     }
   }
 }
 impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIter<Policy> {
-  fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
+  fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     self.next_kv()
   }
 }
