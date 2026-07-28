@@ -3,8 +3,8 @@ use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
 use super::{
-  BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, Snapshotter,
-  WritablePolicy, WriteOp,
+  BTreeIndex, CreatablePolicy, DropTableCommitted, GetResult, ReadonlyPolicy,
+  Snapshotter, WritablePolicy, WriteOp,
 };
 use crate::{
   background::{
@@ -313,7 +313,7 @@ fn create_compaction(
   let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
   let index = BTreeIndex::new(&tx);
 
-  let Some(bytes) = index.get(table_name.as_bytes(), meta_table)?.flatten() else {
+  let GetResult::Present(bytes) = index.get(table_name.as_bytes(), meta_table)? else {
     return Ok(None);
   };
 

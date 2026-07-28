@@ -67,12 +67,13 @@ fn test_basic_crud() {
   table.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
 
   // read within same tx
-  let val = table.get(&b"key1".to_vec()).unwrap();
+  assert!(table.contains(b"key1").unwrap());
+  let val = table.get(b"key1").unwrap();
   assert_eq!(val.as_deref(), Some(b"value1".as_slice()));
 
   // remove
-  table.remove(&b"key1".to_vec()).unwrap();
-  let val = table.get(&b"key1".to_vec()).unwrap();
+  table.remove(b"key1").unwrap();
+  let val = table.get(b"key1").unwrap();
   assert_eq!(val, None);
 
   tx.commit().unwrap();
@@ -95,11 +96,7 @@ fn test_commit_visibility() {
   tx1.commit().unwrap();
 
   let tx2 = engine.new_tx().unwrap();
-  let val = tx2
-    .table(TEST_TABLE)
-    .unwrap()
-    .get(&b"hello".to_vec())
-    .unwrap();
+  let val = tx2.table(TEST_TABLE).unwrap().get(b"hello").unwrap();
   assert_eq!(val.as_deref(), Some(b"world".as_slice()));
 }
 
@@ -119,7 +116,7 @@ fn test_abort_invisibility() {
 
   let tx2 = engine.new_tx().unwrap();
   let t2 = tx2.table(TEST_TABLE).unwrap();
-  let val = t2.get(&b"ghost".to_vec()).unwrap();
+  let val = t2.get(b"ghost").unwrap();
   assert_eq!(val, None);
 }
 
@@ -1729,4 +1726,47 @@ fn test_auto_compaction() {
       assert_eq!(data.len(), c, "table {name}")
     }
   }
+}
+
+/**
+ * 31. Test truncate table.
+ */
+#[test]
+fn test_truncate() {
+  let dir = tempdir_in(".").unwrap();
+  fn count(engine: &Engine) -> usize {
+    let mut count = 0;
+    let tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
+    let mut iter = table.scan::<[_]>(..).unwrap();
+    while iter.try_next().unwrap().is_some() {
+      count += 1;
+    }
+    count
+  }
+
+  {
+    let engine = build_engine(&dir);
+    create_table(&engine, TEST_TABLE);
+    {
+      let mut tx = engine.new_tx().unwrap();
+      let table = tx.open_table(TEST_TABLE).unwrap();
+      for i in 0..100 {
+        let key = format!("123{:06}", i).as_bytes().to_vec();
+        table.insert(key.clone(), key).unwrap();
+      }
+      tx.commit().unwrap();
+    }
+
+    {
+      let mut tx = engine.new_tx().unwrap();
+      tx.truncate_table(TEST_TABLE).unwrap();
+      tx.commit().unwrap();
+    }
+
+    assert_eq!(count(&engine), 0);
+  }
+
+  let engine = build_engine(&dir);
+  assert_eq!(count(&engine), 0);
 }
