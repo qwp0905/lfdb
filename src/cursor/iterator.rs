@@ -77,10 +77,10 @@ pub struct KVSnapshot {
  * preserves the visible record metadata and blob pointer so callers can copy the
  * record itself instead of only its value.
  */
-pub struct Snapshotter<Policy>(BTreeIterator<Policy>);
+pub struct Snapshotter<Policy>(BTreeIter<Policy>);
 impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   pub fn open(policy: Policy, table: &TableHandleRef) -> Result<Self> {
-    BTreeIterator::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
+    BTreeIter::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
   }
 
   /**
@@ -121,7 +121,7 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
  * and returns only the key plus live value/tombstone needed by merge-sort users.
  * Blob values are materialized through the policy before they are returned.
  */
-pub struct BTreeIterator<Policy> {
+pub struct BTreeIter<Policy> {
   policy: Policy,
   table: TableHandleRef,
   buffered: VecDeque<(VecRef, Option<BufferedRecord>)>,
@@ -129,7 +129,7 @@ pub struct BTreeIterator<Policy> {
   end: Bound<StaticKey>,
   closed: bool,
 }
-impl<Policy> BTreeIterator<Policy>
+impl<Policy> BTreeIter<Policy>
 where
   Policy: ReadonlyPolicy,
 {
@@ -282,7 +282,7 @@ where
     }
   }
 }
-impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIterator<Policy> {
+impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIter<Policy> {
   fn try_next(&mut self) -> Result<Option<(VecRef, Option<VecRef>)>> {
     self.next_kv()
   }

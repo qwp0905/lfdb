@@ -14,7 +14,7 @@ mod builder;
 pub use builder::*;
 
 mod cursor;
-pub use cursor::{Cursor, CursorIterator, InsertResult, RemoveResult, VecRef};
+pub use cursor::{Cursor, CursorIter, InsertResult, RemoveResult, VecRef};
 
 mod error;
 pub use error::*;

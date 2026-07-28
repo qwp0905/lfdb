@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-  BTreeIterator, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy, Snapshotter,
+  BTreeIter, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy, Snapshotter,
   VecRef, WritablePolicy,
 };
 
@@ -198,8 +198,8 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
-  ) -> Result<BTreeIterator<&'_ Policy>> {
-    BTreeIterator::open(&self.0, table, start, end)
+  ) -> Result<BTreeIter<&'_ Policy>> {
+    BTreeIter::open(&self.0, table, start, end)
   }
 }
 

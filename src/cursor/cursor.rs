@@ -9,7 +9,7 @@
 use std::ops::{Bound, RangeBounds};
 
 use super::{
-  BTreeIndex, BTreeIterator, GetResult, LookupResult, MergeSortable, MergeSorted, VecRef,
+  BTreeIndex, BTreeIter, GetResult, LookupResult, MergeSortable, MergeSorted, VecRef,
   WriteOp, WriteResult,
 };
 use crate::{
@@ -165,7 +165,7 @@ impl<'a> Cursor<'a> {
   pub fn scan<'b, 'c, K>(
     &'a self,
     range: impl RangeBounds<&'c K>,
-  ) -> Result<CursorIterator<'b>>
+  ) -> Result<CursorIter<'b>>
   where
     'a: 'b,
     K: AsRef<[u8]> + ?Sized + 'c,
@@ -176,7 +176,7 @@ impl<'a> Cursor<'a> {
 
     // Own range bounds inside the iterator so user-provided key references do not
     // extend into the cursor scan lifetime.
-    CursorIterator::new(
+    CursorIter::new(
       self.context,
       &self.table,
       self.compaction.as_ref(),
@@ -187,11 +187,11 @@ impl<'a> Cursor<'a> {
   }
 }
 
-pub struct CursorIterator<'a> {
+pub struct CursorIter<'a> {
   context: &'a TxContext<'a>,
-  iter: MergeSorted<BTreeIterator<&'a &'a TxContext<'a>>>,
+  iter: MergeSorted<BTreeIter<&'a &'a TxContext<'a>>>,
 }
-impl<'a> CursorIterator<'a> {
+impl<'a> CursorIter<'a> {
   pub fn new(
     context: &'a TxContext,
     table: &'a TableHandleRef,
