@@ -2,9 +2,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   cache::RefedSlot,
-  cursor::{AtomicRecordId, CreatablePolicy, ReadonlyPolicy, WritablePolicy},
+  cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
-  serialize::Serializable,
+  objects::AtomicRecordId,
+  objects::Serializable,
   table::TableHandleRef,
   wal::TxId,
   Result,
@@ -79,9 +80,9 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
   }
   fn read_blob(
     &self,
-    blob_id: crate::cursor::BlobId,
-    offset: crate::cursor::BlobOffset,
-    len: crate::cursor::BlobLen,
+    blob_id: crate::blob::BlobId,
+    offset: crate::blob::BlobOffset,
+    len: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     let blob = self
       .orchestrator
@@ -122,7 +123,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.orchestrator.alloc(pointer, table)
   }
-  fn write_blob(&self, data: Vec<u8>) -> Result<crate::cursor::BlobAppendGuard<'_>> {
+  fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     self.orchestrator.write_blob(data)
   }
 }
@@ -136,7 +137,7 @@ impl<'a> CreatablePolicy for TxContext<'a> {
   fn wait_close(&self, owner: TxId) {
     self.orchestrator.wait_commit(owner);
   }
-  fn gen_record_id(&self) -> crate::cursor::RecordId {
+  fn gen_record_id(&self) -> crate::objects::RecordId {
     self.record_id.fetch_add(1, Ordering::Relaxed)
   }
 }

@@ -6,16 +6,15 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
-use super::{
-  BTreeIndex, BTreeNodeView, BlobStorage, DataEntryView, MergeSortable, ReadonlyPolicy,
-  TreeHeader, WritablePolicy, HEADER_POINTER,
-};
+use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
   background::once,
+  blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   cache::BlockCache,
   debug,
   disk::{AlignedBuf, Pointer},
   info,
+  objects::{BTreeNodeView, DataEntryView, TreeHeader, HEADER_POINTER},
   table::{TableHandleRef, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
@@ -51,9 +50,9 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
   }
   fn read_blob(
     &self,
-    blob_id: super::BlobId,
-    offset: super::BlobOffset,
-    len: super::BlobLen,
+    blob_id: BlobId,
+    offset: BlobOffset,
+    len: BlobLen,
   ) -> Result<AlignedBuf> {
     let blob = self
       .blob
@@ -64,7 +63,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 }
 
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
-  fn serialize_and_log<T: crate::serialize::Serializable>(
+  fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
     slot: &mut crate::cache::RefedSlot,
     data: &T,
@@ -83,7 +82,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     self.block_cache.alloc(pointer, table)
   }
 
-  fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
 }
@@ -105,20 +104,21 @@ pub fn initialize(
   Ok(())
 }
 
+pub struct OpenTablesResult {
+  pub handles: Vec<(TableHandleRef, TableMetadata)>,
+  pub in_compaction: Vec<(
+    (TableHandleRef, TableMetadata),
+    (TableHandleRef, TableMetadata),
+  )>,
+}
 pub fn open_tables(
   block_cache: &BlockCache,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
   blob: &BlobStorage,
-) -> Result<(
-  Vec<(TableHandleRef, TableMetadata)>,
-  Vec<(
-    (TableHandleRef, TableMetadata),
-    (TableHandleRef, TableMetadata),
-  )>,
-)> {
+) -> Result<OpenTablesResult> {
   let mut handles = vec![];
-  let mut compactions = vec![];
+  let mut in_compaction = vec![];
   let meta_table = tables.meta_table();
 
   let index = BTreeIndex::new(TableOpenPolicy {
@@ -133,7 +133,7 @@ pub fn open_tables(
   while let Some((_, bytes)) = iter.get_next_pair()? {
     let metadata = TableMetadata::from_bytes(&bytes)?;
     match metadata.get_compaction_metadata() {
-      Some(c_meta) => compactions.push((
+      Some(c_meta) => in_compaction.push((
         (tables.create_handle(&metadata)?, metadata),
         (tables.create_handle(&c_meta)?, c_meta),
       )),
@@ -141,7 +141,10 @@ pub fn open_tables(
     }
   }
 
-  Ok((handles, compactions))
+  Ok(OpenTablesResult {
+    handles,
+    in_compaction,
+  })
 }
 
 pub fn recovery(
@@ -202,20 +205,15 @@ impl<'a> ReadonlyPolicy for RecoveryPolicy<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.read(pointer, table)
   }
-  fn read_blob(
-    &self,
-    _: super::BlobId,
-    _: super::BlobOffset,
-    _: super::BlobLen,
-  ) -> Result<AlignedBuf> {
+  fn read_blob(&self, _: BlobId, _: BlobOffset, _: BlobLen) -> Result<AlignedBuf> {
     unreachable!()
   }
 }
 impl<'a> WritablePolicy for RecoveryPolicy<'a> {
-  fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, _: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
     unreachable!()
   }
-  fn serialize_and_log<T: crate::serialize::Serializable>(
+  fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
     slot: &mut crate::cache::RefedSlot,
     data: &T,

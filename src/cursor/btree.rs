@@ -1,18 +1,21 @@
 use std::{mem::replace, ops::Bound};
 
 use crate::{
+  blob::BlobAppendGuard,
   disk::Pointer,
+  objects::{
+    BTreeNode, BTreeNodeView, DataEntry, DataEntryView, FindSlotResult, InternalNode,
+    NodeFindResult, RecordData, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
+    VersionRecord, HEADER_POINTER, LARGE_VALUE,
+  },
   table::{ReserveGuard, TableHandleRef},
   wal::{TxId, RESERVED_TX},
   Error, Result,
 };
 
 use super::{
-  BTreeIterator, BTreeNode, BTreeNodeView, BlobAppendGuard, BufferedValue,
-  CreatablePolicy, DataEntry, DataEntryView, FindSlotResult, InternalNode, KVSnapshot,
-  NodeFindResult, ReadonlyPolicy, RecordData, RecordDataView, Snapshotter, StaticKey,
-  StaticKeyRef, TreeHeader, VecRef, VersionRecord, WritablePolicy, HEADER_POINTER,
-  LARGE_VALUE,
+  BTreeIterator, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy, Snapshotter,
+  VecRef, WritablePolicy,
 };
 
 /**

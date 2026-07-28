@@ -2,12 +2,12 @@ use std::{
   io::ErrorKind,
   mem::forget,
   path::PathBuf,
-  sync::{atomic::Ordering, Arc},
+  sync::{atomic::Ordering, Arc, OnceLock},
 };
 
 use crossbeam::{
   atomic::AtomicCell,
-  epoch::{self, Atomic, Guard, Owned, Shared},
+  epoch::{Atomic, Collector, Guard, LocalHandle, Owned, Shared},
   utils::Backoff,
 };
 
@@ -51,6 +51,14 @@ impl State {
   }
 }
 
+static COLLECTOR: OnceLock<Collector> = OnceLock::new();
+thread_local! {
+  static LOCAL: LocalHandle = COLLECTOR.get_or_init(Collector::new).register();
+}
+fn pin() -> Guard {
+  LOCAL.with(LocalHandle::pin)
+}
+
 /**
  * Lock-free, group-commit write-ahead log.
  *
@@ -65,7 +73,7 @@ impl State {
  * flush=true callers (commit, checkpoint) wait for all prior segment fsync to
  * complete before returning, guaranteeing durability across segment boundaries.
  */
-pub struct WAL {
+pub struct WriteAheadLog {
   /**
    * last log id (LSN)
    */
@@ -102,7 +110,7 @@ pub struct WAL {
 
   event_bus: Arc<EventBus>,
 }
-impl WAL {
+impl WriteAheadLog {
   pub fn replay(
     config: &WALConfig,
     event_bus: Arc<EventBus>,
@@ -325,7 +333,7 @@ impl WAL {
         return Err(Error::WALUnavailable);
       }
 
-      let guard = epoch::pin();
+      let guard = pin();
       let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
       let buffer = unsafe { &*buffer_ptr.as_raw() };
 
@@ -418,7 +426,7 @@ impl WAL {
 
   pub fn close(&self) {
     self.sync_queue.drain();
-    let guard = epoch::pin();
+    let guard = pin();
     let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
     if !ptr.is_null() {
       unsafe { guard.defer_destroy(ptr) };
@@ -429,5 +437,3 @@ impl WAL {
     self.preloader.close();
   }
 }
-unsafe impl Send for WAL {}
-unsafe impl Sync for WAL {}

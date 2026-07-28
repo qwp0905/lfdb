@@ -1,4 +1,5 @@
-use super::*;
+mod serialize;
+pub use serialize::*;
 
 mod header;
 pub use header::*;
@@ -20,3 +21,6 @@ pub use record::*;
 
 mod bias;
 use bias::*;
+
+mod constants;
+pub use constants::*;

@@ -1,25 +1,26 @@
 use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue};
+use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
 use super::{
-  BTreeIndex, BlobStorage, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, RecordId,
-  Snapshotter, WritablePolicy, WriteOp,
+  BTreeIndex, CreatablePolicy, DropTableCommitted, ReadonlyPolicy, Snapshotter,
+  WritablePolicy, WriteOp,
 };
 use crate::{
   background::{
     BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
   },
   binding_events,
+  blob::BlobStorage,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   error, info,
-  serialize::Serializable,
+  objects::{RecordId, Serializable},
   table::{TableHandleRef, TableMapper, TableMetadata, TableName},
   trace,
   transaction::{PageRecorder, TxSnapshot, TxState, VersionVisibility},
   utils::{ToArc, ToBox},
-  wal::{TxId, WALFailed, RESERVED_TX, WAL},
+  wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
   warn, Error, Result,
 };
 
@@ -38,7 +39,7 @@ struct MiniTx<'a> {
   block_cache: &'a BlockCache,
   version_visibility: &'a VersionVisibility,
   recorder: &'a PageRecorder,
-  wal: &'a WAL,
+  wal: &'a WriteAheadLog,
   blob: &'a BlobStorage,
   committed: Cell<bool>,
   modified: Cell<bool>,
@@ -47,7 +48,7 @@ struct MiniTx<'a> {
 impl<'a> MiniTx<'a> {
   fn start(
     version_visibility: &'a VersionVisibility,
-    wal: &'a WAL,
+    wal: &'a WriteAheadLog,
     block_cache: &'a BlockCache,
     recorder: &'a PageRecorder,
     blob: &'a BlobStorage,
@@ -122,9 +123,9 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
   }
   fn read_blob(
     &self,
-    blob_id: super::BlobId,
-    offset: super::BlobOffset,
-    len: super::BlobLen,
+    blob_id: crate::blob::BlobId,
+    offset: crate::blob::BlobOffset,
+    len: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     let blob = self
       .blob
@@ -158,7 +159,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
-  fn write_blob(&self, data: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
 }
@@ -210,9 +211,9 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   }
   fn read_blob(
     &self,
-    _: super::BlobId,
-    _: super::BlobOffset,
-    _: super::BlobLen,
+    _: crate::blob::BlobId,
+    _: crate::blob::BlobOffset,
+    _: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
@@ -251,9 +252,9 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   }
   fn read_blob(
     &self,
-    _: super::BlobId,
-    _: super::BlobOffset,
-    _: super::BlobLen,
+    _: crate::blob::BlobId,
+    _: crate::blob::BlobOffset,
+    _: crate::blob::BlobLen,
   ) -> Result<crate::disk::AlignedBuf> {
     unreachable!()
   }
@@ -285,7 +286,7 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result<crate::cache::CachedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
-  fn write_blob(&self, _: Vec<u8>) -> Result<super::BlobAppendGuard<'_>> {
+  fn write_blob(&self, _: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     unreachable!()
   }
 }
@@ -301,7 +302,7 @@ const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
  */
 fn create_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -339,8 +340,8 @@ fn create_compaction(
   };
 
   let new_table = tables.create_handle(&table_meta)?;
-  tables.insert(new_table.clone());
   index.initialize(&new_table)?;
+  tables.insert(new_table.clone());
 
   tx.commit()?;
   Ok(Some((new_table, tx.current_version(), table_meta)))
@@ -416,7 +417,7 @@ pub struct Compactor {
   ticker: Box<BackgroundThread<()>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   recorder: Arc<PageRecorder>,
   blob: Arc<BlobStorage>,
   meta_table: TableHandleRef,
@@ -427,7 +428,7 @@ impl Compactor {
     tables: Arc<TableMapper>,
     recorder: Arc<PageRecorder>,
     version_visibility: Arc<VersionVisibility>,
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     event_bus: Arc<EventBus>,
     blob: Arc<BlobStorage>,
     config: CompactionConfig,
@@ -599,7 +600,7 @@ binding_events!(Compactor {
  */
 fn remove_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   blob: &BlobStorage,
@@ -669,7 +670,7 @@ impl CompactionCycle {
  */
 fn check_compaction(
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   blob: &BlobStorage,
@@ -686,7 +687,7 @@ fn run_tick(
   tables: &TableMapper,
   block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   recorder: &PageRecorder,
   event_bus: &EventBus,
   blob: &BlobStorage,
@@ -746,7 +747,8 @@ fn run_tick(
   };
 
   let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   };
 
   let Some(snapshotter) = &mut current.snapshotter else {
@@ -782,7 +784,8 @@ fn run_tick(
     ));
     drop(old);
     drop(new);
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   }
 
   if !check_compaction(
@@ -797,13 +800,17 @@ fn run_tick(
     warn!("table {} already dropped.", current.metadata.get_name());
     drop(old);
     drop(new);
-    return Ok(*cycle_ref = None);
+    *cycle_ref = None;
+    return Ok(());
   }
 
   for _ in 0..batch_size {
     let Some(snap) = snapshotter.next_snapshot()? else {
       break;
     };
+
+    // to protect stale pointer from gc.
+    let _guard = pin();
     new_index.apply_snapshot(snap, new.handle())?;
   }
 
@@ -816,7 +823,7 @@ fn compaction_loop(
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   recorder: Arc<PageRecorder>,
   event_bus: Arc<EventBus>,
   blob: Arc<BlobStorage>,

@@ -5,8 +5,6 @@ pub use transaction::Transaction;
 
 mod cache;
 
-mod serialize;
-
 mod background;
 
 mod engine;
@@ -33,3 +31,7 @@ mod table;
 
 mod config;
 pub use config::*;
+
+mod objects;
+
+mod blob;

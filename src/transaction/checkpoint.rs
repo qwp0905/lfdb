@@ -20,7 +20,9 @@ use crate::{
   metrics::MetricsRegistry,
   trace,
   utils::{ToArc, ToBox},
-  wal::{LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WAL},
+  wal::{
+    LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog,
+  },
   Result,
 };
 
@@ -99,14 +101,14 @@ pub struct Checkpoint {
    * synchronously.
    */
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
 }
 impl Checkpoint {
   pub fn new(
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
@@ -150,7 +152,7 @@ impl Checkpoint {
   }
 
   pub fn initial_checkpoint(
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
@@ -172,7 +174,7 @@ impl Checkpoint {
   }
 
   fn run_hard(
-    wal: &WAL,
+    wal: &WriteAheadLog,
     block_cache: &BlockCache,
     version: &VersionVisibility,
     io_pool: &IOPool,
@@ -267,7 +269,7 @@ binding_events!(Checkpoint {
 
 fn run_tick<F: Fn(usize) -> usize>(
   incoming: &SegQueue<WALSegment>,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   block_cache: &BlockCache,
   version: &VersionVisibility,
   io_pool: &IOPool,
@@ -296,7 +298,8 @@ fn run_tick<F: Fn(usize) -> usize>(
       new.dirty_len(),
       new.segments_len(),
     );
-    return Ok(*cycle = Some(new));
+    *cycle = Some(new);
+    return Ok(());
   };
 
   if !current.flush_done() {
@@ -317,7 +320,8 @@ fn run_tick<F: Fn(usize) -> usize>(
   if current.segments_len() == 0 {
     debug!("skip create checkpoint snapshot since nothing to rotate.");
     metrics.checkpoint_cycle.record(current.take_start());
-    return Ok(*cycle = None);
+    *cycle = None;
+    return Ok(());
   }
 
   finalize_checkpoint(version, io_pool, wal, current.get_log_id())?;
@@ -326,8 +330,8 @@ fn run_tick<F: Fn(usize) -> usize>(
 
   let events = current.drain_all().map(SegmentReuseable::new);
   event_bus.batch_publish(events);
-
-  Ok(*cycle = None)
+  *cycle = None;
+  Ok(())
 }
 
 /**
@@ -337,7 +341,7 @@ fn run_tick<F: Fn(usize) -> usize>(
  */
 fn checkpoint_loop(
   incoming: Arc<SegQueue<WALSegment>>,
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
@@ -380,7 +384,7 @@ fn checkpoint_loop(
 fn finalize_checkpoint(
   version: &VersionVisibility,
   io_pool: &IOPool,
-  wal: &WAL,
+  wal: &WriteAheadLog,
   log_id: LogId,
 ) -> Result {
   let (current_version, path) = version.persist_snapshot()?;

@@ -5,18 +5,17 @@ use super::{
 };
 
 use crate::{
+  blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{
-    BlobAppendGuard, BlobHandle, BlobId, BlobStorage, Compactor, GarbageCollector,
-  },
+  cursor::{Compactor, GarbageCollector},
   disk::{IOPool, Pointer},
   error::Result,
   info, measure,
   metrics::MetricsRegistry,
-  serialize::Serializable,
+  objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
   utils::SBox,
-  wal::{TxId, WAL},
+  wal::{TxId, WriteAheadLog},
 };
 
 pub struct TransactionConfig {
@@ -30,7 +29,7 @@ pub struct TransactionConfig {
  * it wires subsystems together and exposes transaction lifecycle operations.
  */
 pub struct TxOrchestrator {
-  wal: Arc<WAL>,
+  wal: Arc<WriteAheadLog>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
   checkpoint: Arc<Checkpoint>,
@@ -47,7 +46,7 @@ pub struct TxOrchestrator {
 impl TxOrchestrator {
   pub fn new(
     config: TransactionConfig,
-    wal: Arc<WAL>,
+    wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     version_visibility: Arc<VersionVisibility>,

@@ -4,21 +4,22 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{epoch::pin, queue::SegQueue};
 
-use super::{
-  BTreeNodeView, BlobId, BlobStorage, CompactionTriggered, DataEntry, DataEntryView,
-  RecordDataView, TreeHeader, HEADER_POINTER,
-};
+use super::CompactionTriggered;
 use crate::{
   background::{
     BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
     ThreadBuilder,
   },
   binding_events,
+  blob::{BlobId, BlobStorage},
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   error,
+  objects::{
+    BTreeNodeView, DataEntry, DataEntryView, RecordDataView, TreeHeader, HEADER_POINTER,
+  },
   table::{TableHandleRef, TableMapper, META_TABLE_ID},
   transaction::{PageRecorder, VersionVisibility},
   utils::{ChunkQueue, ToArc, ToBox},
@@ -203,7 +204,12 @@ fn release_entry(
         .as_ref()
         .view::<DataEntryView>()?
         .get_next();
-      table.free().dealloc(ptr);
+
+      // lazily dealloc pointers since compaction can reachable.
+      let guard = pin();
+      let cloned = table.clone();
+      guard.defer(move || cloned.free().dealloc(ptr));
+      guard.flush();
       continue;
     }
 
@@ -350,9 +356,7 @@ fn flush_buffered(
   while let Some(handle) = buffered.pop_front() {
     let result = handle.wait().unwrap()?;
     min = min.min(result.min_version);
-    for id in result.blob_refs {
-      refs.insert(id);
-    }
+    refs.extend(result.blob_refs);
   }
   Ok(min)
 }
@@ -392,7 +396,8 @@ fn run_tick(
       {
         blob.truncate(id)?;
       }
-      return Ok(*cycle = None);
+      *cycle = None;
+      return Ok(());
     };
 
     let Some(table) = task.table.try_pin() else {
