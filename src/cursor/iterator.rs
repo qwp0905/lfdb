@@ -45,8 +45,8 @@ impl BufferedRecord {
 
   fn from(slot: &ReadonlySlot, record: VersionRecordView) -> Option<Self> {
     match record.data {
-      RecordDataView::Data(s, e) => Some(Self::new(
-        BufferedValue::Data(VecRef::refed(slot.page(), s, e)),
+      RecordDataView::Data(range) => Some(Self::new(
+        BufferedValue::Data(VecRef::refed(slot.clone(), range)),
         record.owner,
         record.version,
         record.record_id,
@@ -161,7 +161,7 @@ where
           while let Some(e) = iter.try_next()? {
             if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push_back((
-                VecRef::refed(slot.page(), e.start, e.end),
+                VecRef::refed(slot.clone(), e.range),
                 BufferedRecord::from(&slot, e.record),
               ));
               continue;
@@ -169,7 +169,7 @@ where
 
             let Some(p) = e.entry else { continue };
             if let Some(found) = Self::__find(&policy, table, p)? {
-              buffered.push_back((VecRef::refed(slot.page(), e.start, e.end), found));
+              buffered.push_back((VecRef::refed(slot.clone(), e.range), found));
             };
           }
 
@@ -232,7 +232,7 @@ where
     while let Some(e) = iter.try_next()? {
       if self.policy.is_visible(e.record.owner, e.record.version) {
         self.buffered.push_back((
-          VecRef::refed(slot.page(), e.start, e.end),
+          VecRef::refed(slot.clone(), e.range),
           BufferedRecord::from(&slot, e.record),
         ));
         continue;
@@ -242,7 +242,7 @@ where
       if let Some(found) = self.find_value(p)? {
         self
           .buffered
-          .push_back((VecRef::refed(slot.page(), e.start, e.end), found));
+          .push_back((VecRef::refed(slot.clone(), e.range), found));
       };
     }
 

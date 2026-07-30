@@ -1,4 +1,7 @@
-use std::{mem::replace, ops::Bound};
+use std::{
+  mem::replace,
+  ops::{Bound, Range},
+};
 
 use super::{
   count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, VersionRecord,
@@ -330,8 +333,7 @@ impl<'a> LeafNodeView<'a> {
 }
 
 pub struct LeafEntryView {
-  pub start: usize,
-  pub end: usize,
+  pub range: Range<usize>,
   pub record: VersionRecordView,
   pub entry: Option<Pointer>,
 }
@@ -395,8 +397,7 @@ impl<'a> LeafNodeIter<'a> {
       }
 
       let e = LeafEntryView {
-        start: offset,
-        end: offset + l,
+        range: offset..(offset + l),
         record,
         entry: (ptr != 0).then_some(ptr),
       };

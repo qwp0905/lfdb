@@ -1,12 +1,12 @@
-use std::{borrow, cmp, fmt, hash, ops::Deref};
-
-use crate::{
-  disk::{AlignedBuf, PageRef, PAGE_SIZE},
-  utils::SBox,
+use std::{
+  borrow, cmp, fmt, hash,
+  ops::{Deref, Range},
 };
 
+use crate::{cache::ReadonlySlot, disk::AlignedBuf};
+
 enum Type {
-  Refed(SBox<PageRef<PAGE_SIZE>>, usize, usize),
+  Refed(ReadonlySlot, Range<usize>),
   Copied(AlignedBuf),
 }
 
@@ -14,14 +14,14 @@ enum Type {
  * Byte-vector view used by cursor reads.
  *
  * `VecRef` avoids copying when the bytes already live inside a cached page: it
- * keeps an `SBox` reference to the page and exposes the requested range as a
+ * keeps an `ReadonlySlot` reference to the page and exposes the requested range as a
  * slice. When bytes must be materialized elsewhere, it stores the copied aligned
  * buffer but presents the same `[u8]` interface.
  */
 pub struct VecRef(Type);
 impl VecRef {
-  pub const fn refed(page: SBox<PageRef<PAGE_SIZE>>, start: usize, end: usize) -> Self {
-    Self(Type::Refed(page, start, end))
+  pub const fn refed(page: ReadonlySlot, range: Range<usize>) -> Self {
+    Self(Type::Refed(page, range))
   }
   pub const fn copied(data: AlignedBuf) -> Self {
     Self(Type::Copied(data))
@@ -35,13 +35,13 @@ impl VecRef {
    */
   pub fn into_vec(self) -> Vec<u8> {
     match self.0 {
-      Type::Refed(slot, s, e) => slot.copy_range(s..e),
+      Type::Refed(slot, range) => slot.as_ref().copy_range(range),
       Type::Copied(data) => data.as_slice().to_vec(),
     }
   }
   fn as_slice(&self) -> &[u8] {
     match &self.0 {
-      Type::Refed(slot, s, e) => slot.range(*s..*e),
+      Type::Refed(slot, range) => slot.as_ref().range(range.clone()),
       Type::Copied(data) => data.as_slice(),
     }
   }
@@ -88,7 +88,7 @@ impl Ord for VecRef {
 impl Clone for VecRef {
   fn clone(&self) -> Self {
     match &self.0 {
-      Type::Refed(page, s, e) => Self::refed(page.clone(), *s, *e),
+      Type::Refed(page, range) => Self::refed(page.clone(), range.clone()),
       Type::Copied(data) => Self::copied(data.clone()),
     }
   }

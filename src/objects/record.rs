@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::{RecordId, RECORD_ID_BYTES};
 
 use crate::{
@@ -122,7 +124,7 @@ impl VersionRecord {
 
 #[derive(Debug)]
 pub enum RecordDataView {
-  Data(usize, usize),
+  Data(Range<usize>),
   Blob(BlobId, BlobOffset, BlobLen),
   Tombstone,
 }
@@ -166,7 +168,7 @@ impl VersionRecordView {
       self.owner,
       self.version,
       match self.data {
-        RecordDataView::Data(s, e) => RecordData::Data(page.copy_range(s..e)),
+        RecordDataView::Data(range) => RecordData::Data(page.copy_range(range)),
         RecordDataView::Blob(i, o, l) => RecordData::Blob(i, o, l),
         RecordDataView::Tombstone => RecordData::Tombstone,
       },
@@ -182,7 +184,7 @@ impl VersionRecordView {
       0 => {
         let l = reader.read_u16()? as usize;
         let offset = reader.advance(l)?;
-        RecordDataView::Data(offset, offset + l)
+        RecordDataView::Data(offset..(offset + l))
       }
       1 => RecordDataView::Tombstone,
       2 => {

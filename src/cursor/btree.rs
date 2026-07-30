@@ -56,12 +56,12 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
                 None => return Ok(GetResult::Deleted),
               }
             }
-            return Ok(match &record.data {
-              RecordDataView::Data(s, e) => {
-                GetResult::Present(VecRef::refed(slot.page(), *s, *e))
+            return Ok(match record.data {
+              RecordDataView::Data(range) => {
+                GetResult::Present(VecRef::refed(slot, range))
               }
               RecordDataView::Blob(id, offset, len) => {
-                GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+                GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
               }
               RecordDataView::Tombstone => GetResult::Deleted,
             });
@@ -78,12 +78,10 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       if let Some(record) =
         entry.find(|record| self.0.is_visible(record.owner, record.version))?
       {
-        return Ok(match &record.data {
-          RecordDataView::Data(s, e) => {
-            GetResult::Present(VecRef::refed(slot.page(), *s, *e))
-          }
+        return Ok(match record.data {
+          RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
           RecordDataView::Blob(id, offset, len) => {
-            GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+            GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
           }
           RecordDataView::Tombstone => GetResult::Deleted,
         });

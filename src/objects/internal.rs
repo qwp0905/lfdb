@@ -1,4 +1,4 @@
-use std::mem::replace;
+use std::{mem::replace, ops::Range};
 
 use super::{
   count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, DEFAULT_BIAS,
@@ -219,7 +219,7 @@ pub struct InternalNodeView<'a> {
   page: &'a Page,
   len: usize,
   offset: usize,
-  right: Option<(Pointer, usize, usize)>,
+  right: Option<(Pointer, Range<usize>)>,
 }
 impl<'a> InternalNodeView<'a> {
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner) -> Result<Self> {
@@ -228,7 +228,7 @@ impl<'a> InternalNodeView<'a> {
       let ptr = scanner.read_u64()?;
       let len = scanner.read_u16()? as usize;
       let offset = scanner.advance(len)?;
-      right = Some((ptr, offset, offset + len));
+      right = Some((ptr, offset..(offset + len)));
     };
 
     let len = scanner.read_u16()? as usize;
@@ -242,7 +242,7 @@ impl<'a> InternalNodeView<'a> {
     page: &'a Page,
     len: usize,
     offset: usize,
-    right: Option<(Pointer, usize, usize)>,
+    right: Option<(Pointer, Range<usize>)>,
   ) -> Self {
     Self {
       page,
@@ -252,8 +252,8 @@ impl<'a> InternalNodeView<'a> {
     }
   }
   pub fn find(&self, key: StaticKeyRef) -> Result<std::result::Result<Pointer, Pointer>> {
-    if let Some((right, s, e)) = &self.right {
-      if self.page.range(*s..*e) <= key {
+    if let Some((right, range)) = &self.right {
+      if self.page.range(range.clone()) <= key {
         return Ok(Err(*right));
       };
     }
@@ -286,7 +286,10 @@ impl<'a> InternalNodeView<'a> {
   }
 
   pub fn get_right(&self) -> Option<(StaticKey, Pointer)> {
-    self.right.map(|(p, s, e)| (self.page.copy_range(s..e), p))
+    self
+      .right
+      .as_ref()
+      .map(|(p, range)| (self.page.copy_range(range.clone()), *p))
   }
 
   pub fn get_all_child(&self) -> Result<Vec<Pointer>> {
