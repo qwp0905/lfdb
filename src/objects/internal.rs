@@ -136,7 +136,7 @@ impl InternalNode {
     let right_bytes = self.right_bytes();
     let keys_bytes = self.keys_bytes();
     let split_bytes = right_bytes + keys_bytes;
-    if split_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
+    if split_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
 
@@ -167,10 +167,10 @@ impl InternalNode {
       let left_total = Self::RESERVED_BYTES + left_bytes + split_key_bytes;
       let right_total = Self::RESERVED_BYTES + right_bytes + right_key_bytes;
 
-      if left_total >= SERIALIZABLE_BYTES {
-        continue;
+      if left_total > SERIALIZABLE_BYTES {
+        break;
       }
-      if right_total >= SERIALIZABLE_BYTES {
+      if right_total > SERIALIZABLE_BYTES {
         continue;
       }
 
@@ -180,7 +180,7 @@ impl InternalNode {
       }
     }
 
-    let mid = best.unwrap().0;
+    let mid = best.map(|(mid, _)| mid).unwrap();
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);

@@ -4,8 +4,8 @@ use super::{RecordId, RECORD_ID_BYTES};
 
 use crate::{
   blob::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_LEN_BYTES, BLOB_OFFSET_BYTES},
-  disk::{Page, POINTER_BYTES},
-  wal::TxId,
+  disk::Page,
+  wal::{TxId, TX_ID_BYTES},
   Error,
 };
 
@@ -76,8 +76,12 @@ impl VersionRecord {
     }
   }
   pub const fn byte_len(&self) -> usize {
-    (POINTER_BYTES << 1) + self.data.byte_len() + RECORD_ID_BYTES // owner 8byte + version 8byte + data + record id
+    Self::RESERVED_BYTES + self.data.byte_len()
   }
+  /**
+   * owner 8byte + version 8byte + record id
+   * */
+  pub const RESERVED_BYTES: usize = (TX_ID_BYTES << 1) + RECORD_ID_BYTES;
 
   pub fn serialize_to(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
     writer.write_u64(self.version)?;

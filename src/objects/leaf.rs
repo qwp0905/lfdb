@@ -5,7 +5,7 @@ use std::{
 
 use super::{
   count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, VersionRecord,
-  VersionRecordView, DEFAULT_BIAS, SERIALIZABLE_BYTES, SPLIT_BIAS_BYTES,
+  VersionRecordView, DEFAULT_BIAS, MAX_KEY, SERIALIZABLE_BYTES, SPLIT_BIAS_BYTES,
 };
 use crate::{
   disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
@@ -30,9 +30,19 @@ impl LeafEntry {
   }
 
   const fn bytes_len(&self) -> usize {
-    self.key.len() + 2 + POINTER_BYTES + self.record.byte_len()
+    self.key.len() + Self::RESERVED_BYTES + self.record.byte_len()
   }
+  const RESERVED_BYTES: usize = POINTER_BYTES + 2;
 }
+
+/**
+ * Maximum inline value size that still lets a leaf node hold at least two inline
+ * value entries. Larger values must be stored as blobs instead of occupying leaf
+ * payload directly.
+ */
+pub const LARGE_VALUE: usize =
+  ((SERIALIZABLE_BYTES - (LeafNode::RESERVED_BYTES + MAX_KEY + POINTER_BYTES + 2)) >> 1)
+    - (MAX_KEY + LeafEntry::RESERVED_BYTES + VersionRecord::RESERVED_BYTES + 1 + 2);
 
 /**
  * B-link tree leaf node.
@@ -129,14 +139,13 @@ impl LeafNode {
   pub fn split_if_needed(&mut self) -> Option<LeafNode> {
     let right_bytes = self.right_bytes();
     let data_bytes = self.data_bytes();
-    let split_bytes = right_bytes + data_bytes;
-    if split_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
+    if right_bytes + data_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
-    let split_point = {
+    let (multiplier, divisor) = {
       let [l, m, r] = count_directions(replace(&mut self.bias, DEFAULT_BIAS));
       debug_assert!((l + m + r) != 0);
-      (split_bytes * (m + (r << 1))) / ((l + r + m) << 1)
+      ((m + (r << 1)), ((l + r + m) << 1))
     };
 
     debug_assert!(self.entries.len() > 1);
@@ -153,24 +162,23 @@ impl LeafNode {
       let left_total = Self::RESERVED_BYTES + left_data + split_key_bytes;
       let right_total = Self::RESERVED_BYTES + right_bytes + right_data;
 
-      if left_total >= SERIALIZABLE_BYTES {
-        continue;
+      if left_total > SERIALIZABLE_BYTES {
+        break;
       }
-      if right_total >= SERIALIZABLE_BYTES {
+      if right_total > SERIALIZABLE_BYTES {
         continue;
       }
 
+      let split_point =
+        (left_data + split_key_bytes + right_bytes + right_data) * multiplier / divisor;
       let dist = (left_data + split_key_bytes).abs_diff(split_point);
       if best.is_none_or(|(_, best_dist)| dist < best_dist) {
         best = Some((mid, dist));
       }
     }
 
-    let split = Self::new(
-      self.entries.split_off(best.unwrap().0),
-      self.next.take(),
-      DEFAULT_BIAS,
-    );
+    let entries = self.entries.split_off(best.map(|(mid, _)| mid).unwrap());
+    let split = Self::new(entries, self.next.take(), DEFAULT_BIAS);
 
     debug_assert!(!self.entries.is_empty());
     debug_assert!(!split.entries.is_empty());
