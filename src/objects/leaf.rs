@@ -44,14 +44,18 @@ impl LeafEntry {
 #[derive(Debug)]
 pub struct LeafNode {
   entries: Vec<LeafEntry>,
-  next: Option<Pointer>,
+  next: Option<(Pointer, StaticKey)>,
   bias: SplitBias,
 }
 impl LeafNode {
   pub const fn empty() -> Self {
     Self::new(Vec::new(), None, DEFAULT_BIAS)
   }
-  const fn new(entries: Vec<LeafEntry>, next: Option<Pointer>, bias: SplitBias) -> Self {
+  const fn new(
+    entries: Vec<LeafEntry>,
+    next: Option<(Pointer, StaticKey)>,
+    bias: SplitBias,
+  ) -> Self {
     Self {
       entries,
       next,
@@ -60,7 +64,15 @@ impl LeafNode {
   }
 
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
-    writer.write_u64(self.next.unwrap_or(0))?;
+    match &self.next {
+      Some((ptr, key)) => {
+        writer.write(&[1])?;
+        writer.write_u64(*ptr)?;
+        writer.write_u16(key.len() as u16)?;
+        writer.write(key)?;
+      }
+      None => writer.write(&[0])?,
+    };
     writer.write_u16(self.entries.len() as u16)?;
     writer.write_u32(self.bias)?;
     for entry in &self.entries {
@@ -73,7 +85,13 @@ impl LeafNode {
   }
 
   pub fn from_scanner(scanner: &mut PageScanner) -> Result<Self> {
-    let next = scanner.read_u64()?;
+    let mut next = None;
+    if scanner.read()? == 1 {
+      let ptr = scanner.read_u64()?;
+      let len = scanner.read_u16()? as usize;
+      let key = scanner.read_n(len)?.to_vec();
+      next = Some((ptr, key));
+    };
     let len = scanner.read_u16()? as usize;
     let bias = scanner.read_u32()?;
     let mut entries = Vec::with_capacity(len);
@@ -84,29 +102,41 @@ impl LeafNode {
       let next = scanner.read_u64()?;
       entries.push(LeafEntry::new(key, record, (next != 0).then_some(next)))
     }
-    Ok(Self::new(entries, (next != 0).then_some(next), bias))
+    Ok(Self::new(entries, next, bias))
   }
 
-  pub const fn set_next(&mut self, pointer: Pointer) -> Option<Pointer> {
-    self.next.replace(pointer)
+  pub const fn set_next(
+    &mut self,
+    key: StaticKey,
+    pointer: Pointer,
+  ) -> Option<(Pointer, StaticKey)> {
+    self.next.replace((pointer, key))
   }
 
   #[inline]
   fn data_bytes(&self) -> usize {
     self.entries.iter().map(|e| e.bytes_len()).sum::<usize>()
   }
-  // node type + entry len (u16) + next pointer + bias
-  const RESERVED_BYTES: usize = 1 + 2 + POINTER_BYTES + SPLIT_BIAS_BYTES;
+  // node type + right pointer flag + entry len (u16) + bias
+  const RESERVED_BYTES: usize = 1 + 1 + 2 + SPLIT_BIAS_BYTES;
+  const fn right_bytes(&self) -> usize {
+    let Some((_, k)) = &self.next else {
+      return 0;
+    };
+    k.len() + 2 + POINTER_BYTES
+  }
 
   pub fn split_if_needed(&mut self) -> Option<LeafNode> {
+    let right_bytes = self.right_bytes();
     let data_bytes = self.data_bytes();
-    if data_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
+    let split_bytes = right_bytes + data_bytes;
+    if split_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
       return None;
     }
     let split_point = {
       let [l, m, r] = count_directions(replace(&mut self.bias, DEFAULT_BIAS));
       debug_assert!((l + m + r) != 0);
-      (data_bytes * (m + (r << 1))) / ((l + r + m) << 1)
+      (split_bytes * (m + (r << 1))) / ((l + r + m) << 1)
     };
 
     debug_assert!(self.entries.len() > 1);
@@ -117,14 +147,20 @@ impl LeafNode {
     for mid in 1..self.entries.len() {
       left_data += self.entries[mid - 1].bytes_len();
 
-      if Self::RESERVED_BYTES + left_data >= SERIALIZABLE_BYTES {
+      let split_key_bytes = self.entries[mid].key.len() + 2 + POINTER_BYTES;
+      let right_data = data_bytes - left_data;
+
+      let left_total = Self::RESERVED_BYTES + left_data + split_key_bytes;
+      let right_total = Self::RESERVED_BYTES + right_bytes + right_data;
+
+      if left_total >= SERIALIZABLE_BYTES {
         continue;
       }
-      if Self::RESERVED_BYTES + data_bytes - left_data >= SERIALIZABLE_BYTES {
+      if right_total >= SERIALIZABLE_BYTES {
         continue;
       }
 
-      let dist = left_data.abs_diff(split_point);
+      let dist = (left_data + split_key_bytes).abs_diff(split_point);
       if best.is_none_or(|(_, best_dist)| dist < best_dist) {
         best = Some((mid, dist));
       }
@@ -135,11 +171,9 @@ impl LeafNode {
       self.next.take(),
       DEFAULT_BIAS,
     );
-    debug_assert!(self.data_bytes() + Self::RESERVED_BYTES < SERIALIZABLE_BYTES);
-    debug_assert!(!self.entries.is_empty());
-    debug_assert!(split.data_bytes() + Self::RESERVED_BYTES < SERIALIZABLE_BYTES);
-    debug_assert!(!split.entries.is_empty());
 
+    debug_assert!(!self.entries.is_empty());
+    debug_assert!(!split.entries.is_empty());
     Some(split)
   }
 
@@ -158,21 +192,16 @@ impl LeafNode {
     &self.entries[0].key
   }
   pub fn find_slot(&self, key: StaticKeyRef) -> FindSlotResult {
+    if let Some((next, high)) = &self.next {
+      // B-link right move: the caller may have reached a node whose high key no
+      // longer covers this key. In that case the insert belongs to the right sibling.
+      if high.as_slice() <= key {
+        return FindSlotResult::Move(*next);
+      }
+    }
     match self.entries.binary_search_by(|r| (*r.key).cmp(key)) {
       Ok(i) => FindSlotResult::Replace(i),
-      Err(i) => {
-        if i == self.entries.len() {
-          // Leaf-level B-link right move. Internal nodes store an explicit high key with
-          // the right pointer; leaf nodes derive the same decision from the ordered entry
-          // range. If the key belongs beyond the end and a right sibling exists, move
-          // right.
-          if let Some(p) = self.next {
-            return FindSlotResult::Move(p);
-          }
-        };
-
-        FindSlotResult::Insert(i)
-      }
+      Err(i) => FindSlotResult::Insert(i),
     }
   }
 }
@@ -209,14 +238,14 @@ pub struct LeafNodeView<'a> {
   offset: usize,
   len: usize,
   bias: SplitBias,
-  next: Option<Pointer>,
+  next: Option<(Pointer, Range<usize>)>,
 }
 impl<'a> LeafNodeView<'a> {
   const fn new(
     page: &'a Page,
     offset: usize,
     len: usize,
-    next: Option<Pointer>,
+    next: Option<(Pointer, Range<usize>)>,
     bias: SplitBias,
   ) -> Self {
     Self {
@@ -228,50 +257,48 @@ impl<'a> LeafNodeView<'a> {
     }
   }
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
-    let next = scanner.read_u64()?;
+    let mut next = None;
+    if scanner.read()? == 1 {
+      let ptr = scanner.read_u64()?;
+      let len = scanner.read_u16()? as usize;
+      let offset = scanner.advance(len)?;
+      next = Some((ptr, offset..(offset + len)));
+    };
     let len = scanner.read_u16()? as usize;
     let bias = scanner.read_u32()?;
     let offset = scanner.advance(0)?;
-    Ok(Self::new(
-      page,
-      offset,
-      len,
-      (next != 0).then_some(next),
-      bias,
-    ))
+    Ok(Self::new(page, offset, len, next, bias))
   }
 
   pub fn find(&self, key: StaticKeyRef) -> Result<NodeFindResult> {
+    if let Some((next, range)) = &self.next {
+      if self.page.range(range.clone()) <= key {
+        return Ok(NodeFindResult::Move(*next));
+      }
+    }
+
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
 
     for i in 0..self.len {
-      let l = scanner.read_u16()? as usize;
-      let offset = scanner.advance(l)?;
-      let record = VersionRecordView::deserialize_from(&mut scanner)?;
-      let ptr = scanner.read_u64()?;
-
-      let k = self.page.range(offset..offset + l);
+      let e = LeafEntryView::deserialize_from(&mut scanner)?;
+      let k = self.page.range(e.range);
       if k < key {
         continue;
       } else if k > key {
         return Ok(NodeFindResult::NotFound(i));
-      } else if ptr == 0 {
-        return Ok(NodeFindResult::Found(i, record, None));
       } else {
-        return Ok(NodeFindResult::Found(i, record, Some(ptr)));
+        return Ok(NodeFindResult::Found(i, e.record, e.next));
       }
     }
-
-    Ok(
-      self
-        .next
-        .map(NodeFindResult::Move)
-        .unwrap_or_else(|| NodeFindResult::NotFound(self.len)),
-    )
+    Ok(NodeFindResult::NotFound(self.len))
   }
 
   pub fn into_owned(self) -> Result<LeafNode> {
+    let next = self
+      .next
+      .map(|(ptr, range)| (ptr, self.page.copy_range(range)));
+
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
 
@@ -283,8 +310,7 @@ impl<'a> LeafNodeView<'a> {
       let next = scanner.read_u64()?;
       entries.push(LeafEntry::new(key, record, (next != 0).then_some(next)))
     }
-
-    Ok(LeafNode::new(entries, self.next, self.bias))
+    Ok(LeafNode::new(entries, next, self.bias))
   }
 
   pub fn top(&self) -> Result<StaticKeyRef<'_>> {
@@ -328,14 +354,30 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub const fn get_next(&self) -> Option<Pointer> {
-    self.next
+    let Some((p, _)) = &self.next else {
+      return None;
+    };
+    Some(*p)
   }
 }
 
 pub struct LeafEntryView {
   pub range: Range<usize>,
   pub record: VersionRecordView,
-  pub entry: Option<Pointer>,
+  pub next: Option<Pointer>,
+}
+impl LeafEntryView {
+  fn deserialize_from(scanner: &mut PageScanner) -> Result<Self> {
+    let l = scanner.read_u16()? as usize;
+    let offset = scanner.advance(l)?;
+    let record = VersionRecordView::deserialize_from(scanner)?;
+    let ptr = scanner.read_u64()?;
+    Ok(Self {
+      range: offset..(offset + l),
+      record,
+      next: (ptr != 0).then_some(ptr),
+    })
+  }
 }
 
 /**
@@ -399,7 +441,7 @@ impl<'a> LeafNodeIter<'a> {
       let e = LeafEntryView {
         range: offset..(offset + l),
         record,
-        entry: (ptr != 0).then_some(ptr),
+        next: (ptr != 0).then_some(ptr),
       };
 
       match self.end {

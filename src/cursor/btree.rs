@@ -497,7 +497,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         let mid_key = split.top().clone();
         let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-        node.set_next(split_ptr);
+        node.set_next(mid_key.clone(), split_ptr);
         self.0.serialize_and_log(slot, &node.into_node(), table)?;
         Ok(State::Split(mid_key, split_ptr))
       })?;
@@ -647,7 +647,7 @@ where
         let mid_key = split.top().clone();
         let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-        node.set_next(split_ptr);
+        node.set_next(mid_key.clone(), split_ptr);
         self.0.serialize_and_log(slot, &node.into_node(), table)?;
         Ok(State::Split(mid_key, split_ptr, result))
       })?;
@@ -725,7 +725,7 @@ where
           let mid_key = split.top().clone();
           let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-          leaf.set_next(split_ptr);
+          leaf.set_next(mid_key.clone(), split_ptr);
           self.0.serialize_and_log(slot, &node, table)?;
           Ok(State::Split(mid_key, split_ptr, WriteResult::updated(true)))
         })?;
@@ -793,7 +793,7 @@ where
           let mid_key = split.top().clone();
           let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-          leaf.set_next(split_ptr);
+          leaf.set_next(mid_key.clone(), split_ptr);
           self.0.serialize_and_log(slot, &node, table)?;
           Ok(State::Split(mid_key, split_ptr, WriteResult::updated(true)))
         })?;

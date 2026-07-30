@@ -125,11 +125,6 @@ impl InternalNode {
     self.keys.iter().map(Self::key_bytes).sum::<usize>() + POINTER_BYTES
   }
 
-  #[inline]
-  fn bytes_len(&self) -> usize {
-    Self::RESERVED_BYTES + self.keys_bytes() + self.right_bytes()
-  }
-
   /**
    * Split this internal node if it no longer fits.
    *
@@ -191,11 +186,8 @@ impl InternalNode {
     let children = self.children.split_off(mid + 1);
     let split = InternalNode::new(keys, children, self.right.take(), DEFAULT_BIAS);
 
-    debug_assert!(split.bytes_len() < SERIALIZABLE_BYTES);
     debug_assert!(!split.keys.is_empty());
     debug_assert!(!self.keys.is_empty());
-    debug_assert!(self.bytes_len() < SERIALIZABLE_BYTES);
-
     Some((split, mid_key))
   }
 

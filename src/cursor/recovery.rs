@@ -289,7 +289,7 @@ fn recovery_table(
         }
         let mut iter = node.get_entries();
         while let Some(e) = iter.try_next()? {
-          if let Some(p) = e.entry {
+          if let Some(p) = e.next {
             entry_stack.push(p);
           }
         }

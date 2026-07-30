@@ -41,7 +41,7 @@ fn test_serialize_leaf() {
       VersionRecord::new(*o, *v, RecordData::Data(d.clone()), 1),
     );
   }
-  leaf.set_next(200);
+  leaf.set_next(vec![11, 2, 3, 3], 200);
 
   let node = BTreeNode::Leaf(leaf);
   page.serialize_from(&node).expect("serialize error");

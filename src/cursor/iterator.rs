@@ -167,7 +167,7 @@ where
               continue;
             }
 
-            let Some(p) = e.entry else { continue };
+            let Some(p) = e.next else { continue };
             if let Some(found) = Self::__find(&policy, table, p)? {
               buffered.push_back((VecRef::refed(slot.clone(), e.range), found));
             };
@@ -238,7 +238,7 @@ where
         continue;
       }
 
-      let Some(p) = e.entry else { continue };
+      let Some(p) = e.next else { continue };
       if let Some(found) = self.find_value(p)? {
         self
           .buffered

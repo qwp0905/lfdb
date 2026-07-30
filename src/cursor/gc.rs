@@ -432,7 +432,7 @@ fn run_tick(
     let mut iter = node.get_entries();
     while let Some(e) = iter.try_next()? {
       current.min_version = current.min_version.min(e.record.version);
-      if let Some(p) = e.entry {
+      if let Some(p) = e.next {
         buffered.push_back(entry_worker.execute((table.handle().clone(), p)));
       }
       task.total += 1;
