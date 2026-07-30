@@ -23,7 +23,9 @@ fn test_entry_with_data_roundtrip() {
   assert_eq!(records[0].owner, 1);
   assert_eq!(records[0].version, 100);
   match &records[0].data {
-    RecordDataView::Data(s, e) => assert_eq!(page.range(*s..*e), &vec![10, 20, 30]),
+    RecordDataView::Data(range) => {
+      assert_eq!(page.range(range.clone()), &vec![10, 20, 30])
+    }
     RecordDataView::Tombstone => panic!("expected Data"),
     RecordDataView::Blob(_, _, _) => panic!("expected Data"),
   }
@@ -49,7 +51,7 @@ fn test_entry_with_tombstone_roundtrip() {
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, 2);
   match &records[0].data {
-    RecordDataView::Data(_, _) => panic!("expected Tombstone"),
+    RecordDataView::Data(_) => panic!("expected Tombstone"),
     RecordDataView::Tombstone => {}
     RecordDataView::Blob(_, _, _) => panic!("expected Tombstone"),
   }
@@ -76,7 +78,7 @@ fn test_entry_with_chunked_roundtrip() {
   assert_eq!(records.len(), 1);
   assert_eq!(records[0].owner, owner);
   match &records[0].data {
-    RecordDataView::Data(_, _) => panic!("expected Chunked"),
+    RecordDataView::Data(_) => panic!("expected Chunked"),
     RecordDataView::Tombstone => panic!("expected Chunked"),
     RecordDataView::Blob(id, offset, len) => {
       assert_eq!(*id, 1);

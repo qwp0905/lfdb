@@ -251,7 +251,7 @@ fn test_scan_range() {
   let t2 = tx2.table(TEST_TABLE).unwrap();
 
   // scan [3, 7)
-  let mut iter = t2.scan(&vec![3]..&vec![7]).unwrap();
+  let mut iter = t2.range(&vec![3]..&vec![7]).unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -278,7 +278,7 @@ fn test_scan_all() {
 
   let tx2 = engine.new_tx().unwrap();
   let t2 = tx2.table(TEST_TABLE).unwrap();
-  let mut iter = t2.scan::<[_]>(..).unwrap();
+  let mut iter = t2.range::<[_]>(..).unwrap();
   let mut results = vec![];
   while let Some((k, v)) = iter.try_next().unwrap() {
     results.push((k, v));
@@ -513,7 +513,7 @@ fn test_btree_node_split_and_recovery() {
     // scan all and verify order + completeness
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    let mut iter = table.scan::<[_]>(..).unwrap();
+    let mut iter = table.range::<[_]>(..).unwrap();
     let mut count = 0;
     let mut prev_key: Option<VecRef> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -560,7 +560,7 @@ fn test_btree_node_split_and_recovery() {
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
 
-    let mut iter = table.scan::<[_]>(..).unwrap();
+    let mut iter = table.range::<[_]>(..).unwrap();
     let mut count = 0;
     let mut prev_key: Option<VecRef> = None;
     while let Some((k, v)) = iter.try_next().unwrap() {
@@ -810,7 +810,7 @@ fn test_hard_workload() {
   for name in &table_names {
     let t = engine.new_tx().expect("tx start error");
     let table = t.table(name).expect("table error");
-    let mut iter = table.scan::<[_]>(..).expect("scan start error");
+    let mut iter = table.range::<[_]>(..).expect("scan start error");
     let mut count = 0;
     while let Ok(Some(_)) = iter.try_next() {
       count += 1;
@@ -940,7 +940,7 @@ fn insert_and_remove_and_gc() {
       for _ in 0..count {
         let tx = e.new_tx().expect("tx start error");
         let table = tx.table(TEST_TABLE).expect("table error");
-        let mut iter = table.scan::<[_]>(..).expect("scan error");
+        let mut iter = table.range::<[_]>(..).expect("scan error");
         while let Ok(Some(_)) = iter.try_next() {}
       }
     });
@@ -960,7 +960,7 @@ fn insert_and_remove_and_gc() {
 
   let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
-  let mut iter = table.scan::<[_]>(..).expect("scan start error");
+  let mut iter = table.range::<[_]>(..).expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -977,7 +977,7 @@ fn insert_and_remove_and_gc() {
 
   let mut t = engine.new_tx().expect("tx start error");
   let table = t.table(TEST_TABLE).expect("table error");
-  let mut iter = table.scan::<[_]>(..).expect("scan start error");
+  let mut iter = table.range::<[_]>(..).expect("scan start error");
 
   let mut c = 0;
   while let Ok(Some(_)) = iter.try_next() {
@@ -1146,7 +1146,7 @@ fn test_large_key_value_gc() {
 
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    let mut iter = table.scan::<[_]>(..).unwrap();
+    let mut iter = table.range::<[_]>(..).unwrap();
 
     let mut found = 0;
     while let Ok(Some(_)) = iter.try_next() {
@@ -1507,7 +1507,7 @@ fn test_compaction() {
     std::thread::scope(|scope| {
       let th1 = scope.spawn(|| {
         let table = tx.table(TEST_TABLE).unwrap();
-        let mut iter = table.scan(&keys[remove_count]..).unwrap();
+        let mut iter = table.range(&keys[remove_count]..).unwrap();
 
         let mut i = remove_count;
         while let Some((k, v)) = iter.try_next().unwrap() {
@@ -1540,7 +1540,7 @@ fn test_compaction() {
       let tx = engine.new_tx().unwrap();
 
       let table = tx.table(TEST_TABLE).unwrap();
-      let mut iter = table.scan::<[_]>(..).unwrap();
+      let mut iter = table.range::<[_]>(..).unwrap();
 
       let mut i = 0;
       while let Some((k, v)) = iter.try_next().unwrap() {
@@ -1712,7 +1712,7 @@ fn test_auto_compaction() {
 
       let mut c = 0;
 
-      let mut iter = table.scan::<[_]>(..).unwrap();
+      let mut iter = table.range::<[_]>(..).unwrap();
 
       while let Some((k, v)) = iter.try_next().unwrap() {
         assert_eq!(
@@ -1738,7 +1738,7 @@ fn test_truncate() {
     let mut count = 0;
     let tx = engine.new_tx().unwrap();
     let table = tx.table(TEST_TABLE).unwrap();
-    let mut iter = table.scan::<[_]>(..).unwrap();
+    let mut iter = table.range::<[_]>(..).unwrap();
     while iter.try_next().unwrap().is_some() {
       count += 1;
     }

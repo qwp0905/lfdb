@@ -56,12 +56,12 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
                 None => return Ok(GetResult::Deleted),
               }
             }
-            return Ok(match &record.data {
-              RecordDataView::Data(s, e) => {
-                GetResult::Present(VecRef::refed(slot.page(), *s, *e))
+            return Ok(match record.data {
+              RecordDataView::Data(range) => {
+                GetResult::Present(VecRef::refed(slot, range))
               }
               RecordDataView::Blob(id, offset, len) => {
-                GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+                GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
               }
               RecordDataView::Tombstone => GetResult::Deleted,
             });
@@ -78,12 +78,10 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       if let Some(record) =
         entry.find(|record| self.0.is_visible(record.owner, record.version))?
       {
-        return Ok(match &record.data {
-          RecordDataView::Data(s, e) => {
-            GetResult::Present(VecRef::refed(slot.page(), *s, *e))
-          }
+        return Ok(match record.data {
+          RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
           RecordDataView::Blob(id, offset, len) => {
-            GetResult::Present(VecRef::copied(self.0.read_blob(*id, *offset, *len)?))
+            GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
           }
           RecordDataView::Tombstone => GetResult::Deleted,
         });
@@ -193,7 +191,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     Ok((ptr, stack))
   }
 
-  pub fn scan(
+  pub fn range(
     &self,
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
@@ -244,23 +242,20 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     let mut ptr = current;
     loop {
       let state = self.0.fetch_slot(ptr, table)?.for_batch().mutate(|slot| {
-        let mut internal = slot.as_ref().deserialize::<BTreeNode>()?.into_internal()?;
+        let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+        let internal = node.as_internal_mut()?;
         if let Err(i) = internal.insert_or_next(&evicted_key, evicted_ptr) {
           return Ok(State::Move(i));
         };
 
         let Some((split_node, split_key)) = internal.split_if_needed() else {
-          self
-            .0
-            .serialize_and_log(slot, &internal.into_node(), table)?;
+          self.0.serialize_and_log(slot, &node, table)?;
           return Ok(State::Inserted);
         };
 
         let split_ptr = self.0.alloc_and_log(&split_node.into_node(), table)?;
         internal.set_right(&split_key, split_ptr);
-        self
-          .0
-          .serialize_and_log(slot, &internal.into_node(), table)?;
+        self.0.serialize_and_log(slot, &node, table)?;
 
         Ok(State::Exceeded(split_key, split_ptr))
       })?;
@@ -502,7 +497,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         let mid_key = split.top().clone();
         let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-        node.set_next(split_ptr);
+        node.set_next(mid_key.clone(), split_ptr);
         self.0.serialize_and_log(slot, &node.into_node(), table)?;
         Ok(State::Split(mid_key, split_ptr))
       })?;
@@ -652,7 +647,7 @@ where
         let mid_key = split.top().clone();
         let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-        node.set_next(split_ptr);
+        node.set_next(mid_key.clone(), split_ptr);
         self.0.serialize_and_log(slot, &node.into_node(), table)?;
         Ok(State::Split(mid_key, split_ptr, result))
       })?;
@@ -704,7 +699,8 @@ where
         .fetch_slot(leaf_ptr, table)?
         .for_batch()
         .mutate(|slot| {
-          let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
+          let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+          let leaf = node.as_leaf_mut()?;
           let pos = match leaf.find_slot(key) {
             FindSlotResult::Replace(i) => i,
             FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
@@ -722,15 +718,15 @@ where
           leaf.alloc_entry_at(pos, entry_ptr);
 
           let Some(split) = leaf.split_if_needed() else {
-            self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+            self.0.serialize_and_log(slot, &node, table)?;
             return Ok(State::Break(WriteResult::updated(false)));
           };
 
           let mid_key = split.top().clone();
           let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-          leaf.set_next(split_ptr);
-          self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+          leaf.set_next(mid_key.clone(), split_ptr);
+          self.0.serialize_and_log(slot, &node, table)?;
           Ok(State::Split(mid_key, split_ptr, WriteResult::updated(true)))
         })?;
 
@@ -772,7 +768,8 @@ where
         .fetch_slot(leaf_ptr, table)?
         .for_batch()
         .mutate(|slot| {
-          let mut leaf = slot.as_ref().deserialize::<BTreeNode>()?.into_leaf()?;
+          let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+          let leaf = node.as_leaf_mut()?;
           let pos = match leaf.find_slot(key) {
             FindSlotResult::Replace(i) => i,
             FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
@@ -789,15 +786,15 @@ where
           leaf.replace_at(pos, new_record);
 
           let Some(split) = leaf.split_if_needed() else {
-            self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+            self.0.serialize_and_log(slot, &node, table)?;
             return Ok(State::Break(WriteResult::updated(false)));
           };
 
           let mid_key = split.top().clone();
           let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
 
-          leaf.set_next(split_ptr);
-          self.0.serialize_and_log(slot, &leaf.into_node(), table)?;
+          leaf.set_next(mid_key.clone(), split_ptr);
+          self.0.serialize_and_log(slot, &node, table)?;
           Ok(State::Split(mid_key, split_ptr, WriteResult::updated(true)))
         })?;
 

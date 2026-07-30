@@ -1,4 +1,4 @@
-use std::mem::replace;
+use std::{mem::replace, ops::Range};
 
 use super::{
   count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, DEFAULT_BIAS,
@@ -125,11 +125,6 @@ impl InternalNode {
     self.keys.iter().map(Self::key_bytes).sum::<usize>() + POINTER_BYTES
   }
 
-  #[inline]
-  fn bytes_len(&self) -> usize {
-    Self::RESERVED_BYTES + self.keys_bytes() + self.right_bytes()
-  }
-
   /**
    * Split this internal node if it no longer fits.
    *
@@ -141,7 +136,7 @@ impl InternalNode {
     let right_bytes = self.right_bytes();
     let keys_bytes = self.keys_bytes();
     let split_bytes = right_bytes + keys_bytes;
-    if split_bytes + Self::RESERVED_BYTES < SERIALIZABLE_BYTES {
+    if split_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
       return None;
     }
 
@@ -172,10 +167,10 @@ impl InternalNode {
       let left_total = Self::RESERVED_BYTES + left_bytes + split_key_bytes;
       let right_total = Self::RESERVED_BYTES + right_bytes + right_key_bytes;
 
-      if left_total >= SERIALIZABLE_BYTES {
-        continue;
+      if left_total > SERIALIZABLE_BYTES {
+        break;
       }
-      if right_total >= SERIALIZABLE_BYTES {
+      if right_total > SERIALIZABLE_BYTES {
         continue;
       }
 
@@ -185,17 +180,14 @@ impl InternalNode {
       }
     }
 
-    let mid = best.unwrap().0;
+    let mid = best.map(|(mid, _)| mid).unwrap();
     let keys = self.keys.split_off(mid + 1);
     let mid_key = self.keys.pop().unwrap();
     let children = self.children.split_off(mid + 1);
     let split = InternalNode::new(keys, children, self.right.take(), DEFAULT_BIAS);
 
-    debug_assert!(split.bytes_len() < SERIALIZABLE_BYTES);
     debug_assert!(!split.keys.is_empty());
     debug_assert!(!self.keys.is_empty());
-    debug_assert!(self.bytes_len() < SERIALIZABLE_BYTES);
-
     Some((split, mid_key))
   }
 
@@ -219,7 +211,7 @@ pub struct InternalNodeView<'a> {
   page: &'a Page,
   len: usize,
   offset: usize,
-  right: Option<(Pointer, usize, usize)>,
+  right: Option<(Pointer, Range<usize>)>,
 }
 impl<'a> InternalNodeView<'a> {
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner) -> Result<Self> {
@@ -228,7 +220,7 @@ impl<'a> InternalNodeView<'a> {
       let ptr = scanner.read_u64()?;
       let len = scanner.read_u16()? as usize;
       let offset = scanner.advance(len)?;
-      right = Some((ptr, offset, offset + len));
+      right = Some((ptr, offset..(offset + len)));
     };
 
     let len = scanner.read_u16()? as usize;
@@ -242,7 +234,7 @@ impl<'a> InternalNodeView<'a> {
     page: &'a Page,
     len: usize,
     offset: usize,
-    right: Option<(Pointer, usize, usize)>,
+    right: Option<(Pointer, Range<usize>)>,
   ) -> Self {
     Self {
       page,
@@ -252,8 +244,8 @@ impl<'a> InternalNodeView<'a> {
     }
   }
   pub fn find(&self, key: StaticKeyRef) -> Result<std::result::Result<Pointer, Pointer>> {
-    if let Some((right, s, e)) = &self.right {
-      if self.page.range(*s..*e) <= key {
+    if let Some((right, range)) = &self.right {
+      if self.page.range(range.clone()) <= key {
         return Ok(Err(*right));
       };
     }
@@ -286,7 +278,10 @@ impl<'a> InternalNodeView<'a> {
   }
 
   pub fn get_right(&self) -> Option<(StaticKey, Pointer)> {
-    self.right.map(|(p, s, e)| (self.page.copy_range(s..e), p))
+    self
+      .right
+      .as_ref()
+      .map(|(p, range)| (self.page.copy_range(range.clone()), *p))
   }
 
   pub fn get_all_child(&self) -> Result<Vec<Pointer>> {

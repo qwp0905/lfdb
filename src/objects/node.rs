@@ -69,13 +69,13 @@ impl BTreeNode {
   pub const fn initial_state() -> Self {
     Self::Leaf(LeafNode::empty())
   }
-  pub fn into_internal(self) -> Result<InternalNode> {
+  pub const fn as_internal_mut(&mut self) -> Result<&mut InternalNode> {
     match self {
       Self::Internal(node) => Ok(node),
       Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
     }
   }
-  pub fn into_leaf(self) -> Result<LeafNode> {
+  pub const fn as_leaf_mut(&mut self) -> Result<&mut LeafNode> {
     match self {
       Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
       Self::Leaf(node) => Ok(node),

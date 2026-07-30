@@ -123,14 +123,16 @@ impl<'a> CachedSlot<'a> {
 pub struct ReadonlySlot {
   page: SBox<PageRef<PAGE_SIZE>>,
 }
-impl ReadonlySlot {
-  pub fn page(&self) -> SBox<PageRef<PAGE_SIZE>> {
-    self.page.clone()
-  }
-}
 impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
     &self.page
+  }
+}
+impl Clone for ReadonlySlot {
+  fn clone(&self) -> Self {
+    Self {
+      page: self.page.clone(),
+    }
   }
 }
 
