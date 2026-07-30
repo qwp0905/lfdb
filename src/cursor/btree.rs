@@ -193,7 +193,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     Ok((ptr, stack))
   }
 
-  pub fn scan(
+  pub fn range(
     &self,
     table: &TableHandleRef,
     start: &Bound<StaticKey>,

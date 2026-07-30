@@ -162,7 +162,7 @@ impl<'a> Cursor<'a> {
     })
   }
 
-  pub fn scan<'b, 'c, K>(
+  pub fn range<'b, 'c, K>(
     &'a self,
     range: impl RangeBounds<&'c K>,
   ) -> Result<CursorIter<'b>>
@@ -202,10 +202,10 @@ impl<'a> CursorIter<'a> {
   ) -> Result<Self> {
     let iter = match compaction {
       Some(c) => MergeSorted::merge(
-        index.scan(c, &start, &end)?,
-        index.scan(table, &start, &end)?,
+        index.range(c, &start, &end)?,
+        index.range(table, &start, &end)?,
       ),
-      None => MergeSorted::single(index.scan(table, &start, &end)?),
+      None => MergeSorted::single(index.range(table, &start, &end)?),
     };
 
     Ok(Self { context, iter })

@@ -42,25 +42,23 @@ users.remove(b"key1")?;
 tx.commit()?;
 ```
 
-### Scan
+### Range scan
 
 ```rust
 let tx = engine.new_tx()?;
 let users = tx.table("users")?;
 
 // Range scan [start, end)
-let mut iter = users.scan(b"key1"..b"key3")?;
+let mut iter = users.range(b"key1"..b"key3")?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
 // Full scan
-let mut iter = users.scan::<[_]>(..)?;
+let mut iter = users.range::<[_]>(..)?;
 while let Some((key, value)) = iter.try_next()? {
     // process
 }
-
-tx.commit()?;
 ```
 
 ### Compact Table
