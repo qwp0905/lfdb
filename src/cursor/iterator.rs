@@ -114,6 +114,27 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   }
 }
 
+fn find_in_entry<Policy: ReadonlyPolicy>(
+  policy: Policy,
+  table: &TableHandleRef,
+  ptr: Pointer,
+) -> Result<Option<Option<BufferedRecord>>> {
+  let mut next = Some(ptr);
+
+  while let Some(ptr) = next.take() {
+    let slot = policy.fetch_slot(ptr, table)?.for_read();
+    let entry: DataEntryView = slot.as_ref().view()?;
+    if let Some(record) =
+      entry.find(|record| policy.is_visible(record.owner, record.version))?
+    {
+      return Ok(Some(BufferedRecord::from(&slot, record)));
+    }
+
+    next = entry.get_next();
+  }
+
+  Ok(None)
+}
 /**
  * Iterates the visible key/value stream of a B-tree.
  *
@@ -168,7 +189,7 @@ where
             }
 
             let Some(p) = e.next else { continue };
-            if let Some(found) = Self::__find(&policy, table, p)? {
+            if let Some(found) = find_in_entry(&policy, table, p)? {
               buffered.push_back((VecRef::refed(slot.clone(), e.range), found));
             };
           }
@@ -191,30 +212,8 @@ where
     }
   }
 
-  fn __find(
-    policy: &Policy,
-    table: &TableHandleRef,
-    ptr: Pointer,
-  ) -> Result<Option<Option<BufferedRecord>>> {
-    let mut next = Some(ptr);
-
-    while let Some(ptr) = next.take() {
-      let slot = policy.fetch_slot(ptr, table)?.for_read();
-      let entry: DataEntryView = slot.as_ref().view()?;
-      if let Some(record) =
-        entry.find(|record| policy.is_visible(record.owner, record.version))?
-      {
-        return Ok(Some(BufferedRecord::from(&slot, record)));
-      }
-
-      next = entry.get_next();
-    }
-
-    Ok(None)
-  }
-
   fn find_value(&self, ptr: Pointer) -> Result<Option<Option<BufferedRecord>>> {
-    Self::__find(&self.policy, &self.table, ptr)
+    find_in_entry(&self.policy, &self.table, ptr)
   }
 
   fn fill_up(&mut self) -> Result {
@@ -257,11 +256,9 @@ where
       if self.closed {
         return Ok(None);
       }
-
       if let Some((key, found)) = self.buffered.pop_front() {
         return Ok(Some((key, found)));
       }
-
       self.fill_up()?;
     }
   }
@@ -283,6 +280,204 @@ where
   }
 }
 impl<Policy: ReadonlyPolicy> MergeSortable for BTreeIter<Policy> {
+  fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
+    self.next_kv()
+  }
+}
+
+struct StackFrame {
+  slot: ReadonlySlot,
+  pos: usize,
+}
+impl StackFrame {
+  const fn new(slot: ReadonlySlot, pos: usize) -> Self {
+    Self { slot, pos }
+  }
+}
+pub struct BTreeRevIter<Policy> {
+  policy: Policy,
+  table: TableHandleRef,
+  buffered: Vec<(VecRef, Option<BufferedRecord>)>,
+  stack: Vec<StackFrame>,
+  start: Bound<StaticKey>,
+  end: Bound<StaticKey>,
+  closed: bool,
+}
+impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
+  pub fn open(
+    policy: Policy,
+    table: &TableHandleRef,
+    start: &Bound<StaticKey>,
+    end: &Bound<StaticKey>,
+  ) -> Result<Self> {
+    let ptr = policy
+      .fetch_slot(HEADER_POINTER, table)?
+      .for_read()
+      .as_ref()
+      .deserialize::<TreeHeader>()?
+      .get_root();
+
+    let mut stack = Vec::new();
+    let mut buffered = Vec::new();
+    let (end, closed) =
+      Self::descent(&policy, table, &mut buffered, &mut stack, ptr, start, end)?;
+    Ok(Self {
+      policy,
+      table: table.clone(),
+      buffered,
+      stack,
+      start: start.clone(),
+      end: Bound::Excluded(end),
+      closed,
+    })
+  }
+
+  fn descent(
+    policy: &Policy,
+    table: &TableHandleRef,
+    buffered: &mut Vec<(VecRef, Option<BufferedRecord>)>,
+    stack: &mut Vec<StackFrame>,
+    mut ptr: Pointer,
+    start: &Bound<StaticKey>,
+    end: &Bound<StaticKey>,
+  ) -> Result<(StaticKey, bool)> {
+    let mut upper = None;
+    let mut closed = false;
+    loop {
+      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      match slot.as_ref().view::<BTreeNodeView>()? {
+        BTreeNodeView::Internal(node) => {
+          let (pos, p) = match end {
+            Bound::Included(k) => match node.find_pos(k)? {
+              Ok((pos, p)) => (pos, p),
+              Err(p) => (node.len() + 1, p),
+            },
+            Bound::Excluded(k) => match node.find_excluded(k)? {
+              Ok((pos, p)) => (pos, p),
+              Err(p) => (node.len() + 1, p),
+            },
+            Bound::Unbounded => match node.get_right() {
+              Some((_, p)) => (node.len() + 1, p),
+              None => (node.len(), node.last_child()?),
+            },
+          };
+
+          ptr = p;
+          stack.push(StackFrame::new(slot, pos));
+        }
+        BTreeNodeView::Leaf(node) => {
+          if upper.is_none() {
+            let top = node.top()?;
+            if match start {
+              Bound::Included(k) => top <= k,
+              Bound::Excluded(k) => top <= k,
+              Bound::Unbounded => false,
+            } {
+              closed = true;
+              stack.clear();
+            }
+            upper = Some(top.to_vec());
+          }
+
+          let mut iter = node.range_entries(start, end);
+          while let Some(e) = iter.try_next()? {
+            if policy.is_visible(e.record.owner, e.record.version) {
+              buffered.push((
+                VecRef::refed(slot.clone(), e.range),
+                BufferedRecord::from(&slot, e.record),
+              ));
+              continue;
+            }
+
+            let Some(p) = e.next else { continue };
+            if let Some(found) = find_in_entry(policy, table, p)? {
+              buffered.push((VecRef::refed(slot.clone(), e.range), found));
+            };
+          }
+
+          if let Some((p, high)) = node.get_next_with_key() {
+            if match end {
+              Bound::Included(key) => high <= key,
+              Bound::Excluded(key) => high < key,
+              Bound::Unbounded => true,
+            } {
+              ptr = p;
+              continue;
+            }
+          };
+
+          return Ok((upper.unwrap(), closed));
+        }
+      }
+    }
+  }
+
+  fn fill_up(&mut self) -> Result {
+    loop {
+      if self.closed {
+        return Ok(());
+      }
+
+      let Some(frame) = self.stack.last_mut() else {
+        self.closed = true;
+        return Ok(());
+      };
+
+      if frame.pos == 0 {
+        self.stack.pop();
+        continue;
+      }
+      frame.pos -= 1;
+
+      let node = frame
+        .slot
+        .as_ref()
+        .view::<BTreeNodeView>()?
+        .into_internal()?;
+      let ptr = node.nth_child(frame.pos)?;
+      let (end, closed) = Self::descent(
+        &self.policy,
+        &self.table,
+        &mut self.buffered,
+        &mut self.stack,
+        ptr,
+        &self.start,
+        &self.end,
+      )?;
+      self.end = Bound::Excluded(end);
+      self.closed = closed;
+      return Ok(());
+    }
+  }
+
+  fn next_record(&mut self) -> Result<Option<(VecRef, Option<BufferedRecord>)>> {
+    loop {
+      if let Some((key, found)) = self.buffered.pop() {
+        return Ok(Some((key, found)));
+      }
+      if self.closed {
+        return Ok(None);
+      }
+      self.fill_up()?;
+    }
+  }
+  fn next_kv(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
+    let Some((key, found)) = self.next_record()? else {
+      return Ok(None);
+    };
+    let Some(record) = found else {
+      return Ok(Some((key, ScannedItem::Deleted)));
+    };
+    match record.data {
+      BufferedValue::Data(data) => Ok(Some((key, ScannedItem::Present(data)))),
+      BufferedValue::Blob(id, offset, len) => Ok(Some((
+        key,
+        ScannedItem::Present(VecRef::copied(self.policy.read_blob(id, offset, len)?)),
+      ))),
+    }
+  }
+}
+impl<Policy: ReadonlyPolicy> MergeSortable for BTreeRevIter<Policy> {
   fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
     self.next_kv()
   }

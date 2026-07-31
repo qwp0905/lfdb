@@ -9,8 +9,8 @@
 use std::ops::{Bound, RangeBounds};
 
 use super::{
-  BTreeIndex, BTreeIter, GetResult, LookupResult, MergeSortable, MergeSorted, VecRef,
-  WriteOp, WriteResult,
+  BTreeIndex, BTreeIter, BTreeRevIter, GetResult, LookupResult, MergeSortable,
+  MergeSorted, SortDirection, VecRef, WriteOp, WriteResult,
 };
 use crate::{
   measure,
@@ -162,13 +162,12 @@ impl<'a> Cursor<'a> {
     })
   }
 
-  pub fn range<'b, 'c, K>(
+  pub fn range<'b, K>(
     &'a self,
-    range: impl RangeBounds<&'c K>,
-  ) -> Result<CursorIter<'b>>
+    range: impl RangeBounds<&'b K>,
+  ) -> Result<CursorIter<'a, BTreeIter<&'a &'a TxContext<'a>>>>
   where
-    'a: 'b,
-    K: AsRef<[u8]> + ?Sized + 'c,
+    K: AsRef<[u8]> + ?Sized + 'b,
   {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
@@ -185,13 +184,35 @@ impl<'a> Cursor<'a> {
       range.end_bound().map(|k| k.as_ref().to_vec()),
     )
   }
+  pub fn range_rev<'b, K>(
+    &'a self,
+    range: impl RangeBounds<&'b K>,
+  ) -> Result<CursorIter<'a, BTreeRevIter<&'a &'a TxContext<'a>>>>
+  where
+    K: AsRef<[u8]> + ?Sized + 'b,
+  {
+    if !self.context.is_available() {
+      return Err(Error::TransactionClosed);
+    }
+
+    // Own range bounds inside the iterator so user-provided key references do not
+    // extend into the cursor scan lifetime.
+    CursorIter::new_rev(
+      self.context,
+      &self.table,
+      self.compaction.as_ref(),
+      &self.index,
+      range.start_bound().map(|k| k.as_ref().to_vec()),
+      range.end_bound().map(|k| k.as_ref().to_vec()),
+    )
+  }
 }
 
-pub struct CursorIter<'a> {
+pub struct CursorIter<'a, Iter> {
   context: &'a TxContext<'a>,
-  iter: MergeSorted<BTreeIter<&'a &'a TxContext<'a>>>,
+  iter: MergeSorted<Iter>,
 }
-impl<'a> CursorIter<'a> {
+impl<'a> CursorIter<'a, BTreeIter<&'a &'a TxContext<'a>>> {
   pub fn new(
     context: &'a TxContext,
     table: &'a TableHandleRef,
@@ -200,16 +221,42 @@ impl<'a> CursorIter<'a> {
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,
   ) -> Result<Self> {
+    let default = index.range(table, &start, &end)?;
     let iter = match compaction {
       Some(c) => MergeSorted::merge(
         index.range(c, &start, &end)?,
-        index.range(table, &start, &end)?,
+        default,
+        SortDirection::Ascending,
       ),
-      None => MergeSorted::single(index.range(table, &start, &end)?),
+      None => MergeSorted::single(default, SortDirection::Ascending),
     };
 
     Ok(Self { context, iter })
   }
+}
+impl<'a> CursorIter<'a, BTreeRevIter<&'a &'a TxContext<'a>>> {
+  pub fn new_rev(
+    context: &'a TxContext,
+    table: &'a TableHandleRef,
+    compaction: Option<&'a TableHandleRef>,
+    index: &'a BTreeIndex<&'a TxContext<'a>>,
+    start: Bound<StaticKey>,
+    end: Bound<StaticKey>,
+  ) -> Result<Self> {
+    let default = index.range_rev(table, &start, &end)?;
+    let iter = match compaction {
+      Some(c) => MergeSorted::merge(
+        index.range_rev(c, &start, &end)?,
+        default,
+        SortDirection::Descending,
+      ),
+      None => MergeSorted::single(default, SortDirection::Descending),
+    };
+
+    Ok(Self { context, iter })
+  }
+}
+impl<'a, Iter: MergeSortable> CursorIter<'a, Iter> {
   pub fn try_next(&mut self) -> Result<Option<(VecRef, VecRef)>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);

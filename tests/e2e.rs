@@ -1770,3 +1770,49 @@ fn test_truncate() {
   let engine = build_engine(&dir);
   assert_eq!(count(&engine), 0);
 }
+
+/**
+ * 32. Test Reverse scan.
+ */
+#[test]
+fn test_rev_scan() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+  create_table(&engine, TEST_TABLE);
+
+  let mut kvs = Vec::new();
+  for i in 0..100 {
+    let key = format!("123{:06}", i).as_bytes().to_vec();
+    let value = format!("3453453{:06}", i).as_bytes().to_vec();
+    kvs.push((key, value));
+  }
+
+  {
+    let mut tx = engine.new_tx().unwrap();
+    let table = tx.open_table(TEST_TABLE).unwrap();
+    for (k, v) in kvs.iter() {
+      table.insert(k.clone(), v.clone()).unwrap();
+    }
+    tx.commit().unwrap();
+  }
+
+  let tx = engine.new_tx().unwrap();
+  let table = tx.table(TEST_TABLE).unwrap();
+
+  let mut c = 0;
+  let mut iter = table.range::<[_]>(..).unwrap();
+  while let Some((k, v)) = iter.try_next().unwrap() {
+    assert_eq!(k, kvs[c].0);
+    assert_eq!(v, kvs[c].1);
+    c += 1;
+  }
+  assert_eq!(c, kvs.len());
+
+  let mut iter = table.range_rev::<[_]>(..).unwrap();
+  while let Some((k, v)) = iter.try_next().unwrap() {
+    c -= 1;
+    assert_eq!(k, kvs[c].0);
+    assert_eq!(v, kvs[c].1);
+  }
+  assert_eq!(c, 0);
+}
