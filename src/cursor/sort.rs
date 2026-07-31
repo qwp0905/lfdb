@@ -37,9 +37,13 @@ pub trait MergeSortable {
   }
 }
 
-pub enum MergeSorted<T, R = T> {
+pub enum SortDirection {
+  Ascending,
+  Descending,
+}
+enum SortedSet<T, R> {
   Single(T),
-  MergeSorted {
+  Merged {
     primary: T,
     primary_buffered: Option<(VecRef, ScannedItem)>,
     secondary: R,
@@ -47,16 +51,27 @@ pub enum MergeSorted<T, R = T> {
   },
 }
 
+pub struct MergeSorted<T, R = T> {
+  set: SortedSet<T, R>,
+  direction: SortDirection,
+}
+
 impl<T, R> MergeSorted<T, R> {
-  pub fn single(sorted: T) -> Self {
-    Self::Single(sorted)
+  pub fn single(sorted: T, direction: SortDirection) -> Self {
+    Self {
+      set: SortedSet::Single(sorted),
+      direction,
+    }
   }
-  pub fn merge(primary: T, secondary: R) -> Self {
-    Self::MergeSorted {
-      primary,
-      primary_buffered: None,
-      secondary,
-      secondary_buffered: None,
+  pub fn merge(primary: T, secondary: R, direction: SortDirection) -> Self {
+    Self {
+      set: SortedSet::Merged {
+        primary,
+        primary_buffered: None,
+        secondary,
+        secondary_buffered: None,
+      },
+      direction,
     }
   }
 }
@@ -66,9 +81,9 @@ where
   R: MergeSortable,
 {
   fn try_next(&mut self) -> Result<Option<(VecRef, ScannedItem)>> {
-    let (primary, primary_buffered, secondary, secondary_buffered) = match self {
-      MergeSorted::Single(sorted) => return sorted.try_next(),
-      MergeSorted::MergeSorted {
+    let (primary, primary_buffered, secondary, secondary_buffered) = match &mut self.set {
+      SortedSet::Single(sorted) => return sorted.try_next(),
+      SortedSet::Merged {
         primary,
         primary_buffered,
         secondary,
@@ -91,16 +106,18 @@ where
       (Some((k_p, v_p)), Some((k_s, v_s))) => (k_p, v_p, k_s, v_s),
     };
 
-    match k_p.cmp(&k_s) {
-      Ordering::Less => {
+    match (k_p.cmp(&k_s), &self.direction) {
+      (Ordering::Less, SortDirection::Ascending)
+      | (Ordering::Greater, SortDirection::Descending) => {
         *secondary_buffered = Some((k_s, v_s));
         Ok(Some((k_p, v_p)))
       }
-      Ordering::Greater => {
+      (Ordering::Less, SortDirection::Descending)
+      | (Ordering::Greater, SortDirection::Ascending) => {
         *primary_buffered = Some((k_p, v_p));
         Ok(Some((k_s, v_s)))
       }
-      Ordering::Equal => Ok(Some((k_p, v_p))),
+      (Ordering::Equal, _) => Ok(Some((k_p, v_p))),
     }
   }
 }
