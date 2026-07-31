@@ -243,7 +243,39 @@ impl<'a> InternalNodeView<'a> {
       right,
     }
   }
-  pub fn find(&self, key: StaticKeyRef) -> Result<std::result::Result<Pointer, Pointer>> {
+  pub fn find_excluded(
+    &self,
+    key: StaticKeyRef,
+  ) -> Result<std::result::Result<(usize, Pointer), Pointer>> {
+    if let Some((right, range)) = &self.right {
+      if self.page.range(range.clone()) < key {
+        return Ok(Err(*right));
+      };
+    }
+
+    let mut scanner = self.page.scanner();
+    scanner.advance(self.offset).unwrap();
+
+    let mut prev_child = scanner.read_u64()?;
+    for i in 0..self.len {
+      let l = scanner.read_u16()? as usize;
+      let offset = scanner.advance(l)?;
+      let k = self.page.range(offset..(offset + l));
+      let child = scanner.read_u64()?;
+      if k < key {
+        prev_child = child;
+        continue;
+      } else {
+        return Ok(Ok((i, prev_child)));
+      }
+    }
+    Ok(Ok((self.len, prev_child)))
+  }
+
+  pub fn find_pos(
+    &self,
+    key: StaticKeyRef,
+  ) -> Result<std::result::Result<(usize, Pointer), Pointer>> {
     if let Some((right, range)) = &self.right {
       if self.page.range(range.clone()) <= key {
         return Ok(Err(*right));
@@ -251,10 +283,10 @@ impl<'a> InternalNodeView<'a> {
     }
 
     let mut scanner = self.page.scanner();
-    let _ = scanner.advance(self.offset);
+    scanner.advance(self.offset).unwrap();
 
     let mut prev_child = scanner.read_u64()?;
-    for _ in 0..self.len {
+    for i in 0..self.len {
       let l = scanner.read_u16()? as usize;
       let offset = scanner.advance(l)?;
       let k = self.page.range(offset..(offset + l));
@@ -263,20 +295,41 @@ impl<'a> InternalNodeView<'a> {
         prev_child = child;
         continue;
       } else if k == key {
-        return Ok(Ok(child));
+        return Ok(Ok((i + 1, child)));
       } else {
-        return Ok(Ok(prev_child));
+        return Ok(Ok((i, prev_child)));
       }
     }
-
-    Ok(Ok(prev_child))
+    Ok(Ok((self.len, prev_child)))
+  }
+  pub fn find(&self, key: StaticKeyRef) -> Result<std::result::Result<Pointer, Pointer>> {
+    Ok(match self.find_pos(key)? {
+      Ok((_, ptr)) => Ok(ptr),
+      Err(ptr) => Err(ptr),
+    })
   }
   pub fn first_child(&self) -> Result<Pointer> {
+    self.nth_child(0)
+  }
+  pub fn last_child(&self) -> Result<Pointer> {
+    self.nth_child(self.len)
+  }
+  pub fn nth_child(&self, pos: usize) -> Result<Pointer> {
     let mut scanner = self.page.scanner();
     scanner.advance(self.offset).unwrap();
-    scanner.read_u64()
+
+    let mut child = scanner.read_u64()?;
+    for _ in 0..pos {
+      let l = scanner.read_u16()? as usize;
+      scanner.advance(l)?;
+      child = scanner.read_u64()?;
+    }
+    Ok(child)
   }
 
+  pub const fn len(&self) -> usize {
+    self.len
+  }
   pub fn get_right(&self) -> Option<(StaticKey, Pointer)> {
     self
       .right
