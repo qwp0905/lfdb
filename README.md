@@ -54,6 +54,12 @@ while let Some((key, value)) = iter.try_next()? {
     // process
 }
 
+// Range reverse scan [start, end)
+let mut iter = users.range_rev(b"key1"..b"key3")?;
+while let Some((key, value)) = iter.try_next()? {
+    // process
+}
+
 // Full scan
 let mut iter = users.range::<[_]>(..)?;
 while let Some((key, value)) = iter.try_next()? {
