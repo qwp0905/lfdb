@@ -84,7 +84,7 @@ impl TableHandle {
   }
 
   /**
-   * reserve for detect write conflict
+   * reserve to protect from write conflict
    */
   pub fn reserve(
     &self,
