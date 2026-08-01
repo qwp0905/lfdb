@@ -70,7 +70,7 @@ impl VersionRecord {
     Self::RESERVED_BYTES + self.data.byte_len()
   }
   /**
-   * owner 8byte + version 8byte + record id
+   * owner 8byte + version 8byte
    * */
   pub const RESERVED_BYTES: usize = (TX_ID_BYTES << 1);
 
