@@ -1,7 +1,5 @@
 use std::ops::Range;
 
-use super::{RecordId, RECORD_ID_BYTES};
-
 use crate::{
   blob::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_LEN_BYTES, BLOB_OFFSET_BYTES},
   disk::Page,
@@ -58,21 +56,14 @@ pub struct VersionRecord {
    * transactions may.
    */
   pub version: TxId,
-  pub record_id: RecordId,
   pub data: RecordData,
 }
 impl VersionRecord {
-  pub const fn new(
-    owner: TxId,
-    version: TxId,
-    data: RecordData,
-    record_id: RecordId,
-  ) -> Self {
+  pub const fn new(owner: TxId, version: TxId, data: RecordData) -> Self {
     Self {
       owner,
       version,
       data,
-      record_id,
     }
   }
   pub const fn byte_len(&self) -> usize {
@@ -81,12 +72,11 @@ impl VersionRecord {
   /**
    * owner 8byte + version 8byte + record id
    * */
-  pub const RESERVED_BYTES: usize = (TX_ID_BYTES << 1) + RECORD_ID_BYTES;
+  pub const RESERVED_BYTES: usize = (TX_ID_BYTES << 1);
 
   pub fn serialize_to(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
     writer.write_u64(self.version)?;
     writer.write_u64(self.owner)?;
-    writer.write_u32(self.record_id)?;
     match &self.data {
       RecordData::Data(data) => {
         writer.write(&[0])?;
@@ -107,7 +97,6 @@ impl VersionRecord {
   pub fn deserialize_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let version = reader.read_u64()?;
     let owner = reader.read_u64()?;
-    let id = reader.read_u32()?;
     let data = match reader.read()? {
       0 => {
         let l = reader.read_u16()? as usize;
@@ -122,7 +111,7 @@ impl VersionRecord {
       }
       _ => return Err(Error::InvalidFormat("invalid type for data version record")),
     };
-    Ok(Self::new(owner, version, data, id))
+    Ok(Self::new(owner, version, data))
   }
 }
 
@@ -149,21 +138,14 @@ impl RecordDataView {
 pub struct VersionRecordView {
   pub owner: TxId,
   pub version: TxId,
-  pub record_id: RecordId,
   pub data: RecordDataView,
 }
 impl VersionRecordView {
-  pub const fn new(
-    owner: TxId,
-    version: TxId,
-    data: RecordDataView,
-    record_id: RecordId,
-  ) -> Self {
+  pub const fn new(owner: TxId, version: TxId, data: RecordDataView) -> Self {
     Self {
       owner,
       version,
       data,
-      record_id,
     }
   }
 
@@ -176,14 +158,12 @@ impl VersionRecordView {
         RecordDataView::Blob(i, o, l) => RecordData::Blob(i, o, l),
         RecordDataView::Tombstone => RecordData::Tombstone,
       },
-      self.record_id,
     )
   }
 
   pub fn deserialize_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
     let version = reader.read_u64()?;
     let owner = reader.read_u64()?;
-    let id = reader.read_u32()?;
     let data = match reader.read()? {
       0 => {
         let l = reader.read_u16()? as usize;
@@ -199,6 +179,6 @@ impl VersionRecordView {
       }
       _ => return Err(Error::InvalidFormat("invalid type for data version record")),
     };
-    Ok(Self::new(owner, version, data, id))
+    Ok(Self::new(owner, version, data))
   }
 }
