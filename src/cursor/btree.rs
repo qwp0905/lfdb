@@ -9,7 +9,7 @@ use crate::{
     VersionRecord, HEADER_POINTER, LARGE_VALUE,
   },
   table::{ReserveGuard, TableHandleRef},
-  wal::{TxId, RESERVED_TX},
+  wal::TxId,
   Error, Result,
 };
 
@@ -326,11 +326,10 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     loop {
       let old_height = stack.len() as u16;
       while let Some(ptr) = stack.pop() {
-        let Some((k, p)) = self.apply_split(split_key, split_pointer, ptr, table)? else {
-          return Ok(());
-        };
-
-        (split_key, split_pointer) = (k, p);
+        match self.apply_split(split_key, split_pointer, ptr, table)? {
+          Some((k, p)) => (split_key, split_pointer) = (k, p),
+          None => return Ok(()),
+        }
       }
 
       let Some((mut ptr, diff)) = self
@@ -385,10 +384,8 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       return Ok((RecordData::Data(data), None));
     }
     let guard = self.0.write_blob(data)?;
-    Ok((
-      RecordData::Blob(guard.get_id(), guard.get_offset(), guard.get_len()),
-      Some(guard),
-    ))
+    let data = RecordData::Blob(guard.get_id(), guard.get_offset(), guard.get_len());
+    Ok((data, Some(guard)))
   }
 
   /**
@@ -422,7 +419,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
           return Ok(State::Move(next, record));
         }
 
-        let new_entry = DataEntry::init(record, None, RESERVED_TX);
+        let new_entry = DataEntry::init(record, None);
         entry.set_next(self.0.alloc_and_log(&new_entry, table)?);
         self.0.serialize_and_log(slot, &entry, table)?;
         Ok(State::Inserted)
@@ -458,7 +455,6 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
         BufferedValue::Data(data) => RecordData::Data(data.into_vec()),
         BufferedValue::Blob(id, offset, len) => RecordData::Blob(id, offset, len),
       },
-      snapshot.record_id,
     );
 
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
@@ -480,7 +476,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
               let mut node = leaf.into_owned()?;
               let entry_ptr = self
                 .0
-                .alloc_and_log(&DataEntry::init(record, None, RESERVED_TX), table)?;
+                .alloc_and_log(&DataEntry::init(record, None), table)?;
               node.alloc_entry_at(pos, entry_ptr);
               self.0.serialize_and_log(slot, &node.into_node(), table)?;
               return Ok(State::Break);
@@ -541,33 +537,23 @@ where
     entry_ptr: Pointer,
     old: VersionRecord,
     table: &TableHandleRef,
-  ) -> Result<Option<TxId>> {
+  ) -> Result {
     self
       .0
       .fetch_slot(entry_ptr, table)?
       .for_batch()
       .mutate(|slot| {
-        let entry: DataEntryView = slot.as_ref().view()?;
-        if let Some(latest) = entry.get_latest()? {
-          if latest.owner == old.owner && latest.record_id == old.record_id {
-            if !self.0.is_owned(entry.get_last_owner()) {
-              return Ok(Some(entry.get_last_owner()));
-            }
-            return Ok(None);
-          }
-        }
-
-        let mut entry = entry.into_owned()?;
+        let mut entry: DataEntry = slot.as_ref().deserialize()?;
         if entry.is_available(&old) {
-          entry.attach_front(old, self.0.current_owner());
+          entry.attach_front(old);
           self.0.serialize_and_log(slot, &entry, table)?;
-          return Ok(None);
+          return Ok(());
         }
 
         let new_entry_ptr = self.0.alloc_and_log(&entry, table)?;
-        let new_entry = DataEntry::init(old, Some(new_entry_ptr), self.0.current_owner());
+        let new_entry = DataEntry::init(old, Some(new_entry_ptr));
         self.0.serialize_and_log(slot, &new_entry, table)?;
-        Ok(None)
+        Ok(())
       })
   }
 
@@ -593,8 +579,7 @@ where
       Break(WriteResult),
       Conflict(TxId),
       Split(StaticKey, Pointer, WriteResult),
-      CopyOld(Pointer, VersionRecord, WriteOp),
-      AllocEntry(ReserveGuard<'a>, VersionRecord, WriteOp),
+      CopyOld(ReserveGuard<'a>, Option<Pointer>, VersionRecord, WriteOp),
     }
 
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
@@ -611,13 +596,11 @@ where
             }
 
             if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
-              let old = old.into_owned_with(slot.as_ref());
-              if let Some(p) = entry_ptr {
-                return Ok(State::CopyOld(p, old, op));
-              }
-
               return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
-                Ok(g) => State::AllocEntry(g, old, op),
+                Ok(g) => {
+                  let old = old.into_owned_with(slot.as_ref());
+                  State::CopyOld(g, entry_ptr, old, op)
+                }
                 Err(i) => State::Conflict(i),
               });
             }
@@ -632,12 +615,8 @@ where
         };
 
         let (record, _guard) = self.create_record(op)?;
-        let new_record = VersionRecord::new(
-          self.0.current_owner(),
-          self.0.current_version(),
-          record,
-          self.0.gen_record_id(),
-        );
+        let new_record =
+          VersionRecord::new(self.0.current_owner(), self.0.current_version(), record);
         let mut result = if found {
           node.replace_at(pos, new_record);
           WriteResult::updated(false)
@@ -671,81 +650,10 @@ where
           self.0.wait_close(i);
           return Err(Error::WriteConflict);
         }
-        State::CopyOld(entry_ptr, old, o) => {
-          return self.copy_and_update(key, o, ptr, table, entry_ptr, old, stack);
-        }
-        State::AllocEntry(guard, old, o) => {
-          return self.alloc_entry_and_update(key, o, ptr, old, guard, table, stack);
+        State::CopyOld(guard, entry_ptr, old, o) => {
+          return self.copy_and_update(key, o, ptr, table, entry_ptr, old, stack, guard);
         }
       };
-    }
-  }
-
-  fn alloc_entry_and_update(
-    &self,
-    key: StaticKeyRef,
-    mut op: WriteOp,
-    mut leaf_ptr: Pointer,
-    old: VersionRecord,
-    _insert_guard: ReserveGuard<'_>,
-    table: &TableHandleRef,
-    stack: Vec<Pointer>,
-  ) -> Result<WriteResult> {
-    let entry_ptr = self
-      .0
-      .alloc_and_log(&DataEntry::init(old, None, self.0.current_owner()), table)?;
-
-    enum State {
-      Move(Pointer, WriteOp),
-      Break(WriteResult),
-      Split(StaticKey, Pointer, WriteResult),
-    }
-
-    loop {
-      let state = self
-        .0
-        .fetch_slot(leaf_ptr, table)?
-        .for_batch()
-        .mutate(|slot| {
-          let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
-          let leaf = node.as_leaf_mut()?;
-          let pos = match leaf.find_slot(key) {
-            FindSlotResult::Replace(i) => i,
-            FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
-            FindSlotResult::Insert(_) => unreachable!(),
-          };
-
-          let (record, _guard) = self.create_record(op)?;
-          let new_record = VersionRecord::new(
-            self.0.current_owner(),
-            self.0.current_version(),
-            record,
-            self.0.gen_record_id(),
-          );
-          leaf.replace_at(pos, new_record);
-          leaf.alloc_entry_at(pos, entry_ptr);
-
-          let Some(split) = leaf.split_if_needed() else {
-            self.0.serialize_and_log(slot, &node, table)?;
-            return Ok(State::Break(WriteResult::updated(false)));
-          };
-
-          let mid_key = split.top().clone();
-          let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
-
-          leaf.set_next(mid_key.clone(), split_ptr);
-          self.0.serialize_and_log(slot, &node, table)?;
-          Ok(State::Split(mid_key, split_ptr, WriteResult::updated(true)))
-        })?;
-
-      match state {
-        State::Move(p, o) => (leaf_ptr, op) = (p, o),
-        State::Break(result) => return Ok(result),
-        State::Split(k, p, result) => {
-          self.propagate_split(k, p, stack, table)?;
-          return Ok(result);
-        }
-      }
     }
   }
 
@@ -755,9 +663,10 @@ where
     mut op: WriteOp,
     mut leaf_ptr: Pointer,
     table: &TableHandleRef,
-    entry_ptr: Pointer,
+    entry_ptr: Option<Pointer>,
     old: VersionRecord,
     stack: Vec<Pointer>,
+    _insert_guard: ReserveGuard<'_>,
   ) -> Result<WriteResult> {
     enum State {
       Move(Pointer, WriteOp),
@@ -765,9 +674,9 @@ where
       Split(StaticKey, Pointer, WriteResult),
     }
 
-    if let Some(i) = self.copy_old_record(entry_ptr, old, table)? {
-      self.0.wait_close(i);
-      return Err(Error::WriteConflict);
+    let entry_ptr = match entry_ptr {
+      Some(p) => self.copy_old_record(p, old, table).map(|_| p)?,
+      None => self.0.alloc_and_log(&DataEntry::init(old, None), table)?,
     };
 
     loop {
@@ -785,13 +694,10 @@ where
           };
 
           let (record, _guard) = self.create_record(op)?;
-          let new_record = VersionRecord::new(
-            self.0.current_owner(),
-            self.0.current_version(),
-            record,
-            self.0.gen_record_id(),
-          );
+          let new_record =
+            VersionRecord::new(self.0.current_owner(), self.0.current_version(), record);
           leaf.replace_at(pos, new_record);
+          leaf.alloc_entry_at(pos, entry_ptr);
 
           let Some(split) = leaf.split_if_needed() else {
             self.0.serialize_and_log(slot, &node, table)?;

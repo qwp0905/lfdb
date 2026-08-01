@@ -30,9 +30,9 @@ pub struct TableHandle {
   pin: ExclusivePin,
 
   /**
-   * local guard for alloc new entry per each key.
+   * local guard for detect write conflict per each key.
    */
-  alloc_set: SkipMap<Vec<u8>, TxId>,
+  conflict_set: SkipMap<Vec<u8>, TxId>,
 }
 impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: BlockIOHandle<PAGE_SIZE>) -> Self {
@@ -42,7 +42,7 @@ impl TableHandle {
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
-      alloc_set: SkipMap::new(),
+      conflict_set: SkipMap::new(),
     }
   }
 
@@ -84,21 +84,21 @@ impl TableHandle {
   }
 
   /**
-   * reserve allocate new data entry before real allocation
+   * reserve for detect write conflict
    */
   pub fn reserve(
     &self,
     key: Vec<u8>,
     owner: TxId,
   ) -> std::result::Result<ReserveGuard<'_>, TxId> {
-    let entry = self.alloc_set.get_or_insert(key, owner);
+    let entry = self.conflict_set.get_or_insert(key, owner);
     if *entry.value() != owner {
       return Err(*entry.value());
     }
     Ok(ReserveGuard(entry))
   }
   pub fn is_reserved(&self, key: &[u8]) -> bool {
-    self.alloc_set.contains_key(key)
+    self.conflict_set.contains_key(key)
   }
 }
 
