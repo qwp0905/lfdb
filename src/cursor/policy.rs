@@ -2,7 +2,7 @@ use crate::{
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
   cache::{CachedSlot, RefedSlot},
   disk::{AlignedBuf, FreePointer, Pointer},
-  objects::{RecordId, Serializable},
+  objects::Serializable,
   table::TableHandleRef,
   wal::TxId,
   Result,
@@ -154,7 +154,6 @@ pub trait CreatablePolicy: WritablePolicy {
   fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
-  fn gen_record_id(&self) -> RecordId;
 }
 impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
   fn wait_close(&self, owner: TxId) {
@@ -165,8 +164,5 @@ impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
   }
   fn current_version(&self) -> TxId {
     (*self).current_version()
-  }
-  fn gen_record_id(&self) -> RecordId {
-    (*self).gen_record_id()
   }
 }

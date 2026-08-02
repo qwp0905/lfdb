@@ -4,7 +4,6 @@ use crate::{
   cache::RefedSlot,
   cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
-  objects::AtomicRecordId,
   objects::Serializable,
   table::TableHandleRef,
   wal::TxId,
@@ -23,7 +22,6 @@ pub struct TxContext<'a> {
   orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
-  record_id: AtomicRecordId,
   modified: AtomicBool,
 }
 impl<'a> TxContext<'a> {
@@ -37,7 +35,6 @@ impl<'a> TxContext<'a> {
       orchestrator,
       state,
       snapshot,
-      record_id: AtomicRecordId::new(0),
       modified: AtomicBool::new(false),
     }
   }
@@ -136,8 +133,5 @@ impl<'a> CreatablePolicy for TxContext<'a> {
   }
   fn wait_close(&self, owner: TxId) {
     self.orchestrator.wait_commit(owner);
-  }
-  fn gen_record_id(&self) -> crate::objects::RecordId {
-    self.record_id.fetch_add(1, Ordering::Relaxed)
   }
 }

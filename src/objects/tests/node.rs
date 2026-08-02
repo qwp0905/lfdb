@@ -38,7 +38,7 @@ fn test_serialize_leaf() {
     leaf.insert_at(
       i,
       key.clone(),
-      VersionRecord::new(*o, *v, RecordData::Data(d.clone()), 1),
+      VersionRecord::new(*o, *v, RecordData::Data(d.clone())),
     );
   }
   leaf.set_next(vec![11, 2, 3, 3], 200);

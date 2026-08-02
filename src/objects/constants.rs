@@ -1,11 +1,5 @@
-use std::sync::atomic::AtomicU32;
-
 pub const MAX_KEY: usize = 1 << 8;
 pub const MAX_VALUE: usize = 32 << 20;
-
-pub type RecordId = u32;
-pub const RECORD_ID_BYTES: usize = RecordId::BITS as usize >> 3;
-pub type AtomicRecordId = AtomicU32;
 
 /**
  * Bit-packed split-bias history.

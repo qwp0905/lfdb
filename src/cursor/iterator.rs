@@ -5,7 +5,7 @@ use crate::{
   cache::ReadonlySlot,
   disk::Pointer,
   objects::{
-    BTreeNodeView, DataEntryView, RecordDataView, RecordId, StaticKey, TreeHeader,
+    BTreeNodeView, DataEntryView, RecordDataView, StaticKey, TreeHeader,
     VersionRecordView, HEADER_POINTER,
   },
   table::TableHandleRef,
@@ -31,15 +31,13 @@ struct BufferedRecord {
   data: BufferedValue,
   owner: TxId,
   version: TxId,
-  id: RecordId,
 }
 impl BufferedRecord {
-  const fn new(data: BufferedValue, owner: TxId, version: TxId, id: RecordId) -> Self {
+  const fn new(data: BufferedValue, owner: TxId, version: TxId) -> Self {
     Self {
       data,
       owner,
       version,
-      id,
     }
   }
 
@@ -49,13 +47,11 @@ impl BufferedRecord {
         BufferedValue::Data(VecRef::refed(slot.clone(), range)),
         record.owner,
         record.version,
-        record.record_id,
       )),
       RecordDataView::Blob(id, offset, len) => Some(Self::new(
         BufferedValue::Blob(id, offset, len),
         record.owner,
         record.version,
-        record.record_id,
       )),
       RecordDataView::Tombstone => None,
     }
@@ -67,7 +63,6 @@ pub struct KVSnapshot {
   pub value: BufferedValue,
   pub owner: TxId,
   pub version: TxId,
-  pub record_id: RecordId,
 }
 
 /**
@@ -104,7 +99,6 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
         value: record.data,
         owner: record.owner,
         version: record.version,
-        record_id: record.id,
       }));
     }
   }
