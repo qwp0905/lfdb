@@ -123,11 +123,11 @@ impl<T> SBox<MaybeUninit<T>> {
 //     self.deref().fmt(f)
 //   }
 // }
-// impl<T: Default> Default for SBox<T> {
-//   fn default() -> Self {
-//     Self::new(Default::default())
-//   }
-// }
+impl<T: Default> Default for SBox<T> {
+  fn default() -> Self {
+    Self::new(Default::default())
+  }
+}
 // impl<T: core::error::Error + ?Sized> core::error::Error for SBox<T> {
 //   #[allow(deprecated)]
 //   fn cause(&self) -> Option<&dyn core::error::Error> {

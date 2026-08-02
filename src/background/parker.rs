@@ -27,3 +27,8 @@ impl OnceParker {
     self.0.call_once_force(|_| ());
   }
 }
+impl Default for OnceParker {
+  fn default() -> Self {
+    Self::new()
+  }
+}
