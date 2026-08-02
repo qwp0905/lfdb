@@ -14,13 +14,13 @@ that resemble how the engine is expected to be used in practice.
 
 A useful benchmark should define:
 
-- the shape and size of stored records;
-- the ratio of reads, inserts, updates, and scans;
-- the distribution used to select keys;
-- the number of concurrent clients;
-- the transaction and durability boundaries;
-- the relationship between the working set and available cache;
-- how the database state changes throughout the workload.
+- the shape and size of stored records
+- the ratio of reads, inserts, updates, and scans
+- the distribution used to select keys
+- the number of concurrent clients
+- the transaction and durability boundaries
+- the relationship between the working set and available cache
+- how the database state changes throughout the workload
 
 Each benchmark should answer a concrete performance question. A sequential
 insert benchmark measures append behavior, while a highly contended update
