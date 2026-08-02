@@ -18,11 +18,7 @@ impl RecordEncoding {
   }
   pub fn compress(&self, data: &[u8]) -> Vec<u8> {
     match self {
-      Self::Raw => {
-        let mut v = vec![0; data.len()];
-        v.copy_from_slice(data);
-        v
-      }
+      Self::Raw => data.to_vec(),
       Self::Lz4 => lz4_flex::compress(data),
       Self::Zstd => zstd::bulk::compress(data, 1).unwrap(),
     }
@@ -34,11 +30,7 @@ impl RecordEncoding {
     original_len: usize,
   ) -> std::result::Result<Vec<u8>, DecompressError> {
     let decoded = match self {
-      Self::Raw => {
-        let mut v = vec![0; data.len()];
-        v.copy_from_slice(data);
-        Ok(v)
-      }
+      Self::Raw => Ok(data.to_vec()),
       Self::Lz4 => lz4_flex::decompress(data, original_len).map_err(|_| DecompressError),
       Self::Zstd => {
         zstd::bulk::decompress(data, original_len).map_err(|_| DecompressError)
