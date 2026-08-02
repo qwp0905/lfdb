@@ -28,7 +28,6 @@ use super::{
 pub struct WALConfig {
   pub max_file_size: usize,
   pub max_buffer_size: usize,
-  pub compression: RecordEncoding,
 }
 
 pub struct WALSegmentRotated(WALSegment);
@@ -58,6 +57,8 @@ thread_local! {
 fn pin() -> Guard {
   LOCAL.with(LocalHandle::pin)
 }
+
+const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
 
 /**
  * Lock-free, group-commit write-ahead log.
@@ -95,8 +96,6 @@ pub struct WriteAheadLog {
    * A state of wal. If wal io fails, it switches to the failed state and requires a restart.
    */
   state: AtomicCell<State>,
-
-  encoding: RecordEncoding,
 
   /**
    *  preload wal segment
@@ -145,7 +144,6 @@ impl WriteAheadLog {
         state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
-        encoding: config.compression,
       },
       replay_result,
     ))
@@ -397,7 +395,7 @@ impl WriteAheadLog {
         table_id,
         ptr,
         record_version,
-        self.encoding,
+        DEFAULT_ENCODING,
         data,
       ),
       false,
