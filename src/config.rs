@@ -1,5 +1,3 @@
-use crate::wal::RecordEncoding;
-
 use super::{Error, Result};
 use std::{path::PathBuf, time::Duration};
 
@@ -14,7 +12,6 @@ pub struct EngineConfig {
   pub io_thread_count: usize,
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
-  pub wal_compression: RecordEncoding,
   pub checkpoint_flush_factor: f64,
   pub gc_batch_size: usize,
   pub gc_thread_count: usize,
@@ -93,7 +90,6 @@ impl Clone for EngineConfig {
       io_thread_count: self.io_thread_count,
       wal_file_size: self.wal_file_size,
       wal_buffer_size: self.wal_buffer_size,
-      wal_compression: self.wal_compression,
       checkpoint_flush_factor: self.checkpoint_flush_factor,
       gc_batch_size: self.gc_batch_size,
       gc_thread_count: self.gc_thread_count,
