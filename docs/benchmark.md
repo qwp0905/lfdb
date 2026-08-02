@@ -70,7 +70,7 @@ TODO
 TODO
 
 
-## Result
+## Results
 
 ### Concurrency Scaling
 
