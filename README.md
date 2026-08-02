@@ -115,6 +115,7 @@ println!("cache hit: {}", m.block_cache_hit);
 println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 ```
 
+
 ## Configuration
 
 | Option | Description |
@@ -132,6 +133,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
 | `compaction_batch_size` | Number of keys to copy per compaction tick. |
 | `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
+
 
 ## Architecture
 
@@ -240,15 +242,18 @@ it.
 
 LFDB emits logs through the [`log`](https://crates.io/crates/log) crate facade. Refer to its documentation for backend setup and filter configuration.
 
-### Benchmark
+
+## Benchmark
 
 See [[benchmark.md]](docs/benchmark.md).
+
 
 ## Limitations
 
 - **Key size**: maximum 256 bytes
 - **Value size**: maximum 33,554,432 bytes (32 MiB)
 - **Heavy removes**: heavy delete workloads warrant care. Disk space freed by removes is returned to the per-table free list and reused for new writes. When auto compaction is triggered, the table is rebuilt into a new file, and reads that happen during the compaction pay an extra cost because they are routed across both the old and the new file until the swap completes.
+
 
 ## License
 
