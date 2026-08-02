@@ -8,9 +8,10 @@ use crossbeam::utils::Backoff;
 
 use super::{CacheNode, GetOrReserve, Reserved, ShrinkSet};
 use crate::{
+  background::OnceParker,
   disk::Pointer,
   table::TableId,
-  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SBox, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
@@ -21,7 +22,7 @@ const U32_MASK: u64 = u32::MAX as u64;
 
 struct Shard {
   node: CacheNode<Key, BlockId>,
-  eviction: ShrinkSet<Key>, // evicting pointers
+  eviction: ShrinkSet<Key, SBox<OnceParker>>, // evicting pointers
   allocated: BlockId,
 
   /**
@@ -98,25 +99,31 @@ impl<'a> EvictionGuard<'a> {
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
     if self.committed {
-      if let Some((k, h)) = self.evicted {
-        self.guard.l().eviction.remove(h, &k, self.hasher);
-      }
-      return;
+      let Some((k, h)) = self.evicted else { return };
+      let Some(parker) = self.guard.l().eviction.remove(h, &k, self.hasher) else {
+        unreachable!()
+      };
+      return parker.wake_all();
     }
 
     // rollback
     let mut shard = self.guard.l();
-    if let Some((k, h)) = self.evicted {
-      shard.eviction.remove(h, &k, self.hasher);
-      shard.aborted.push((self.block_id, Some((k, h))));
-    } else {
-      shard.aborted.push((self.block_id, None));
-    }
+    let (parker, evicted) = self
+      .evicted
+      .map(|(k, h)| (shard.eviction.remove(h, &k, self.hasher), Some((k, h))))
+      .unwrap_or_else(|| (None, None));
+
+    shard.aborted.push((self.block_id, evicted));
     shard
       .node
       .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
     // No ownership claimed — block is immediately available for eviction.
     unsafe { ManuallyDrop::drop(&mut self.token) };
+    drop(shard);
+
+    if let Some(parker) = parker {
+      parker.wake_all();
+    }
   }
 }
 
@@ -194,7 +201,7 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      debug_assert!(!shard.eviction.contains(hash, &key));
+      debug_assert!(shard.eviction.get(hash, &key).is_none());
       let Ok(reserved) = shard.node.reserve(&key, hash, hasher, try_evict) else {
         drop(shard);
         backoff.snooze();
@@ -234,9 +241,9 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      if shard.eviction.contains(hash, &key) {
+      if let Some(parker) = shard.eviction.get(hash, &key).cloned() {
         drop(shard);
-        backoff.snooze();
+        parker.park();
         continue;
       }
 
@@ -284,9 +291,12 @@ impl MappingTable {
       // but the slot may still contain the old page until the caller finishes the
       // eviction/load work, so keep the old key blocked during the transition.
       reserved.fulfill(bid);
-      shard
-        .eviction
-        .insert_unchecked(evicted, evicted_hash, &self.hasher);
+      shard.eviction.insert_unchecked(
+        evicted,
+        Default::default(),
+        evicted_hash,
+        &self.hasher,
+      );
       return Some(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,
@@ -323,9 +333,12 @@ impl MappingTable {
     };
 
     if let Some(token) = try_evict(&bid) {
-      shard
-        .eviction
-        .insert_unchecked(evicted, evicted_hash, &self.hasher);
+      shard.eviction.insert_unchecked(
+        evicted,
+        Default::default(),
+        evicted_hash,
+        &self.hasher,
+      );
       return Some(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,
