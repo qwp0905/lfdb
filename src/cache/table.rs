@@ -1,4 +1,5 @@
 use std::{
+  cell::OnceCell,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::{Mutex, MutexGuard},
@@ -22,7 +23,7 @@ const U32_MASK: u64 = u32::MAX as u64;
 
 struct Shard {
   node: CacheNode<Key, BlockId>,
-  eviction: ShrinkSet<Key, SBox<OnceParker>>, // evicting pointers
+  eviction: ShrinkSet<Key, OnceCell<SBox<OnceParker>>>, // evicting pointers
   allocated: BlockId,
 
   /**
@@ -103,6 +104,9 @@ impl<'a> Drop for EvictionGuard<'a> {
       let Some(parker) = self.guard.l().eviction.remove(h, &k, self.hasher) else {
         unreachable!()
       };
+      let Some(parker) = parker.into_inner() else {
+        return;
+      };
       return parker.wake_all();
     }
 
@@ -121,7 +125,7 @@ impl<'a> Drop for EvictionGuard<'a> {
     unsafe { ManuallyDrop::drop(&mut self.token) };
     drop(shard);
 
-    if let Some(parker) = parker {
+    if let Some(parker) = parker.and_then(|p| p.into_inner()) {
       parker.wake_all();
     }
   }
@@ -241,7 +245,8 @@ impl MappingTable {
 
     loop {
       let mut shard = s.l();
-      if let Some(parker) = shard.eviction.get(hash, &key).cloned() {
+      if let Some(parker) = shard.eviction.get(hash, &key) {
+        let parker = parker.get_or_init(Default::default).clone();
         drop(shard);
         parker.park();
         continue;
@@ -293,7 +298,7 @@ impl MappingTable {
       reserved.fulfill(bid);
       shard.eviction.insert_unchecked(
         evicted,
-        Default::default(),
+        OnceCell::new(),
         evicted_hash,
         &self.hasher,
       );
@@ -335,7 +340,7 @@ impl MappingTable {
     if let Some(token) = try_evict(&bid) {
       shard.eviction.insert_unchecked(
         evicted,
-        Default::default(),
+        OnceCell::new(),
         evicted_hash,
         &self.hasher,
       );
