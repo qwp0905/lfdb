@@ -240,6 +240,10 @@ it.
 
 LFDB emits logs through the [`log`](https://crates.io/crates/log) crate facade. Refer to its documentation for backend setup and filter configuration.
 
+### Benchmark
+
+See [[benchmark.md]](docs/benchmark.md).
+
 ## Limitations
 
 - **Key size**: maximum 256 bytes
