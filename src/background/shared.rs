@@ -247,16 +247,22 @@ impl<T, R> SharedWorkThread<T, R> {
       }
 
       if let Some(ctx) = self.global.steal().success() {
-        handle_task(ctx, &self.work);
-        continue;
+        if handle_task(ctx, &self.work) {
+          continue;
+        };
+        self.register(Context::Term);
+        break;
       }
       if let Some(ctx) = self
         .stealers
         .iter()
         .find_map(|stealer| stealer.steal().success())
       {
-        handle_task(ctx, &self.work);
-        continue;
+        if handle_task(ctx, &self.work) {
+          continue;
+        };
+        self.register(Context::Term);
+        break;
       }
 
       backoff.snooze();
@@ -283,7 +289,7 @@ impl<T, R> SharedWorkThread<T, R> {
     }
 
     for _ in 0..threads.len() {
-      self.global.push(Context::Term);
+      self.register(Context::Term);
     }
     for th in threads {
       th.thread().unpark();
