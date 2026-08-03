@@ -147,6 +147,7 @@ pub fn open_tables(
   })
 }
 
+const MAX_RECOVERY_THREADS: usize = 5;
 pub fn recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
@@ -158,7 +159,7 @@ pub fn recovery(
     .into_iter()
     .for_each(|v| open_handles.push(v));
 
-  let threads = (0..5)
+  let threads = (0..open_handles.len().min(MAX_RECOVERY_THREADS))
     .map(|_| {
       let block_cache = block_cache.clone();
       let open_handles = open_handles.clone();
@@ -175,6 +176,14 @@ pub fn recovery(
       })
     })
     .collect::<Vec<_>>();
+
+  while let Some(table) = open_handles.pop() {
+    debug!(
+      "table {} start to collect orphaned blocks.",
+      table.get_name(),
+    );
+    recovery_table(&block_cache, &recorder, &table)?;
+  }
 
   threads.into_iter().try_for_each(|th| th.wait())?;
   info!("orphaned block has released successfully.");
