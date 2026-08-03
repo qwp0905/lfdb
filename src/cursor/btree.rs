@@ -523,14 +523,6 @@ where
 {
   /**
    * Copy the old leaf record into the data-entry version chain.
-   *
-   * The old record is identified by `(owner, record_id)`. If the same record is
-   * already the latest data-entry record, the copy was already performed. In that
-   * case the copy is accepted only when this transaction was the last modifier of
-   * the data entry; otherwise the last modifier is returned as a conflict owner.
-   *
-   * If the record has not been copied yet, this method prepends it to the data
-   * entry chain and records the current transaction as the last modifier.
    */
   fn copy_old_record(
     &self,
@@ -563,9 +555,7 @@ where
    * Updating an existing key must preserve the previous leaf record in the
    * data-entry version chain. To avoid coupling the leaf latch with the data-entry
    * latch, the method first copies the old leaf record into the data entry, then
-   * retries the leaf update and replaces the latest record. The copied record is
-   * checked by `(owner, record_id)`, and data-entry `last_owner` is used to detect
-   * whether another transaction performed the copy first.
+   * retries the leaf update and replaces the latest record.
    */
   fn __insert(
     &self,

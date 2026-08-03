@@ -39,9 +39,6 @@ impl RecordData {
  * A version record stores the writer transaction, visibility version, record id,
  * and either inline value bytes, a blob location, or a tombstone. Leaf entries
  * and data-entry version chains share this format.
- *
- *  A record is uniquely identified by `(owner, record_id)`. The record id is
- * local to the owner transaction and may repeat across transactions.
  */
 #[derive(Debug)]
 pub struct VersionRecord {
