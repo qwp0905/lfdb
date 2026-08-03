@@ -67,7 +67,6 @@ impl Engine {
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
-      compression: config.wal_compression,
     };
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,
