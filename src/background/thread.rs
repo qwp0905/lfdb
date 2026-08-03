@@ -52,12 +52,7 @@ impl<T, R> BackgroundThread<T, R> {
   pub fn execute(&self, value: T) -> Oneshot<R> {
     let (done_r, done_t) = oneshot();
     let ctx = Context::Work(value, done_t);
-    match &self.0 {
-      ThreadTypes::Shared(t) => t.register(ctx),
-      ThreadTypes::Preload(t) => t.register(ctx),
-      ThreadTypes::Interval(t) => t.register(ctx),
-      ThreadTypes::Buffering(t) => t.register(ctx),
-    };
+    self.register(ctx);
     done_r
   }
 
