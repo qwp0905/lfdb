@@ -99,35 +99,29 @@ impl<'a> EvictionGuard<'a> {
 }
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
-    if self.committed {
-      let Some((k, h)) = self.evicted else { return };
-      let Some(parker) = self.guard.l().eviction.remove(h, &k, self.hasher) else {
-        unreachable!()
-      };
-      let Some(parker) = parker.into_inner() else {
-        return;
-      };
-      return parker.wake_all();
-    }
-
-    // rollback
     let mut shard = self.guard.l();
-    let (parker, evicted) = self
+    let parker = self
       .evicted
-      .map(|(k, h)| (shard.eviction.remove(h, &k, self.hasher), Some((k, h))))
-      .unwrap_or_else(|| (None, None));
+      .map(|(k, h)| shard.eviction.remove(h, &k, self.hasher))
+      .map(|p| p.unwrap_or_else(|| unreachable!()))
+      .and_then(|p| p.into_inner());
 
-    shard.aborted.push((self.block_id, evicted));
-    shard
-      .node
-      .remove(&self.new_pointer, self.new_pointer_hash, self.hasher);
-    // No ownership claimed — block is immediately available for eviction.
-    unsafe { ManuallyDrop::drop(&mut self.token) };
-    drop(shard);
-
-    if let Some(parker) = parker.and_then(|p| p.into_inner()) {
-      parker.wake_all();
+    if !self.committed {
+      // rollback
+      shard.aborted.push((self.block_id, self.evicted));
+      shard
+        .node
+        .remove(&self.new_pointer, self.new_pointer_hash, self.hasher)
+        .unwrap_or_else(|| unreachable!());
+      // No ownership claimed — block is immediately available for eviction.
+      unsafe { ManuallyDrop::drop(&mut self.token) };
     }
+
+    drop(shard);
+    let Some(parker) = parker else {
+      return;
+    };
+    parker.wake_all()
   }
 }
 
