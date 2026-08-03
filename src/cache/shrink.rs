@@ -81,39 +81,41 @@ impl<T> ShrinkTable<T> {
   }
 }
 
-pub struct ShrinkSet<K>(ShrinkTable<K>);
-impl<K> ShrinkSet<K> {
+pub struct ShrinkSet<K, V>(ShrinkTable<(K, V)>);
+impl<K, V> ShrinkSet<K, V> {
   const fn equivalent<'a, Q: ?Sized + Equivalent<K>>(
     key: &'a Q,
-  ) -> impl Fn(&K) -> bool + 'a {
-    |k| key.equivalent(k)
+  ) -> impl Fn(&(K, V)) -> bool + 'a {
+    |(k, _)| key.equivalent(k)
   }
-  const fn make_hasher<'a, S: BuildHasher>(build_hasher: &'a S) -> impl Fn(&K) -> u64 + 'a
+  const fn make_hasher<'a, S: BuildHasher>(
+    build_hasher: &'a S,
+  ) -> impl Fn(&(K, V)) -> u64 + 'a
   where
     K: Hash,
   {
-    |k| build_hasher.hash_one(k)
+    |(k, _)| build_hasher.hash_one(k)
   }
 
   pub const fn new() -> Self {
     Self(ShrinkTable::new())
   }
-  pub fn contains<Q>(&self, hash: u64, key: &Q) -> bool
+  pub fn get<Q>(&self, hash: u64, key: &Q) -> Option<&V>
   where
     Q: Equivalent<K> + ?Sized,
   {
     let eq = Self::equivalent(key);
-    self.0.find(hash, eq).is_some()
+    Some(&self.0.find(hash, eq)?.1)
   }
-  pub fn insert_unchecked<S>(&mut self, key: K, hash: u64, hasher: &S)
+  pub fn insert_unchecked<S>(&mut self, key: K, value: V, hash: u64, hasher: &S)
   where
     K: Hash,
     S: BuildHasher,
   {
     let hasher = Self::make_hasher(hasher);
-    self.0.insert_unique(hash, key, hasher);
+    self.0.insert_unique(hash, (key, value), hasher);
   }
-  pub fn remove<Q, S>(&mut self, hash: u64, key: &Q, hasher: &S)
+  pub fn remove<Q, S>(&mut self, hash: u64, key: &Q, hasher: &S) -> Option<V>
   where
     Q: Equivalent<K> + ?Sized,
     K: Hash,
@@ -121,7 +123,7 @@ impl<K> ShrinkSet<K> {
   {
     let eq = Self::equivalent(key);
     let hasher = Self::make_hasher(hasher);
-    self.0.remove_and_shrink(hash, eq, hasher);
+    Some(self.0.remove_and_shrink(hash, eq, hasher)?.1)
   }
 }
 
