@@ -1,6 +1,6 @@
 use super::{
   oneshot, BufferingThread, Context, EventBindings, IntervalWorkThread, Oneshot,
-  OwnedSubscription, PreloadThread, SharedWorkThread,
+  OwnedSubscription, PreloadThread, SharedWorkThread, WaitDisconnectedError,
 };
 
 pub enum ThreadTypes<T, R> {
@@ -59,6 +59,16 @@ impl<T, R> BackgroundThread<T, R> {
       ThreadTypes::Buffering(t) => t.register(ctx),
     };
     done_r
+  }
+
+  pub fn wait_with(
+    &self,
+    oneshot: Oneshot<R>,
+  ) -> std::result::Result<R, WaitDisconnectedError> {
+    match &self.0 {
+      ThreadTypes::Shared(t) => t.steal_until(oneshot),
+      _ => panic!("must use with shared thread."),
+    }
   }
 
   /**

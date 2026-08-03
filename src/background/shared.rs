@@ -13,7 +13,9 @@ use crossbeam::{
 
 use crate::utils::{SBox, ShortenedMutex};
 
-use super::{Context, SharedFn, UnwindSpawner};
+use super::{
+  Context, Oneshot, SharedFn, TryWaitError, UnwindSpawner, WaitDisconnectedError,
+};
 
 /*
  * Standard work-stealing priority:
@@ -167,8 +169,9 @@ pub struct SharedWorkThread<T, R = ()> {
   global: Arc<Injector<Context<T, R>>>,
   idle: Arc<SegQueue<Idle>>,
   wakers: Vec<Thread>,
-  threads: Mutex<Vec<JoinHandle<()>>>,
   work: SharedFn<'static, T, R>,
+  stealers: Arc<[Stealer<Context<T, R>>]>,
+  threads: Mutex<Vec<JoinHandle<()>>>,
 }
 impl<T, R> SharedWorkThread<T, R> {
   pub fn new<S: ToString>(
@@ -214,6 +217,7 @@ impl<T, R> SharedWorkThread<T, R> {
       wakers,
       threads: Mutex::new(threads),
       work,
+      stealers,
     }
   }
 
@@ -228,6 +232,37 @@ impl<T, R> SharedWorkThread<T, R> {
     if let State::Parked = idle.state.swap(State::Unqueued) {
       self.wakers[idle.id].unpark();
     }
+  }
+
+  pub fn steal_until(
+    &self,
+    mut oneshot: Oneshot<R>,
+  ) -> std::result::Result<R, WaitDisconnectedError> {
+    let backoff = Backoff::new();
+    while !backoff.is_completed() {
+      match oneshot.try_wait() {
+        Ok(r) => return Ok(r),
+        Err(TryWaitError::Empty(o)) => oneshot = o,
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+      }
+
+      if let Some(ctx) = self.global.steal().success() {
+        handle_task(ctx, &self.work);
+        continue;
+      }
+      if let Some(ctx) = self
+        .stealers
+        .iter()
+        .find_map(|stealer| stealer.steal().success())
+      {
+        handle_task(ctx, &self.work);
+        continue;
+      }
+
+      backoff.snooze();
+    }
+
+    oneshot.wait_slow()
   }
 
   /*
