@@ -321,7 +321,7 @@ impl CacheFlusher {
     }
     waiting
       .into_iter()
-      .try_for_each(|done| done.wait().unwrap())?;
+      .try_for_each(|done| self.executor.wait_with(done).unwrap())?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }

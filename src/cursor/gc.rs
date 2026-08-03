@@ -351,10 +351,11 @@ impl GCTask {
 fn flush_buffered(
   buffered: &mut VecDeque<Oneshot<Result<EntryRelease>>>,
   refs: &mut HashSet<BlobId>,
+  entry_worker: &BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>,
 ) -> Result<TxId> {
   let mut min = TxId::MAX;
   while let Some(handle) = buffered.pop_front() {
-    let result = handle.wait().unwrap()?;
+    let result = entry_worker.wait_with(handle).unwrap()?;
     min = min.min(result.min_version);
     refs.extend(result.blob_refs);
   }
@@ -386,7 +387,7 @@ fn run_tick(
 
   for _ in 0..key_count {
     let Some(mut task) = current.tasks.pop() else {
-      let min = flush_buffered(buffered, &mut current.blob_refs)?;
+      let min = flush_buffered(buffered, &mut current.blob_refs, entry_worker)?;
       version_visibility.remove_aborted(&current.min_version.min(min));
 
       for &id in current
@@ -470,7 +471,7 @@ fn run_tick(
     event_bus.publish(CompactionTriggered::new(table.into_inner()));
   }
 
-  let min_version = flush_buffered(buffered, &mut current.blob_refs)?;
+  let min_version = flush_buffered(buffered, &mut current.blob_refs, entry_worker)?;
   current.min_version = current.min_version.min(min_version);
   Ok(())
 }
