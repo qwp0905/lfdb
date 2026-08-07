@@ -207,6 +207,16 @@ impl Engine {
         .write(data)?;
     }
 
+    let checkpoint = Checkpoint::initial_checkpoint(
+      wal.clone(),
+      block_cache.clone(),
+      version_visibility.clone(),
+      io_pool.clone(),
+      event_bus.clone(),
+      metrics_registry.clone(),
+      config.checkpoint_flush_factor,
+    )?;
+
     tables.replay(handles.into_values())?;
     recovery(block_cache.clone(), recorder.clone(), &tables)?;
 
@@ -239,16 +249,6 @@ impl Engine {
           CompactionPublished::new(table, c_table, c_meta)
         });
     event_bus.batch_publish(events);
-
-    let checkpoint = Checkpoint::initial_checkpoint(
-      wal.clone(),
-      block_cache.clone(),
-      version_visibility.clone(),
-      io_pool.clone(),
-      event_bus.clone(),
-      metrics_registry.clone(),
-      config.checkpoint_flush_factor,
-    )?;
 
     // Discard replay input WAL segments after the initial checkpoint.
     // Restart may use a different WAL segment size/configuration. Rather than

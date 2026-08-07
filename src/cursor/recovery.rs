@@ -258,14 +258,12 @@ fn recovery_table(
   let mut entry_stack = vec![];
   let mut half_split = HashMap::new();
   let mut child_reachable = HashSet::new();
-  let mut used = HEADER_POINTER;
 
   while let Some((ptr, level)) = node_stack.pop() {
     if !visited.insert(ptr) {
       continue;
     };
 
-    used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
       .for_read()
@@ -301,7 +299,6 @@ fn recovery_table(
     if !visited.insert(ptr) {
       continue;
     };
-    used = used.max(ptr);
     if let Some(i) = block_cache
       .read(ptr, table)?
       .for_read()
@@ -313,10 +310,11 @@ fn recovery_table(
     };
   }
 
-  (0..=used)
+  let len = table.disk().len()?;
+  (0..len)
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
-  table.free().replay(used + 1);
+  table.free().replay(len + 1);
 
   let half_split = half_split
     .into_iter()
