@@ -37,7 +37,6 @@ fn cache_size() -> usize {
     .unwrap_or(DEFAULT_CACHE_SIZE)
     << 20
 }
-
 const DEFAULT_CACHE_SIZE: usize = 1024;
 
 /// Workload A: 50% read, 50% update (write-heavy, session store)
