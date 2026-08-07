@@ -19,10 +19,10 @@ use crate::{
  * to the data-entry page that continues the version chain for older records.
  */
 #[derive(Debug)]
-struct LeafEntry {
-  key: StaticKey,
-  record: VersionRecord,
-  next: Option<Pointer>,
+pub struct LeafEntry {
+  pub key: StaticKey,
+  pub record: VersionRecord,
+  pub next: Option<Pointer>,
 }
 impl LeafEntry {
   const fn new(key: StaticKey, record: VersionRecord, next: Option<Pointer>) -> Self {
@@ -73,6 +73,10 @@ impl LeafNode {
     }
   }
 
+  pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut LeafEntry> {
+    self.entries.iter_mut()
+  }
+
   pub fn write_at(&self, writer: &mut PageWriter) -> Result {
     match &self.next {
       Some((ptr, key)) => {
@@ -121,6 +125,12 @@ impl LeafNode {
     pointer: Pointer,
   ) -> Option<(Pointer, StaticKey)> {
     self.next.replace((pointer, key))
+  }
+  pub const fn get_next(&self) -> Option<Pointer> {
+    match &self.next {
+      Some((p, _)) => Some(*p),
+      None => None,
+    }
   }
 
   #[inline]

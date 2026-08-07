@@ -18,7 +18,8 @@ use crate::{
   disk::Pointer,
   error,
   objects::{
-    BTreeNodeView, DataEntry, DataEntryView, RecordDataView, TreeHeader, HEADER_POINTER,
+    BTreeNode, BTreeNodeView, DataEntry, DataEntryView, RecordDataView, StaticKey,
+    TreeHeader, HEADER_POINTER,
   },
   table::{TableHandleRef, TableMapper, META_TABLE_ID},
   transaction::{PageRecorder, VersionVisibility},
@@ -37,10 +38,16 @@ pub struct GarbageCollectionConfig {
 const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
+enum EntryWork {
+  Check,
+  Release,
+}
+type EntryWorker =
+  BackgroundThread<(TableHandleRef, Pointer, EntryWork), Result<Option<EntryRelease>>>;
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   main: Box<BackgroundThread<()>>,
-  entry: Arc<BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>>,
+  entry: Arc<EntryWorker>,
   table: Arc<BackgroundThread<()>>,
 }
 impl GarbageCollector {
@@ -85,6 +92,7 @@ impl GarbageCollector {
         GC_RUN_INTERVAL,
         gc_main_loop(
           block_cache,
+          recorder,
           mapper,
           version_visibility,
           entry.clone(),
@@ -179,13 +187,13 @@ fn check_entry(
  * this point. GC may remove older history, but it must keep at least one record
  * below that threshold so future reads still have a stable version boundary.
  */
-fn release_entry(
+fn check_and_release_entry(
   block_cache: &BlockCache,
   version_visibility: &VersionVisibility,
   recorder: &PageRecorder,
   table: &TableHandleRef,
   pointer: Pointer,
-) -> Result<EntryRelease> {
+) -> Result<Option<EntryRelease>> {
   let table_id = table.get_id();
   let mut next = Some(pointer);
   let mut max_found = None;
@@ -248,25 +256,52 @@ fn release_entry(
     })?;
   }
 
-  Ok(EntryRelease {
+  Ok(Some(EntryRelease {
     min_version: max_found.unwrap_or(min_version),
     blob_refs,
-  })
+  }))
+}
+
+fn release_entry(
+  block_cache: &BlockCache,
+  table: &TableHandleRef,
+  pointer: Pointer,
+) -> Result {
+  let mut next = Some(pointer);
+  while let Some(ptr) = next.take() {
+    next = block_cache
+      .read(ptr, table)?
+      .for_read()
+      .as_ref()
+      .view::<DataEntryView>()?
+      .get_next();
+
+    // lazily dealloc pointers since compaction can reachable.
+    let guard = pin();
+    let cloned = table.clone();
+    guard.defer(move || cloned.free().dealloc(ptr));
+    guard.flush();
+  }
+  Ok(())
 }
 
 const fn run_entry(
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   recorder: Arc<PageRecorder>,
-) -> impl Fn((TableHandleRef, Pointer)) -> Result<EntryRelease> {
-  move |(table, pointer)| {
-    release_entry(
+) -> impl Fn((TableHandleRef, Pointer, EntryWork)) -> Result<Option<EntryRelease>> {
+  move |(table, pointer, work)| match work {
+    EntryWork::Check => check_and_release_entry(
       &block_cache,
       &version_visibility,
       &recorder,
       &table,
       pointer,
-    )
+    ),
+    EntryWork::Release => {
+      release_entry(&block_cache, &table, pointer)?;
+      Ok(None)
+    }
   }
 }
 
@@ -316,7 +351,7 @@ const fn run_release_table(
 }
 
 struct GcCycle {
-  tasks: ChunkQueue<GCTask>,
+  tasks: ChunkQueue<GcTask>,
   min_version: TxId,
   blob_refs: HashSet<BlobId>,
   exists_blobs: Vec<BlobId>,
@@ -331,13 +366,13 @@ impl GcCycle {
     }
   }
 }
-struct GCTask {
+struct GcTask {
   table: TableHandleRef,
   total: usize,
   dead: usize,
   leaf_ptr: Option<Pointer>,
 }
-impl GCTask {
+impl GcTask {
   const fn new(table: TableHandleRef) -> Self {
     Self {
       table,
@@ -349,12 +384,14 @@ impl GCTask {
 }
 
 fn flush_buffered(
-  buffered: &mut VecDeque<Oneshot<Result<EntryRelease>>>,
+  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
   refs: &mut HashSet<BlobId>,
 ) -> Result<TxId> {
   let mut min = TxId::MAX;
   while let Some(handle) = buffered.pop_front() {
-    let result = handle.wait().unwrap()?;
+    let Some(result) = handle.wait().unwrap()? else {
+      continue;
+    };
     min = min.min(result.min_version);
     refs.extend(result.blob_refs);
   }
@@ -362,11 +399,12 @@ fn flush_buffered(
 }
 fn run_tick(
   cycle: &mut Option<GcCycle>,
-  buffered: &mut VecDeque<Oneshot<Result<EntryRelease>>>,
+  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
   block_cache: &BlockCache,
+  recorder: &PageRecorder,
   tables: &TableMapper,
   version_visibility: &VersionVisibility,
-  entry_worker: &BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>,
+  entry_worker: &EntryWorker,
   event_bus: &EventBus,
   blob: &BlobStorage,
   key_count: usize,
@@ -378,7 +416,7 @@ fn run_tick(
       version_visibility.min_version(),
       blob.readonly_handle_ids(),
     ));
-    for task in tables.get_all().into_iter().map(GCTask::new) {
+    for task in tables.get_all().into_iter().map(GcTask::new) {
       cycle.tasks.push(task);
     }
     return Ok(());
@@ -427,30 +465,61 @@ fn run_tick(
       continue;
     };
 
-    let slot = block_cache.read(ptr, table.handle())?.for_read();
-    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-    let mut iter = node.get_entries();
-    while let Some(e) = iter.try_next()? {
-      current.min_version = current.min_version.min(e.record.version);
-      if let Some(p) = e.next {
-        buffered.push_back(entry_worker.execute((table.handle().clone(), p)));
-      }
-      task.total += 1;
+    let mut release_candidates = HashSet::new();
 
-      if version_visibility.is_aborted(&e.record.owner) {
-        task.dead += 1;
-        continue;
-      }
-      match e.record.data {
-        RecordDataView::Blob(id, _, _) => {
-          current.blob_refs.insert(id);
+    let has_next = {
+      let min_version = version_visibility.min_version();
+      let slot = block_cache.read(ptr, table.handle())?.for_read();
+      let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+      let mut iter = node.get_entries();
+      while let Some(e) = iter.try_next()? {
+        current.min_version = current.min_version.min(e.record.version);
+        task.total += 1;
+
+        if version_visibility.is_aborted(&e.record.owner) {
+          task.dead += 1;
+          if let Some(p) = e.next {
+            let handle =
+              entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+            buffered.push_back(handle);
+          }
+          continue;
         }
-        RecordDataView::Tombstone => task.dead += 1,
-        _ => {}
-      }
-    }
 
-    if let Some(i) = node.get_next() {
+        if let Some(p) = e.next {
+          if e.record.version < min_version {
+            release_candidates.insert(slot.as_ref().copy_range(e.range));
+          } else {
+            let handle =
+              entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+            buffered.push_back(handle);
+          }
+        }
+
+        match e.record.data {
+          RecordDataView::Blob(id, _, _) => {
+            current.blob_refs.insert(id);
+          }
+          RecordDataView::Tombstone => task.dead += 1,
+          _ => {}
+        }
+      }
+
+      node.get_next()
+    };
+
+    release_leaf(
+      block_cache,
+      recorder,
+      version_visibility,
+      table.handle(),
+      entry_worker,
+      buffered,
+      release_candidates,
+      ptr,
+    )?;
+
+    if let Some(i) = has_next {
       task.leaf_ptr = Some(i);
       drop(table);
       current.tasks.push(task);
@@ -475,11 +544,77 @@ fn run_tick(
   Ok(())
 }
 
+fn release_leaf(
+  block_cache: &BlockCache,
+  recorder: &PageRecorder,
+  version_visibility: &VersionVisibility,
+  table: &TableHandleRef,
+  entry_worker: &EntryWorker,
+  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
+  mut candidates: HashSet<StaticKey>,
+  ptr: Pointer,
+) -> Result {
+  let count = candidates.len();
+  if count == 0 {
+    return Ok(());
+  }
+
+  let min_version = version_visibility.min_version();
+  let mut next = Some(ptr);
+  while let Some(ptr) = next.take() {
+    let targets = block_cache.read(ptr, table)?.for_batch().mutate(|slot| {
+      let mut targets = Vec::new();
+      let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+      let leaf = node.as_leaf_mut()?;
+
+      for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
+        let Some(ptr) = entry.next else {
+          continue;
+        };
+
+        if table.is_reserved(&entry.key)
+          || entry.record.version >= min_version
+          || version_visibility.is_aborted(&entry.record.owner)
+        {
+          let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Check));
+          buffered.push_back(handle);
+          continue;
+        }
+
+        targets.push(ptr);
+        entry.next = None;
+      }
+
+      if !candidates.is_empty() {
+        next = leaf.get_next();
+      }
+
+      if !targets.is_empty() {
+        recorder.serialize_and_log(
+          RESERVED_TX,
+          table.get_id(),
+          RESERVED_TX,
+          slot,
+          &node,
+        )?;
+      }
+      Ok(targets)
+    })?;
+    for ptr in targets {
+      let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Release));
+      buffered.push_back(handle);
+    }
+  }
+
+  Ok(())
+}
+
 fn gc_main_loop(
   block_cache: Arc<BlockCache>,
+  recorder: Arc<PageRecorder>,
   tables: Arc<TableMapper>,
   version_visibility: Arc<VersionVisibility>,
-  entry_worker: Arc<BackgroundThread<(TableHandleRef, Pointer), Result<EntryRelease>>>,
+  entry_worker: Arc<EntryWorker>,
   event_bus: Arc<EventBus>,
   blob: Arc<BlobStorage>,
   key_count: usize,
@@ -487,13 +622,14 @@ fn gc_main_loop(
   compaction_min_size: Pointer,
 ) -> impl FnMut(Option<()>) {
   let mut cycle = None;
-  let mut buffered = VecDeque::<Oneshot<Result<EntryRelease>>>::new();
+  let mut buffered = VecDeque::new();
 
   move |_| {
     run_tick(
       &mut cycle,
       &mut buffered,
       &block_cache,
+      &recorder,
       &tables,
       &version_visibility,
       &entry_worker,
