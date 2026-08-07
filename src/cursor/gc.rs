@@ -486,16 +486,6 @@ fn run_tick(
           continue;
         }
 
-        if let Some(p) = e.next {
-          if e.record.version < min_version {
-            release_candidates.insert(slot.as_ref().copy_range(e.range));
-          } else {
-            let handle =
-              entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
-            buffered.push_back(handle);
-          }
-        }
-
         match e.record.data {
           RecordDataView::Blob(id, _, _) => {
             current.blob_refs.insert(id);
@@ -503,6 +493,16 @@ fn run_tick(
           RecordDataView::Tombstone => task.dead += 1,
           _ => {}
         }
+
+        let Some(p) = e.next else {
+          continue;
+        };
+        if e.record.version < min_version {
+          release_candidates.insert(slot.as_ref().copy_range(e.range));
+          continue;
+        }
+        let handle = entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+        buffered.push_back(handle);
       }
 
       node.get_next()
