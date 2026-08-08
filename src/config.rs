@@ -28,15 +28,15 @@ pub struct EngineConfig {
 impl EngineConfig {
   pub fn validate(&self) -> Result {
     if self.io_thread_count == 0 {
-      return invalid!("io_thread_count must be greater then 0.");
+      return invalid!("io_thread_count must be greater than 0.");
     }
 
     if self.wal_file_size == 0 {
-      return invalid!("wal_file_size must be greater then 0.");
+      return invalid!("wal_file_size must be greater than 0.");
     }
 
     if self.wal_buffer_size == 0 {
-      return invalid!("wal_buffer_size must be greater then 0.");
+      return invalid!("wal_buffer_size must be greater than 0.");
     }
 
     if !self.checkpoint_flush_factor.is_finite() {
@@ -44,11 +44,11 @@ impl EngineConfig {
     }
 
     if self.checkpoint_flush_factor < 1.0 {
-      return invalid!("checkpoint_flush_factor must be equal or greater then 1.0");
+      return invalid!("checkpoint_flush_factor must be equal or greater than 1.0");
     }
 
     if self.block_cache_shard_count == 0 {
-      return invalid!("block_cache_shard_count must be greater then 0.");
+      return invalid!("block_cache_shard_count must be greater than 0.");
     }
 
     if self.block_cache_memory_capacity == 0 {
@@ -68,11 +68,11 @@ impl EngineConfig {
     }
 
     if self.compaction_threshold > 1.0 {
-      return invalid!("compaction_threshold must be equal or less then 1.0");
+      return invalid!("compaction_threshold must be equal or less than 1.0");
     }
 
     if self.compaction_threshold <= 0.0 {
-      return invalid!("compaction_threshold must be greater then 0.0");
+      return invalid!("compaction_threshold must be greater than 0.0");
     }
 
     if self.compaction_min_size == 0 {
