@@ -33,38 +33,87 @@ pub struct BlockFlusher<'a> {
   pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
   handle: &'a TableHandleRef,
   pointer: Pointer,
-  guard: MutexGuard<'a, u64>,
 }
 impl<'a> BlockFlusher<'a> {
-  pub fn submit(self) -> BlockFlushResult {
+  const fn new(
+    pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
+    handle: &'a TableHandleRef,
+    pointer: Pointer,
+  ) -> Self {
+    Self {
+      pages,
+      handle,
+      pointer,
+    }
+  }
+  pub fn submit(self) -> PendingFlush {
     let page = self.pages.load();
-    let epoch = *self.guard;
 
     // SAFETY: `write_async` needs a `'static` page because the IO worker may run
-    // after this function returns. `BlockFlushResult` keeps an `SBox` clone of the
+    // after this function returns. `PendingFlush` keeps an `SBox` clone of the
     // loaded page, and `finalize(self)` waits for the async write before that clone
     // is dropped. Therefore the submitted page remains alive until the worker is
     // done with the slice.
     let static_ref = unsafe { transmute::<&'_ Page, &'static Page>(&**page) };
     let handle = self.handle.disk().write_async(self.pointer, static_ref);
-    BlockFlushResult {
-      epoch,
-      handle,
+    PendingFlush {
+      handle: Some(handle),
       _page: page,
     }
   }
 }
-pub struct BlockFlushResult {
-  epoch: u64,
-  handle: AsyncIO,
+pub struct ExclusiveBlockFlusher<'a> {
+  flusher: BlockFlusher<'a>,
+  guard: MutexGuard<'a, u64>,
+}
+impl<'a> ExclusiveBlockFlusher<'a> {
+  const fn new(
+    pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
+    handle: &'a TableHandleRef,
+    pointer: Pointer,
+    guard: MutexGuard<'a, u64>,
+  ) -> Self {
+    Self {
+      flusher: BlockFlusher::new(pages, handle, pointer),
+      guard,
+    }
+  }
+  pub fn submit(self) -> ExclusivePendingFlush {
+    let pending = self.flusher.submit();
+    ExclusivePendingFlush {
+      epoch: *self.guard,
+      pending,
+    }
+  }
+}
+
+pub struct PendingFlush {
+  handle: Option<AsyncIO>,
   _page: SBox<PageRef<PAGE_SIZE>>,
 }
-impl BlockFlushResult {
+impl PendingFlush {
+  pub fn finalize(mut self) -> Result {
+    self.handle.take().unwrap().wait()
+  }
+}
+impl Drop for PendingFlush {
+  fn drop(&mut self) {
+    let Some(handle) = self.handle.take() else {
+      return;
+    };
+    let _ = handle.wait();
+  }
+}
+pub struct ExclusivePendingFlush {
+  epoch: u64,
+  pending: PendingFlush,
+}
+impl ExclusivePendingFlush {
   pub const fn epoch(&self) -> u64 {
     self.epoch
   }
   pub fn finalize(self) -> (u64, Result) {
-    (self.epoch, self.handle.wait())
+    (self.epoch, self.pending.finalize())
   }
 }
 
@@ -118,26 +167,15 @@ impl CachedBlock {
 
   /**
    * Write the current page without taking the block latch.
-   *
-   * Normal shared-access flushing must use `BlockFlusher` so the page snapshot and
-   * epoch are recorded consistently. `flush_hard` is for callers that already
-   * provide stronger external exclusion and therefore know the block cannot be
-   * concurrently replaced while the write is issued.
    */
-  pub fn flush_hard(&self) -> Result {
-    let page = self.load_page();
-    self.handle.disk().write(self.pointer, &**page)
+  pub const fn flusher(&self) -> BlockFlusher<'_> {
+    BlockFlusher::new(&self.page, &self.handle, self.pointer)
   }
 
   /**
-   * Create BlockFlusher which contains block latch.
+   * Write the current page with taking the block latch.
    */
-  pub fn flusher(&self) -> BlockFlusher<'_> {
-    BlockFlusher {
-      pages: &self.page,
-      handle: &self.handle,
-      pointer: self.pointer,
-      guard: self.latch.l(),
-    }
+  pub fn exclusive_flusher(&self) -> ExclusiveBlockFlusher<'_> {
+    ExclusiveBlockFlusher::new(&self.page, &self.handle, self.pointer, self.latch.l())
   }
 }
