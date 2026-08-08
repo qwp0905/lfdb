@@ -30,7 +30,14 @@ fn thread_count() -> usize {
 }
 const DEFAULT_MEASURE_TIME: Duration = Duration::from_secs(240);
 
-const CACHE_SIZE: usize = 1024 << 20;
+fn cache_size() -> usize {
+  std::env::var("YCSB_CACHE_SIZE")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(DEFAULT_CACHE_SIZE)
+    << 20
+}
+const DEFAULT_CACHE_SIZE: usize = 1024;
 
 /// Workload A: 50% read, 50% update (write-heavy, session store)
 fn bench_ycsb_a(c: &mut Criterion) {
@@ -45,7 +52,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, thread_count, group, || {
-      engines::lfdb::new(CACHE_SIZE, dir.path())
+      engines::lfdb::new(cache_size(), dir.path())
     });
   }
 
@@ -55,7 +62,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, thread_count, group, || {
-      engines::redb::new(CACHE_SIZE, dir.path())
+      engines::redb::new(cache_size(), dir.path())
     });
   }
 
@@ -65,7 +72,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, thread_count, group, || {
-      engines::rocksdb::new(CACHE_SIZE, dir.path())
+      engines::rocksdb::new(cache_size(), dir.path())
     });
   }
 
@@ -75,7 +82,7 @@ fn bench_ycsb_a(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_a(record_count, op_count, thread_count, group, || {
-      engines::sled::new(CACHE_SIZE, dir.path())
+      engines::sled::new(cache_size(), dir.path())
     });
   }
 }
@@ -93,7 +100,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, thread_count, group, || {
-      engines::lfdb::new(CACHE_SIZE, dir.path())
+      engines::lfdb::new(cache_size(), dir.path())
     });
   }
 
@@ -103,7 +110,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, thread_count, group, || {
-      engines::redb::new(CACHE_SIZE, dir.path())
+      engines::redb::new(cache_size(), dir.path())
     });
   }
 
@@ -113,7 +120,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, thread_count, group, || {
-      engines::rocksdb::new(CACHE_SIZE, dir.path())
+      engines::rocksdb::new(cache_size(), dir.path())
     });
   }
 
@@ -123,7 +130,7 @@ fn bench_ycsb_b(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_b(record_count, op_count, thread_count, group, || {
-      engines::sled::new(CACHE_SIZE, dir.path())
+      engines::sled::new(cache_size(), dir.path())
     });
   }
 }
@@ -141,7 +148,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, thread_count, group, || {
-      engines::lfdb::new(CACHE_SIZE, dir.path())
+      engines::lfdb::new(cache_size(), dir.path())
     });
   }
 
@@ -151,7 +158,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, thread_count, group, || {
-      engines::redb::new(CACHE_SIZE, dir.path())
+      engines::redb::new(cache_size(), dir.path())
     });
   }
 
@@ -161,7 +168,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, thread_count, group, || {
-      engines::rocksdb::new(CACHE_SIZE, dir.path())
+      engines::rocksdb::new(cache_size(), dir.path())
     });
   }
 
@@ -171,7 +178,7 @@ fn bench_ycsb_d(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_d(record_count, op_count, thread_count, group, || {
-      engines::sled::new(CACHE_SIZE, dir.path())
+      engines::sled::new(cache_size(), dir.path())
     });
   }
 }
@@ -189,7 +196,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, thread_count, group, || {
-      engines::lfdb::new(CACHE_SIZE, dir.path())
+      engines::lfdb::new(cache_size(), dir.path())
     });
   }
 
@@ -199,7 +206,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, thread_count, group, || {
-      engines::redb::new(CACHE_SIZE, dir.path())
+      engines::redb::new(cache_size(), dir.path())
     });
   }
 
@@ -209,7 +216,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, thread_count, group, || {
-      engines::rocksdb::new(CACHE_SIZE, dir.path())
+      engines::rocksdb::new(cache_size(), dir.path())
     });
   }
 
@@ -219,7 +226,7 @@ fn bench_ycsb_e(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_e(record_count, op_count, thread_count, group, || {
-      engines::sled::new(CACHE_SIZE, dir.path())
+      engines::sled::new(cache_size(), dir.path())
     });
   }
 }
@@ -237,7 +244,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("lfdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, thread_count, group, || {
-      engines::lfdb::new(CACHE_SIZE, dir.path())
+      engines::lfdb::new(cache_size(), dir.path())
     });
   }
 
@@ -247,7 +254,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("redb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, thread_count, group, || {
-      engines::redb::new(CACHE_SIZE, dir.path())
+      engines::redb::new(cache_size(), dir.path())
     });
   }
 
@@ -257,7 +264,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("rocksdb/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, thread_count, group, || {
-      engines::rocksdb::new(CACHE_SIZE, dir.path())
+      engines::rocksdb::new(cache_size(), dir.path())
     });
   }
 
@@ -267,7 +274,7 @@ fn bench_ycsb_f(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("sled/{group_name}"));
     group.measurement_time(DEFAULT_MEASURE_TIME);
     scenarios::ycsb::workload_f(record_count, op_count, thread_count, group, || {
-      engines::sled::new(CACHE_SIZE, dir.path())
+      engines::sled::new(cache_size(), dir.path())
     });
   }
 }
