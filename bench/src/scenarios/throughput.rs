@@ -26,10 +26,17 @@ fn make_value(i: usize) -> Vec<u8> {
   v
 }
 
+const CHUNK: usize = 1000;
 fn pre_load<E: BenchmarkDB>(engine: &E, count: usize) {
   engine.ensure_table(TABLE);
-  let kvs = (0..count).map(|i| (make_key(i), make_value(i)));
-  engine.bulk(TABLE, kvs.collect());
+  let mut iter = (0..count).map(|i| (make_key(i), make_value(i)));
+  loop {
+    let chunk = (&mut iter).take(CHUNK).collect::<Vec<_>>();
+    if chunk.is_empty() {
+      break;
+    }
+    engine.bulk(TABLE, &chunk);
+  }
 }
 
 pub fn sequential_get<E, F>(mut group: BenchmarkGroup<WallTime>, new: F)

@@ -20,11 +20,11 @@ impl BenchmarkDB for Db {
     self.drop_tree(table).unwrap();
   }
 
-  fn bulk(&self, table: &str, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+  fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]) {
     let t = self.open_tree(table).unwrap();
     let mut b = Batch::default();
     for (k, v) in kvs {
-      b.insert(k, v);
+      b.insert(k.to_vec(), v.to_vec());
     }
     t.apply_batch(b).unwrap();
     t.flush().unwrap();

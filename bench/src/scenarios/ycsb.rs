@@ -30,10 +30,17 @@ fn make_value(i: usize) -> Vec<u8> {
   v
 }
 
-fn pre_load<E: BenchmarkDB>(engine: E, count: usize) {
+const CHUNK: usize = 1000;
+fn pre_load<E: BenchmarkDB>(engine: &E, count: usize) {
   engine.ensure_table(TABLE);
-  let kvs = (0..count).map(|i| (make_key(i), make_value(i)));
-  engine.bulk(TABLE, kvs.collect());
+  let mut iter = (0..count).map(|i| (make_key(i), make_value(i)));
+  loop {
+    let chunk = (&mut iter).take(CHUNK).collect::<Vec<_>>();
+    if chunk.is_empty() {
+      break;
+    }
+    engine.bulk(TABLE, &chunk);
+  }
 }
 
 fn zipfian_index(rng: &mut impl Rng, zipf: &Zipf<f64>, record_count: usize) -> usize {
@@ -99,7 +106,7 @@ pub fn workload_a<F, E>(
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
-    pre_load(engine, record_count);
+    pre_load(&engine, record_count);
   }
 
   let engine = Arc::new(new());
@@ -109,9 +116,7 @@ pub fn workload_a<F, E>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
-  let mut records = (0..record_count)
-    .map(|i| (make_key(i), make_value(i)))
-    .collect::<Vec<_>>();
+  let mut records = (0..record_count).collect::<Vec<_>>();
   records.shuffle(rng);
 
   group
@@ -122,11 +127,11 @@ pub fn workload_a<F, E>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = records[idx].0.clone();
+          let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
-            Op::Insert(key, records[idx].1.clone())
+            Op::Insert(key, make_value(idx))
           };
           tx.send(op).unwrap();
         }
@@ -154,7 +159,7 @@ pub fn workload_b<E, F>(
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
-    pre_load(engine, record_count);
+    pre_load(&engine, record_count);
   }
 
   let engine = Arc::new(new());
@@ -164,9 +169,7 @@ pub fn workload_b<E, F>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
-  let mut records = (0..record_count)
-    .map(|i| (make_key(i), make_value(i)))
-    .collect::<Vec<_>>();
+  let mut records = (0..record_count).collect::<Vec<_>>();
   records.shuffle(rng);
 
   group
@@ -177,11 +180,11 @@ pub fn workload_b<E, F>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = records[idx].0.clone();
+          let key = make_key(idx);
           let op = if rng.random_bool(0.95) {
             Op::Get(key)
           } else {
-            Op::Insert(key, records[idx].1.clone())
+            Op::Insert(key, make_value(idx))
           };
           tx.send(op).unwrap();
         }
@@ -209,7 +212,7 @@ pub fn workload_d<E, F>(
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
-    pre_load(engine, record_count);
+    pre_load(&engine, record_count);
   }
 
   let engine = Arc::new(new());
@@ -276,12 +279,15 @@ pub fn workload_e<E, F>(
     let engine = new();
     engine.ensure_table(TABLE);
     for &id in ids.iter() {
-      engine.bulk(
-        TABLE,
-        (0..(record_count / ids.len()))
-          .map(|i| (make_key(id, i), make_value(i)))
-          .collect(),
-      );
+      let mut iter =
+        (0..(record_count / ids.len())).map(|i| (make_key(id, i), make_value(i)));
+      loop {
+        let chunk = (&mut iter).take(CHUNK).collect::<Vec<_>>();
+        if chunk.is_empty() {
+          break;
+        }
+        engine.bulk(TABLE, &chunk);
+      }
     }
   }
 
@@ -338,7 +344,7 @@ pub fn workload_f<E, F>(
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
     let engine = new();
-    pre_load(engine, record_count);
+    pre_load(&engine, record_count);
   }
 
   let engine = Arc::new(new());
@@ -348,9 +354,7 @@ pub fn workload_f<E, F>(
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
 
-  let mut records = (0..record_count)
-    .map(|i| (make_key(i), make_value(i)))
-    .collect::<Vec<_>>();
+  let mut records = (0..record_count).collect::<Vec<_>>();
   records.shuffle(rng);
 
   group
@@ -361,11 +365,11 @@ pub fn workload_f<E, F>(
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
           let idx = zipfian_index(rng, &zipf, record_count);
-          let key = records[idx].0.clone();
+          let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
           } else {
-            Op::ReadModifyWrite(key, records[idx].1.clone())
+            Op::ReadModifyWrite(key, make_value(idx))
           };
           tx.send(op).unwrap();
         }
