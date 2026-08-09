@@ -152,7 +152,7 @@ impl BlockCache {
     let table_id = handle.get_id();
     let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
 
-    let pending = self.flush_async(&guard);
+    let pending = self.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
     self.resolve_pending(pending, guard, new_block)
   }
@@ -175,14 +175,14 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.flush_async(&guard);
+    let pending = self.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
     self.resolve_pending(pending, guard, new_block)
   }
 
-  fn flush_async(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
+  fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
     if !guard.is_evicted() {
       return None;
     }
@@ -225,7 +225,7 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.flush_async(&guard);
+    let pending = self.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
@@ -397,8 +397,8 @@ const fn handle_execute(
         return Ok(());
       }
 
-      let result = flusher.submit();
-      let (epoch, Err(err)) = result.finalize() else {
+      let pending = flusher.submit();
+      let (epoch, Err(err)) = pending.finalize() else {
         dirty_tables.mark(block.handle());
         return Ok(());
       };
