@@ -25,7 +25,7 @@ impl TableName {
       return Err(Error::NotAllowedChar(c));
     }
 
-    Ok(Self(name.to_string()))
+    Ok(Self::from_str_unchecked(name))
   }
 
   /**

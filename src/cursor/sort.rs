@@ -57,13 +57,13 @@ pub struct MergeSorted<T, R = T> {
 }
 
 impl<T, R> MergeSorted<T, R> {
-  pub fn single(sorted: T, direction: SortDirection) -> Self {
+  pub const fn single(set: T, direction: SortDirection) -> Self {
     Self {
-      set: SortedSet::Single(sorted),
+      set: SortedSet::Single(set),
       direction,
     }
   }
-  pub fn merge(primary: T, secondary: R, direction: SortDirection) -> Self {
+  pub const fn merge(primary: T, secondary: R, direction: SortDirection) -> Self {
     Self {
       set: SortedSet::Merged {
         primary,
