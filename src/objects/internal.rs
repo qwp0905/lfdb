@@ -230,7 +230,7 @@ impl<'a> InternalNodeView<'a> {
     Ok(Self::new(page, len, offset, right))
   }
 
-  pub const fn new(
+  const fn new(
     page: &'a Page,
     len: usize,
     offset: usize,

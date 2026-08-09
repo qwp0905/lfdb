@@ -17,7 +17,7 @@ pub struct FreeList {
   released: SegQueue<Pointer>,
 }
 impl FreeList {
-  pub fn new() -> Self {
+  pub const fn new() -> Self {
     Self {
       file_end: AtomicU64::new(1),
       released: SegQueue::new(),
