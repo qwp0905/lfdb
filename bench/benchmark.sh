@@ -29,7 +29,7 @@ for count in {10000000,20000000,50000000,100000000}; do
 done
 
 echo "####### Scaling Workload #######"
-for count in {500000,1000000,2000000,50000000}; do
+for count in {500000,1000000,2000000,5000000}; do
   echo "####### Scaling Cache [$count] #######"
     OP_COUNT=$count benchmark
 done
