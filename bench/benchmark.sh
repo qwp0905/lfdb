@@ -22,7 +22,7 @@ benchmark
 echo "####### Scaling Concurrency #######"
 for count in {32,64,256,512}; do
   echo "####### Scaling Concurrency [$count] #######"
-    THREAD_COUNT=$count benchmark
+  THREAD_COUNT=$count benchmark
 done
 
 echo "####### Scaling Dataset #######"
@@ -34,5 +34,5 @@ done
 echo "####### Scaling Workload #######"
 for count in {500000,1000000,2000000,5000000}; do
   echo "####### Scaling Workload [$count] #######"
-    OP_COUNT=$count benchmark
+  OP_COUNT=$count benchmark
 done
