@@ -158,7 +158,8 @@ pub fn recovery(
     .into_iter()
     .for_each(|v| open_handles.push(v));
 
-  let threads = (0..5)
+  let count = open_handles.len().min(5);
+  let threads = (0..count)
     .map(|_| {
       let block_cache = block_cache.clone();
       let open_handles = open_handles.clone();

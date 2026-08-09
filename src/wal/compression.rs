@@ -8,7 +8,7 @@ pub enum RecordEncoding {
   Zstd = 3u8,
 }
 impl RecordEncoding {
-  pub fn from_byte(byte: u8) -> Option<Self> {
+  pub const fn from_byte(byte: u8) -> Option<Self> {
     match byte {
       1 => Some(Self::Raw),
       2 => Some(Self::Lz4),

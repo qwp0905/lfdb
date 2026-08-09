@@ -65,12 +65,11 @@ impl TableMapper {
   }
 
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
-    let disk = BlockIOHandle::new(
-      self
-        .io_pool
-        .open_direct_io(table_meta.get_filename().to_path_buf())?,
-    );
-    Ok(SBox::new(TableHandle::new(table_meta, disk)))
+    let io = self
+      .io_pool
+      .open_direct_io(table_meta.get_filename().to_path_buf())?;
+    let handle = BlockIOHandle::new(io);
+    Ok(SBox::new(TableHandle::new(table_meta, handle)))
   }
 
   /**

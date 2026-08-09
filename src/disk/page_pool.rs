@@ -48,9 +48,8 @@ impl<const N: usize> DerefMut for PageRef<N> {
 }
 impl<const N: usize> Drop for PageRef<N> {
   fn drop(&mut self) {
-    let _ = self
-      .store
-      .push(unsafe { ManuallyDrop::take(&mut self.page) });
+    let page = unsafe { ManuallyDrop::take(&mut self.page) };
+    let _ = self.store.push(page);
   }
 }
 
@@ -83,7 +82,7 @@ impl<const N: usize> PagePool<N> {
     PageRef::new(self.store.clone())
   }
 
-  #[allow(unused)]
+  #[cfg(test)]
   pub fn len(&self) -> usize {
     self.store.len()
   }
