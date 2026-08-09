@@ -9,7 +9,10 @@ benchmark() {
   YCSB_RECORD_COUNT=${RECORD_COUNT:-$DEFAULT_RECORD} \
     YCSB_OP_COUNT=${OP_COUNT:-$DEFAULT_OP} \
     YCSB_THREAD_COUNT=${THREAD_COUNT:-$DEFAULT_THREAD} \
-    cargo benchmark --bench ycsb --all-features -- \
+    cargo benchmark --bench ycsb \
+    --features redb \
+    --features sled \
+    --features rocksdb -- \
     --sample-size=$SAMPLE_SIZE
 }
 
