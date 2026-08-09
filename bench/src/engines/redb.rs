@@ -70,14 +70,14 @@ impl BenchmarkDB for Database {
     }
     tx.commit().unwrap();
   }
-  fn bulk(&self, table: &str, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+  fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]) {
     let tx = self.begin_write().unwrap();
     {
       let mut table = tx
         .open_table(TableDefinition::<&[u8], Vec<u8>>::new(table))
         .unwrap();
       for (k, v) in kvs {
-        table.insert(k.as_slice(), v).unwrap();
+        table.insert(k.as_slice(), v.to_vec()).unwrap();
       }
     }
     tx.commit().unwrap();

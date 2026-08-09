@@ -31,7 +31,9 @@ harness = false
 
 [features]
 default = ["lfdb"]
+all = ["lfdb", "redb", "rocksdb", "sled"]
 lfdb = ["dep:lfdb"]
 redb = ["dep:redb"]
 rocksdb = ["dep:rocksdb"]
 sled = ["dep:sled"]
+metrics = []

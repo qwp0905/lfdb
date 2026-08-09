@@ -80,6 +80,6 @@ TODO
 
 TODO
 
-### Cache Scaling
+### Workload Volume Scaling
 
 TODO
