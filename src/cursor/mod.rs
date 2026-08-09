@@ -4,8 +4,8 @@ pub use cursor::*;
 mod gc;
 pub use gc::*;
 
-mod types;
-pub use types::*;
+mod vec_ref;
+pub use vec_ref::*;
 
 mod compact;
 pub use compact::*;
