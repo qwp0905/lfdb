@@ -233,10 +233,9 @@ impl WriteAheadLog {
 
     let mut new_page = self.page_pool.acquire();
     new_page.copy_from(overflow, 0);
-    let new_buffer = buffer.init_next(new_page, overflow.len());
     let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
       buffer_ptr,
-      Owned::new(new_buffer),
+      Owned::new(buffer.init_next(new_page, overflow.len())),
       Ordering::Release,
       Ordering::Acquire,
       guard,
@@ -374,6 +373,7 @@ impl WriteAheadLog {
       }
 
       self.rotate_segment(buffer_ptr, &guard, buffer, commit_order, token, &backoff)?;
+      backoff.reset();
     }
   }
 
