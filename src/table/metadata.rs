@@ -67,16 +67,18 @@ impl TableMetadata {
     Some(TableMetadata::new(*id, self.name.clone(), filename.clone()))
   }
 
+  fn compaction_len(&self) -> usize {
+    let Some((_, file)) = &self.compaction else {
+      return 1;
+    };
+    1 + file.as_os_str().len() + 2 + TABLE_ID_BYTES
+  }
+
   pub fn to_vec(&self) -> Vec<u8> {
     let filename = self.filename.as_os_str().as_encoded_bytes();
     let filename_len = filename.len();
     let name_len = self.name.len();
-    let compaction_len = 1
-      + self
-        .compaction
-        .as_ref()
-        .map(|(_, p)| p.as_os_str().len() + 2 + TABLE_ID_BYTES)
-        .unwrap_or(0);
+    let compaction_len = self.compaction_len();
     let mut vec =
       vec![0; filename_len + 2 + name_len + 2 + TABLE_ID_BYTES + compaction_len];
 

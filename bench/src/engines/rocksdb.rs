@@ -58,13 +58,13 @@ impl BenchmarkDB for Engine {
     self.db.drop_cf(table).unwrap();
   }
 
-  fn bulk(&self, table: &str, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+  fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]) {
     let cf = self.db.cf_handle(table).unwrap();
     let tx = self
       .db
       .transaction_opt(&self.write_options, &self.tx_options);
     for (k, v) in kvs {
-      tx.put_cf(&cf, k, v).unwrap();
+      tx.put_cf(&cf, k.to_vec(), v.to_vec()).unwrap();
     }
     tx.commit().unwrap();
   }

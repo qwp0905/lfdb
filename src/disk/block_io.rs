@@ -16,7 +16,14 @@ pub struct BlockIOHandle<const N: usize> {
   handle: IOHandle,
 }
 impl<const N: usize> BlockIOHandle<N> {
-  const SIZE: Pointer = N as Pointer;
+  const SHIFT: u32 = {
+    assert!(N.is_power_of_two());
+    N.ilog2()
+  };
+  #[inline(always)]
+  const fn cvt(pointer: Pointer) -> u64 {
+    pointer << Self::SHIFT
+  }
 
   pub const fn new(handle: IOHandle) -> Self {
     Self { handle }
@@ -25,14 +32,14 @@ impl<const N: usize> BlockIOHandle<N> {
   pub fn read(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
-      .read(page.as_mut_slice(), pointer * Self::SIZE)
+      .read(page.as_mut_slice(), Self::cvt(pointer))
       .map_err(Error::IO)
   }
 
   pub fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
     self
       .handle
-      .read_unchecked(page.as_mut_slice(), pointer * Self::SIZE)
+      .read_unchecked(page.as_mut_slice(), Self::cvt(pointer))
       .map_err(Error::IO)
   }
 
@@ -54,11 +61,8 @@ impl<const N: usize> BlockIOHandle<N> {
    * returning.
    */
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
-    AsyncIO::new(
-      self
-        .handle
-        .alloc_and_write(page.as_slice(), pointer * Self::SIZE),
-    )
+    let slice = page.as_slice();
+    AsyncIO::new(self.handle.alloc_and_write(slice, Self::cvt(pointer)))
   }
 
   #[inline]
@@ -68,7 +72,7 @@ impl<const N: usize> BlockIOHandle<N> {
 
   #[inline]
   pub fn len(&self) -> Result<Pointer> {
-    Ok(self.handle.len().map_err(Error::IO)? / Self::SIZE)
+    Ok(self.handle.len().map_err(Error::IO)? >> Self::SHIFT)
   }
 
   pub fn truncate(&self) -> Result {

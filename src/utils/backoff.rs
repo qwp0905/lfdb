@@ -8,7 +8,7 @@ impl Backoff {
   }
   pub fn snooze(&self) {
     let ptr = self.0.get();
-    unsafe { ptr.write((*ptr + 1).min(MAX_YIELD)) };
+    unsafe { ptr.write((ptr.read() + 1).min(MAX_YIELD)) };
     yield_now();
   }
   pub const fn is_complete(&self) -> bool {

@@ -305,10 +305,12 @@ fn exec_write(
 ) -> std::io::Result<()> {
   // Treat the flush batch like a tiny write buffer. When multiple writes target
   // the same byte range, only the last published value needs to reach the file.
-  buffered.sort_by_key(|(i, _)| *i);
-  buffered.reverse();
-  buffered.dedup_by_key(|(i, b)| (*i, b.len()));
-  buffered.reverse();
+  if buffered.len() > 1 {
+    buffered.sort_by_key(|(i, _)| *i);
+    buffered.reverse();
+    buffered.dedup_by_key(|(i, b)| (*i, b.len()));
+    buffered.reverse();
+  }
 
   if let Some(alloc) = alloc {
     // Space allocation is owned by this batching layer. Since all writes for this

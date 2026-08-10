@@ -7,7 +7,7 @@ use std::{
 
 use super::{
   Acquired, BatchHandle, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
-  MappingTable,
+  MappingTable, PendingFlush,
 };
 use crate::{
   background::{BackgroundThread, ThreadBuilder},
@@ -138,31 +138,6 @@ impl BlockCache {
     )
   }
 
-  fn handle_eviction<'a>(
-    &'a self,
-    guard: EvictionGuard<'a>,
-    new: CachedBlock,
-  ) -> Result<CachedSlot<'a>> {
-    let block_id = guard.get_block_id();
-    if !guard.is_evicted() {
-      self.cached_blocks[block_id].write(new);
-      return Ok(self.cache_slot(block_id, guard.commit()));
-    }
-
-    let old = self.cached_blocks[block_id].replace(new);
-    if self.dirty_blocks.contains(block_id) {
-      // hard flush allowed since exclusive token acquired.
-      if let Err(err) = old.flush_hard() {
-        self.cached_blocks[block_id].replace(old);
-        return Err(err);
-      }
-      self.dirty_blocks.remove(block_id);
-      self.dirty_tables.mark(old.handle());
-    }
-
-    Ok(self.cache_slot(block_id, guard.commit()))
-  }
-
   /**
    * Allocate a cache slot for a newly allocated disk block.
    *
@@ -177,8 +152,9 @@ impl BlockCache {
     let table_id = handle.get_id();
     let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
 
+    let pending = self.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
-    self.handle_eviction(guard, new_block)
+    self.resolve_pending(pending, guard, new_block)
   }
 
   /**
@@ -199,10 +175,44 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
+    let pending = self.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.handle_eviction(guard, new_block)
+    self.resolve_pending(pending, guard, new_block)
+  }
+
+  fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
+    if !guard.is_evicted() {
+      return None;
+    }
+    let block_id = guard.get_block_id();
+    if !self.dirty_blocks.contains(block_id) {
+      return None;
+    }
+
+    Some(self.cached_blocks[block_id].get().flusher().submit())
+  }
+  fn resolve_pending<'a>(
+    &'a self,
+    pending: Option<PendingFlush>,
+    guard: EvictionGuard<'a>,
+    new: CachedBlock,
+  ) -> Result<CachedSlot<'a>> {
+    let block_id = guard.get_block_id();
+    let block = &self.cached_blocks[block_id];
+    if let Some(pending) = pending {
+      pending.finalize()?;
+      self.dirty_blocks.remove(block_id);
+      self.dirty_tables.mark(block.get().handle());
+    }
+
+    if guard.is_evicted() {
+      block.replace(new);
+    } else {
+      block.write(new);
+    }
+    Ok(self.cache_slot(block_id, guard.commit()))
   }
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
@@ -215,10 +225,11 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
+    let pending = self.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.handle_eviction(guard, new_block)
+    self.resolve_pending(pending, guard, new_block)
   }
 
   #[inline]
@@ -381,13 +392,13 @@ const fn handle_execute(
       };
 
       let block = blocks[id].get();
-      let flusher = block.flusher();
+      let flusher = block.exclusive_flusher();
       if !dirty_blocks.remove(id) {
         return Ok(());
       }
 
-      let result = flusher.submit();
-      let (epoch, Err(err)) = result.finalize() else {
+      let pending = flusher.submit();
+      let (epoch, Err(err)) = pending.finalize() else {
         dirty_tables.mark(block.handle());
         return Ok(());
       };

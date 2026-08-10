@@ -109,6 +109,16 @@ impl Engine {
       info!("engine initial state.");
       initialize(&block_cache, &tables, &recorder, &version_visibility, &blob)?;
 
+      let checkpoint = Checkpoint::new(
+        wal.clone(),
+        block_cache.clone(),
+        version_visibility.clone(),
+        io_pool.clone(),
+        event_bus.clone(),
+        metrics_registry.clone(),
+        config.checkpoint_flush_factor,
+      );
+
       let gc = GarbageCollector::new(
         block_cache.clone(),
         version_visibility.clone(),
@@ -128,16 +138,6 @@ impl Engine {
         event_bus.clone(),
         blob.clone(),
         compaction_config,
-      );
-
-      let checkpoint = Checkpoint::new(
-        wal.clone(),
-        block_cache.clone(),
-        version_visibility.clone(),
-        io_pool.clone(),
-        event_bus.clone(),
-        metrics_registry.clone(),
-        config.checkpoint_flush_factor,
       );
 
       let orchestrator = TxOrchestrator::new(

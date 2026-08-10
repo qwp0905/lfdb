@@ -12,8 +12,6 @@ pub const FILE_EXT: &str = "log";
 
 pub type FsyncResult = Oneshot<IOResult<()>>;
 
-const SIZE: Pointer = WAL_BLOCK_SIZE as Pointer;
-
 /**
  * Fixed-size WAL segment made of WAL blocks.
  *
@@ -25,6 +23,7 @@ pub struct WALSegment {
   handle: IOHandle,
 }
 impl WALSegment {
+  const SHIFT: u32 = WAL_BLOCK_SIZE.ilog2();
   pub fn open(max_len: Pointer, pool: &IOPool) -> Result<Self> {
     let filename = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
     let handle = pool.open_direct_io(filename)?;
@@ -32,7 +31,7 @@ impl WALSegment {
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
     // at creation avoids metadata updates on every subsequent write.
-    let file_len = max_len * SIZE;
+    let file_len = max_len << Self::SHIFT;
     handle.fallocate(0, file_len).map_err(Error::IO)?;
     handle.fsync().map_err(Error::IO)?;
 
@@ -44,7 +43,9 @@ impl WALSegment {
     page: &'static Page<WAL_BLOCK_SIZE>,
   ) -> Oneshot<IOResult<()>> {
     // segment must call write only rather than alloc_and_write since it calls fallocate in constructor.
-    self.handle.write_only(page.as_slice(), pointer * SIZE)
+    self
+      .handle
+      .write_only(page.as_slice(), pointer << Self::SHIFT)
   }
 
   /**

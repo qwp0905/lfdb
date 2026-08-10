@@ -40,12 +40,8 @@ impl<const T: usize> Page<T> {
   pub fn new() -> Self {
     Self(unsafe { alloc_zeroed(Self::LAYOUT) }, PhantomData)
   }
-  #[inline(always)]
-  pub const fn as_ptr(&self) -> *mut u8 {
-    self.0
-  }
   #[inline]
-  pub fn copy_from(&mut self, data: &[u8], offset: usize) {
+  pub const fn copy_from(&mut self, data: &[u8], offset: usize) {
     let len = data.len();
     self.range_mut(offset..(offset + len)).copy_from_slice(data);
   }

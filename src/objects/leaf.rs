@@ -340,17 +340,7 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn get_entries(&self) -> LeafNodeIter<'_> {
-    let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
-    LeafNodeIter {
-      scanner,
-      page: self.page,
-      start: &Bound::Unbounded,
-      end: &Bound::Unbounded,
-      pos: 0,
-      len: self.len,
-      closed: false,
-    }
+    self.range_entries(&Bound::Unbounded, &Bound::Unbounded)
   }
 
   pub fn range_entries(

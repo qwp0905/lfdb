@@ -64,15 +64,16 @@ impl BenchmarkDB for Engine {
     }
   }
 
-  fn bulk(&self, table: &str, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+  fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]) {
     let mut tx = self.new_tx_timeout(Duration::from_mins(10)).unwrap();
     let table = tx.table(table).unwrap();
     for (k, v) in kvs {
-      table.insert(k, v).unwrap();
+      table.insert(k.to_vec(), v.to_vec()).unwrap();
     }
     tx.commit().unwrap();
   }
 
+  #[cfg(feature = "metrics")]
   fn print_metrics(&self) {
     println!("{}", self.metrics());
   }
