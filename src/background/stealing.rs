@@ -265,5 +265,5 @@ impl<T, R> StealingWorkThread<T, R> {
 }
 
 #[cfg(test)]
-#[path = "tests/shared.rs"]
-mod tests;
+#[path = "tests/stealing.rs"]
+mod stealing;
