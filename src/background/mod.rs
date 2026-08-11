@@ -7,8 +7,8 @@ pub use builder::*;
 mod oneshot;
 pub use oneshot::*;
 
-mod shared;
-use shared::*;
+mod stealing;
+use stealing::*;
 
 mod thread;
 pub use thread::*;
