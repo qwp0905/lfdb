@@ -1,7 +1,6 @@
 use std::{
-  mem::take,
-  sync::{Arc, Mutex},
-  thread::{park, Builder, JoinHandle, Thread},
+  sync::Arc,
+  thread::{park, Builder, Thread},
 };
 
 use crossbeam::{
@@ -11,9 +10,9 @@ use crossbeam::{
   utils::Backoff,
 };
 
-use crate::utils::{SBox, ShortenedMutex};
+use crate::utils::SBox;
 
-use super::{Context, SharedFn, UnwindSpawner};
+use super::{Context, SharedFn, ThreadSlot, UnwindSpawner};
 
 /*
  * Standard work-stealing priority:
@@ -167,7 +166,7 @@ pub struct SharedWorkThread<T, R = ()> {
   global: Arc<Injector<Context<T, R>>>,
   idle: Arc<SegQueue<Idle>>,
   wakers: Vec<Thread>,
-  threads: Mutex<Vec<JoinHandle<()>>>,
+  threads: Vec<ThreadSlot>,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> SharedWorkThread<T, R> {
@@ -206,13 +205,13 @@ impl<T, R> SharedWorkThread<T, R> {
         ));
 
       wakers.push(thread.thread().clone());
-      threads.push(thread);
+      threads.push(ThreadSlot::new(thread));
     }
     Self {
       global,
       idle,
       wakers,
-      threads: Mutex::new(threads),
+      threads,
       work,
     }
   }
@@ -242,7 +241,11 @@ impl<T, R> SharedWorkThread<T, R> {
    * even if some workers encounter `Term` before processing all local work.
    */
   pub fn close(&self) {
-    let threads = take(&mut *self.threads.l());
+    let threads = self
+      .threads
+      .iter()
+      .flat_map(|th| th.close())
+      .collect::<Vec<_>>();
     if threads.is_empty() {
       return;
     }
