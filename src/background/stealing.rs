@@ -162,14 +162,14 @@ impl Idle {
  * park. Producers wake parked workers on demand, so the executor can handle
  * bursts of parallel work without keeping idle threads busy.
  */
-pub struct SharedWorkThread<T, R = ()> {
+pub struct StealingWorkThread<T, R = ()> {
   global: Arc<Injector<Context<T, R>>>,
   idle: Arc<SegQueue<Idle>>,
   wakers: Vec<Thread>,
   threads: Vec<ThreadSlot>,
   work: SharedFn<'static, T, R>,
 }
-impl<T, R> SharedWorkThread<T, R> {
+impl<T, R> StealingWorkThread<T, R> {
   pub fn new<S: ToString>(
     name: S,
     size: usize,

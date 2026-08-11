@@ -31,7 +31,7 @@ fn test_no_timeout() {
     .name("test-no-timeout")
     .stack_size(DEFAULT_STACK_SIZE)
     .multi(thread_count)
-    .shared(work);
+    .stealing(work);
 
   // Send multiple tasks
   let receivers: Vec<_> = (1..=(thread_count << 1))
@@ -69,7 +69,7 @@ fn test_multiple_threads() {
     .name("test-multi")
     .stack_size(DEFAULT_STACK_SIZE)
     .multi(thread_count)
-    .shared(work);
+    .stealing(work);
 
   let receivers: Vec<_> = (0..(thread_count << 1))
     .map(|i| thread.execute(i))
@@ -89,7 +89,7 @@ fn test_multiple_threads() {
 fn test_multiple_close() {
   let thread_count = 4;
   let work = |_: ()| {};
-  let thread = SharedWorkThread::new(
+  let thread = StealingWorkThread::new(
     "test-multi-close",
     DEFAULT_STACK_SIZE,
     thread_count,

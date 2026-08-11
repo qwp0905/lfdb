@@ -1,10 +1,10 @@
 use super::{
   oneshot, BufferingThread, Context, EventBindings, IntervalWorkThread, Oneshot,
-  OwnedSubscription, PreloadThread, SharedWorkThread,
+  OwnedSubscription, PreloadThread, StealingWorkThread,
 };
 
 pub enum ThreadTypes<T, R> {
-  Shared(SharedWorkThread<T, R>),
+  Stealing(StealingWorkThread<T, R>),
   Preload(PreloadThread<T, R>),
   Interval(IntervalWorkThread<T, R>),
   Buffering(BufferingThread<T, R>),
@@ -14,7 +14,7 @@ pub enum ThreadTypes<T, R> {
  *
  * A BackgroundThread is intentionally broader than a plain worker queue: it is
  * the public handle to a background execution runtime. Implementations may run
- * as a single worker, a shared worker pool, an eager worker, or an interval
+ * as a single worker, a stealing worker pool, an eager worker, or an interval
  * task, but they all expose the same way to submit work, dispatch fire-and-
  * forget messages, and shut the runtime down.
  */
@@ -34,7 +34,7 @@ impl<T, R> BackgroundThread<T, R> {
    */
   fn register(&self, ctx: Context<T, R>) {
     match &self.0 {
-      ThreadTypes::Shared(t) => t.register(ctx),
+      ThreadTypes::Stealing(t) => t.register(ctx),
       ThreadTypes::Preload(t) => t.register(ctx),
       ThreadTypes::Interval(t) => t.register(ctx),
       ThreadTypes::Buffering(t) => t.register(ctx),
@@ -53,7 +53,7 @@ impl<T, R> BackgroundThread<T, R> {
     let (done_r, done_t) = oneshot();
     let ctx = Context::Work(value, done_t);
     match &self.0 {
-      ThreadTypes::Shared(t) => t.register(ctx),
+      ThreadTypes::Stealing(t) => t.register(ctx),
       ThreadTypes::Preload(t) => t.register(ctx),
       ThreadTypes::Interval(t) => t.register(ctx),
       ThreadTypes::Buffering(t) => t.register(ctx),
@@ -83,7 +83,7 @@ impl<T, R> BackgroundThread<T, R> {
    */
   pub fn close(&self) {
     match &self.0 {
-      ThreadTypes::Shared(t) => t.close(),
+      ThreadTypes::Stealing(t) => t.close(),
       ThreadTypes::Preload(t) => t.close(),
       ThreadTypes::Interval(t) => t.close(),
       ThreadTypes::Buffering(t) => t.close(),

@@ -59,7 +59,7 @@ impl IOPool {
     let thread = ThreadBuilder::new()
       .name("io pool")
       .multi(thread_count)
-      .shared(create_io_thread(metrics.clone()));
+      .stealing(create_io_thread(metrics.clone()));
     let thread = SBox::new(thread);
 
     // The base directory lock prevents multiple engine processes from using the

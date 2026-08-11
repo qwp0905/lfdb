@@ -105,7 +105,7 @@ impl BlockCache {
     let flush_executor = ThreadBuilder::new()
       .name("flush executor")
       .multi(PRE_FLUSH_CONCURRENCY)
-      .shared(handle_execute(
+      .stealing(handle_execute(
         cached_blocks.clone(),
         pins.clone(),
         dirty_blocks.clone(),

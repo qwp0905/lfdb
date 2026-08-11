@@ -2,7 +2,7 @@ use std::{sync::Arc, thread::Builder, time::Duration};
 
 use super::{
   BackgroundThread, BufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
-  SharedFn, SharedWorkThread, SingleFn, ThreadTypes,
+  SharedFn, SingleFn, StealingWorkThread, ThreadTypes,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
@@ -63,13 +63,13 @@ pub struct MultiThreadBuilder {
   count: usize,
 }
 impl MultiThreadBuilder {
-  pub fn shared<T, R, F>(self, build: F) -> BackgroundThread<T, R>
+  pub fn stealing<T, R, F>(self, build: F) -> BackgroundThread<T, R>
   where
     T: Send + 'static,
     R: Send + 'static,
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    BackgroundThread::new(ThreadTypes::Shared(SharedWorkThread::new(
+    BackgroundThread::new(ThreadTypes::Stealing(StealingWorkThread::new(
       self.builder.name,
       self.builder.stack_size,
       self.count,

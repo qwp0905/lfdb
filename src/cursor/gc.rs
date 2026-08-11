@@ -64,7 +64,7 @@ impl GarbageCollector {
     let entry = ThreadBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
-      .shared(run_entry(
+      .stealing(run_entry(
         block_cache.clone(),
         version_visibility.clone(),
         recorder.clone(),
