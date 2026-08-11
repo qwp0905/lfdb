@@ -154,7 +154,7 @@ impl BlockCache {
 
     let pending = self.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   /**
@@ -179,7 +179,7 @@ impl BlockCache {
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
@@ -193,7 +193,7 @@ impl BlockCache {
 
     Some(self.cached_blocks[block_id].get().flusher().submit())
   }
-  fn resolve_pending<'a>(
+  fn resolve_eviction<'a>(
     &'a self,
     pending: Option<PendingFlush>,
     guard: EvictionGuard<'a>,
@@ -201,17 +201,19 @@ impl BlockCache {
   ) -> Result<CachedSlot<'a>> {
     let block_id = guard.get_block_id();
     let block = &self.cached_blocks[block_id];
+
+    if !guard.is_evicted() {
+      block.write(new);
+      return Ok(self.cache_slot(block_id, guard.commit()));
+    }
+
     if let Some(pending) = pending {
       pending.finalize()?;
       self.dirty_blocks.remove(block_id);
       self.dirty_tables.mark(block.get().handle());
     }
 
-    if guard.is_evicted() {
-      block.replace(new);
-    } else {
-      block.write(new);
-    }
+    block.replace(new);
     Ok(self.cache_slot(block_id, guard.commit()))
   }
 
@@ -229,7 +231,7 @@ impl BlockCache {
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   #[inline]
@@ -296,7 +298,7 @@ impl Drop for BlockCache {
  * disk range.
  */
 const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
-const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
+const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
 
 /**
  * Incremental dirty-page flusher.
