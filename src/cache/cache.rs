@@ -1,13 +1,12 @@
 use std::{
-  cell::UnsafeCell,
   collections::{HashMap, VecDeque},
-  mem::{replace, MaybeUninit},
+  mem::replace,
   sync::Arc,
 };
 
 use super::{
-  Acquired, BatchHandle, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
-  MappingTable, PendingFlush,
+  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyTables,
+  EvictionGuard, MappingTable, PendingFlush,
 };
 use crate::{
   background::{BackgroundThread, ThreadBuilder},
@@ -23,35 +22,6 @@ pub struct BlockCacheConfig {
   pub shard_count: usize,
   pub capacity: usize,
 }
-
-/**
- * Lazily initialized cache-slot storage.
- *
- * The cache allocates the slot array up front, but a `CachedBlock` is only
- * written into a slot once the mapping table assigns that slot. Drop therefore
- * only visits the initialized ranges reported by the mapping table.
- */
-struct BlockCell(UnsafeCell<MaybeUninit<CachedBlock>>);
-impl BlockCell {
-  const fn uninit() -> Self {
-    Self(UnsafeCell::new(MaybeUninit::uninit()))
-  }
-  const fn get(&self) -> &CachedBlock {
-    unsafe { (*self.0.get()).assume_init_ref() }
-  }
-  const fn write(&self, block: CachedBlock) {
-    unsafe { (*self.0.get()).write(block) };
-  }
-  const fn replace(&self, block: CachedBlock) -> CachedBlock {
-    unsafe { (*self.0.get()).as_mut_ptr().replace(block) }
-  }
-  fn drop_in_place(&self) {
-    unsafe { (*self.0.get()).assume_init_drop() };
-  }
-}
-unsafe impl Send for BlockCell {}
-unsafe impl Sync for BlockCell {}
-
 /**
  * Central block-cache manager and higher-level disk abstraction.
  *

@@ -21,3 +21,6 @@ pub use batch::*;
 
 mod shrink;
 pub use shrink::*;
+
+mod cell;
+use cell::*;
