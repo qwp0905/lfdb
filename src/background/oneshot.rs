@@ -174,6 +174,18 @@ impl<T> Oneshot<T> {
       backoff.reset();
     }
   }
+
+  pub fn wait_slow(mut self) -> Result<T, WaitDisconnectedError> {
+    self.0.caller.store(Some(current()));
+    loop {
+      match self.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(this)) => self = this,
+      };
+      park();
+    }
+  }
 }
 impl<T> Drop for Oneshot<T> {
   fn drop(&mut self) {
