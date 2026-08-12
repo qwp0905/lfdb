@@ -20,7 +20,7 @@ use crate::{
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
   metrics::{EngineMetrics, MetricsRegistry},
-  table::{TableMapper, META_TABLE_ID},
+  table::{TableId, TableMapper, META_TABLE_ID},
   transaction::{
     Checkpoint, PageRecorder, Transaction, TransactionConfig, TxOrchestrator,
     VersionVisibility,
@@ -166,6 +166,7 @@ impl Engine {
 
     info!("trying to replay...");
 
+    let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
     for (_, ptr, data) in replay
@@ -173,6 +174,10 @@ impl Engine {
       .iter()
       .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
     {
+      max_used
+        .entry(META_TABLE_ID)
+        .and_modify(|v| *v = (*v).max(*ptr))
+        .or_insert(*ptr);
       block_cache
         .read_unchecked(*ptr, &meta_table)?
         .for_write()
@@ -199,6 +204,10 @@ impl Engine {
       let Some((_, handle)) = handles.get(table_id) else {
         continue;
       };
+      max_used
+        .entry(*table_id)
+        .and_modify(|v| *v = (*v).max(*ptr))
+        .or_insert(*ptr);
       block_cache
         .read_unchecked(*ptr, handle)?
         .for_write()
@@ -218,7 +227,7 @@ impl Engine {
     )?;
 
     tables.replay(handles.into_values())?;
-    recovery(block_cache.clone(), recorder.clone(), &tables)?;
+    recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),
