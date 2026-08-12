@@ -70,11 +70,6 @@ impl<const N: usize> BlockIOHandle<N> {
     self.handle.fsync().map_err(Error::IO)
   }
 
-  #[inline]
-  pub fn len(&self) -> Result<Pointer> {
-    Ok(self.handle.len().map_err(Error::IO)? >> Self::SHIFT)
-  }
-
   pub fn truncate(&self) -> Result {
     self.handle.truncate().map_err(Error::IO)
   }
