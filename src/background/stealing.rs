@@ -1,7 +1,4 @@
-use std::{
-  sync::Arc,
-  thread::{park, Builder, Thread},
-};
+use std::thread::{park, Builder, Thread};
 
 use crossbeam::{
   atomic::AtomicCell,
@@ -60,7 +57,7 @@ fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
 const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
   global: SBox<Injector<Context<T, R>>>,
-  stealers: Arc<[Stealer<Context<T, R>>]>,
+  stealers: SBox<Vec<Stealer<Context<T, R>>>>,
   idle: SBox<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
@@ -167,7 +164,7 @@ pub struct StealingWorkThread<T, R = ()> {
   idle: SBox<SegQueue<Idle>>,
   wakers: SBox<Vec<Thread>>,
   threads: Vec<ThreadSlot>,
-  stealers: Arc<[Stealer<Context<T, R>>]>,
+  stealers: SBox<Vec<Stealer<Context<T, R>>>>,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> StealingWorkThread<T, R> {
@@ -182,13 +179,17 @@ impl<T, R> StealingWorkThread<T, R> {
     R: Send + 'static,
   {
     let idle = SBox::new(SegQueue::new());
-    let (stealers, workers): (Vec<_>, Vec<_>) = (0..count)
-      .map(|_| Worker::<Context<T, R>>::new_fifo())
-      .map(|w| (w.stealer(), w))
-      .unzip();
+    let mut stealers = Vec::with_capacity(count);
+    let mut workers = Vec::with_capacity(count);
+
+    for _ in 0..count {
+      let worker = Worker::<Context<T, R>>::new_fifo();
+      stealers.push(worker.stealer());
+      workers.push(worker);
+    }
 
     let global = SBox::new(Injector::new());
-    let stealers = Arc::from(stealers.into_boxed_slice());
+    let stealers = SBox::new(stealers);
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -199,7 +200,7 @@ impl<T, R> StealingWorkThread<T, R> {
         .spawn_unwind(worker_loop(
           local,
           SBox::clone(&global),
-          Arc::clone(&stealers),
+          SBox::clone(&stealers),
           SBox::clone(&idle),
           work.clone(),
           id,
@@ -234,7 +235,7 @@ impl<T, R> StealingWorkThread<T, R> {
   pub fn coworker(&self) -> Coworker<T, R> {
     Coworker {
       global: SBox::clone(&self.global),
-      stealers: Arc::clone(&self.stealers),
+      stealers: SBox::clone(&self.stealers),
       work: self.work.clone(),
       wakers: SBox::clone(&self.wakers),
     }
@@ -277,7 +278,7 @@ impl<T, R> StealingWorkThread<T, R> {
 
 pub struct Coworker<T, R> {
   global: SBox<Injector<Context<T, R>>>,
-  stealers: Arc<[Stealer<Context<T, R>>]>,
+  stealers: SBox<Vec<Stealer<Context<T, R>>>>,
   work: SharedFn<'static, T, R>,
   wakers: SBox<Vec<Thread>>,
 }
