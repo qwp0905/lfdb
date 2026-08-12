@@ -13,7 +13,7 @@ use crate::{
   disk::{AlignedBuf, Pointer},
   info,
   objects::{BTreeNodeView, DataEntryView, TreeHeader, HEADER_POINTER},
-  table::{TableHandleRef, TableMapper, TableMetadata},
+  table::{TableHandleRef, TableId, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
   Result,
@@ -149,12 +149,13 @@ pub fn recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
+  max_used: HashMap<TableId, Pointer>,
 ) -> Result {
   let open_handles = tables.get_all();
   let thread = ThreadBuilder::new()
     .name("release orphan")
     .multi(open_handles.len().min(5))
-    .stealing(handle_recovery(block_cache, recorder));
+    .stealing(handle_recovery(block_cache, recorder, Arc::new(max_used)));
 
   let mut waiting = Vec::with_capacity(open_handles.len());
   for table in open_handles {
@@ -221,8 +222,9 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
 const fn handle_recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
+  max_used: Arc<HashMap<TableId, Pointer>>,
 ) -> impl Fn(TableHandleRef) -> Result {
-  move |table| recovery_table(&block_cache, &recorder, &table)
+  move |table| recovery_table(&block_cache, &recorder, &table, &max_used)
 }
 
 /**
@@ -237,6 +239,7 @@ fn recovery_table(
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   table: &TableHandleRef,
+  max_used: &HashMap<TableId, Pointer>,
 ) -> Result {
   let name = table.get_name();
   debug!("table {name} start to collect orphaned blocks.");
@@ -253,12 +256,14 @@ fn recovery_table(
   let mut entry_stack = vec![];
   let mut half_split = HashMap::new();
   let mut child_reachable = HashSet::new();
+  let mut used = HEADER_POINTER;
 
   while let Some((ptr, level)) = node_stack.pop() {
     if !visited.insert(ptr) {
       continue;
     };
 
+    used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
       .for_read()
@@ -294,6 +299,7 @@ fn recovery_table(
     if !visited.insert(ptr) {
       continue;
     };
+    used = used.max(ptr);
     if let Some(i) = block_cache
       .read(ptr, table)?
       .for_read()
@@ -305,11 +311,15 @@ fn recovery_table(
     };
   }
 
-  let len = table.disk().len()?;
-  (0..len)
+  let end = max_used
+    .get(&table.get_id())
+    .copied()
+    .unwrap_or(HEADER_POINTER)
+    .max(used);
+  (0..=end)
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
-  table.free().replay(len + 1);
+  table.free().replay(end + 1);
 
   let half_split = half_split
     .into_iter()
