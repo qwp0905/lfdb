@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::JoinHandle};
+use std::sync::Arc;
 
 use super::OneshotFulfill;
 
@@ -48,24 +48,5 @@ impl<'a, T, R> SingleFn<'a, T, R> {
   #[inline]
   pub fn call(&mut self, v: T) -> R {
     self.0(v)
-  }
-}
-
-/**
- * Join handle for a one-shot background task.
- *
- * `wait` deliberately unwraps the thread join result. A panic in a background
- * task means the engine has reached an invalid internal state; the caller
- * should observe that panic instead of treating it as a recoverable error.
- */
-pub struct OnceHandle<T>(JoinHandle<T>);
-impl<T> OnceHandle<T> {
-  pub fn wait(self) -> T {
-    self.0.join().unwrap()
-  }
-
-  #[inline]
-  pub const fn new(handle: JoinHandle<T>) -> Self {
-    Self(handle)
   }
 }
