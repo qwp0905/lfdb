@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DEFAULT_THREAD=128
-DEFAULT_RECORD=5000000
+DEFAULT_RECORD=500000
 DEFAULT_OP=200000
 SAMPLE_SIZE=30
 
@@ -26,7 +26,7 @@ for count in {32,64,256,512}; do
 done
 
 echo "####### Scaling Dataset #######"
-for count in {10000000,20000000,50000000,100000000}; do
+for count in {1000000,2000000,5000000,10000000}; do
   echo "####### Scaling Dataset [$count] #######"
   RECORD_COUNT=$count benchmark
 done
