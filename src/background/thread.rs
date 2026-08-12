@@ -1,7 +1,35 @@
 use super::{
-  oneshot, BufferingThread, Context, EventBindings, IntervalWorkThread, Oneshot,
-  OwnedSubscription, PreloadThread, StealingWorkThread,
+  oneshot, BufferingThread, Context, Coworker, EventBindings, IntervalWorkThread,
+  Oneshot, OwnedSubscription, PreloadThread, StealingWorkThread, TryWaitError,
+  WaitDisconnectedError,
 };
+
+pub struct OnceRecv<T, R> {
+  recv: Oneshot<R>,
+  coworker: Option<Coworker<T, R>>,
+}
+impl<T, R> OnceRecv<T, R> {
+  const fn new(recv: Oneshot<R>, coworker: Option<Coworker<T, R>>) -> Self {
+    Self { recv, coworker }
+  }
+
+  pub fn wait(mut self) -> std::result::Result<R, WaitDisconnectedError> {
+    let Some(coworker) = self.coworker else {
+      return self.recv.wait();
+    };
+
+    loop {
+      match self.recv.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(recv)) => self.recv = recv,
+      }
+      if !coworker.run() {
+        return self.recv.wait_slow();
+      }
+    }
+  }
+}
 
 pub enum ThreadTypes<T, R> {
   Stealing(StealingWorkThread<T, R>),
@@ -32,13 +60,17 @@ impl<T, R> BackgroundThread<T, R> {
    * caller's request, while each concrete runtime decides how that context
    * should be queued, scheduled, or handled.
    */
-  fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: Context<T, R>) -> Option<Coworker<T, R>> {
     match &self.0 {
-      ThreadTypes::Stealing(t) => t.register(ctx),
+      ThreadTypes::Stealing(t) => {
+        t.register(ctx);
+        return Some(t.coworker());
+      }
       ThreadTypes::Preload(t) => t.register(ctx),
       ThreadTypes::Interval(t) => t.register(ctx),
       ThreadTypes::Buffering(t) => t.register(ctx),
     };
+    None
   }
 
   /**
@@ -49,16 +81,11 @@ impl<T, R> BackgroundThread<T, R> {
    * oneshot fulfiller, and the returned `Oneshot` can be waited on by the
    * caller.
    */
-  pub fn execute(&self, value: T) -> Oneshot<R> {
+  pub fn execute(&self, value: T) -> OnceRecv<T, R> {
     let (done_r, done_t) = oneshot();
     let ctx = Context::Work(value, done_t);
-    match &self.0 {
-      ThreadTypes::Stealing(t) => t.register(ctx),
-      ThreadTypes::Preload(t) => t.register(ctx),
-      ThreadTypes::Interval(t) => t.register(ctx),
-      ThreadTypes::Buffering(t) => t.register(ctx),
-    };
-    done_r
+    let co = self.register(ctx);
+    OnceRecv::new(done_r, co)
   }
 
   /**
@@ -69,7 +96,13 @@ impl<T, R> BackgroundThread<T, R> {
    * command with a reply, while `dispatch` behaves like an event.
    */
   pub fn dispatch(&self, value: T) {
-    self.register(Context::Dispatch(value));
+    let ctx = Context::Dispatch(value);
+    match &self.0 {
+      ThreadTypes::Stealing(t) => t.register(ctx),
+      ThreadTypes::Preload(t) => t.register(ctx),
+      ThreadTypes::Interval(t) => t.register(ctx),
+      ThreadTypes::Buffering(t) => t.register(ctx),
+    };
   }
 
   /**

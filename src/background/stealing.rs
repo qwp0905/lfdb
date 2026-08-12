@@ -59,9 +59,9 @@ fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool
 
 const fn worker_loop<T, R>(
   local: Worker<Context<T, R>>,
-  global: Arc<Injector<Context<T, R>>>,
+  global: SBox<Injector<Context<T, R>>>,
   stealers: Arc<[Stealer<Context<T, R>>]>,
-  idle: Arc<SegQueue<Idle>>,
+  idle: SBox<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
 ) -> impl FnOnce()
@@ -163,10 +163,11 @@ impl Idle {
  * bursts of parallel work without keeping idle threads busy.
  */
 pub struct StealingWorkThread<T, R = ()> {
-  global: Arc<Injector<Context<T, R>>>,
-  idle: Arc<SegQueue<Idle>>,
-  wakers: Vec<Thread>,
+  global: SBox<Injector<Context<T, R>>>,
+  idle: SBox<SegQueue<Idle>>,
+  wakers: SBox<Vec<Thread>>,
   threads: Vec<ThreadSlot>,
+  stealers: Arc<[Stealer<Context<T, R>>]>,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> StealingWorkThread<T, R> {
@@ -180,13 +181,13 @@ impl<T, R> StealingWorkThread<T, R> {
     T: Send + 'static,
     R: Send + 'static,
   {
-    let idle = Arc::new(SegQueue::new());
+    let idle = SBox::new(SegQueue::new());
     let (stealers, workers): (Vec<_>, Vec<_>) = (0..count)
       .map(|_| Worker::<Context<T, R>>::new_fifo())
       .map(|w| (w.stealer(), w))
       .unzip();
 
-    let global = Arc::new(Injector::new());
+    let global = SBox::new(Injector::new());
     let stealers = Arc::from(stealers.into_boxed_slice());
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
@@ -197,9 +198,9 @@ impl<T, R> StealingWorkThread<T, R> {
         .stack_size(size)
         .spawn_unwind(worker_loop(
           local,
-          Arc::clone(&global),
+          SBox::clone(&global),
           Arc::clone(&stealers),
-          Arc::clone(&idle),
+          SBox::clone(&idle),
           work.clone(),
           id,
         ));
@@ -210,8 +211,9 @@ impl<T, R> StealingWorkThread<T, R> {
     Self {
       global,
       idle,
-      wakers,
+      wakers: SBox::new(wakers),
       threads,
+      stealers,
       work,
     }
   }
@@ -226,6 +228,15 @@ impl<T, R> StealingWorkThread<T, R> {
     // if does not matches parked, worker thread are already working.
     if let State::Parked = idle.state.swap(State::Unqueued) {
       self.wakers[idle.id].unpark();
+    }
+  }
+
+  pub fn coworker(&self) -> Coworker<T, R> {
+    Coworker {
+      global: SBox::clone(&self.global),
+      stealers: Arc::clone(&self.stealers),
+      work: self.work.clone(),
+      wakers: SBox::clone(&self.wakers),
     }
   }
 
@@ -244,7 +255,7 @@ impl<T, R> StealingWorkThread<T, R> {
     let threads = self
       .threads
       .iter()
-      .flat_map(|th| th.close())
+      .filter_map(|th| th.close())
       .collect::<Vec<_>>();
     if threads.is_empty() {
       return;
@@ -264,6 +275,35 @@ impl<T, R> StealingWorkThread<T, R> {
   }
 }
 
+pub struct Coworker<T, R> {
+  global: SBox<Injector<Context<T, R>>>,
+  stealers: Arc<[Stealer<Context<T, R>>]>,
+  work: SharedFn<'static, T, R>,
+  wakers: SBox<Vec<Thread>>,
+}
+impl<T, R> Coworker<T, R> {
+  pub fn run(&self) -> bool {
+    let Some(ctx) = self
+      .global
+      .steal()
+      .success()
+      .or_else(|| self.stealers.iter().find_map(|s| s.steal().success()))
+    else {
+      return false;
+    };
+
+    if handle_task(ctx, &self.work) {
+      return true;
+    }
+
+    self.global.push(Context::Term);
+    for thread in self.wakers.iter() {
+      thread.unpark();
+    }
+    false
+  }
+}
+
 #[cfg(test)]
 #[path = "tests/stealing.rs"]
-mod stealing;
+mod tests;
