@@ -344,7 +344,7 @@ impl CacheFlusher {
   }
 }
 
-const PRE_FLUSH_CONCURRENCY: usize = 4;
+const PRE_FLUSH_CONCURRENCY: usize = 3;
 
 enum FlushTask {
   Write(BlockId),

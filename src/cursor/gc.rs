@@ -9,7 +9,7 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
+    BackgroundThread, EventBus, OnceRecv, OwnedSubscription, SharedSubscription,
     ThreadBuilder,
   },
   binding_events,
@@ -42,8 +42,10 @@ enum EntryWork {
   Check,
   Release,
 }
-type EntryWorker =
-  BackgroundThread<(TableHandleRef, Pointer, EntryWork), Result<Option<EntryRelease>>>;
+type EntryWorkArg = (TableHandleRef, Pointer, EntryWork);
+type EntryWorkResult = Result<Option<EntryRelease>>;
+type EntryWorker = BackgroundThread<EntryWorkArg, EntryWorkResult>;
+
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   main: Box<BackgroundThread<()>>,
@@ -365,6 +367,21 @@ impl GcCycle {
       exists_blobs,
     }
   }
+
+  fn flush_buffered(
+    &mut self,
+    buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
+  ) -> Result {
+    while let Some(handle) = buffered.pop_front() {
+      let Some(result) = handle.wait().unwrap()? else {
+        continue;
+      };
+      self.min_version = self.min_version.min(result.min_version);
+      self.blob_refs.extend(result.blob_refs);
+    }
+
+    Ok(())
+  }
 }
 struct GcTask {
   table: TableHandleRef,
@@ -383,23 +400,9 @@ impl GcTask {
   }
 }
 
-fn flush_buffered(
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
-  refs: &mut HashSet<BlobId>,
-) -> Result<TxId> {
-  let mut min = TxId::MAX;
-  while let Some(handle) = buffered.pop_front() {
-    let Some(result) = handle.wait().unwrap()? else {
-      continue;
-    };
-    min = min.min(result.min_version);
-    refs.extend(result.blob_refs);
-  }
-  Ok(min)
-}
 fn run_tick(
   cycle: &mut Option<GcCycle>,
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
+  buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -424,8 +427,8 @@ fn run_tick(
 
   for _ in 0..key_count {
     let Some(mut task) = current.tasks.pop() else {
-      let min = flush_buffered(buffered, &mut current.blob_refs)?;
-      version_visibility.remove_aborted(&current.min_version.min(min));
+      current.flush_buffered(buffered)?;
+      version_visibility.remove_aborted(&current.min_version);
 
       for &id in current
         .exists_blobs
@@ -539,8 +542,7 @@ fn run_tick(
     event_bus.publish(CompactionTriggered::new(table.into_inner()));
   }
 
-  let min_version = flush_buffered(buffered, &mut current.blob_refs)?;
-  current.min_version = current.min_version.min(min_version);
+  current.flush_buffered(buffered)?;
   Ok(())
 }
 
@@ -550,7 +552,7 @@ fn release_leaf(
   version_visibility: &VersionVisibility,
   table: &TableHandleRef,
   entry_worker: &EntryWorker,
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
+  buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
   mut candidates: HashSet<StaticKey>,
   ptr: Pointer,
 ) -> Result {
