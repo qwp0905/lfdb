@@ -305,7 +305,7 @@ pub struct CoRecv<T, R> {
   coworker: Coworker<T, R>,
 }
 impl<T, R> CoRecv<T, R> {
-  pub const fn new(recv: Oneshot<R>, coworker: Coworker<T, R>) -> Self {
+  const fn new(recv: Oneshot<R>, coworker: Coworker<T, R>) -> Self {
     Self { recv, coworker }
   }
 

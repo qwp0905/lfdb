@@ -7,7 +7,7 @@ use crossbeam::utils::Backoff;
 
 use super::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
-  disk::{AlignedBuf, AsyncIO, IOHandle, ALIGN},
+  disk::{AlignedBuf, PendingIO, IOHandle, ALIGN},
   Error, Result,
 };
 
@@ -114,8 +114,8 @@ impl BlobHandle {
       .unwrap()
       .map_err(Error::IO)
   }
-  pub fn sync(&self) -> AsyncIO {
-    AsyncIO::new(self.io.fdatasync())
+  pub fn sync(&self) -> PendingIO {
+    self.io.fdatasync()
   }
   pub fn truncate(&self) -> Result {
     self.io.truncate().map_err(Error::IO)

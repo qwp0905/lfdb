@@ -105,7 +105,7 @@ impl BlobStorage {
             handle.write(&buf, offset)?;
             // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
             // before returning a reference that may be persisted into the tree.
-            handle.sync().wait()?;
+            handle.sync().wait_flatten()?;
             return Ok(BlobAppendGuard::new(
               handle.get_id(),
               offset,
@@ -116,7 +116,7 @@ impl BlobStorage {
           BlobReserved::Last(offset) => {
             drop(permit);
             handle.write(&buf, offset)?;
-            handle.sync().wait()?;
+            handle.sync().wait_flatten()?;
             return Ok(BlobAppendGuard::new(
               handle.get_id(),
               offset,
