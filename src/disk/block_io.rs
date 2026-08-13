@@ -1,6 +1,6 @@
 use std::mem::transmute;
 
-use super::{PendingIO, IOHandle, Page, Pointer};
+use super::{IOHandle, Page, PendingIO, Pointer};
 use crate::{error::Result, Error};
 
 /**
