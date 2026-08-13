@@ -1,6 +1,6 @@
 use std::mem::transmute;
 
-use super::{AsyncIO, IOHandle, Page, Pointer};
+use super::{IOHandle, Page, PendingIO, Pointer};
 use crate::{error::Result, Error};
 
 /**
@@ -60,9 +60,9 @@ impl<const N: usize> BlockIOHandle<N> {
    * that cannot provide that lifetime should use `write`, which waits before
    * returning.
    */
-  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
+  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> PendingIO {
     let slice = page.as_slice();
-    AsyncIO::new(self.handle.alloc_and_write(slice, Self::cvt(pointer)))
+    PendingIO::new(self.handle.alloc_and_write(slice, Self::cvt(pointer)))
   }
 
   #[inline]

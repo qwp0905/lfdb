@@ -295,16 +295,16 @@ impl<T: Send, R: Send> Execute<T, R> for StealingWorkThread<T, R> {
   }
 }
 impl<T: Send, R: Send> StealingWorkThread<T, R> {
-  pub fn cooperate(&self, value: T) -> CoRecv<T, R> {
-    CoRecv::new(Execute::execute(self, value), self.coworker())
+  pub fn cooperate(&self, value: T) -> PendingCoop<T, R> {
+    PendingCoop::new(Execute::execute(self, value), self.coworker())
   }
 }
 
-pub struct CoRecv<T, R> {
+pub struct PendingCoop<T, R> {
   recv: Oneshot<R>,
   coworker: Coworker<T, R>,
 }
-impl<T, R> CoRecv<T, R> {
+impl<T, R> PendingCoop<T, R> {
   pub const fn new(recv: Oneshot<R>, coworker: Coworker<T, R>) -> Self {
     Self { recv, coworker }
   }
