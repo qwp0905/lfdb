@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-  disk::{PendingIO, Page, PageRef, Pointer, PAGE_SIZE},
+  disk::{AsyncIO, Page, PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
   utils::{AtomicSBox, SBox, ShortenedMutex},
   Result,
@@ -88,12 +88,12 @@ impl<'a> ExclusiveBlockFlusher<'a> {
 }
 
 pub struct PendingFlush {
-  handle: Option<PendingIO>,
+  handle: Option<AsyncIO>,
   _page: SBox<PageRef<PAGE_SIZE>>,
 }
 impl PendingFlush {
   pub fn finalize(mut self) -> Result {
-    self.handle.take().unwrap().wait_flatten()
+    self.handle.take().unwrap().wait()
   }
 }
 impl Drop for PendingFlush {

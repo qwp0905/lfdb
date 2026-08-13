@@ -20,7 +20,7 @@ mod io_pool;
 pub use io_pool::*;
 
 mod thread;
-pub use thread::*;
+use thread::*;
 
 mod backend;
 pub use backend::*;

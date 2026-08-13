@@ -5,8 +5,9 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, IOThread, PendingIO, TaskPublisher};
-use crate::utils::SBox;
+use crate::{background::Oneshot, utils::SBox};
+
+use super::{DiskBackend, HandleState, IOBackend, IOThread, TaskPublisher};
 
 /**
  * Base-directory-bound disk backend.
@@ -42,7 +43,7 @@ impl DirHandle {
       path,
     })
   }
-  pub fn fdatasync(&self) -> PendingIO {
+  pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
       .publish_sync(&self.state, &self.thread, &self.io_backend)

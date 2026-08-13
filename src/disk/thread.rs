@@ -11,10 +11,7 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{
-    oneshot, Coworker, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread,
-    TryWaitError, WaitDisconnectedError,
-  },
+  background::{oneshot, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread},
   measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
@@ -107,15 +104,15 @@ impl SBox<TaskPublisher<WriteTask>> {
     backend: &Arc<dyn IOBackend>,
     alloc: &SBox<AllocState>,
     task: WriteTask,
-  ) -> PendingIO {
+  ) -> Oneshot<Result<()>> {
     if state.is_closed() {
-      return PendingIO::new(Oneshot::fulfilled(Ok(())), thread.coworker());
+      return Oneshot::fulfilled(Ok(()));
     }
 
     let (o, f) = oneshot();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return PendingIO::new(o, thread.coworker());
+      return o;
     }
 
     thread.dispatch((
@@ -123,7 +120,7 @@ impl SBox<TaskPublisher<WriteTask>> {
       IOTask::Write(self.clone(), Some(alloc.clone())),
       state.clone(),
     ));
-    PendingIO::new(o, thread.coworker())
+    o
   }
   /**
    * For fixed-size or externally preallocated files.
@@ -135,15 +132,15 @@ impl SBox<TaskPublisher<WriteTask>> {
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
     task: WriteTask,
-  ) -> PendingIO {
+  ) -> Oneshot<Result<()>> {
     if state.is_closed() {
-      return PendingIO::new(Oneshot::fulfilled(Ok(())), thread.coworker());
+      return Oneshot::fulfilled(Ok(()));
     }
 
     let (o, f) = oneshot();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return PendingIO::new(o, thread.coworker());
+      return o;
     }
 
     thread.dispatch((
@@ -151,7 +148,7 @@ impl SBox<TaskPublisher<WriteTask>> {
       IOTask::Write(self.clone(), None),
       state.clone(),
     ));
-    PendingIO::new(o, thread.coworker())
+    o
   }
 
   const MAX_FLUSH_COUNT: usize = max_iov();
@@ -194,19 +191,19 @@ impl SBox<TaskPublisher<()>> {
     state: &SBox<HandleState>,
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
-  ) -> PendingIO {
+  ) -> Oneshot<Result<()>> {
     if state.is_closed() {
-      return PendingIO::new(Oneshot::fulfilled(Ok(())), thread.coworker());
+      return Oneshot::fulfilled(Ok(()));
     }
 
     let (o, f) = oneshot();
     self.queue.push(((), f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return PendingIO::new(o, thread.coworker());
+      return o;
     }
 
     thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
-    PendingIO::new(o, thread.coworker())
+    o
   }
 
   const MAX_FLUSH_COUNT: usize = 512;
@@ -240,32 +237,6 @@ pub enum IOTask {
 }
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
 pub type IOThread = StealingWorkThread<ThreadArg, ()>;
-
-pub struct PendingIO<T = ()> {
-  recv: Oneshot<Result<T>>,
-  coworker: Coworker<ThreadArg, ()>,
-}
-impl<T> PendingIO<T> {
-  const fn new(recv: Oneshot<Result<T>>, coworker: Coworker<ThreadArg, ()>) -> Self {
-    Self { recv, coworker }
-  }
-  pub fn wait(mut self) -> std::result::Result<Result<T>, WaitDisconnectedError> {
-    loop {
-      match self.recv.try_wait() {
-        Ok(v) => return Ok(v),
-        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-        Err(TryWaitError::Empty(recv)) => self.recv = recv,
-      }
-      if !self.coworker.run() {
-        return self.recv.wait_slow();
-      }
-    }
-  }
-
-  pub fn wait_flatten(self) -> crate::Result<T> {
-    self.wait().unwrap().map_err(crate::Error::IO)
-  }
-}
 
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   move |(backend, task, state)| {

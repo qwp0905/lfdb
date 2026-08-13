@@ -12,10 +12,10 @@ use crossbeam::utils::Backoff;
 
 use super::{
   create_io_thread, AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState,
-  IOBackend, IOThread, PendingIO, ScanIOHandle, TaskPublisher, WriteTask,
+  IOBackend, IOThread, ScanIOHandle, TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Close, ThreadBuilder},
+  background::{Close, Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex},
@@ -24,6 +24,17 @@ use crate::{
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
+
+pub struct AsyncIO<T = ()>(Oneshot<IOResult<T>>);
+impl<T> AsyncIO<T> {
+  pub const fn new(inner: Oneshot<IOResult<T>>) -> Self {
+    Self(inner)
+  }
+
+  pub fn wait(self) -> Result<T> {
+    self.0.wait().unwrap().map_err(Error::IO)
+  }
+}
 
 /**
  * Engine-local filesystem facade.
@@ -202,7 +213,11 @@ impl IOHandle {
     }
   }
 
-  pub fn alloc_and_write(&self, buf: &'static [u8], offset: u64) -> PendingIO {
+  pub fn alloc_and_write(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+  ) -> Oneshot<IOResult<()>> {
     self.write_handle.publish_alloc_and_write(
       &self.state,
       &self.thread,
@@ -211,7 +226,7 @@ impl IOHandle {
       (offset, IoSlice::new(buf)),
     )
   }
-  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> PendingIO {
+  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
     self.write_handle.publish_write_only(
       &self.state,
       &self.thread,
@@ -220,7 +235,7 @@ impl IOHandle {
     )
   }
 
-  pub fn fdatasync(&self) -> PendingIO {
+  pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
     self
       .sync_handle
       .publish_sync(&self.state, &self.thread, &self.backend)

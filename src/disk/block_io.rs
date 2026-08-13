@@ -1,6 +1,6 @@
 use std::mem::transmute;
 
-use super::{PendingIO, IOHandle, Page, Pointer};
+use super::{AsyncIO, IOHandle, Page, Pointer};
 use crate::{error::Result, Error};
 
 /**
@@ -50,7 +50,7 @@ impl<const N: usize> BlockIOHandle<N> {
     // completion, and completion means the worker no longer holds or reads the
     // submitted slice. Therefore the borrowed page cannot outlive this call.
     let static_ref = unsafe { transmute::<&Page<N>, &'static Page<N>>(page) };
-    self.write_async(pointer, static_ref).wait_flatten()
+    self.write_async(pointer, static_ref).wait()
   }
 
   /**
@@ -60,9 +60,9 @@ impl<const N: usize> BlockIOHandle<N> {
    * that cannot provide that lifetime should use `write`, which waits before
    * returning.
    */
-  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> PendingIO {
+  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> AsyncIO {
     let slice = page.as_slice();
-    self.handle.alloc_and_write(slice, Self::cvt(pointer))
+    AsyncIO::new(self.handle.alloc_and_write(slice, Self::cvt(pointer)))
   }
 
   #[inline]

@@ -2,14 +2,15 @@ use std::{io::Result as IOResult, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
-  disk::{IOHandle, IOPool, Page, PendingIO, Pointer},
+  background::Oneshot,
+  disk::{IOHandle, IOPool, Page, Pointer},
   utils::uuid_simple,
   Error, Result,
 };
 
 pub const FILE_EXT: &str = "log";
 
-pub type FsyncResult = PendingIO;
+pub type FsyncResult = Oneshot<IOResult<()>>;
 
 /**
  * Fixed-size WAL segment made of WAL blocks.
@@ -40,7 +41,7 @@ impl WALSegment {
     &self,
     pointer: Pointer,
     page: &'static Page<WAL_BLOCK_SIZE>,
-  ) -> PendingIO {
+  ) -> Oneshot<IOResult<()>> {
     // segment must call write only rather than alloc_and_write since it calls fallocate in constructor.
     self
       .handle
@@ -57,7 +58,7 @@ impl WALSegment {
   }
 
   #[inline]
-  pub fn fsync(&self) -> PendingIO {
+  pub fn fsync(&self) -> FsyncResult {
     self.handle.fdatasync()
   }
 
