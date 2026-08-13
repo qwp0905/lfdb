@@ -35,7 +35,7 @@ fn test_no_timeout() {
 
   // Send multiple tasks
   let receivers: Vec<_> = (1..=(thread_count << 1))
-    .map(|i| thread.execute(i))
+    .map(|i| thread.cooperate(i))
     .collect();
   let results = receivers
     .into_iter()
@@ -72,7 +72,7 @@ fn test_multiple_threads() {
     .stealing(work);
 
   let receivers: Vec<_> = (0..(thread_count << 1))
-    .map(|i| thread.execute(i))
+    .map(|i| thread.cooperate(i))
     .collect();
 
   // Collect all results

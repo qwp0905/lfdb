@@ -6,7 +6,7 @@ use std::{
 
 use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
-  background::ThreadBuilder,
+  background::{Close, ThreadBuilder},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   cache::BlockCache,
   debug,
@@ -159,7 +159,7 @@ pub fn recovery(
 
   let mut waiting = Vec::with_capacity(open_handles.len());
   for table in open_handles {
-    waiting.push(thread.execute(table));
+    waiting.push(thread.cooperate(table));
   }
 
   thread.close();

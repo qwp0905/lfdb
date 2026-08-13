@@ -9,8 +9,8 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    BackgroundThread, EventBus, OnceRecv, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
+    Close, CoRecv, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    StealingWorkThread, ThreadBuilder,
   },
   binding_events,
   blob::{BlobId, BlobStorage},
@@ -44,13 +44,13 @@ enum EntryWork {
 }
 type EntryWorkArg = (TableHandleRef, Pointer, EntryWork);
 type EntryWorkResult = Result<Option<EntryRelease>>;
-type EntryWorker = BackgroundThread<EntryWorkArg, EntryWorkResult>;
+type EntryWorker = StealingWorkThread<EntryWorkArg, EntryWorkResult>;
 
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
-  main: Box<BackgroundThread<()>>,
+  main: Box<IntervalWorkThread<()>>,
   entry: Arc<EntryWorker>,
-  table: Arc<BackgroundThread<()>>,
+  table: Arc<IntervalWorkThread<()>>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -370,7 +370,7 @@ impl GcCycle {
 
   fn flush_buffered(
     &mut self,
-    buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
+    buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   ) -> Result {
     while let Some(handle) = buffered.pop_front() {
       let Some(result) = handle.wait().unwrap()? else {
@@ -402,7 +402,7 @@ impl GcTask {
 
 fn run_tick(
   cycle: &mut Option<GcCycle>,
-  buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
+  buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -483,7 +483,7 @@ fn run_tick(
           task.dead += 1;
           if let Some(p) = e.next {
             let handle =
-              entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+              entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
             buffered.push_back(handle);
           }
           continue;
@@ -504,7 +504,8 @@ fn run_tick(
           release_candidates.insert(slot.as_ref().copy_range(e.range));
           continue;
         }
-        let handle = entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+        let handle =
+          entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
         buffered.push_back(handle);
       }
 
@@ -552,7 +553,7 @@ fn release_leaf(
   version_visibility: &VersionVisibility,
   table: &TableHandleRef,
   entry_worker: &EntryWorker,
-  buffered: &mut VecDeque<OnceRecv<EntryWorkArg, EntryWorkResult>>,
+  buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   mut candidates: HashSet<StaticKey>,
   ptr: Pointer,
 ) -> Result {
@@ -578,7 +579,7 @@ fn release_leaf(
           || entry.record.version >= min_version
           || version_visibility.is_aborted(&entry.record.owner)
         {
-          let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Check));
+          let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Check));
           buffered.push_back(handle);
           continue;
         }
@@ -603,7 +604,7 @@ fn release_leaf(
       Ok(targets)
     })?;
     for ptr in targets {
-      let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Release));
+      let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Release));
       buffered.push_back(handle);
     }
   }

@@ -1,127 +1,37 @@
-use super::{
-  oneshot, BufferingThread, Context, Coworker, EventBindings, IntervalWorkThread,
-  Oneshot, OwnedSubscription, PreloadThread, StealingWorkThread, TryWaitError,
-  WaitDisconnectedError,
-};
+use super::{EventBindings, Oneshot, OwnedSubscription};
 
-pub struct OnceRecv<T, R> {
-  recv: Oneshot<R>,
-  coworker: Option<Coworker<T, R>>,
-}
-impl<T, R> OnceRecv<T, R> {
-  const fn new(recv: Oneshot<R>, coworker: Option<Coworker<T, R>>) -> Self {
-    Self { recv, coworker }
-  }
-
-  pub fn wait(mut self) -> std::result::Result<R, WaitDisconnectedError> {
-    let Some(coworker) = self.coworker else {
-      return self.recv.wait();
-    };
-
-    loop {
-      match self.recv.try_wait() {
-        Ok(v) => return Ok(v),
-        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-        Err(TryWaitError::Empty(recv)) => self.recv = recv,
-      }
-      if !coworker.run() {
-        return self.recv.wait_slow();
-      }
-    }
-  }
-}
-
-pub enum ThreadTypes<T, R> {
-  Stealing(StealingWorkThread<T, R>),
-  Preload(PreloadThread<T, R>),
-  Interval(IntervalWorkThread<T, R>),
-  Buffering(BufferingThread<T, R>),
+/**
+ * Stop the runtime and join its worker thread(s).
+ *
+ * `close` is the synchronization boundary for background runtimes. After it
+ * is called, the runtime stops accepting requests and the caller waits for
+ * the underlying thread(s) to terminate. Implementations use this point to
+ * join the worker thread(s), which also makes background panics observable by
+ * the caller.
+ */
+pub trait Close: Send + Sync {
+  fn close(&self);
 }
 /**
- * Common interface for all background runtimes used by the engine.
+ * Submit a command and return a completion handle.
  *
- * A BackgroundThread is intentionally broader than a plain worker queue: it is
- * the public handle to a background execution runtime. Implementations may run
- * as a single worker, a stealing worker pool, an eager worker, or an interval
- * task, but they all expose the same way to submit work, dispatch fire-and-
- * forget messages, and shut the runtime down.
+ * `execute` is used when the caller needs a response from the background
+ * runtime. The work item is wrapped in a `Context::Work` together with a
+ * oneshot fulfiller, and the returned `Oneshot` can be waited on by the
+ * caller.
  */
-pub struct BackgroundThread<T, R = ()>(ThreadTypes<T, R>);
-impl<T, R> BackgroundThread<T, R> {
-  pub const fn new(types: ThreadTypes<T, R>) -> Self {
-    Self(types)
-  }
-
-  /**
-   * Submit a raw execution context to the runtime.
-   *
-   * This is the low-level entry point implemented by each runtime type. The
-   * trait-level helper methods decide which Context variant represents the
-   * caller's request, while each concrete runtime decides how that context
-   * should be queued, scheduled, or handled.
-   */
-  fn register(&self, ctx: Context<T, R>) -> Option<Coworker<T, R>> {
-    match &self.0 {
-      ThreadTypes::Stealing(t) => {
-        t.register(ctx);
-        return Some(t.coworker());
-      }
-      ThreadTypes::Preload(t) => t.register(ctx),
-      ThreadTypes::Interval(t) => t.register(ctx),
-      ThreadTypes::Buffering(t) => t.register(ctx),
-    };
-    None
-  }
-
-  /**
-   * Submit a command and return a completion handle.
-   *
-   * `execute` is used when the caller needs a response from the background
-   * runtime. The work item is wrapped in a `Context::Work` together with a
-   * oneshot fulfiller, and the returned `Oneshot` can be waited on by the
-   * caller.
-   */
-  pub fn execute(&self, value: T) -> OnceRecv<T, R> {
-    let (done_r, done_t) = oneshot();
-    let ctx = Context::Work(value, done_t);
-    let co = self.register(ctx);
-    OnceRecv::new(done_r, co)
-  }
-
-  /**
-   * Submit a fire-and-forget event.
-   *
-   * `dispatch` is used when the caller only needs to notify the background
-   * runtime and does not need a response. In DDD terms, `execute` behaves like a
-   * command with a reply, while `dispatch` behaves like an event.
-   */
-  pub fn dispatch(&self, value: T) {
-    let ctx = Context::Dispatch(value);
-    match &self.0 {
-      ThreadTypes::Stealing(t) => t.register(ctx),
-      ThreadTypes::Preload(t) => t.register(ctx),
-      ThreadTypes::Interval(t) => t.register(ctx),
-      ThreadTypes::Buffering(t) => t.register(ctx),
-    };
-  }
-
-  /**
-   * Stop the runtime and join its worker thread(s).
-   *
-   * `close` is the synchronization boundary for background runtimes. After it
-   * is called, the runtime stops accepting requests and the caller waits for
-   * the underlying thread(s) to terminate. Implementations use this point to
-   * join the worker thread(s), which also makes background panics observable by
-   * the caller.
-   */
-  pub fn close(&self) {
-    match &self.0 {
-      ThreadTypes::Stealing(t) => t.close(),
-      ThreadTypes::Preload(t) => t.close(),
-      ThreadTypes::Interval(t) => t.close(),
-      ThreadTypes::Buffering(t) => t.close(),
-    };
-  }
+pub trait Execute<T, R>: Close {
+  fn execute(&self, value: T) -> Oneshot<R>;
+}
+/**
+ * Submit a fire-and-forget event.
+ *
+ * `dispatch` is used when the caller only needs to notify the background
+ * runtime and does not need a response. In DDD terms, `execute` behaves like a
+ * command with a reply, while `dispatch` behaves like an event.
+ */
+pub trait Dispatch<T>: Close {
+  fn dispatch(&self, value: T);
 }
 
 /**
@@ -132,15 +42,14 @@ impl<T, R> BackgroundThread<T, R> {
  * `binding_events!` macro: a background thread can act as the runtime for an
  * event subscription without exposing its concrete runtime type.
  */
-impl<T, R> OwnedSubscription<T> for BackgroundThread<T, R> {
+impl<T> OwnedSubscription<T> for dyn Dispatch<T> {
   fn handle(&self, event: T) {
     self.dispatch(event);
   }
 }
-impl<T, R> EventBindings for BackgroundThread<T, R>
+impl<T> EventBindings for dyn Dispatch<T>
 where
   T: Send + Sync + 'static,
-  R: Send + 'static,
 {
   type Owned = (T, ());
 

@@ -4,7 +4,10 @@ use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  background::{BackgroundThread, EventBus, OwnedSubscription, ThreadBuilder},
+  background::{
+    BufferingThread, Close, Dispatch, EventBus, Execute, Fallback, OwnedSubscription,
+    PreloadThread, ThreadBuilder,
+  },
   binding_events,
   disk::{IOPool, Pointer},
   error,
@@ -31,8 +34,8 @@ impl SegmentReuseable {
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  reuse: Arc<BackgroundThread<WALSegment, ()>>,
-  preload: Box<BackgroundThread<(), Result<WALSegment>>>,
+  reuse: Arc<BufferingThread<WALSegment, ()>>,
+  preload: Box<PreloadThread<Result<WALSegment>>>,
   ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
@@ -141,7 +144,7 @@ const fn handle_preload(
   ready: Arc<SegQueue<WALSegment>>,
   io_pool: Arc<IOPool>,
   max_len: Pointer,
-) -> impl FnMut(Option<()>) -> Result<WALSegment> {
+) -> impl FnMut(()) -> Result<WALSegment> {
   move |_| {
     if let Some(segment) = ready.pop() {
       return Ok(segment);
@@ -159,9 +162,9 @@ const fn handle_preload(
  * the idle window. That implies low WAL write pressure, so keeping preallocated
  * disk space is unnecessary; the segment is truncated instead.
  */
-const fn handle_fallback() -> impl FnMut(Option<Result<WALSegment>>) {
+const fn handle_fallback() -> impl FnMut(Fallback<Result<WALSegment>>) {
   move |finalize| {
-    if let Some(Ok(segment)) = finalize {
+    if let Fallback::Terminated(Ok(segment)) = finalize {
       let _ = segment.truncate();
     };
   }

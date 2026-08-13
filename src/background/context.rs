@@ -9,9 +9,13 @@ use super::OneshotFulfill;
  * oneshot fulfiller. `Dispatch` is a fire-and-forget event with no response
  * channel. `Term` asks the runtime to stop and is used by `close`.
  */
-pub enum Context<T, R> {
+pub enum ExecutableContext<T, R> {
   Work(T, OneshotFulfill<R>),
   Dispatch(T),
+  Term,
+}
+pub enum ExecuteOnlyContext<T, R> {
+  Work(T, OneshotFulfill<R>),
   Term,
 }
 /**

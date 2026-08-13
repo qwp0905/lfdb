@@ -1,36 +1,35 @@
 use crate::background::SingleFn;
 
-use super::{Context, ThreadSlot, UnwindSpawner};
+use super::{oneshot, Close, Execute, ExecuteOnlyContext, ThreadSlot, UnwindSpawner};
 use std::{thread::Builder, time::Duration};
 
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
-const fn worker_loop<T, R>(
+pub enum Fallback<T> {
+  Timeout,
+  Terminated(T),
+}
+
+const fn worker_loop<T>(
   timeout: Duration,
-  mut preload: SingleFn<'static, Option<T>, R>,
-  mut fallback: SingleFn<'static, Option<R>, ()>,
-  receiver: Receiver<Context<T, R>>,
+  mut preload: SingleFn<'static, (), T>,
+  mut fallback: SingleFn<'static, Fallback<T>, ()>,
+  receiver: Receiver<ExecuteOnlyContext<(), T>>,
 ) -> impl FnOnce()
 where
   T: Send,
-  R: Send,
 {
   let mut preloaded = None;
-  let mut arg = None;
   move || loop {
-    let result = preloaded.take().unwrap_or_else(|| preload.call(arg.take()));
+    let result = preloaded.take().unwrap_or_else(|| preload.call(()));
     match receiver.recv_timeout(timeout) {
-      Ok(Context::Work(v, done)) => {
-        done.fulfill(result);
-        arg = Some(v);
-      }
-      Ok(Context::Dispatch(v)) => arg = Some(v),
+      Ok(ExecuteOnlyContext::Work(_, done)) => done.fulfill(result),
       Err(RecvTimeoutError::Timeout) => {
-        fallback.call(None);
+        fallback.call(Fallback::Timeout);
         preloaded = Some(result);
       }
-      Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => {
-        return fallback.call(Some(result))
+      Ok(ExecuteOnlyContext::Term) | Err(RecvTimeoutError::Disconnected) => {
+        return fallback.call(Fallback::Terminated(result))
       }
     }
   }
@@ -52,21 +51,20 @@ where
  * On shutdown, any unused preloaded value is passed to `fallback(Some(value))`
  * so the caller can clean it up or return it to another owner.
  */
-pub struct PreloadThread<T, R> {
-  channel: Sender<Context<T, R>>,
+pub struct PreloadThread<T> {
+  channel: Sender<ExecuteOnlyContext<(), T>>,
   slot: ThreadSlot,
 }
-impl<T, R> PreloadThread<T, R> {
+impl<T> PreloadThread<T> {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
-    preload: SingleFn<'static, Option<T>, R>,
-    fallback: SingleFn<'static, Option<R>, ()>,
+    preload: SingleFn<'static, (), T>,
+    fallback: SingleFn<'static, Fallback<T>, ()>,
   ) -> Self
   where
     T: Send + 'static,
-    R: Send + 'static,
   {
     let (tx, rx) = unbounded();
     let handle = Builder::new()
@@ -80,14 +78,22 @@ impl<T, R> PreloadThread<T, R> {
     }
   }
 
-  pub fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: ExecuteOnlyContext<(), T>) {
     self.channel.send(ctx).unwrap()
   }
-
-  pub fn close(&self) {
+}
+impl<T: Send> Close for PreloadThread<T> {
+  fn close(&self) {
     if let Some(v) = self.slot.close() {
-      self.channel.send(Context::Term).unwrap();
+      self.channel.send(ExecuteOnlyContext::Term).unwrap();
       v.join().unwrap();
     }
+  }
+}
+impl<T: Send> Execute<(), T> for PreloadThread<T> {
+  fn execute(&self, _: ()) -> super::Oneshot<T> {
+    let (o, f) = oneshot();
+    self.register(ExecuteOnlyContext::Work((), f));
+    o
   }
 }

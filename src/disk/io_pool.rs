@@ -15,7 +15,7 @@ use super::{
   IOBackend, IOThread, ScanIOHandle, TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Oneshot, ThreadBuilder},
+  background::{Close, Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex},

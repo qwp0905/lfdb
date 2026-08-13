@@ -1,4 +1,5 @@
 use super::super::ThreadBuilder;
+use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
