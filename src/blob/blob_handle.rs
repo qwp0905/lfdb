@@ -7,7 +7,7 @@ use crossbeam::utils::Backoff;
 
 use super::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
-  disk::{AlignedBuf, IOHandle, PendingIO, ALIGN},
+  disk::{AlignedBuf, PendingIO, IOHandle, ALIGN},
   Error, Result,
 };
 

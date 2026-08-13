@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-  disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
+  disk::{PendingIO, Page, PageRef, Pointer, PAGE_SIZE},
   table::TableHandleRef,
   utils::{AtomicSBox, SBox, ShortenedMutex},
   Result,
