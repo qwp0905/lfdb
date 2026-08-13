@@ -1,4 +1,5 @@
 use std::{
+  marker::PhantomData,
   mem::ManuallyDrop,
   ptr::NonNull,
   sync::atomic::{AtomicBool, Ordering},
@@ -6,18 +7,16 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
-use super::RefedSlot;
-
 const MAX_BATCH_SIZE: usize = 32;
 
-pub struct BatchFn<F>(ManuallyDrop<F>);
-impl<F> BatchFn<F> {
+pub struct BatchFn<T, F>(ManuallyDrop<F>, PhantomData<fn(&mut T)>);
+impl<T, F> BatchFn<T, F> {
   pub const fn new(f: F) -> Self {
-    Self(ManuallyDrop::new(f))
+    Self(ManuallyDrop::new(f), PhantomData)
   }
-  pub const fn task(&mut self) -> BatchTask
+  pub const fn task(&mut self) -> BatchTask<T>
   where
-    F: FnOnce(&mut RefedSlot),
+    F: FnOnce(&mut T),
   {
     BatchTask::new(NonNull::from_mut(self))
   }
@@ -25,30 +24,30 @@ impl<F> BatchFn<F> {
     unsafe { ManuallyDrop::take(&mut self.0) }
   }
 }
-pub struct BatchTask {
+pub struct BatchTask<T> {
   ptr: NonNull<()>,
-  call: unsafe fn(NonNull<()>, &mut RefedSlot),
+  call: unsafe fn(NonNull<()>, &mut T),
 }
-impl BatchTask {
-  const fn new<F>(ptr: NonNull<BatchFn<F>>) -> Self
+impl<T> BatchTask<T> {
+  const fn new<F>(ptr: NonNull<BatchFn<T, F>>) -> Self
   where
-    F: FnOnce(&mut RefedSlot),
+    F: FnOnce(&mut T),
   {
     Self {
       ptr: ptr.cast(),
-      call: call::<F>,
+      call: call::<T, F>,
     }
   }
-  fn call_with(self, slot: &mut RefedSlot) {
-    unsafe { (self.call)(self.ptr, slot) };
+  fn call_with(self, data: &mut T) {
+    unsafe { (self.call)(self.ptr, data) };
   }
 }
-unsafe fn call<F>(ptr: NonNull<()>, slot: &mut RefedSlot)
+unsafe fn call<T, F>(ptr: NonNull<()>, data: &mut T)
 where
-  F: FnOnce(&mut RefedSlot),
+  F: FnOnce(&mut T),
 {
-  let f = unsafe { ptr.cast::<BatchFn<F>>().as_mut().take() };
-  f(slot);
+  let f = unsafe { ptr.cast::<BatchFn<T, F>>().as_mut().take() };
+  f(data);
 }
 
 /**
@@ -59,11 +58,11 @@ where
  * one winner owns the batch pass that applies queued handlers to the same
  * `RefedSlot`.
  */
-pub struct BatchHandle {
-  queue: SegQueue<BatchTask>,
+pub struct BatchHandle<T> {
+  queue: SegQueue<BatchTask<T>>,
   occupied: AtomicBool,
 }
-impl BatchHandle {
+impl<T> BatchHandle<T> {
   pub fn new() -> Self {
     Self {
       queue: SegQueue::new(),
@@ -71,7 +70,7 @@ impl BatchHandle {
     }
   }
 
-  pub fn register(&self, handler: BatchTask) -> bool {
+  pub fn register(&self, handler: BatchTask<T>) -> bool {
     self.queue.push(handler);
     !self.occupied.fetch_or(true, Ordering::Release)
   }
@@ -80,9 +79,9 @@ impl BatchHandle {
    * flush handles with given slot.
    * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
    */
-  pub unsafe fn flush_with(&self, slot: &mut RefedSlot) {
+  pub unsafe fn flush_with(&self, data: &mut T) {
     for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle.call_with(slot);
+      handle.call_with(data);
     }
   }
 
@@ -100,5 +99,5 @@ impl BatchHandle {
     false
   }
 }
-unsafe impl Send for BatchHandle {}
-unsafe impl Sync for BatchHandle {}
+unsafe impl<T: Send> Send for BatchHandle<T> {}
+unsafe impl<T: Sync> Sync for BatchHandle<T> {}
