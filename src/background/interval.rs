@@ -1,10 +1,13 @@
 use std::{thread::Builder, time::Duration};
 
-use super::{Context, SingleFn, ThreadSlot, UnwindSpawner};
+use super::{
+  oneshot, Close, Dispatch, ExecutableContext, Execute, SingleFn, ThreadSlot,
+  UnwindSpawner,
+};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
 const fn worker_loop<T, R>(
-  receiver: Receiver<Context<T, R>>,
+  receiver: Receiver<ExecutableContext<T, R>>,
   mut work: SingleFn<'static, Option<T>, R>,
   timeout: Duration,
 ) -> impl FnOnce()
@@ -14,14 +17,14 @@ where
 {
   move || loop {
     match receiver.recv_timeout(timeout) {
-      Ok(Context::Work(v, done)) => done.fulfill(work.call(Some(v))),
-      Ok(Context::Dispatch(v)) => {
+      Ok(ExecutableContext::Work(v, done)) => done.fulfill(work.call(Some(v))),
+      Ok(ExecutableContext::Dispatch(v)) => {
         let _ = work.call(Some(v));
       }
       Err(RecvTimeoutError::Timeout) => {
         let _ = work.call(None);
       }
-      Ok(Context::Term) | Err(RecvTimeoutError::Disconnected) => return,
+      Ok(ExecutableContext::Term) | Err(RecvTimeoutError::Disconnected) => return,
     }
   }
 }
@@ -41,8 +44,8 @@ where
  * This is a single-threaded runtime: it uses `SingleFn`, so explicit work and
  * idle ticks are serialized through one worker thread.
  */
-pub struct IntervalWorkThread<T, R> {
-  channel: Sender<Context<T, R>>,
+pub struct IntervalWorkThread<T, R = ()> {
+  channel: Sender<ExecutableContext<T, R>>,
   slot: ThreadSlot,
 }
 impl<T, R> IntervalWorkThread<T, R> {
@@ -67,15 +70,29 @@ impl<T, R> IntervalWorkThread<T, R> {
     }
   }
 
-  pub fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: ExecutableContext<T, R>) {
     self.channel.send(ctx).unwrap()
   }
+}
 
-  pub fn close(&self) {
+impl<T: Send, R: Send> Close for IntervalWorkThread<T, R> {
+  fn close(&self) {
     if let Some(v) = self.slot.close() {
-      self.channel.send(Context::Term).unwrap();
+      self.channel.send(ExecutableContext::Term).unwrap();
       v.join().unwrap();
     }
+  }
+}
+impl<T: Send, R: Send> Dispatch<T> for IntervalWorkThread<T, R> {
+  fn dispatch(&self, value: T) {
+    self.register(ExecutableContext::Dispatch(value));
+  }
+}
+impl<T: Send, R: Send> Execute<T, R> for IntervalWorkThread<T, R> {
+  fn execute(&self, value: T) -> super::Oneshot<R> {
+    let (o, f) = oneshot();
+    self.register(ExecutableContext::Work(value, f));
+    o
   }
 }
 

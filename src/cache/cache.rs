@@ -9,7 +9,7 @@ use super::{
   EvictionGuard, MappingTable, PendingFlush,
 };
 use crate::{
-  background::{BackgroundThread, ThreadBuilder},
+  background::{Close, StealingWorkThread, ThreadBuilder},
   disk::{PagePool, Pointer, PAGE_SIZE},
   error, measure,
   metrics::MetricsRegistry,
@@ -45,7 +45,7 @@ pub struct BlockCache {
   batch_handles: Box<[BatchHandle]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<BackgroundThread<FlushTask, Result>>,
+  flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
@@ -280,13 +280,13 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<BackgroundThread<FlushTask, Result>>,
+  executor: Arc<StealingWorkThread<FlushTask, Result>>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<BackgroundThread<FlushTask, Result>>,
+    executor: Arc<StealingWorkThread<FlushTask, Result>>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
     Self {
@@ -300,7 +300,7 @@ impl CacheFlusher {
     let count = count.min(self.dirty_blocks.len());
     let mut waiting = Vec::with_capacity(count);
     for &id in self.dirty_blocks.iter().take(count) {
-      waiting.push(self.executor.execute(FlushTask::Write(id)));
+      waiting.push(self.executor.cooperate(FlushTask::Write(id)));
     }
     waiting
       .into_iter()
@@ -325,7 +325,7 @@ impl CacheFlusher {
   pub fn finish(&self) -> Result {
     let mut waiting = Vec::new();
     for table in self.dirty_tables.drain() {
-      let done = self.executor.execute(FlushTask::Fsync(table.clone()));
+      let done = self.executor.cooperate(FlushTask::Fsync(table.clone()));
       waiting.push((table, done));
     }
 
@@ -344,7 +344,7 @@ impl CacheFlusher {
   }
 }
 
-const PRE_FLUSH_CONCURRENCY: usize = 4;
+const PRE_FLUSH_CONCURRENCY: usize = 3;
 
 enum FlushTask {
   Write(BlockId),

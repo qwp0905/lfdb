@@ -10,7 +10,8 @@ use super::VersionVisibility;
 
 use crate::{
   background::{
-    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
+    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   binding_events,
   cache::{BlockCache, CacheFlusher},
@@ -92,7 +93,7 @@ impl CheckpointCycle {
 
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegment>>,
-  ticker: Box<BackgroundThread<()>>,
+  ticker: Box<IntervalWorkThread<()>>,
   /**
    * Shared storage for the active checkpoint cycle.
    *

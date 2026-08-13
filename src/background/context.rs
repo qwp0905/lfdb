@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::JoinHandle};
+use std::sync::Arc;
 
 use super::OneshotFulfill;
 
@@ -9,9 +9,13 @@ use super::OneshotFulfill;
  * oneshot fulfiller. `Dispatch` is a fire-and-forget event with no response
  * channel. `Term` asks the runtime to stop and is used by `close`.
  */
-pub enum Context<T, R> {
+pub enum ExecutableContext<T, R> {
   Work(T, OneshotFulfill<R>),
   Dispatch(T),
+  Term,
+}
+pub enum ExecuteOnlyContext<T, R> {
+  Work(T, OneshotFulfill<R>),
   Term,
 }
 /**
@@ -48,24 +52,5 @@ impl<'a, T, R> SingleFn<'a, T, R> {
   #[inline]
   pub fn call(&mut self, v: T) -> R {
     self.0(v)
-  }
-}
-
-/**
- * Join handle for a one-shot background task.
- *
- * `wait` deliberately unwraps the thread join result. A panic in a background
- * task means the engine has reached an invalid internal state; the caller
- * should observe that panic instead of treating it as a recoverable error.
- */
-pub struct OnceHandle<T>(JoinHandle<T>);
-impl<T> OnceHandle<T> {
-  pub fn wait(self) -> T {
-    self.0.join().unwrap()
-  }
-
-  #[inline]
-  pub const fn new(handle: JoinHandle<T>) -> Self {
-    Self(handle)
   }
 }

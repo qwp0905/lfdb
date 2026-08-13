@@ -8,7 +8,8 @@ use super::{
 };
 use crate::{
   background::{
-    BackgroundThread, EventBus, OwnedSubscription, SharedSubscription, ThreadBuilder,
+    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   binding_events,
   blob::BlobStorage,
@@ -407,7 +408,7 @@ pub struct Compactor {
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<BackgroundThread<()>>,
+  ticker: Box<IntervalWorkThread<()>>,
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   wal: Arc<WriteAheadLog>,
