@@ -6,7 +6,7 @@ use std::{
 
 use super::{
   Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyTables,
-  EvictionGuard, MappingTable, PendingFlush,
+  EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
   background::{Close, StealingWorkThread, ThreadBuilder},
@@ -42,7 +42,7 @@ pub struct BlockCache {
   /**
    * each dirty bits are protected by each block's latch
    */
-  batch_handles: Box<[BatchHandle]>,
+  batch_handles: Box<[BatchHandle<RefedSlot>]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
   flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
