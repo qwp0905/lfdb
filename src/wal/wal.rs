@@ -205,7 +205,7 @@ impl WriteAheadLog {
     let done = buffer.sync_segment();
     drop(token);
 
-    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation())? {
+    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation()) {
       return Err(self.failover(err.kind()));
     }
 
