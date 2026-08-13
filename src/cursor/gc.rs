@@ -9,8 +9,8 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, PendingCoop,
-    SharedSubscription, StealingWorkThread, ThreadBuilder,
+    Close, CoRecv, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    StealingWorkThread, ThreadBuilder,
   },
   binding_events,
   blob::{BlobId, BlobStorage},
@@ -370,7 +370,7 @@ impl GcCycle {
 
   fn flush_buffered(
     &mut self,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+    buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   ) -> Result {
     while let Some(handle) = buffered.pop_front() {
       let Some(result) = handle.wait().unwrap()? else {
@@ -402,7 +402,7 @@ impl GcTask {
 
 fn run_tick(
   cycle: &mut Option<GcCycle>,
-  buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+  buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -553,7 +553,7 @@ fn release_leaf(
   version_visibility: &VersionVisibility,
   table: &TableHandleRef,
   entry_worker: &EntryWorker,
-  buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+  buffered: &mut VecDeque<CoRecv<EntryWorkArg, EntryWorkResult>>,
   mut candidates: HashSet<StaticKey>,
   ptr: Pointer,
 ) -> Result {

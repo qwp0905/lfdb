@@ -12,7 +12,8 @@ use crossbeam::queue::SegQueue;
 use super::{max_iov, IOBackend};
 use crate::{
   background::{
-    oneshot, Dispatch, Oneshot, OneshotFulfill, PendingCoop, StealingWorkThread,
+    oneshot, Coworker, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread,
+    TryWaitError, WaitDisconnectedError,
   },
   measure,
   metrics::MetricsRegistry,
@@ -240,8 +241,27 @@ pub enum IOTask {
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
 pub type IOThread = StealingWorkThread<ThreadArg, ()>;
 
-pub type PendingIO<T = ()> = PendingCoop<ThreadArg, Result<T>, ()>;
+pub struct PendingIO<T = ()> {
+  recv: Oneshot<Result<T>>,
+  coworker: Coworker<ThreadArg, ()>,
+}
 impl<T> PendingIO<T> {
+  const fn new(recv: Oneshot<Result<T>>, coworker: Coworker<ThreadArg, ()>) -> Self {
+    Self { recv, coworker }
+  }
+  pub fn wait(mut self) -> std::result::Result<Result<T>, WaitDisconnectedError> {
+    loop {
+      match self.recv.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(recv)) => self.recv = recv,
+      }
+      if !self.coworker.run() {
+        return self.recv.wait_slow();
+      }
+    }
+  }
+
   pub fn wait_flatten(self) -> crate::Result<T> {
     self.wait().unwrap().map_err(crate::Error::IO)
   }
