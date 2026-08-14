@@ -4,18 +4,16 @@ use std::{
   sync::Arc,
 };
 
-use crossbeam::queue::SegQueue;
-
 use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
-  background::once,
+  background::{Close, ThreadBuilder},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   cache::BlockCache,
   debug,
   disk::{AlignedBuf, Pointer},
   info,
   objects::{BTreeNodeView, DataEntryView, TreeHeader, HEADER_POINTER},
-  table::{TableHandleRef, TableMapper, TableMetadata},
+  table::{TableHandleRef, TableId, TableMapper, TableMetadata},
   transaction::{PageRecorder, VersionVisibility},
   wal::{TxId, RESERVED_TX},
   Result,
@@ -151,33 +149,21 @@ pub fn recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
+  max_used: HashMap<TableId, Pointer>,
 ) -> Result {
-  let open_handles = Arc::new(SegQueue::new());
-  tables
-    .get_all()
-    .into_iter()
-    .for_each(|v| open_handles.push(v));
+  let open_handles = tables.get_all();
+  let thread = ThreadBuilder::new()
+    .name("release orphan")
+    .multi(open_handles.len().min(5))
+    .stealing(handle_recovery(block_cache, recorder, Arc::new(max_used)));
 
-  let count = open_handles.len().min(5);
-  let threads = (0..count)
-    .map(|_| {
-      let block_cache = block_cache.clone();
-      let open_handles = open_handles.clone();
-      let recorder = recorder.clone();
-      once(move || {
-        while let Some(table) = open_handles.pop() {
-          debug!(
-            "table {} start to collect orphaned blocks.",
-            table.get_name(),
-          );
-          recovery_table(&block_cache, &recorder, &table)?;
-        }
-        Ok(())
-      })
-    })
-    .collect::<Vec<_>>();
+  let mut waiting = Vec::with_capacity(open_handles.len());
+  for table in open_handles {
+    waiting.push(thread.cooperate(table));
+  }
 
-  threads.into_iter().try_for_each(|th| th.wait())?;
+  thread.close();
+  waiting.into_iter().try_for_each(|th| th.wait().unwrap())?;
   info!("orphaned block has released successfully.");
   Ok(())
 }
@@ -233,6 +219,14 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   }
 }
 
+const fn handle_recovery(
+  block_cache: Arc<BlockCache>,
+  recorder: Arc<PageRecorder>,
+  max_used: Arc<HashMap<TableId, Pointer>>,
+) -> impl Fn(TableHandleRef) -> Result {
+  move |table| recovery_table(&block_cache, &recorder, &table, &max_used)
+}
+
 /**
  * Rebuild the table free list from reachable table pages and recovery half splits.
  *
@@ -245,7 +239,10 @@ fn recovery_table(
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   table: &TableHandleRef,
+  max_used: &HashMap<TableId, Pointer>,
 ) -> Result {
+  let name = table.get_name();
+  debug!("table {name} start to collect orphaned blocks.");
   let mut visited = HashSet::<Pointer>::from_iter([HEADER_POINTER]);
   let (root, height) = {
     let header = block_cache
@@ -259,12 +256,14 @@ fn recovery_table(
   let mut entry_stack = vec![];
   let mut half_split = HashMap::new();
   let mut child_reachable = HashSet::new();
+  let mut used = HEADER_POINTER;
 
   while let Some((ptr, level)) = node_stack.pop() {
     if !visited.insert(ptr) {
       continue;
     };
 
+    used = used.max(ptr);
     match block_cache
       .read(ptr, table)?
       .for_read()
@@ -300,6 +299,7 @@ fn recovery_table(
     if !visited.insert(ptr) {
       continue;
     };
+    used = used.max(ptr);
     if let Some(i) = block_cache
       .read(ptr, table)?
       .for_read()
@@ -311,11 +311,15 @@ fn recovery_table(
     };
   }
 
-  let len = table.disk().len()?;
-  (0..len)
+  let end = max_used
+    .get(&table.get_id())
+    .copied()
+    .unwrap_or(HEADER_POINTER)
+    .max(used);
+  (0..=end)
     .filter(|i| !visited.remove(i))
     .for_each(|i| table.free().dealloc(i));
-  table.free().replay(len + 1);
+  table.free().replay(end + 1);
 
   let half_split = half_split
     .into_iter()
@@ -325,11 +329,7 @@ fn recovery_table(
   if half_split.is_empty() {
     return Ok(());
   }
-  info!(
-    "{} half split detected at table {}",
-    half_split.len(),
-    table.get_name()
-  );
+  info!("{} half split detected at table {name}", half_split.len());
 
   let index = BTreeIndex::new(RecoveryPolicy {
     block_cache,

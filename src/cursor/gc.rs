@@ -9,8 +9,8 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    BackgroundThread, EventBus, Oneshot, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
+    Close, EventBus, IntervalWorkThread, OwnedSubscription, PendingCoop,
+    SharedSubscription, StealingWorkThread, ThreadBuilder,
   },
   binding_events,
   blob::{BlobId, BlobStorage},
@@ -42,13 +42,15 @@ enum EntryWork {
   Check,
   Release,
 }
-type EntryWorker =
-  BackgroundThread<(TableHandleRef, Pointer, EntryWork), Result<Option<EntryRelease>>>;
+type EntryWorkArg = (TableHandleRef, Pointer, EntryWork);
+type EntryWorkResult = Result<Option<EntryRelease>>;
+type EntryWorker = StealingWorkThread<EntryWorkArg, EntryWorkResult>;
+
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
-  main: Box<BackgroundThread<()>>,
+  main: Box<IntervalWorkThread<()>>,
   entry: Arc<EntryWorker>,
-  table: Arc<BackgroundThread<()>>,
+  table: Arc<IntervalWorkThread<()>>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -64,7 +66,7 @@ impl GarbageCollector {
     let entry = ThreadBuilder::new()
       .name("gc found entry")
       .multi(config.thread_count)
-      .shared(run_entry(
+      .stealing(run_entry(
         block_cache.clone(),
         version_visibility.clone(),
         recorder.clone(),
@@ -365,6 +367,21 @@ impl GcCycle {
       exists_blobs,
     }
   }
+
+  fn flush_buffered(
+    &mut self,
+    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+  ) -> Result {
+    while let Some(handle) = buffered.pop_front() {
+      let Some(result) = handle.wait().unwrap()? else {
+        continue;
+      };
+      self.min_version = self.min_version.min(result.min_version);
+      self.blob_refs.extend(result.blob_refs);
+    }
+
+    Ok(())
+  }
 }
 struct GcTask {
   table: TableHandleRef,
@@ -383,23 +400,9 @@ impl GcTask {
   }
 }
 
-fn flush_buffered(
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
-  refs: &mut HashSet<BlobId>,
-) -> Result<TxId> {
-  let mut min = TxId::MAX;
-  while let Some(handle) = buffered.pop_front() {
-    let Some(result) = handle.wait().unwrap()? else {
-      continue;
-    };
-    min = min.min(result.min_version);
-    refs.extend(result.blob_refs);
-  }
-  Ok(min)
-}
 fn run_tick(
   cycle: &mut Option<GcCycle>,
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
+  buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
   block_cache: &BlockCache,
   recorder: &PageRecorder,
   tables: &TableMapper,
@@ -424,8 +427,8 @@ fn run_tick(
 
   for _ in 0..key_count {
     let Some(mut task) = current.tasks.pop() else {
-      let min = flush_buffered(buffered, &mut current.blob_refs)?;
-      version_visibility.remove_aborted(&current.min_version.min(min));
+      current.flush_buffered(buffered)?;
+      version_visibility.remove_aborted(&current.min_version);
 
       for &id in current
         .exists_blobs
@@ -480,7 +483,7 @@ fn run_tick(
           task.dead += 1;
           if let Some(p) = e.next {
             let handle =
-              entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+              entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
             buffered.push_back(handle);
           }
           continue;
@@ -501,7 +504,8 @@ fn run_tick(
           release_candidates.insert(slot.as_ref().copy_range(e.range));
           continue;
         }
-        let handle = entry_worker.execute((table.handle().clone(), p, EntryWork::Check));
+        let handle =
+          entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
         buffered.push_back(handle);
       }
 
@@ -539,8 +543,7 @@ fn run_tick(
     event_bus.publish(CompactionTriggered::new(table.into_inner()));
   }
 
-  let min_version = flush_buffered(buffered, &mut current.blob_refs)?;
-  current.min_version = current.min_version.min(min_version);
+  current.flush_buffered(buffered)?;
   Ok(())
 }
 
@@ -550,7 +553,7 @@ fn release_leaf(
   version_visibility: &VersionVisibility,
   table: &TableHandleRef,
   entry_worker: &EntryWorker,
-  buffered: &mut VecDeque<Oneshot<Result<Option<EntryRelease>>>>,
+  buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
   mut candidates: HashSet<StaticKey>,
   ptr: Pointer,
 ) -> Result {
@@ -576,7 +579,7 @@ fn release_leaf(
           || entry.record.version >= min_version
           || version_visibility.is_aborted(&entry.record.owner)
         {
-          let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Check));
+          let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Check));
           buffered.push_back(handle);
           continue;
         }
@@ -601,7 +604,7 @@ fn release_leaf(
       Ok(targets)
     })?;
     for ptr in targets {
-      let handle = entry_worker.execute((table.clone(), ptr, EntryWork::Release));
+      let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Release));
       buffered.push_back(handle);
     }
   }

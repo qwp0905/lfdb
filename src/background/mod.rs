@@ -7,14 +7,14 @@ pub use builder::*;
 mod oneshot;
 pub use oneshot::*;
 
-mod shared;
-use shared::*;
+mod stealing;
+pub use stealing::*;
 
 mod thread;
 pub use thread::*;
 
 mod interval;
-use interval::*;
+pub use interval::*;
 
 mod parker;
 pub use parker::*;

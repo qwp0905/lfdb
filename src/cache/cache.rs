@@ -1,16 +1,15 @@
 use std::{
-  cell::UnsafeCell,
   collections::{HashMap, VecDeque},
-  mem::{replace, MaybeUninit},
+  mem::replace,
   sync::Arc,
 };
 
 use super::{
-  Acquired, BatchHandle, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
-  MappingTable, PendingFlush,
+  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyTables,
+  EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
-  background::{BackgroundThread, ThreadBuilder},
+  background::{Close, StealingWorkThread, ThreadBuilder},
   disk::{PagePool, Pointer, PAGE_SIZE},
   error, measure,
   metrics::MetricsRegistry,
@@ -23,35 +22,6 @@ pub struct BlockCacheConfig {
   pub shard_count: usize,
   pub capacity: usize,
 }
-
-/**
- * Lazily initialized cache-slot storage.
- *
- * The cache allocates the slot array up front, but a `CachedBlock` is only
- * written into a slot once the mapping table assigns that slot. Drop therefore
- * only visits the initialized ranges reported by the mapping table.
- */
-struct BlockCell(UnsafeCell<MaybeUninit<CachedBlock>>);
-impl BlockCell {
-  const fn uninit() -> Self {
-    Self(UnsafeCell::new(MaybeUninit::uninit()))
-  }
-  const fn get(&self) -> &CachedBlock {
-    unsafe { (*self.0.get()).assume_init_ref() }
-  }
-  const fn write(&self, block: CachedBlock) {
-    unsafe { (*self.0.get()).write(block) };
-  }
-  const fn replace(&self, block: CachedBlock) -> CachedBlock {
-    unsafe { (*self.0.get()).as_mut_ptr().replace(block) }
-  }
-  fn drop_in_place(&self) {
-    unsafe { (*self.0.get()).assume_init_drop() };
-  }
-}
-unsafe impl Send for BlockCell {}
-unsafe impl Sync for BlockCell {}
-
 /**
  * Central block-cache manager and higher-level disk abstraction.
  *
@@ -72,10 +42,10 @@ pub struct BlockCache {
   /**
    * each dirty bits are protected by each block's latch
    */
-  batch_handles: Box<[BatchHandle]>,
+  batch_handles: Box<[BatchHandle<RefedSlot>]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<BackgroundThread<FlushTask, Result>>,
+  flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
@@ -105,7 +75,7 @@ impl BlockCache {
     let flush_executor = ThreadBuilder::new()
       .name("flush executor")
       .multi(PRE_FLUSH_CONCURRENCY)
-      .shared(handle_execute(
+      .stealing(handle_execute(
         cached_blocks.clone(),
         pins.clone(),
         dirty_blocks.clone(),
@@ -154,7 +124,7 @@ impl BlockCache {
 
     let pending = self.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   /**
@@ -179,7 +149,7 @@ impl BlockCache {
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
@@ -193,7 +163,7 @@ impl BlockCache {
 
     Some(self.cached_blocks[block_id].get().flusher().submit())
   }
-  fn resolve_pending<'a>(
+  fn resolve_eviction<'a>(
     &'a self,
     pending: Option<PendingFlush>,
     guard: EvictionGuard<'a>,
@@ -201,17 +171,19 @@ impl BlockCache {
   ) -> Result<CachedSlot<'a>> {
     let block_id = guard.get_block_id();
     let block = &self.cached_blocks[block_id];
+
+    if !guard.is_evicted() {
+      block.write(new);
+      return Ok(self.cache_slot(block_id, guard.commit()));
+    }
+
     if let Some(pending) = pending {
       pending.finalize()?;
       self.dirty_blocks.remove(block_id);
       self.dirty_tables.mark(block.get().handle());
     }
 
-    if guard.is_evicted() {
-      block.replace(new);
-    } else {
-      block.write(new);
-    }
+    block.replace(new);
     Ok(self.cache_slot(block_id, guard.commit()))
   }
 
@@ -229,7 +201,7 @@ impl BlockCache {
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_pending(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new_block)
   }
 
   #[inline]
@@ -296,7 +268,7 @@ impl Drop for BlockCache {
  * disk range.
  */
 const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
-const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
+const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
 
 /**
  * Incremental dirty-page flusher.
@@ -308,13 +280,13 @@ const BUCKET_SHIFT: Pointer = FLUSH_BUCKET_PAGES.ilog2() as Pointer;
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<BackgroundThread<FlushTask, Result>>,
+  executor: Arc<StealingWorkThread<FlushTask, Result>>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<BackgroundThread<FlushTask, Result>>,
+    executor: Arc<StealingWorkThread<FlushTask, Result>>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
     Self {
@@ -328,7 +300,7 @@ impl CacheFlusher {
     let count = count.min(self.dirty_blocks.len());
     let mut waiting = Vec::with_capacity(count);
     for &id in self.dirty_blocks.iter().take(count) {
-      waiting.push(self.executor.execute(FlushTask::Write(id)));
+      waiting.push(self.executor.cooperate(FlushTask::Write(id)));
     }
     waiting
       .into_iter()
@@ -353,7 +325,7 @@ impl CacheFlusher {
   pub fn finish(&self) -> Result {
     let mut waiting = Vec::new();
     for table in self.dirty_tables.drain() {
-      let done = self.executor.execute(FlushTask::Fsync(table.clone()));
+      let done = self.executor.cooperate(FlushTask::Fsync(table.clone()));
       waiting.push((table, done));
     }
 
@@ -372,7 +344,7 @@ impl CacheFlusher {
   }
 }
 
-const PRE_FLUSH_CONCURRENCY: usize = 4;
+const PRE_FLUSH_CONCURRENCY: usize = 3;
 
 enum FlushTask {
   Write(BlockId),

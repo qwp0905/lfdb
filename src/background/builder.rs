@@ -1,24 +1,11 @@
-use std::{sync::Arc, thread::Builder, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use super::{
-  BackgroundThread, BufferingThread, IntervalWorkThread, OnceHandle, PreloadThread,
-  SharedFn, SharedWorkThread, SingleFn, ThreadTypes,
+  BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SharedFn, SingleFn,
+  StealingWorkThread,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
-
-pub fn once<F, T>(f: F) -> OnceHandle<T>
-where
-  T: Send + 'static,
-  F: FnOnce() -> T + Send + 'static,
-{
-  let handle = Builder::new()
-    .name("once thread".to_string())
-    .stack_size(DEFAULT_STACK_SIZE)
-    .spawn(f)
-    .unwrap();
-  OnceHandle::new(handle)
-}
 
 /**
  * Builders for the engine's background runtime families.
@@ -63,18 +50,18 @@ pub struct MultiThreadBuilder {
   count: usize,
 }
 impl MultiThreadBuilder {
-  pub fn shared<T, R, F>(self, build: F) -> BackgroundThread<T, R>
+  pub fn stealing<T, R, F>(self, build: F) -> StealingWorkThread<T, R>
   where
     T: Send + 'static,
     R: Send + 'static,
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    BackgroundThread::new(ThreadTypes::Shared(SharedWorkThread::new(
+    StealingWorkThread::new(
       self.builder.name,
       self.builder.stack_size,
       self.count,
       SharedFn::new(Arc::new(build)),
-    )))
+    )
   }
 }
 
@@ -82,56 +69,51 @@ pub struct SingleThreadBuilder {
   builder: ThreadBuilder,
 }
 impl SingleThreadBuilder {
-  pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> BackgroundThread<T, R>
+  pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> IntervalWorkThread<T, R>
   where
     T: Send + 'static,
     R: Send + 'static,
     F: FnMut(Option<T>) -> R + Send + Sync + 'static,
   {
-    BackgroundThread::new(ThreadTypes::Interval(IntervalWorkThread::new(
+    IntervalWorkThread::new(
       self.builder.name,
       self.builder.stack_size,
       timeout,
       SingleFn::new(f),
-    )))
+    )
   }
 
-  pub fn buffering<F, T, R>(
-    self,
-    count: usize,
-    when_buffered: F,
-  ) -> BackgroundThread<T, R>
+  pub fn buffering<F, T, R>(self, count: usize, when_buffered: F) -> BufferingThread<T, R>
   where
     T: Send + 'static,
     R: Send + Clone + 'static,
     F: FnMut(Vec<T>) -> R + Send + Sync + 'static,
   {
-    BackgroundThread::new(ThreadTypes::Buffering(BufferingThread::new(
+    BufferingThread::new(
       self.builder.name,
       self.builder.stack_size,
       count,
       SingleFn::new(when_buffered),
-    )))
+    )
   }
 
-  pub fn preload<T, F, R, G>(
+  pub fn preload<T, F, G>(
     self,
     timeout: Duration,
     preload: F,
     fallback: G,
-  ) -> BackgroundThread<T, R>
+  ) -> PreloadThread<T>
   where
     T: Send + 'static,
-    R: Send + 'static,
-    F: FnMut(Option<T>) -> R + Send + 'static,
-    G: FnMut(Option<R>) + Send + 'static,
+    F: FnMut(()) -> T + Send + 'static,
+    G: FnMut(Fallback<T>) + Send + 'static,
   {
-    BackgroundThread::new(ThreadTypes::Preload(PreloadThread::new(
+    PreloadThread::new(
       self.builder.name,
       self.builder.stack_size,
       timeout,
       SingleFn::new(preload),
       SingleFn::new(fallback),
-    )))
+    )
   }
 }

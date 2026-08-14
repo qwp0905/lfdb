@@ -1,8 +1,4 @@
-use std::{
-  mem::take,
-  sync::{Arc, Mutex},
-  thread::{park, Builder, JoinHandle, Thread},
-};
+use std::thread::{park, Builder, Thread};
 
 use crossbeam::{
   atomic::AtomicCell,
@@ -11,9 +7,12 @@ use crossbeam::{
   utils::Backoff,
 };
 
-use crate::utils::{SBox, ShortenedMutex};
+use crate::{background::Oneshot, utils::SBox};
 
-use super::{Context, SharedFn, UnwindSpawner};
+use super::{
+  oneshot, Close, Dispatch, ExecutableContext, Execute, SharedFn, ThreadSlot,
+  TryWaitError, UnwindSpawner, WaitDisconnectedError,
+};
 
 /*
  * Standard work-stealing priority:
@@ -47,22 +46,25 @@ fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
  * into its local queue are returned to the global injector so another worker,
  * or the close-time cleanup path, can handle them.
  */
-fn handle_task<T, R>(ctx: Context<T, R>, work: &SharedFn<'static, T, R>) -> bool {
+fn handle_task<T, R>(
+  ctx: ExecutableContext<T, R>,
+  work: &SharedFn<'static, T, R>,
+) -> bool {
   match ctx {
-    Context::Work(v, done) => done.fulfill(work.call(v)),
-    Context::Dispatch(v) => {
+    ExecutableContext::Work(v, done) => done.fulfill(work.call(v)),
+    ExecutableContext::Dispatch(v) => {
       let _ = work.call(v);
     }
-    Context::Term => return false,
+    ExecutableContext::Term => return false,
   }
   true
 }
 
 const fn worker_loop<T, R>(
-  local: Worker<Context<T, R>>,
-  global: Arc<Injector<Context<T, R>>>,
-  stealers: Arc<[Stealer<Context<T, R>>]>,
-  idle: Arc<SegQueue<Idle>>,
+  local: Worker<ExecutableContext<T, R>>,
+  global: SBox<Injector<ExecutableContext<T, R>>>,
+  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
+  idle: SBox<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
 ) -> impl FnOnce()
@@ -163,14 +165,15 @@ impl Idle {
  * park. Producers wake parked workers on demand, so the executor can handle
  * bursts of parallel work without keeping idle threads busy.
  */
-pub struct SharedWorkThread<T, R = ()> {
-  global: Arc<Injector<Context<T, R>>>,
-  idle: Arc<SegQueue<Idle>>,
-  wakers: Vec<Thread>,
-  threads: Mutex<Vec<JoinHandle<()>>>,
+pub struct StealingWorkThread<T, R = ()> {
+  global: SBox<Injector<ExecutableContext<T, R>>>,
+  idle: SBox<SegQueue<Idle>>,
+  wakers: SBox<Vec<Thread>>,
+  threads: Vec<ThreadSlot>,
+  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
   work: SharedFn<'static, T, R>,
 }
-impl<T, R> SharedWorkThread<T, R> {
+impl<T, R> StealingWorkThread<T, R> {
   pub fn new<S: ToString>(
     name: S,
     size: usize,
@@ -181,14 +184,18 @@ impl<T, R> SharedWorkThread<T, R> {
     T: Send + 'static,
     R: Send + 'static,
   {
-    let idle = Arc::new(SegQueue::new());
-    let (stealers, workers): (Vec<_>, Vec<_>) = (0..count)
-      .map(|_| Worker::<Context<T, R>>::new_fifo())
-      .map(|w| (w.stealer(), w))
-      .unzip();
+    let idle = SBox::new(SegQueue::new());
+    let mut stealers = Vec::with_capacity(count);
+    let mut workers = Vec::with_capacity(count);
 
-    let global = Arc::new(Injector::new());
-    let stealers = Arc::from(stealers.into_boxed_slice());
+    for _ in 0..count {
+      let worker = Worker::<ExecutableContext<T, R>>::new_fifo();
+      stealers.push(worker.stealer());
+      workers.push(worker);
+    }
+
+    let global = SBox::new(Injector::new());
+    let stealers = SBox::new(stealers);
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -198,26 +205,27 @@ impl<T, R> SharedWorkThread<T, R> {
         .stack_size(size)
         .spawn_unwind(worker_loop(
           local,
-          Arc::clone(&global),
-          Arc::clone(&stealers),
-          Arc::clone(&idle),
+          SBox::clone(&global),
+          SBox::clone(&stealers),
+          SBox::clone(&idle),
           work.clone(),
           id,
         ));
 
       wakers.push(thread.thread().clone());
-      threads.push(thread);
+      threads.push(ThreadSlot::new(thread));
     }
     Self {
       global,
       idle,
-      wakers,
-      threads: Mutex::new(threads),
+      wakers: SBox::new(wakers),
+      threads,
+      stealers,
       work,
     }
   }
 
-  pub fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: ExecutableContext<T, R>) {
     self.global.push(ctx);
 
     let Some(idle) = self.idle.pop() else {
@@ -230,6 +238,16 @@ impl<T, R> SharedWorkThread<T, R> {
     }
   }
 
+  pub fn coworker(&self) -> Coworker<T, R> {
+    Coworker {
+      global: SBox::clone(&self.global),
+      stealers: SBox::clone(&self.stealers),
+      work: self.work.clone(),
+      wakers: SBox::clone(&self.wakers),
+    }
+  }
+}
+impl<T: Send, R: Send> Close for StealingWorkThread<T, R> {
   /*
    * Closing a shared executor cannot use the same simple boundary as a single
    * worker. Tasks may already be in the global injector or in a worker's local
@@ -241,14 +259,18 @@ impl<T, R> SharedWorkThread<T, R> {
    * the important guarantee: work submitted before `close` begins is completed
    * even if some workers encounter `Term` before processing all local work.
    */
-  pub fn close(&self) {
-    let threads = take(&mut *self.threads.l());
+  fn close(&self) {
+    let threads = self
+      .threads
+      .iter()
+      .filter_map(|th| th.close())
+      .collect::<Vec<_>>();
     if threads.is_empty() {
       return;
     }
 
     for _ in 0..threads.len() {
-      self.global.push(Context::Term);
+      self.global.push(ExecutableContext::Term);
     }
     for th in threads {
       th.thread().unpark();
@@ -260,7 +282,76 @@ impl<T, R> SharedWorkThread<T, R> {
     }
   }
 }
+impl<T: Send, R: Send> Dispatch<T> for StealingWorkThread<T, R> {
+  fn dispatch(&self, value: T) {
+    self.register(ExecutableContext::Dispatch(value));
+  }
+}
+impl<T: Send, R: Send> Execute<T, R> for StealingWorkThread<T, R> {
+  fn execute(&self, value: T) -> super::Oneshot<R> {
+    let (o, f) = oneshot();
+    self.register(ExecutableContext::Work(value, f));
+    o
+  }
+}
+impl<T: Send, R: Send> StealingWorkThread<T, R> {
+  pub fn cooperate(&self, value: T) -> PendingCoop<T, R> {
+    PendingCoop::new(Execute::execute(self, value), self.coworker())
+  }
+}
+
+pub struct PendingCoop<T, R> {
+  recv: Oneshot<R>,
+  coworker: Coworker<T, R>,
+}
+impl<T, R> PendingCoop<T, R> {
+  pub const fn new(recv: Oneshot<R>, coworker: Coworker<T, R>) -> Self {
+    Self { recv, coworker }
+  }
+
+  pub fn wait(mut self) -> std::result::Result<R, WaitDisconnectedError> {
+    loop {
+      match self.recv.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(recv)) => self.recv = recv,
+      }
+      if !self.coworker.run() {
+        return self.recv.wait_slow();
+      }
+    }
+  }
+}
+
+pub struct Coworker<T, R> {
+  global: SBox<Injector<ExecutableContext<T, R>>>,
+  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
+  work: SharedFn<'static, T, R>,
+  wakers: SBox<Vec<Thread>>,
+}
+impl<T, R> Coworker<T, R> {
+  pub fn run(&self) -> bool {
+    let Some(ctx) = self
+      .global
+      .steal()
+      .success()
+      .or_else(|| self.stealers.iter().find_map(|s| s.steal().success()))
+    else {
+      return false;
+    };
+
+    if handle_task(ctx, &self.work) {
+      return true;
+    }
+
+    self.global.push(ExecutableContext::Term);
+    for thread in self.wakers.iter() {
+      thread.unpark();
+    }
+    false
+  }
+}
 
 #[cfg(test)]
-#[path = "tests/shared.rs"]
+#[path = "tests/stealing.rs"]
 mod tests;

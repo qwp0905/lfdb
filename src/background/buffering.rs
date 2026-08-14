@@ -3,7 +3,10 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use super::{Context, OneshotFulfill, SingleFn, ThreadSlot, UnwindSpawner};
+use super::{
+  oneshot, Close, Dispatch, ExecutableContext, Execute, OneshotFulfill, SingleFn,
+  ThreadSlot, UnwindSpawner,
+};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
@@ -39,7 +42,7 @@ where
 }
 
 const fn worker_loop<T, R>(
-  queue: Arc<SegQueue<Context<T, R>>>,
+  queue: Arc<SegQueue<ExecutableContext<T, R>>>,
   count: usize,
   when_buffered: SingleFn<'static, Vec<T>, R>,
 ) -> impl FnOnce()
@@ -56,9 +59,9 @@ where
       while !backoff.is_completed() {
         for ctx in (0..count).map_while(|_| queue.pop()) {
           match ctx {
-            Context::Work(v, done) => buffered.push((v, Some(done))),
-            Context::Dispatch(v) => buffered.push((v, None)),
-            Context::Term => {
+            ExecutableContext::Work(v, done) => buffered.push((v, Some(done))),
+            ExecutableContext::Dispatch(v) => buffered.push((v, None)),
+            ExecutableContext::Term => {
               flush(&mut buffered);
               return;
             }
@@ -87,7 +90,7 @@ where
  * the queue; after the flush, the worker immediately drains the next batch.
  */
 pub struct BufferingThread<T, R> {
-  queue: Arc<SegQueue<Context<T, R>>>,
+  queue: Arc<SegQueue<ExecutableContext<T, R>>>,
   waker: Thread,
   slot: ThreadSlot,
 }
@@ -115,17 +118,30 @@ impl<T, R> BufferingThread<T, R> {
     }
   }
 
-  pub fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: ExecutableContext<T, R>) {
     self.queue.push(ctx);
     self.waker.unpark();
   }
-
-  pub fn close(&self) {
+}
+impl<T: Send, R: Send> Close for BufferingThread<T, R> {
+  fn close(&self) {
     if let Some(th) = self.slot.close() {
-      self.queue.push(Context::Term);
+      self.queue.push(ExecutableContext::Term);
       self.waker.unpark();
       th.join().unwrap();
     }
+  }
+}
+impl<T: Send, R: Send> Dispatch<T> for BufferingThread<T, R> {
+  fn dispatch(&self, value: T) {
+    self.register(ExecutableContext::Dispatch(value))
+  }
+}
+impl<T: Send, R: Send> Execute<T, R> for BufferingThread<T, R> {
+  fn execute(&self, value: T) -> super::Oneshot<R> {
+    let (o, f) = oneshot();
+    self.register(ExecutableContext::Work(value, f));
+    o
   }
 }
 

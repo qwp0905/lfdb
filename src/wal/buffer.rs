@@ -60,8 +60,6 @@ impl Drop for SegmentState {
   }
 }
 
-// const U16_MASK: u32 = 0xFFFF;
-
 const BITS: u64 = 40;
 const MASK: u64 = (1 << BITS) - 1;
 

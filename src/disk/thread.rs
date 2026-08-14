@@ -11,7 +11,7 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{oneshot, BackgroundThread, Oneshot, OneshotFulfill},
+  background::{oneshot, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread},
   measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
@@ -236,7 +236,7 @@ pub enum IOTask {
   Sync(SBox<TaskPublisher<()>>),
 }
 type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
-pub type IOThread = BackgroundThread<ThreadArg, ()>;
+pub type IOThread = StealingWorkThread<ThreadArg, ()>;
 
 pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
   move |(backend, task, state)| {

@@ -15,7 +15,7 @@ use super::{
   IOBackend, IOThread, ScanIOHandle, TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Oneshot, ThreadBuilder},
+  background::{Close, Oneshot, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex},
@@ -25,8 +25,8 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub struct AsyncIO<T = ()>(Oneshot<IOResult<T>>);
-impl<T> AsyncIO<T> {
+pub struct PendingIO<T = ()>(Oneshot<IOResult<T>>);
+impl<T> PendingIO<T> {
   pub const fn new(inner: Oneshot<IOResult<T>>) -> Self {
     Self(inner)
   }
@@ -59,7 +59,7 @@ impl IOPool {
     let thread = ThreadBuilder::new()
       .name("io pool")
       .multi(thread_count)
-      .shared(create_io_thread(metrics.clone()));
+      .stealing(create_io_thread(metrics.clone()));
     let thread = SBox::new(thread);
 
     // The base directory lock prevents multiple engine processes from using the

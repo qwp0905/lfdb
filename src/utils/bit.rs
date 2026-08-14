@@ -19,7 +19,7 @@ impl AtomicBitmap {
     let cap = (capacity + MASK) >> SHIFT;
     let mut bits = Vec::with_capacity(cap);
     bits.resize_with(cap, || AtomicU64::new(0));
-    AtomicBitmap { bits }
+    Self { bits }
   }
 
   pub fn insert(&self, n: usize) -> bool {
