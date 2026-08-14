@@ -54,7 +54,7 @@ impl AsMut<Page> for RefedSlot {
 pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
   dirty: &'a AtomicBitmap,
-  batch_handle: &'a BatchHandle,
+  batch_handle: &'a BatchHandle<RefedSlot>,
   block_id: BlockId,
   token: SharedToken<'a>,
   page_pool: &'a PagePool<PAGE_SIZE>,
@@ -63,7 +63,7 @@ impl<'a> CachedSlot<'a> {
   pub fn new(
     block: &'a CachedBlock,
     dirty: &'a AtomicBitmap,
-    batch_handle: &'a BatchHandle,
+    batch_handle: &'a BatchHandle<RefedSlot>,
     block_id: BlockId,
     token: SharedToken<'a>,
     page_pool: &'a PagePool<PAGE_SIZE>,
@@ -170,14 +170,14 @@ impl<'a> Drop for WritableSlot<'a> {
 
 pub struct BatchSlot<'a> {
   block: &'a CachedBlock,
-  batch: &'a BatchHandle,
+  batch: &'a BatchHandle<RefedSlot>,
   page_pool: &'a PagePool<PAGE_SIZE>,
   dirty: &'a AtomicBitmap,
   block_id: BlockId,
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  const fn batch_fn<F>(f: F) -> BatchFn<F>
+  const fn batch_fn<F>(f: F) -> BatchFn<RefedSlot, F>
   where
     F: FnOnce(&mut RefedSlot),
   {
