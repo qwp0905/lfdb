@@ -38,8 +38,8 @@ impl<T> BatchTask<T> {
       call: call::<T, F>,
     }
   }
-  fn call_with(self, data: &mut T) {
-    unsafe { (self.call)(self.ptr, data) };
+  pub unsafe fn call_with(self, data: &mut T) {
+    (self.call)(self.ptr, data);
   }
 }
 unsafe fn call<T, F>(ptr: NonNull<()>, data: &mut T)
@@ -79,10 +79,8 @@ impl<T> BatchHandle<T> {
    * flush handles with given slot.
    * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
    */
-  pub unsafe fn flush_with(&self, data: &mut T) {
-    for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle.call_with(data);
-    }
+  pub fn drain_all(&self) -> impl Iterator<Item = BatchTask<T>> + '_ {
+    (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop())
   }
 
   pub fn try_release(&self) -> bool {

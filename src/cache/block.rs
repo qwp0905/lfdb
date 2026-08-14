@@ -1,33 +1,11 @@
-use std::{
-  mem::transmute,
-  sync::{Mutex, MutexGuard},
-};
+use std::mem::transmute;
 
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{AtomicSBox, SBox, ShortenedMutex},
+  utils::{AtomicSBox, SBox},
   Result,
 };
-
-/**
- * Exclusive update guard for a cached block.
- *
- * Applying a page installs the new page pointer and advances the block epoch.
- */
-pub struct BlockLatch<'a> {
-  pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
-  guard: MutexGuard<'a, u64>,
-}
-impl<'a> BlockLatch<'a> {
-  pub fn apply(&mut self, page: PageRef<PAGE_SIZE>) {
-    self.pages.store(page);
-    *self.guard += 1;
-  }
-  pub fn epoch(&self) -> u64 {
-    *self.guard
-  }
-}
 
 pub struct BlockFlusher<'a> {
   pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
@@ -62,30 +40,6 @@ impl<'a> BlockFlusher<'a> {
     }
   }
 }
-pub struct ExclusiveBlockFlusher<'a> {
-  flusher: BlockFlusher<'a>,
-  guard: MutexGuard<'a, u64>,
-}
-impl<'a> ExclusiveBlockFlusher<'a> {
-  const fn new(
-    pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
-    handle: &'a TableHandleRef,
-    pointer: Pointer,
-    guard: MutexGuard<'a, u64>,
-  ) -> Self {
-    Self {
-      flusher: BlockFlusher::new(pages, handle, pointer),
-      guard,
-    }
-  }
-  pub fn submit(self) -> ExclusivePendingFlush {
-    let pending = self.flusher.submit();
-    ExclusivePendingFlush {
-      epoch: *self.guard,
-      pending,
-    }
-  }
-}
 
 pub struct PendingFlush {
   handle: Option<PendingIO>,
@@ -104,18 +58,6 @@ impl Drop for PendingFlush {
     let _ = handle.wait();
   }
 }
-pub struct ExclusivePendingFlush {
-  epoch: u64,
-  pending: PendingFlush,
-}
-impl ExclusivePendingFlush {
-  pub const fn epoch(&self) -> u64 {
-    self.epoch
-  }
-  pub fn finalize(self) -> (u64, Result) {
-    (self.epoch, self.pending.finalize())
-  }
-}
 
 /**
  * Cached page for one table block.
@@ -129,7 +71,6 @@ pub struct CachedBlock {
   page: AtomicSBox<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
   handle: TableHandleRef,
-  latch: Mutex<u64>,
 }
 impl CachedBlock {
   #[inline]
@@ -138,7 +79,6 @@ impl CachedBlock {
       page: AtomicSBox::new(page),
       pointer,
       handle,
-      latch: Mutex::new(0),
     }
   }
 
@@ -151,13 +91,8 @@ impl CachedBlock {
   pub fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
     self.page.load()
   }
-
-  #[inline]
-  pub fn latch(&self) -> BlockLatch<'_> {
-    BlockLatch {
-      pages: &self.page,
-      guard: self.latch.l(),
-    }
+  pub fn store_page(&self, page: PageRef<PAGE_SIZE>) {
+    self.page.store(page);
   }
 
   #[inline]
@@ -170,12 +105,5 @@ impl CachedBlock {
    */
   pub const fn flusher(&self) -> BlockFlusher<'_> {
     BlockFlusher::new(&self.page, &self.handle, self.pointer)
-  }
-
-  /**
-   * Write the current page with taking the block latch.
-   */
-  pub fn exclusive_flusher(&self) -> ExclusiveBlockFlusher<'_> {
-    ExclusiveBlockFlusher::new(&self.page, &self.handle, self.pointer, self.latch.l())
   }
 }

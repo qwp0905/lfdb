@@ -1,10 +1,6 @@
-use std::{
-  mem::ManuallyDrop,
-  ops::{Deref, DerefMut},
-  pin::pin,
-};
+use std::pin::pin;
 
-use super::{BatchFn, BatchHandle, BlockId, BlockLatch, CachedBlock};
+use super::{BatchFn, BatchHandle, BlockId, CachedBlock};
 use crate::{
   background::oneshot,
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
@@ -83,31 +79,16 @@ impl<'a> CachedSlot<'a> {
       page: self.block.load_page(),
     }
   }
-  pub fn for_batch<'b>(self) -> BatchSlot<'b>
+  pub fn for_write<'b>(self) -> WritableSlot<'b>
   where
     'a: 'b,
   {
-    BatchSlot {
+    WritableSlot {
       block: self.block,
       batch: self.batch_handle,
       page_pool: self.page_pool,
       dirty: self.dirty,
       block_id: self.block_id,
-      _token: self.token,
-    }
-  }
-  pub fn for_write<'b>(self) -> WritableSlot<'b>
-  where
-    'a: 'b,
-  {
-    let mut shadow = self.page_pool.acquire();
-    let latch = self.block.latch();
-    self.dirty.insert(self.block_id);
-    shadow.copy_from(self.block.load_page().as_slice(), 0);
-    WritableSlot {
-      shadow: ManuallyDrop::new(RefedSlot::new(self.block.get_pointer(), shadow)),
-
-      latch,
       _token: self.token,
     }
   }
@@ -136,39 +117,7 @@ impl Clone for ReadonlySlot {
   }
 }
 
-/**
- * Copy-on-write write guard for a cached block.
- *
- * The guard owns a shadow page copied from the current cached page. Callers
- * mutate that shadow page, and when the guard is dropped the shadow replaces the
- * cached page and advances the block epoch.
- */
 pub struct WritableSlot<'a> {
-  shadow: ManuallyDrop<RefedSlot>,
-  latch: BlockLatch<'a>,
-  _token: SharedToken<'a>,
-}
-
-impl<'a> Deref for WritableSlot<'a> {
-  type Target = RefedSlot;
-
-  fn deref(&self) -> &Self::Target {
-    &self.shadow
-  }
-}
-impl<'a> DerefMut for WritableSlot<'a> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.shadow
-  }
-}
-impl<'a> Drop for WritableSlot<'a> {
-  fn drop(&mut self) {
-    let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
-    self.latch.apply(shadow.into_inner());
-  }
-}
-
-pub struct BatchSlot<'a> {
   block: &'a CachedBlock,
   batch: &'a BatchHandle<RefedSlot>,
   page_pool: &'a PagePool<PAGE_SIZE>,
@@ -176,7 +125,7 @@ pub struct BatchSlot<'a> {
   block_id: BlockId,
   _token: SharedToken<'a>,
 }
-impl<'a> BatchSlot<'a> {
+impl<'a> WritableSlot<'a> {
   const fn batch_fn<F>(f: F) -> BatchFn<RefedSlot, F>
   where
     F: FnOnce(&mut RefedSlot),
@@ -196,18 +145,16 @@ impl<'a> BatchSlot<'a> {
 
     loop {
       let mut page = self.page_pool.acquire();
-      {
-        let mut latch = self.block.latch();
-        self.dirty.insert(self.block_id);
-        page.copy_from(self.block.load_page().as_slice(), 0);
+      page.copy_from(self.block.load_page().as_slice(), 0);
 
-        let mut slot = RefedSlot::new(self.block.get_pointer(), page);
+      let mut slot = RefedSlot::new(self.block.get_pointer(), page);
+      for task in self.batch.drain_all() {
+        self.dirty.insert(self.block_id);
         // SAFETY: Since `BatchFn` is pinned and its address does not change,
         // it can be accessed safely.
-        unsafe { self.batch.flush_with(&mut slot) };
-
-        latch.apply(slot.into_inner());
+        unsafe { task.call_with(&mut slot) };
       }
+      self.block.store_page(slot.into_inner());
 
       if self.batch.try_release() {
         break;

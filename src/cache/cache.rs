@@ -42,16 +42,16 @@ pub struct BlockCache {
   /**
    * each dirty bits are protected by each block's latch
    */
-  batch_handles: Box<[BatchHandle<RefedSlot>]>,
+  batch_handles: Arc<[BatchHandle<RefedSlot>]>,
   dirty_blocks: Arc<AtomicBitmap>,
-  page_pool: PagePool<PAGE_SIZE>,
+  page_pool: Arc<PagePool<PAGE_SIZE>>,
   flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.capacity);
+    let page_pool = Arc::new(PagePool::new(config.capacity));
 
     // 90% of page pool capacity reserved for blocks; the remaining 10% is kept
     // free for copy on write.
@@ -67,7 +67,7 @@ impl BlockCache {
 
     let cached_blocks = Arc::<[_]>::from(blocks.into_boxed_slice());
     let pins = Arc::<[_]>::from(pins.into_boxed_slice());
-    let batch_handles = batch_handles.into_boxed_slice();
+    let batch_handles = Arc::<[_]>::from(batch_handles.into_boxed_slice());
     let dirty_blocks = AtomicBitmap::new(block_cap).to_arc();
 
     let dirty_tables = DirtyTables::new().to_arc();
@@ -78,6 +78,8 @@ impl BlockCache {
       .stealing(handle_execute(
         cached_blocks.clone(),
         pins.clone(),
+        batch_handles.clone(),
+        page_pool.clone(),
         dirty_blocks.clone(),
         dirty_tables.clone(),
       ))
@@ -354,32 +356,40 @@ enum FlushTask {
 const fn handle_execute(
   blocks: Arc<[BlockCell]>,
   pins: Arc<[ExclusivePin]>,
+  batch_handles: Arc<[BatchHandle<RefedSlot>]>,
+  page_pool: Arc<PagePool<PAGE_SIZE>>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
 ) -> impl Fn(FlushTask) -> Result {
   move |task| match task {
     FlushTask::Write(id) => {
-      let Some(_token) = pins[id].try_shared() else {
+      let Some(token) = pins[id].try_shared() else {
         return Ok(());
       };
 
       let block = blocks[id].get();
-      let flusher = block.exclusive_flusher();
-      if !dirty_blocks.remove(id) {
-        return Ok(());
-      }
+      let slot = CachedSlot::new(
+        block,
+        &dirty_blocks,
+        &batch_handles[id],
+        id,
+        token,
+        &page_pool,
+      )
+      .for_write();
+      slot.mutate(|slot| {
+        if !dirty_blocks.contains(id) {
+          return Ok(());
+        }
 
-      let pending = flusher.submit();
-      let (epoch, Err(err)) = pending.finalize() else {
+        block
+          .handle()
+          .disk()
+          .write(block.get_pointer(), slot.as_ref())?;
+        dirty_blocks.remove(id);
         dirty_tables.mark(block.handle());
-        return Ok(());
-      };
-
-      let latch = block.latch();
-      if latch.epoch() == epoch {
-        dirty_blocks.insert(id);
-      }
-      Err(err)
+        Ok(())
+      })
     }
     FlushTask::Fsync(table) => table.disk().fsync(),
   }

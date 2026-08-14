@@ -234,7 +234,7 @@ fn check_and_release_entry(
       continue;
     }
 
-    block_cache.read(ptr, table)?.for_batch().mutate(|slot| {
+    block_cache.read(ptr, table)?.for_write().mutate(|slot| {
       let mut entry: DataEntry = slot.as_ref().deserialize()?;
       let mut new_versions = VecDeque::new();
 
@@ -565,7 +565,7 @@ fn release_leaf(
   let min_version = version_visibility.min_version();
   let mut next = Some(ptr);
   while let Some(ptr) = next.take() {
-    let targets = block_cache.read(ptr, table)?.for_batch().mutate(|slot| {
+    let targets = block_cache.read(ptr, table)?.for_write().mutate(|slot| {
       let mut targets = Vec::new();
       let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
       let leaf = node.as_leaf_mut()?;

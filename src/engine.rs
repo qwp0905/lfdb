@@ -181,9 +181,7 @@ impl Engine {
       block_cache
         .read_unchecked(*ptr, &meta_table)?
         .for_write()
-        .as_mut()
-        .writer()
-        .write(data)?;
+        .mutate(|slot| slot.as_mut().writer().write(data))?;
     }
 
     let mut handles = HashMap::new();
@@ -211,9 +209,7 @@ impl Engine {
       block_cache
         .read_unchecked(*ptr, handle)?
         .for_write()
-        .as_mut()
-        .writer()
-        .write(data)?;
+        .mutate(|slot| slot.as_mut().writer().write(data))?;
     }
 
     let checkpoint = Checkpoint::initial_checkpoint(
