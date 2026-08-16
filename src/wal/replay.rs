@@ -5,6 +5,7 @@ use std::{
 
 use super::{LogId, LogRecord, Operation, TxId, FILE_EXT};
 use crate::{
+  blob::BlobMetadata,
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
@@ -42,6 +43,7 @@ pub struct ReplayResult {
   pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
   pub segments: Vec<ScanIOHandle>,
   pub last_snapshot: Option<PathBuf>,
+  pub blob_handles: Vec<BlobMetadata>,
 }
 impl ReplayResult {
   const fn empty() -> Self {
@@ -53,6 +55,7 @@ impl ReplayResult {
       redo: Vec::new(),
       segments: Vec::new(),
       last_snapshot: None,
+      blob_handles: Vec::new(),
     }
   }
 }
@@ -77,6 +80,7 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
   let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
   let mut started = BTreeMap::<LogId, TxId>::new();
   let mut closed = BTreeMap::<LogId, TxId>::new();
+  let mut blob_handles = BTreeMap::<LogId, BlobMetadata>::new();
   let mut last_snapshot = None;
 
   let mut segments = Vec::new();
@@ -135,9 +139,13 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
           redo = redo.split_off(&last_log_id);
           started = started.split_off(&last_log_id);
           closed = closed.split_off(&last_log_id);
+          blob_handles = blob_handles.split_off(&last_log_id);
 
           last_checkpoint = Some(last_log_id);
           last_snapshot = Some(snapshot);
+        }
+        Operation::BlobCreated(metadata) => {
+          blob_handles.insert(record.log_id, metadata);
         }
       };
     }
@@ -153,5 +161,6 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
     redo: redo.into_values().collect::<Vec<_>>(),
     segments,
     last_snapshot,
+    blob_handles: blob_handles.into_values().collect(),
   })
 }

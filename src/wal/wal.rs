@@ -13,6 +13,7 @@ use crossbeam::{
 
 use crate::{
   background::EventBus,
+  blob::BlobMetadata,
   disk::{IOPool, PagePool, Pointer},
   error, info,
   table::TableId,
@@ -400,6 +401,9 @@ impl WriteAheadLog {
       ),
       false,
     )
+  }
+  pub fn append_blob_created(&self, metadata: BlobMetadata) -> Result {
+    self.append(LogRecordUninit::new_blob_created(metadata), false)
   }
 
   pub fn checkpoint_and_flush(
