@@ -22,8 +22,8 @@ use crate::{
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableId, TableMapper, META_TABLE_ID},
   transaction::{
-    Checkpoint, PageRecorder, Transaction, TransactionConfig, TxOrchestrator,
-    VersionVisibility,
+    Checkpoint, CheckpointSnapshot, PageRecorder, Transaction, TransactionConfig,
+    TxOrchestrator, VersionVisibility,
   },
   utils::ToArc,
   wal::{WALConfig, WriteAheadLog},
@@ -89,19 +89,26 @@ impl Engine {
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
     let tables = TableMapper::new(io_pool.clone())?.to_arc();
-    let blob = BlobStorage::replay(io_pool.clone())?.to_arc();
 
     let (wal, replay) =
       WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
     let wal = wal.to_arc();
 
+    let snapshot = match replay.last_snapshot {
+      Some(file) => CheckpointSnapshot::read_from(&mut io_pool.open_scan_io(file)?)?,
+      None => CheckpointSnapshot::empty(),
+    };
+    let mut blob_metadata = snapshot.blob_metadata;
+    blob_metadata.extend(replay.blob_handles);
+    let blob = BlobStorage::replay(blob_metadata, io_pool.clone(), wal.clone())?.to_arc();
+
     let recorder = PageRecorder::new(wal.clone()).to_arc();
     let version_visibility = VersionVisibility::replay(
-      io_pool.clone(),
       replay.last_tx_id,
       replay.started,
       replay.closed,
-      replay.last_snapshot,
+      snapshot.active_versions,
+      snapshot.aborted_versions,
       &event_bus,
     )?;
 
@@ -114,6 +121,7 @@ impl Engine {
         block_cache.clone(),
         version_visibility.clone(),
         io_pool.clone(),
+        blob.clone(),
         event_bus.clone(),
         metrics_registry.clone(),
         config.checkpoint_flush_factor,
@@ -221,6 +229,7 @@ impl Engine {
       block_cache.clone(),
       version_visibility.clone(),
       io_pool.clone(),
+      blob.clone(),
       event_bus.clone(),
       metrics_registry.clone(),
       config.checkpoint_flush_factor,
