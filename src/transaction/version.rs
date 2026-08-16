@@ -1,7 +1,6 @@
 use std::{
   collections::BTreeSet,
   ops::Deref,
-  path::{Path, PathBuf},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -14,15 +13,11 @@ use super::{ActiveSet, ActiveState};
 
 use crate::{
   background::{EventBus, SharedSubscription},
-  binding_events, debug,
-  disk::IOPool,
-  error, info,
-  utils::{uuid_simple, OffsetBitmap, SBox},
-  wal::{TxId, WALFailed, TX_ID_BYTES},
+  binding_events, error,
+  utils::{OffsetBitmap, SBox},
+  wal::{TxId, WALFailed},
   Result,
 };
-
-const FILE_EXT: &str = "snap";
 
 pub struct TxState<'a> {
   state: SBox<ActiveState>,
@@ -83,7 +78,6 @@ impl<'a> TxSnapshot<'a> {
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
-  io_pool: Arc<IOPool>,
   closed: AtomicBool,
 }
 impl VersionVisibility {
@@ -96,24 +90,18 @@ impl VersionVisibility {
    * are represented implicitly as ids that are neither active-at-crash nor aborted.
    */
   pub fn replay(
-    io_pool: Arc<IOPool>,
     last_tx_id: TxId,
     started: BTreeSet<TxId>,
     closed: BTreeSet<TxId>,
-    last_snapshot: Option<PathBuf>,
+    active_versions: Vec<TxId>,
+    aborted_versions: Vec<TxId>,
     event_bus: &EventBus,
   ) -> Result<Arc<Self>> {
-    let (active_s, aborted_s) = match last_snapshot {
-      Some(path) => Self::replay_snapshot(path, &io_pool)?,
-      None => (BTreeSet::new(), BTreeSet::new()),
-    };
-
     let this = Arc::new(Self {
-      io_pool,
-      aborted: active_s
+      aborted: active_versions
         .into_iter()
         .chain(started)
-        .chain(aborted_s)
+        .chain(aborted_versions)
         .filter(|c| !closed.contains(c))
         .collect(),
       active: ActiveSet::new(last_tx_id),
@@ -180,80 +168,17 @@ impl VersionVisibility {
       .map(|state| TxState::new(state, &self.active))
   }
 
-  fn replay_snapshot(
-    filename: PathBuf,
-    io_pool: &IOPool,
-  ) -> Result<(BTreeSet<TxId>, BTreeSet<TxId>)> {
-    info!("trying to open snapshot {:?}", filename);
-    let mut file = io_pool.open_scan_io(filename)?;
-    debug!("snapshot opened.");
-
-    let mut active = BTreeSet::new();
-    let mut aborted = BTreeSet::new();
-
-    let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
-    for _ in 0..len {
-      let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
-      active.insert(id);
-    }
-
-    let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
-    for _ in 0..len {
-      let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
-      aborted.insert(id);
-    }
-    debug!("snapshot replay completed.");
-    Ok((active, aborted))
-  }
-
   /**
-   * Persist the current visibility state and return its covered transaction
-   * boundary with the snapshot file path.
+   * Return the current visibility state and return its covered transaction
+   * boundary.
    */
-  pub fn persist_snapshot(&self) -> Result<(TxId, PathBuf)> {
-    let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    let mut file = self.io_pool.open_append_io(current)?;
+  pub fn snapshot(&self) -> (TxId, Vec<TxId>, Vec<TxId>) {
     let tx_id = self.active.current_version();
-
-    let active = self
-      .active
-      .until(tx_id)
-      .iter()
-      .map(|v| v.to_le_bytes())
-      .collect::<Vec<_>>();
-    debug!("snapshot active ids {}", active.len());
-    file.append(&(active.len() as u32).to_le_bytes())?;
-    for bytes in active {
-      file.append(&bytes)?;
-    }
-
-    let aborted = self
-      .aborted
-      .range(..tx_id)
-      .map(|v| v.value().to_le_bytes())
-      .collect::<Vec<_>>();
-    debug!("snapshot aborted ids {}", aborted.len());
-    file.append(&(aborted.len() as u32).to_le_bytes())?;
-    for bytes in aborted {
-      file.append(&bytes)?;
-    }
-
-    let path = file.flush()?;
-    Ok((tx_id, path))
-  }
-
-  pub fn clear(&self, current: &Path) -> Result {
-    for entry in self.io_pool.read_dir()? {
-      let path = PathBuf::from(entry.file_name());
-      if path.extension().is_none_or(|ext| ext != FILE_EXT) {
-        continue;
-      };
-      if path == current {
-        continue;
-      }
-      self.io_pool.truncate(&path)?;
-    }
-    Ok(())
+    (
+      tx_id,
+      self.active.until(tx_id),
+      self.aborted.range(..tx_id).map(|e| *e.value()).collect(),
+    )
   }
 }
 impl SharedSubscription<WALFailed> for VersionVisibility {

@@ -1,12 +1,13 @@
 use std::{
   iter::repeat,
+  path::PathBuf,
   sync::Arc,
   time::{Duration, Instant},
 };
 
 use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
-use super::VersionVisibility;
+use super::{CheckpointSnapshot, VersionVisibility};
 
 use crate::{
   background::{
@@ -14,13 +15,14 @@ use crate::{
     ThreadBuilder,
   },
   binding_events,
+  blob::BlobStorage,
   cache::{BlockCache, CacheFlusher},
   debug,
   disk::{IOPool, PAGE_SIZE},
   error, info,
   metrics::MetricsRegistry,
   trace,
-  utils::{ToArc, ToBox},
+  utils::{uuid_simple, ToArc, ToBox},
   wal::{
     LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog,
   },
@@ -106,6 +108,7 @@ pub struct Checkpoint {
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
+  blob_storage: Arc<BlobStorage>,
 }
 impl Checkpoint {
   pub fn new(
@@ -113,6 +116,7 @@ impl Checkpoint {
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
+    blob_storage: Arc<BlobStorage>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
@@ -131,6 +135,7 @@ impl Checkpoint {
           block_cache.clone(),
           version_visibility.clone(),
           io_pool.clone(),
+          blob_storage.clone(),
           event_bus.clone(),
           cycle.clone(),
           metrics,
@@ -147,6 +152,7 @@ impl Checkpoint {
       block_cache,
       version_visibility,
       io_pool,
+      blob_storage,
     });
     event_bus.register(&this);
     this
@@ -157,17 +163,25 @@ impl Checkpoint {
     block_cache: Arc<BlockCache>,
     version_visibility: Arc<VersionVisibility>,
     io_pool: Arc<IOPool>,
+    blob_storage: Arc<BlobStorage>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
   ) -> Result<Arc<Self>> {
-    Self::run_hard(&wal, &block_cache, &version_visibility, &io_pool)?;
+    Self::run_hard(
+      &wal,
+      &block_cache,
+      &version_visibility,
+      &io_pool,
+      &blob_storage,
+    )?;
 
     Ok(Self::new(
       wal,
       block_cache,
       version_visibility,
       io_pool,
+      blob_storage,
       event_bus,
       metrics,
       flush_factor,
@@ -179,18 +193,14 @@ impl Checkpoint {
     block_cache: &BlockCache,
     version: &VersionVisibility,
     io_pool: &IOPool,
+    blob_storage: &BlobStorage,
   ) -> Result {
     let log_id = wal.current_log_id();
     info!("hard checkpoint trigger id {log_id}.");
 
     block_cache.create_flusher().flush_hard()?;
-    let (current_version, path) = version.persist_snapshot()?;
-    io_pool.sync_dir()?;
-
-    wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
+    finalize_checkpoint(version, io_pool, wal, blob_storage, log_id)?;
     info!("hard checkpoint complete id {log_id}");
-
-    version.clear(&path)?;
     Ok(())
   }
 
@@ -225,6 +235,7 @@ impl Checkpoint {
         &self.version_visibility,
         &self.io_pool,
         &self.wal,
+        &self.blob_storage,
         cycle.get_log_id(),
       )?;
       cycle.truncate_all()?;
@@ -237,6 +248,7 @@ impl Checkpoint {
       &self.block_cache,
       &self.version_visibility,
       &self.io_pool,
+      &self.blob_storage,
     )?;
 
     while let Some(segment) = self.incoming.pop() {
@@ -274,6 +286,7 @@ fn run_tick<F: Fn(usize) -> usize>(
   block_cache: &BlockCache,
   version: &VersionVisibility,
   io_pool: &IOPool,
+  blob_storage: &BlobStorage,
   event_bus: &EventBus,
   cycle: &AtomicCell<Option<CheckpointCycle>>,
   metrics: &MetricsRegistry,
@@ -325,7 +338,7 @@ fn run_tick<F: Fn(usize) -> usize>(
     return Ok(());
   }
 
-  finalize_checkpoint(version, io_pool, wal, current.get_log_id())?;
+  finalize_checkpoint(version, io_pool, wal, blob_storage, current.get_log_id())?;
   metrics.checkpoint_cycle.record(current.take_start());
   info!("checkpoint complete id {}", current.get_log_id());
 
@@ -346,6 +359,7 @@ fn checkpoint_loop(
   block_cache: Arc<BlockCache>,
   version: Arc<VersionVisibility>,
   io_pool: Arc<IOPool>,
+  blob_storage: Arc<BlobStorage>,
   event_bus: Arc<EventBus>,
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
@@ -373,6 +387,7 @@ fn checkpoint_loop(
       &block_cache,
       &version,
       &io_pool,
+      &blob_storage,
       &event_bus,
       &cycle,
       &metrics,
@@ -382,18 +397,35 @@ fn checkpoint_loop(
   }
 }
 
+const FILE_EXT: &str = "snap";
+
 fn finalize_checkpoint(
   version: &VersionVisibility,
   io_pool: &IOPool,
   wal: &WriteAheadLog,
+  blob_storage: &BlobStorage,
   log_id: LogId,
 ) -> Result {
-  let (current_version, path) = version.persist_snapshot()?;
+  let (current_version, active, aborted) = version.snapshot();
+  let blobs = blob_storage.metadata_snapshot();
+  let snapshot = CheckpointSnapshot::new(active, aborted, blobs);
+
+  let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+  snapshot.write_at(&mut io_pool.open_append_io(current.clone())?)?;
   debug!("checkpoint snapshot persisted.");
   io_pool.sync_dir()?;
 
-  wal.checkpoint_and_flush(log_id, current_version, path.clone())?;
+  wal.checkpoint_and_flush(log_id, current_version, current.clone())?;
 
-  version.clear(&path)?;
+  for entry in io_pool.read_dir()? {
+    let name = PathBuf::from(entry.file_name());
+    if name.extension().is_none_or(|ext| ext != FILE_EXT) {
+      continue;
+    };
+    if name == current {
+      continue;
+    }
+    io_pool.truncate(&name)?;
+  }
   Ok(())
 }
