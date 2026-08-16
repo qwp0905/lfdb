@@ -94,7 +94,7 @@ impl IOPool {
       .base_dir
       .open_direct_io(options.write(true).create(true), &path)
       .map_err(Error::IO)?;
-    Ok(AppendIOHandle::new(file, filename))
+    Ok(AppendIOHandle::new(file))
   }
   pub fn open_scan_io(&self, filename: PathBuf) -> Result<ScanIOHandle> {
     let path = self.base_dir.get_path().join(&filename);
