@@ -5,9 +5,9 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_SIZE, BLOB_THRESHOLD};
+use super::{BlobLen, BlobMetadata, BlobOffset, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
-  disk::{AlignedBuf, IOHandle, PendingIO, ALIGN},
+  disk::{AlignedBuf, IOHandle, PendingIO},
   Error, Result,
 };
 
@@ -20,43 +20,20 @@ use crate::{
  * path rather than the dynamic alloc-and-write path.
  */
 pub struct BlobHandle {
-  id: BlobId,
   io: IOHandle,
+  metadata: BlobMetadata,
   reserved: AtomicU64,
 }
 impl BlobHandle {
-  pub fn replay(io: IOHandle) -> Result<Self> {
-    // Blob identity is stored in the segment header, not derived from the
-    // filename. Recovery can therefore discover the blob id from the file contents
-    // even if filename conventions change.
-    let mut bytes = AlignedBuf::new(BLOB_ID_BYTES);
-    io.read(bytes.get_mut_aligned_slice(), 0)
-      .map_err(Error::IO)?;
-    let id = BlobId::from_le_bytes(unsafe { bytes.as_ptr().cast::<[u8; _]>().read() });
-    let reserved = io.len().map_err(Error::IO)?;
-    Ok(Self {
-      id,
+  pub const fn new(io: IOHandle, metadata: BlobMetadata) -> Self {
+    Self {
       io,
-      reserved: AtomicU64::new(reserved),
-    })
+      metadata,
+      reserved: AtomicU64::new(0),
+    }
   }
-  pub fn open(id: BlobId, io: IOHandle) -> Result<Self> {
-    io.fallocate(0, BLOB_SIZE).map_err(Error::IO)?;
-    let mut buf = AlignedBuf::new(BLOB_ID_BYTES);
-    debug_assert_eq!(buf.size(), ALIGN);
-    let this = Self {
-      id,
-      io,
-      reserved: AtomicU64::new(buf.size() as BlobOffset),
-    };
-    buf
-      .as_mut_slice()
-      .copy_from_slice(&this.get_id().to_le_bytes());
-    this.write(&buf, 0)?;
-    Ok(this)
-  }
-  pub const fn get_id(&self) -> BlobId {
-    self.id
+  pub const fn metadata(&self) -> &BlobMetadata {
+    &self.metadata
   }
   pub fn reserve(&self, size: BlobOffset) -> BlobReserved {
     let mut offset = self.reserved.load(Ordering::Acquire);

@@ -3,11 +3,13 @@ use crate::{
   debug,
   disk::{AlignedBuf, IOPool},
   utils::{uuid_simple, SBox, Semaphore, ShortenedRwLock},
+  wal::WriteAheadLog,
   Result,
 };
 
-use super::{BlobHandle, BlobId, BlobLen, BlobOffset, BlobReserved};
+use super::{BlobHandle, BlobId, BlobLen, BlobMetadata, BlobOffset, BlobReserved};
 use std::{
+  collections::{HashMap, HashSet},
   path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
@@ -35,26 +37,47 @@ pub struct BlobStorage {
   writable: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
   last_id: AtomicU64,
   io_pool: Arc<IOPool>,
+  wal: Arc<WriteAheadLog>,
   append_gate: Semaphore,
 }
 impl BlobStorage {
-  pub fn replay(io_pool: Arc<IOPool>) -> Result<Self> {
+  pub fn replay(
+    handles: Vec<BlobMetadata>,
+    io_pool: Arc<IOPool>,
+    wal: Arc<WriteAheadLog>,
+  ) -> Result<Self> {
     // Writable state is runtime-only. After recovery, existing blob files are sealed
     // as readonly because the storage layer does not try to reconstruct the exact
     // append frontier inside each blob segment. Any unused tail space is accepted as
     // fragmentation.
 
+    let mut opened = HashSet::new();
     let mut readonly = ShrinkMap::new();
     let mut last_id = 0;
+    for metadata in handles {
+      if !opened.insert(metadata.get_filename().clone()) {
+        continue;
+      };
+
+      let id = metadata.get_id();
+      last_id = last_id.max(id + 1);
+
+      let handle = BlobHandle::new(
+        io_pool.open_direct_io(metadata.get_filename().clone())?,
+        metadata,
+      );
+      readonly.insert(id, SBox::new(handle));
+    }
+
     for entry in io_pool.read_dir()? {
       let filename = PathBuf::from(entry.file_name());
       if filename.extension().is_none_or(|ext| ext != FILE_EXT) {
         continue;
       }
-
-      let handle = BlobHandle::replay(io_pool.open_direct_io(filename)?)?;
-      last_id = last_id.max(handle.get_id() + 1);
-      readonly.insert(handle.get_id(), SBox::new(handle));
+      if opened.contains(&filename) {
+        continue;
+      }
+      io_pool.truncate(&filename)?;
     }
 
     Ok(Self {
@@ -62,12 +85,18 @@ impl BlobStorage {
       writable: RwLock::new(ShrinkMap::new()),
       last_id: AtomicU64::new(last_id),
       io_pool,
+      wal,
       append_gate: Semaphore::new(MAX_APPEND),
     })
   }
 
   pub fn readonly_handle_ids(&self) -> Vec<BlobId> {
-    self.readonly.rl().values().map(|h| h.get_id()).collect()
+    self
+      .readonly
+      .rl()
+      .values()
+      .map(|h| h.metadata().get_id())
+      .collect()
   }
   fn writable_handles(&self) -> Vec<SBox<BlobHandle>> {
     self.writable.rl().values().cloned().collect()
@@ -107,7 +136,7 @@ impl BlobStorage {
             // before returning a reference that may be persisted into the tree.
             handle.sync().wait()?;
             return Ok(BlobAppendGuard::new(
-              handle.get_id(),
+              handle.metadata().get_id(),
               offset,
               len as BlobLen,
               None,
@@ -118,7 +147,7 @@ impl BlobStorage {
             handle.write(&buf, offset)?;
             handle.sync().wait()?;
             return Ok(BlobAppendGuard::new(
-              handle.get_id(),
+              handle.metadata().get_id(),
               offset,
               len as BlobLen,
               Some((handle, self)),
@@ -128,15 +157,42 @@ impl BlobStorage {
         }
       }
 
-      let last_id = self.last_id.fetch_add(1, Ordering::Relaxed);
-      let new = BlobHandle::open(last_id, self.io_pool.open_direct_io(filename())?)?;
+      let new = self.open_new_handle()?;
 
       // The newly created blob file must be visible after a crash so replay/GC can
       // discover and account for it. Blob contents and directory namespace durability
       // are handled as separate boundaries.
       self.io_pool.sync_dir()?;
-      self.writable.wl().insert(last_id, SBox::new(new));
+      self.wal.append_blob_created(new.metadata().clone())?;
+      self
+        .writable
+        .wl()
+        .insert(new.metadata().get_id(), SBox::new(new));
     }
+  }
+
+  fn open_new_handle(&self) -> Result<BlobHandle> {
+    let id = self.last_id.fetch_add(1, Ordering::Relaxed);
+    let metadata = BlobMetadata::new(id, filename());
+
+    let io = self
+      .io_pool
+      .open_direct_io(metadata.get_filename().clone())?;
+    Ok(BlobHandle::new(io, metadata))
+  }
+
+  pub fn metadata_snapshot(&self) -> Vec<BlobMetadata> {
+    let mut handles = HashMap::new();
+    for handle in self.writable.rl().values() {
+      handles.insert(handle.metadata().get_id(), handle.metadata().clone());
+    }
+    for handle in self.readonly.rl().values() {
+      handles
+        .entry(handle.metadata().get_id())
+        .or_insert_with(|| handle.metadata().clone());
+    }
+
+    handles.into_values().collect()
   }
 }
 
@@ -184,10 +240,8 @@ impl<'a> Drop for BlobAppendGuard<'a> {
     let Some((handle, storage)) = self.handle.take() else {
       return;
     };
-    storage
-      .readonly
-      .wl()
-      .insert(handle.get_id(), handle.clone());
-    storage.writable.wl().remove(&handle.get_id());
+    let id = handle.metadata().get_id();
+    storage.readonly.wl().insert(id, handle.clone());
+    storage.writable.wl().remove(&id);
   }
 }
