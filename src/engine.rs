@@ -110,6 +110,7 @@ impl Engine {
         WALFormatVersion::CURRENT.as_u16(),
       );
       save_manifest(&io_pool, &manifest)?;
+      io_pool.sync_dir()?;
 
       let checkpoint = Checkpoint::new(
         wal.clone(),
