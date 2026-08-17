@@ -111,6 +111,28 @@ pub struct WriteAheadLog {
   event_bus: Arc<EventBus>,
 }
 impl WriteAheadLog {
+  pub fn init(
+    config: &WALConfig,
+    event_bus: Arc<EventBus>,
+    io_pool: Arc<IOPool>,
+  ) -> Result<Self> {
+    let max_len = config.max_file_size / WAL_BLOCK_SIZE;
+    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let max_len = max_len as Pointer;
+    let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
+    let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
+
+    Ok(Self {
+      last_log_id: AtomicLogId::new(0),
+      preloader,
+      buffer: Atomic::new(buffer),
+      page_pool,
+      sync_queue: SyncQueue::new(),
+      state: AtomicCell::new(State::Available),
+      max_len,
+      event_bus,
+    })
+  }
   pub fn replay(
     config: &WALConfig,
     event_bus: Arc<EventBus>,

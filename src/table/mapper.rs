@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata, TableName,
-  META_TABLE,
+  AtomicTableId, InitMetadata, TableHandle, TableHandleRef, TableId, TableMetadata,
+  TableName, META_TABLE,
 };
 use crate::{
   cache::ShrinkMap,
@@ -38,29 +38,33 @@ pub struct TableMapper {
   metadata: TableHandleRef,
   io_pool: Arc<IOPool>,
   last_table_id: AtomicTableId,
-  is_new: bool,
 }
 impl TableMapper {
-  pub fn new(io_pool: Arc<IOPool>) -> Result<Self> {
-    let filename = PathBuf::from(META_TABLE).with_extension(FILE_EXT);
-    let is_new = !io_pool.exists(&filename)?;
-
-    let disk = BlockIOHandle::new(io_pool.open_direct_io(filename.clone())?);
-    let metadata = TableHandle::new(
-      &TableMetadata::new(
-        META_TABLE_ID,
-        TableName::from_str_unchecked(META_TABLE),
-        filename,
-      ),
-      disk,
-    );
-
+  pub fn open_new(io_pool: Arc<IOPool>) -> Result<(Self, InitMetadata)> {
+    let filename = format!("{}.{}", META_TABLE, FILE_EXT);
+    let init = InitMetadata::new(META_TABLE_ID, META_TABLE.to_string(), filename.clone());
+    let disk = BlockIOHandle::new(io_pool.open_direct_io(PathBuf::from(filename))?);
+    let metadata = TableHandle::new(&init.try_cast().unwrap(), disk);
+    Ok((
+      Self {
+        open_handles: Default::default(),
+        metadata: SBox::new(metadata),
+        io_pool,
+        last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
+      },
+      init,
+    ))
+  }
+  pub fn open_exists(io_pool: Arc<IOPool>, init: &InitMetadata) -> Result<Self> {
+    let casted = init.try_cast()?;
+    let disk =
+      BlockIOHandle::new(io_pool.open_direct_io(casted.get_filename().to_path_buf())?);
+    let metadata = TableHandle::new(&casted, disk);
     Ok(Self {
       open_handles: Default::default(),
       metadata: SBox::new(metadata),
       io_pool,
       last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
-      is_new,
     })
   }
 
@@ -104,10 +108,6 @@ impl TableMapper {
       self.io_pool.truncate(&filename)?;
     }
     Ok(())
-  }
-
-  pub fn is_new(&self) -> bool {
-    self.is_new
   }
 
   pub fn get(&self, id: TableId) -> Option<TableHandleRef> {
