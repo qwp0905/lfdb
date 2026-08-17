@@ -65,6 +65,12 @@ pub enum Error {
 
   #[error("compression crashed at algorithm: {0:?}")]
   CompressionCrashed(RecordEncoding),
+
+  #[error("version unsupported.")]
+  UnsupportedVersion,
+
+  #[error("page size unsupported.")]
+  UnsupportedPageSize,
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;
