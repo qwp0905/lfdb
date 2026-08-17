@@ -363,8 +363,8 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
           if upper.is_none() {
             let top = node.top()?;
             if match start {
-              Bound::Included(k) => top <= k,
-              Bound::Excluded(k) => top <= k,
+              Bound::Included(k) => top <= k.as_slice(),
+              Bound::Excluded(k) => top <= k.as_slice(),
               Bound::Unbounded => false,
             } {
               closed = true;
@@ -391,8 +391,8 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
 
           if let Some((p, high)) = node.get_next_with_key() {
             if match end {
-              Bound::Included(key) => high <= key,
-              Bound::Excluded(key) => high < key,
+              Bound::Included(key) => high <= key.as_slice(),
+              Bound::Excluded(key) => high < key.as_slice(),
               Bound::Unbounded => true,
             } {
               ptr = p;
