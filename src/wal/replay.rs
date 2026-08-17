@@ -9,6 +9,7 @@ use crate::{
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
+  utils::OpaqueRead,
   Error,
 };
 
@@ -91,14 +92,12 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
     let len = segment.len();
 
     while segment.get_offset() + (LogRecord::LEN_BYTES as u64) < len {
-      let mut buf = [0; LogRecord::LEN_BYTES];
-      segment.read(&mut buf)?;
-      let byte_len = u16::from_le_bytes(buf) as usize;
+      let byte_len = u16::from_le_bytes(segment.read_array_opaque()?) as usize;
       if segment.get_offset() + (byte_len as u64) > len {
         break;
       }
 
-      let buf = segment.read_to_vec(byte_len)?;
+      let buf = segment.read_to_vec_opaque(byte_len)?;
       let Some(record) = LogRecord::read_from(&buf) else {
         break;
       };
