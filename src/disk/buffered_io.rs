@@ -15,13 +15,11 @@ pub struct AppendIOHandle {
   buffer: AlignedArray,
   buffer_offset: usize,
   file_offset: u64,
-  filename: PathBuf,
 }
 impl AppendIOHandle {
-  pub const fn new(file: Box<dyn IOBackend>, filename: PathBuf) -> Self {
+  pub const fn new(file: Box<dyn IOBackend>) -> Self {
     Self {
       file,
-      filename,
       buffer: AlignedArray::new(),
       buffer_offset: 0,
       file_offset: 0,
@@ -56,10 +54,10 @@ impl AppendIOHandle {
    * The handle is consumed because this is the finalization step for the append
    * stream.
    */
-  pub fn flush(mut self) -> Result<PathBuf> {
+  pub fn flush(&mut self) -> Result {
     self.flush_buf()?;
     self.file.fsync().map_err(Error::IO)?;
-    Ok(self.filename)
+    Ok(())
   }
 }
 

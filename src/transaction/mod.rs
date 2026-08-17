@@ -21,3 +21,6 @@ use active::*;
 
 mod checkpoint;
 pub use checkpoint::*;
+
+mod snapshot;
+pub use snapshot::*;

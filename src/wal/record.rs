@@ -2,6 +2,7 @@ use std::{ffi::OsStr, path::PathBuf};
 
 use super::{LogId, RecordEncoding, TxId};
 use crate::{
+  blob::BlobMetadata,
   disk::{Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
   utils::{OffsetReader, OffsetWriter},
@@ -30,6 +31,7 @@ pub enum Operation {
     current_version: TxId, // current version
     snapshot: PathBuf,     // mvcc snapshot path
   },
+  BlobCreated(BlobMetadata), // created blob metadata
 }
 impl Operation {
   const fn type_byte(&self) -> u8 {
@@ -37,6 +39,7 @@ impl Operation {
       Self::Insert { .. } => 1,
       Self::Commit => 2,
       Self::Checkpoint { .. } => 3,
+      Self::BlobCreated(_) => 4,
     }
   }
 
@@ -48,6 +51,7 @@ impl Operation {
       Self::Checkpoint { snapshot, .. } => {
         TX_ID_BYTES + LOG_ID_BYTES + snapshot.as_os_str().len()
       }
+      Self::BlobCreated(metadata) => metadata.byte_len(),
       _ => 0,
     }
   }
@@ -112,6 +116,7 @@ impl LogRecord {
           snapshot: path.into(),
         }
       }
+      4 => Operation::BlobCreated(BlobMetadata::read_from(&mut reader)?),
       _ => return None,
     };
     Some(LogRecord::new(log_id, tx_id, operation))
@@ -150,6 +155,9 @@ impl LogRecord {
         writer.write(snapshot.as_os_str().as_encoded_bytes());
       }
       Operation::Commit => {}
+      Operation::BlobCreated(metadata) => {
+        metadata.write_at(&mut writer);
+      }
     }
     debug_assert_eq!(writer.written_bytes(), buf.len() - 4);
 
@@ -238,6 +246,9 @@ impl LogRecordUninit {
         snapshot: snapshot_path,
       },
     )
+  }
+  pub fn new_blob_created(metadata: BlobMetadata) -> Self {
+    Self::new(0, Operation::BlobCreated(metadata))
   }
 }
 
