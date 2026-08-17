@@ -1,4 +1,4 @@
-use std::{mem::replace, path::PathBuf};
+use std::path::PathBuf;
 
 use super::{AlignedArray, DirHandle, IOBackend, ALIGN};
 use crate::{error::Result, utils::SBox, Error};
@@ -26,26 +26,27 @@ impl AppendIOHandle {
     }
   }
   pub fn append(&mut self, mut buf: &[u8]) -> Result {
-    loop {
-      let end = self.buffer_offset + buf.len();
-      if end <= ALIGN {
-        self.buffer[replace(&mut self.buffer_offset, end)..end].copy_from_slice(buf);
-        return Ok(());
+    while !buf.is_empty() {
+      debug_assert!(self.buffer_offset <= ALIGN);
+      if self.buffer_offset == ALIGN {
+        self.flush_buf()?;
+        self.file_offset += ALIGN as u64;
+        self.buffer_offset = 0;
       }
 
-      let available = ALIGN - self.buffer_offset;
-      self.buffer[self.buffer_offset..].copy_from_slice(&buf[..available]);
-      self.flush_buf()?;
-      buf = &buf[available..];
+      let end = (self.buffer_offset + buf.len()).min(ALIGN);
+      let bytes = end - self.buffer_offset;
+      self.buffer[self.buffer_offset..end].copy_from_slice(&buf[..bytes]);
+      self.buffer_offset = end;
+      buf = &buf[bytes..];
     }
+    Ok(())
   }
   fn flush_buf(&mut self) -> Result {
     self
       .file
       .pwrite_or_fail(&*self.buffer, self.file_offset)
       .map_err(Error::IO)?;
-    self.file_offset += ALIGN as u64;
-    self.buffer_offset = 0;
     Ok(())
   }
   /**
@@ -54,7 +55,7 @@ impl AppendIOHandle {
    * The handle is consumed because this is the finalization step for the append
    * stream.
    */
-  pub fn flush(&mut self) -> Result {
+  pub fn flush_all(&mut self) -> Result {
     self.flush_buf()?;
     self.file.fsync().map_err(Error::IO)?;
     Ok(())
@@ -99,8 +100,6 @@ impl ScanIOHandle {
       .file
       .pread_or_fail(&mut *self.buffer, self.file_offset)
       .map_err(Error::IO)?;
-    self.file_offset += ALIGN as u64;
-    self.buffer_offset = 0;
     Ok(())
   }
   pub fn read_to_vec(&mut self, bytes: usize) -> Result<Vec<u8>> {
@@ -108,19 +107,27 @@ impl ScanIOHandle {
     self.read(&mut buf)?;
     Ok(buf)
   }
-  pub fn read(&mut self, mut buf: &mut [u8]) -> Result {
-    loop {
-      let end = self.buffer_offset + buf.len();
-      if end <= ALIGN {
-        buf.copy_from_slice(&self.buffer[replace(&mut self.buffer_offset, end)..end]);
-        return Ok(());
+  pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+    let mut buf = [0; N];
+    self.read(&mut buf)?;
+    Ok(buf)
+  }
+  fn read(&mut self, mut buf: &mut [u8]) -> Result {
+    while !buf.is_empty() {
+      debug_assert!(self.buffer_offset <= ALIGN);
+      if self.buffer_offset == ALIGN {
+        self.fill_buf()?;
+        self.file_offset += ALIGN as u64;
+        self.buffer_offset = 0;
       }
 
-      let available = ALIGN - self.buffer_offset;
-      buf[..available].copy_from_slice(&self.buffer[self.buffer_offset..]);
-      self.fill_buf()?;
-      buf = &mut buf[available..];
+      let end = (self.buffer_offset + buf.len()).min(ALIGN);
+      let bytes = end - self.buffer_offset;
+      buf[..bytes].copy_from_slice(&self.buffer[self.buffer_offset..end]);
+      self.buffer_offset = end;
+      buf = &mut buf[bytes..];
     }
+    Ok(())
   }
   pub const fn len(&self) -> u64 {
     self.file_len
