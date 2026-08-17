@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn test_simple() {
   let id = 13;
-  let name = TableName::from_str_unchecked("test");
+  let name = unsafe { TableName::from_str_unchecked("test") };
   let path = PathBuf::from(&*name);
   let metadata = TableMetadata::new(id, name.clone(), path.clone());
 
@@ -18,7 +18,7 @@ fn test_simple() {
 #[test]
 fn test_compaction() {
   let id = 13;
-  let name = TableName::from_str_unchecked("test");
+  let name = unsafe { TableName::from_str_unchecked("test") };
   let path = PathBuf::from(&*name);
   let cid = 123123;
   let cpath = PathBuf::from("compaction");

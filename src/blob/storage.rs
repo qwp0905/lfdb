@@ -41,6 +41,16 @@ pub struct BlobStorage {
   append_gate: Semaphore,
 }
 impl BlobStorage {
+  pub fn init(io_pool: Arc<IOPool>, wal: Arc<WriteAheadLog>) -> Self {
+    Self {
+      readonly: Default::default(),
+      writable: Default::default(),
+      last_id: AtomicU64::new(0),
+      io_pool,
+      wal,
+      append_gate: Semaphore::new(MAX_APPEND),
+    }
+  }
   pub fn replay(
     handles: Vec<BlobMetadata>,
     io_pool: Arc<IOPool>,

@@ -60,6 +60,9 @@ impl AppendIOHandle {
     self.file.fsync().map_err(Error::IO)?;
     Ok(())
   }
+  pub const fn is_aligned(&self) -> bool {
+    self.buffer_offset == ALIGN
+  }
 }
 
 /**

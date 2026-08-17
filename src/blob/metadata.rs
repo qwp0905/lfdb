@@ -1,7 +1,6 @@
 use std::{ffi::OsStr, path::PathBuf};
 
 use crate::{
-  disk::ALIGN,
   objects::{LARGE_VALUE, MAX_VALUE},
   utils::{OffsetReader, OffsetWriter},
 };
@@ -18,7 +17,7 @@ pub const BLOB_LEN_BYTES: usize = BlobLen::BITS as usize >> 3;
 /**
  * Blob sizing defaults derived from the maximum supported value size.
  */
-pub const BLOB_SIZE: BlobOffset = (MAX_VALUE + ALIGN) as BlobOffset;
+pub const BLOB_SIZE: BlobOffset = MAX_VALUE as BlobOffset;
 pub const BLOB_THRESHOLD: BlobOffset = BLOB_SIZE - LARGE_VALUE as BlobOffset;
 
 #[derive(Debug)]

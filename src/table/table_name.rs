@@ -25,7 +25,7 @@ impl TableName {
       return Err(Error::NotAllowedChar(c));
     }
 
-    Ok(Self::from_str_unchecked(name))
+    Ok(unsafe { Self::from_str_unchecked(name) })
   }
 
   /**
@@ -34,7 +34,7 @@ impl TableName {
    * This is an unsafe-equivalent constructor: callers must guarantee the same
    * invariants enforced by `from_str`.
    */
-  pub fn from_str_unchecked(name: &str) -> Self {
+  pub unsafe fn from_str_unchecked(name: &str) -> Self {
     Self(name.to_string())
   }
 }

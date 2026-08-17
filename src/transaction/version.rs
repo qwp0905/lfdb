@@ -15,7 +15,7 @@ use crate::{
   background::{EventBus, SharedSubscription},
   binding_events, error,
   utils::{OffsetBitmap, SBox},
-  wal::{TxId, WALFailed},
+  wal::{TxId, WALFailed, RESERVED_TX},
   Result,
 };
 
@@ -109,6 +109,15 @@ impl VersionVisibility {
     });
     event_bus.register(&this);
     Ok(this)
+  }
+  pub fn init(event_bus: &EventBus) -> Arc<Self> {
+    let this = Arc::new(Self {
+      aborted: Default::default(),
+      active: ActiveSet::new(RESERVED_TX + 1),
+      closed: AtomicBool::new(false),
+    });
+    event_bus.register(&this);
+    this
   }
 
   /**

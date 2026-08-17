@@ -4,6 +4,8 @@ use std::{
   sync::atomic::AtomicU32,
 };
 
+use serde::{Deserialize, Serialize};
+
 use super::TableName;
 use crate::{
   utils::{OffsetReader, OffsetWriter},
@@ -14,6 +16,88 @@ pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
 pub type AtomicTableId = AtomicU32;
 
+#[derive(Debug, Clone, Copy)]
+pub enum TableFormatVersion {
+  V0,
+}
+impl TableFormatVersion {
+  pub const CURRENT: Self = Self::V0;
+
+  pub const fn from_u16(version: u16) -> Option<Self> {
+    match version {
+      0 => Some(Self::V0),
+      _ => None,
+    }
+  }
+  pub const fn as_u16(&self) -> u16 {
+    match self {
+      Self::V0 => 0,
+    }
+  }
+
+  const BYTE_LEN: usize = u16::BITS as usize >> 3;
+}
+
+#[derive(Debug)]
+struct SegmentSpec {
+  id: TableId,
+  filename: PathBuf,
+  version: TableFormatVersion,
+}
+impl SegmentSpec {
+  const fn new(id: TableId, filename: PathBuf, version: TableFormatVersion) -> Self {
+    Self {
+      id,
+      filename,
+      version,
+    }
+  }
+  fn read_from(reader: &mut OffsetReader) -> Result<Self> {
+    let Some(id) = reader.read_array().map(TableId::from_le_bytes) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(version) = reader.read_u16().and_then(TableFormatVersion::from_u16) else {
+      return Err(Error::UnsupportedVersion);
+    };
+    let Some(len) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(bytes) = reader.read(len as usize) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let filename = unsafe { OsStr::from_encoded_bytes_unchecked(bytes) };
+    Ok(Self {
+      id,
+      filename: PathBuf::from(filename),
+      version,
+    })
+  }
+  fn write_to(&self, writer: &mut OffsetWriter) {
+    writer.write(&self.id.to_le_bytes());
+    writer.write_u16(self.version.as_u16());
+
+    let bytes = self.filename.as_os_str().as_encoded_bytes();
+    writer.write_u16(bytes.len() as u16);
+    writer.write(bytes);
+  }
+
+  fn byte_len(&self) -> usize {
+    TABLE_ID_BYTES
+      + 2
+      + self.filename.as_os_str().as_encoded_bytes().len()
+      + TableFormatVersion::BYTE_LEN
+  }
+}
+impl Clone for SegmentSpec {
+  fn clone(&self) -> Self {
+    Self {
+      id: self.id,
+      filename: self.filename.clone(),
+      version: self.version,
+    }
+  }
+}
+
 /**
  * Durable table descriptor stored in the metadata table.
  *
@@ -23,9 +107,8 @@ pub type AtomicTableId = AtomicU32;
  */
 #[derive(Debug)]
 pub struct TableMetadata {
-  id: TableId,
   name: TableName,
-  filename: PathBuf,
+  spec: SegmentSpec,
   /**
    * In-progress compaction target, if any.
    *
@@ -34,25 +117,24 @@ pub struct TableMetadata {
    * with the table descriptor, recovery can also discover the compaction target
    * after a crash.
    */
-  compaction: Option<(TableId, PathBuf)>,
+  compaction: Option<SegmentSpec>,
 }
 impl TableMetadata {
   pub const fn new(id: TableId, name: TableName, filename: PathBuf) -> Self {
     Self {
-      id,
       name,
-      filename,
+      spec: SegmentSpec::new(id, filename, TableFormatVersion::CURRENT),
       compaction: None,
     }
   }
 
   pub fn set_compaction(&mut self, metadata: &TableMetadata) {
-    self.compaction = Some((metadata.get_id(), metadata.get_filename().into()))
+    self.compaction = Some(metadata.spec.clone());
   }
 
   pub const fn get_compaction_id(&self) -> Option<TableId> {
     match &self.compaction {
-      Some((id, _)) => Some(*id),
+      Some(spec) => Some(spec.id),
       None => None,
     }
   }
@@ -63,96 +145,77 @@ impl TableMetadata {
    * and backing file.
    */
   pub fn get_compaction_metadata(&self) -> Option<TableMetadata> {
-    let (id, filename) = self.compaction.as_ref()?;
-    Some(TableMetadata::new(*id, self.name.clone(), filename.clone()))
+    let spec = self.compaction.as_ref()?;
+    Some(Self {
+      name: self.name.clone(),
+      spec: spec.clone(),
+      compaction: None,
+    })
   }
 
-  fn compaction_len(&self) -> usize {
-    let Some((_, file)) = &self.compaction else {
-      return 1;
-    };
-    1 + file.as_os_str().len() + 2 + TABLE_ID_BYTES
+  fn byte_len(&self) -> usize {
+    1 + self
+      .compaction
+      .as_ref()
+      .map(|spec| spec.byte_len())
+      .unwrap_or(0)
+      + self.spec.byte_len()
+      + 2
+      + self.name.len()
   }
 
   pub fn to_vec(&self) -> Vec<u8> {
-    let filename = self.filename.as_os_str().as_encoded_bytes();
-    let filename_len = filename.len();
-    let name_len = self.name.len();
-    let compaction_len = self.compaction_len();
-    let mut vec =
-      vec![0; filename_len + 2 + name_len + 2 + TABLE_ID_BYTES + compaction_len];
+    let mut bytes = vec![0; self.byte_len()];
+    let mut writer = OffsetWriter::new(&mut bytes);
 
-    let mut writer = OffsetWriter::new(&mut vec);
-    match &self.compaction {
-      Some((id, path)) => {
+    match self.compaction.as_ref() {
+      Some(spec) => {
         writer.write_u8(1);
-        writer.write_u32(*id);
-
-        let path = path.as_os_str().as_encoded_bytes();
-        writer.write_u16(path.len() as u16);
-        writer.write(path);
+        spec.write_to(&mut writer);
       }
       None => {
         writer.write_u8(0);
       }
-    };
+    }
 
-    writer.write_u32(self.id);
-
-    writer.write_u16(name_len as u16);
+    writer.write_u16(self.name.len() as u16);
     writer.write(self.name.as_bytes());
 
-    writer.write_u16(filename_len as u16);
-    writer.write(filename);
-
-    vec
+    self.spec.write_to(&mut writer);
+    debug_assert_eq!(writer.written_bytes(), bytes.len());
+    bytes
   }
 
-  fn read_from(bytes: &[u8]) -> Option<Self> {
+  pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
     let mut reader = OffsetReader::new(bytes);
-    let compaction = match reader.read_byte()? {
-      0 => None,
-      1 => {
-        let id = reader.read_u32()?;
-        let len = reader.read_u16()? as usize;
-        let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read(len)?) };
-        Some((id, PathBuf::from(path)))
-      }
-      _ => return None,
+    let compaction = match reader.read_byte() {
+      Some(0) => None,
+      Some(1) => Some(SegmentSpec::read_from(&mut reader)?),
+      _ => return Err(Error::InvalidFormat("metadata crashed.")),
     };
 
-    let id = reader.read_u32()?;
-
-    let name_len = reader.read_u16()? as usize;
-    let name = TableName::from_str_unchecked(unsafe {
-      str::from_utf8_unchecked(reader.read(name_len)?)
-    });
-
-    let path_len = reader.read_u16()? as usize;
-    let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read(path_len)?) };
-
-    Some(Self {
-      id,
+    let Some(name_len) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(name) = reader.read(name_len as usize) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let name = unsafe { TableName::from_str_unchecked(str::from_utf8_unchecked(name)) };
+    let spec = SegmentSpec::read_from(&mut reader)?;
+    Ok(Self {
       name,
-      filename: PathBuf::from(path),
+      spec,
       compaction,
     })
   }
 
-  pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-    match Self::read_from(bytes) {
-      Some(v) => Ok(v),
-      None => Err(Error::InvalidFormat("metadata crashed.")),
-    }
-  }
-
   #[inline]
   pub const fn get_id(&self) -> TableId {
-    self.id
+    self.spec.id
   }
   #[inline]
   pub fn get_filename(&self) -> &Path {
-    &self.filename
+    &self.spec.filename
   }
   #[inline]
   pub fn get_name(&self) -> &TableName {
@@ -163,11 +226,38 @@ impl TableMetadata {
 impl Clone for TableMetadata {
   fn clone(&self) -> Self {
     Self {
-      id: self.id,
       name: self.name.clone(),
-      filename: self.filename.clone(),
-      compaction: self.compaction.clone(),
+      spec: self.spec.clone(),
+      compaction: self.compaction.as_ref().cloned(),
     }
+  }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InitMetadata {
+  pub id: TableId,
+  pub name: String,
+  pub filename: String,
+  pub version: u16,
+}
+impl InitMetadata {
+  pub const fn new(id: TableId, name: String, filename: String) -> Self {
+    Self {
+      id,
+      name,
+      filename,
+      version: TableFormatVersion::CURRENT.as_u16(),
+    }
+  }
+  pub fn try_cast(&self) -> Result<TableMetadata> {
+    let Some(version) = TableFormatVersion::from_u16(self.version) else {
+      return Err(Error::UnsupportedVersion);
+    };
+    Ok(TableMetadata {
+      name: unsafe { TableName::from_str_unchecked(&self.name) },
+      spec: SegmentSpec::new(self.id, PathBuf::from(self.filename.as_str()), version),
+      compaction: None,
+    })
   }
 }
 

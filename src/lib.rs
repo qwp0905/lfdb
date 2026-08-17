@@ -35,3 +35,5 @@ pub use config::*;
 mod objects;
 
 mod blob;
+
+mod manifest;

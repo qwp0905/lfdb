@@ -19,14 +19,15 @@ use crate::{
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
+  manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   table::{TableId, TableMapper, META_TABLE_ID},
   transaction::{
-    Checkpoint, CheckpointSnapshot, PageRecorder, Transaction, TransactionConfig,
-    TxOrchestrator, VersionVisibility,
+    Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
+    TransactionConfig, TxOrchestrator, VersionVisibility,
   },
   utils::ToArc,
-  wal::{WALConfig, WriteAheadLog},
+  wal::{WALConfig, WALFormatVersion, WriteAheadLog},
   Error, Result,
 };
 
@@ -88,33 +89,28 @@ impl Engine {
 
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
-    let tables = TableMapper::new(io_pool.clone())?.to_arc();
 
-    let (wal, replay) =
-      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
-    let wal = wal.to_arc();
-
-    let snapshot = match replay.last_snapshot {
-      Some(file) => CheckpointSnapshot::read_from(&mut io_pool.open_scan_io(file)?)?,
-      None => CheckpointSnapshot::empty(),
-    };
-    let mut blob_metadata = snapshot.blob_metadata;
-    blob_metadata.extend(replay.blob_handles);
-    let blob = BlobStorage::replay(blob_metadata, io_pool.clone(), wal.clone())?.to_arc();
-
-    let recorder = PageRecorder::new(wal.clone()).to_arc();
-    let version_visibility = VersionVisibility::replay(
-      replay.last_tx_id,
-      replay.started,
-      replay.closed,
-      snapshot.active_versions,
-      snapshot.aborted_versions,
-      &event_bus,
-    )?;
-
-    if tables.is_new() {
+    let Some(manifest) = load_manifest(&io_pool)? else {
       info!("engine initial state.");
+      let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
+
+      let tables = tables.to_arc();
+      let wal =
+        WriteAheadLog::init(&wal_config, event_bus.clone(), io_pool.clone())?.to_arc();
+      let blob = BlobStorage::init(io_pool.clone(), wal.clone()).to_arc();
+      let recorder = PageRecorder::new(wal.clone()).to_arc();
+      let version_visibility = VersionVisibility::init(&event_bus);
+
       initialize(&block_cache, &tables, &recorder, &version_visibility, &blob)?;
+
+      let manifest = Manifest::new(
+        PAGE_SIZE as u32,
+        metadata,
+        SnapshotFormatVersion::CURRENT.as_u16(),
+        WALFormatVersion::CURRENT.as_u16(),
+      );
+      save_manifest(&io_pool, &manifest)?;
+      io_pool.sync_dir()?;
 
       let checkpoint = Checkpoint::new(
         wal.clone(),
@@ -170,9 +166,37 @@ impl Engine {
         available: AtomicBool::new(true),
         metrics_registry,
       });
+    };
+
+    if manifest.page_size != PAGE_SIZE as u32 {
+      return Err(Error::UnsupportedPageSize);
     }
 
+    let tables =
+      TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
+
     info!("trying to replay...");
+    let (wal, replay) =
+      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
+    let wal = wal.to_arc();
+
+    let snapshot = match replay.last_snapshot {
+      Some(file) => CheckpointSnapshot::read_from(&mut io_pool.open_scan_io(file)?)?,
+      None => CheckpointSnapshot::empty(),
+    };
+    let mut blob_metadata = snapshot.blob_metadata;
+    blob_metadata.extend(replay.blob_handles);
+    let blob = BlobStorage::replay(blob_metadata, io_pool.clone(), wal.clone())?.to_arc();
+
+    let recorder = PageRecorder::new(wal.clone()).to_arc();
+    let version_visibility = VersionVisibility::replay(
+      replay.last_tx_id,
+      replay.started,
+      replay.closed,
+      snapshot.active_versions,
+      snapshot.aborted_versions,
+      &event_bus,
+    )?;
 
     let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
