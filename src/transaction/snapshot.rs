@@ -2,7 +2,7 @@ use crate::{
   blob::BlobMetadata,
   disk::{AppendIOHandle, ScanIOHandle},
   utils::{OffsetReader, OffsetWriter},
-  wal::{TxId, TX_ID_BYTES},
+  wal::TxId,
   Error, Result,
 };
 
@@ -37,28 +37,26 @@ impl CheckpointSnapshot {
     let mut blob_metadata = Vec::new();
 
     {
-      let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
+      let len = u32::from_le_bytes(file.read_array()?);
       for _ in 0..len {
-        let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
+        let id = TxId::from_le_bytes(file.read_array()?);
         active_versions.push(id);
       }
     }
 
     {
-      let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
+      let len = u32::from_le_bytes(file.read_array()?);
       for _ in 0..len {
-        let id = TxId::from_le_bytes(file.read_to_vec(TX_ID_BYTES)?.try_into().unwrap());
+        let id = TxId::from_le_bytes(file.read_array()?);
         aborted_versions.push(id);
       }
     }
 
     {
-      let len = u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap());
+      let len = u32::from_le_bytes(file.read_array()?);
       for _ in 0..len {
-        let byte_len =
-          u32::from_le_bytes(file.read_to_vec(4)?.try_into().unwrap()) as usize;
-        let mut bytes = vec![0; byte_len];
-        file.read(&mut bytes)?;
+        let byte_len = u32::from_le_bytes(file.read_array()?) as usize;
+        let bytes = file.read_to_vec(byte_len)?;
         let Some(metadata) = BlobMetadata::read_from(&mut OffsetReader::new(&bytes))
         else {
           return Err(Error::InvalidFormat("blob metadata crashed."));
@@ -101,7 +99,7 @@ impl CheckpointSnapshot {
       }
     }
 
-    file.flush()?;
+    file.flush_all()?;
     Ok(())
   }
 }

@@ -91,9 +91,7 @@ pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
     let len = segment.len();
 
     while segment.get_offset() + (LogRecord::LEN_BYTES as u64) < len {
-      let mut buf = [0; LogRecord::LEN_BYTES];
-      segment.read(&mut buf)?;
-      let byte_len = u16::from_le_bytes(buf) as usize;
+      let byte_len = u16::from_le_bytes(segment.read_array()?) as usize;
       if segment.get_offset() + (byte_len as u64) > len {
         break;
       }
