@@ -1,11 +1,11 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use super::{LogId, RecordEncoding, TxId};
+use super::{LogId, TxId};
 use crate::{
   blob::BlobMetadata,
   disk::{Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
-  utils::{OffsetReader, OffsetWriter},
+  utils::{Encoding, OffsetReader, OffsetWriter},
   wal::{LOG_ID_BYTES, TX_ID_BYTES},
 };
 
@@ -13,11 +13,11 @@ use crate::{
 pub enum Operation {
   Insert {
     table_id: TableId,
-    pointer: Pointer,         // disk pointer of the page
-    current_version: TxId,    // current version at the time the wal record was written
-    data: Vec<u8>,            // data
-    original_len: u16,        // original len before compression
-    encoding: RecordEncoding, // encoding of compression
+    pointer: Pointer,      // disk pointer of the page
+    current_version: TxId, // current version at the time the wal record was written
+    data: Vec<u8>,         // data
+    original_len: u16,     // original len before compression
+    encoding: Encoding,    // encoding of compression
   },
   Commit,
   /**
@@ -94,7 +94,7 @@ impl LogRecord {
         let pointer = reader.read_u64()?;
         let current_version = reader.read_u64()?;
         let original_len = reader.read_u16()?;
-        let encoding = RecordEncoding::from_byte(reader.read_byte()?)?;
+        let encoding = Encoding::from_byte(reader.read_byte()?)?;
         let data = reader.read_all();
         Operation::Insert {
           table_id,
@@ -204,7 +204,7 @@ impl LogRecordUninit {
     table_id: TableId,
     pointer: Pointer,
     current_version: TxId,
-    encoding: RecordEncoding,
+    encoding: Encoding,
     data: &[u8],
   ) -> Self {
     let original_len = data.len() as u16;

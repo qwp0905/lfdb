@@ -2,7 +2,7 @@ use std::{io, result};
 
 use thiserror::Error;
 
-use crate::wal::RecordEncoding;
+use crate::utils::Encoding;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -64,7 +64,7 @@ pub enum Error {
   InvalidConfig(&'static str),
 
   #[error("compression crashed at algorithm: {0:?}")]
-  CompressionCrashed(RecordEncoding),
+  CompressionCrashed(Encoding),
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;

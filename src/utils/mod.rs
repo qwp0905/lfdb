@@ -32,3 +32,9 @@ pub use backoff::*;
 
 mod semaphore;
 pub use semaphore::*;
+
+mod encoding;
+pub use encoding::*;
+
+mod opaque;
+pub use opaque::*;

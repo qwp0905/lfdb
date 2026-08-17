@@ -17,13 +17,13 @@ use crate::{
   disk::{IOPool, PagePool, Pointer},
   error, info,
   table::TableId,
-  utils::SharedToken,
+  utils::{Encoding, SharedToken},
   Error, Result,
 };
 
 use super::{
-  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, RecordEncoding, ReplayResult,
-  SegmentPreload, SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
+  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, ReplayResult, SegmentPreload,
+  SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -59,7 +59,7 @@ fn pin() -> Guard {
   LOCAL.with(LocalHandle::pin)
 }
 
-const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
+const DEFAULT_ENCODING: Encoding = Encoding::Lz4;
 
 /**
  * Lock-free, group-commit write-ahead log.
