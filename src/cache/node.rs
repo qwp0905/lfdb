@@ -58,17 +58,17 @@ impl<K, V> CacheEntry<K, V> {
     &self.key
   }
 
-  const fn new_small(key: K) -> Self {
+  const fn new_small(key: K, value: V) -> Self {
     Self {
       key,
-      value: MaybeUninit::uninit(),
+      value: MaybeUninit::new(value),
       state: State::Small { freq: 0 },
     }
   }
-  const fn new_main(key: K) -> Self {
+  const fn new_main(key: K, value: V) -> Self {
     Self {
       key,
-      value: MaybeUninit::uninit(),
+      value: MaybeUninit::new(value),
       state: State::Main { freq: 0 },
     }
   }
@@ -86,9 +86,6 @@ impl<K, V> CacheEntry<K, V> {
   }
   const fn take_value(&self) -> V {
     unsafe { self.value.assume_init_read() }
-  }
-  const fn value_ptr(&mut self) -> *mut V {
-    self.value.as_mut_ptr()
   }
   fn drop_value(&mut self) {
     unsafe { self.value.assume_init_drop() };
@@ -150,27 +147,48 @@ where
 
   pub fn reserve<S, R, F>(
     &mut self,
-    key: &K,
-    hash: u64,
     hash_builder: &S,
     try_evict: F,
-  ) -> std::result::Result<Reserved<K, V, R>, ()>
+  ) -> std::result::Result<Evicted<K, V, R>, ()>
   where
     K: Clone,
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
-    debug_assert!(self.table.find(hash, equivalent(key)).is_none());
     let hasher = make_hasher(hash_builder);
     let evicted = self.evict(&hasher, &try_evict)?;
+    Ok(Evicted::new(evicted, EvictedTo::Small))
+  }
 
-    let mut ptr =
-      NonNull::from_mut(Box::leak(Box::new(CacheEntry::new_small(key.clone()))));
-    self.table.insert_unique(hash, ptr, &hasher);
-
-    self.small.push(ptr);
-    self.small_count += 1;
-    Ok(Reserved::new(evicted, unsafe { ptr.as_mut() }.value_ptr()))
+  pub fn insert_to<S>(
+    &mut self,
+    key: &K,
+    hash: u64,
+    value: V,
+    hash_builder: &S,
+    toward: EvictedTo,
+  ) where
+    K: Clone,
+    S: BuildHasher,
+  {
+    debug_assert!(self.table.find(hash, equivalent(key)).is_none());
+    let hasher = make_hasher(hash_builder);
+    match toward {
+      EvictedTo::Main => {
+        let entry = CacheEntry::new_main(key.clone(), value);
+        let ptr = NonNull::from_mut(Box::leak(Box::new(entry)));
+        self.table.insert_unique(hash, ptr, &hasher);
+        self.main.push(ptr);
+        self.main_count += 1;
+      }
+      EvictedTo::Small => {
+        let entry = CacheEntry::new_small(key.clone(), value);
+        let ptr = NonNull::from_mut(Box::leak(Box::new(entry)));
+        self.table.insert_unique(hash, ptr, &hasher);
+        self.small.push(ptr);
+        self.small_count += 1;
+      }
+    }
   }
 
   /**
@@ -185,7 +203,7 @@ where
     hash: u64,
     hash_builder: &S,
     try_evict: F,
-  ) -> std::result::Result<GetOrReserve<'_, K, V, R>, ()>
+  ) -> std::result::Result<GetOrEvicted<'_, K, V, R>, ()>
   where
     K: Clone,
     S: BuildHasher,
@@ -193,8 +211,8 @@ where
   {
     let Ok(mut bucket) = self.table.find_entry(hash, equivalent(key)) else {
       return self
-        .reserve(key, hash, hash_builder, try_evict)
-        .map(GetOrReserve::Reserved);
+        .reserve(hash_builder, try_evict)
+        .map(GetOrEvicted::Evicted);
     };
 
     let hasher = make_hasher(hash_builder);
@@ -203,7 +221,7 @@ where
     match entry.get_state_mut() {
       State::Small { freq } | State::Main { freq } => {
         *freq = (*freq + 1).min(MAX_FREQ);
-        Ok(GetOrReserve::Hit(entry.get_value()))
+        Ok(GetOrEvicted::Hit(entry.get_value()))
       }
       State::Ghost => {
         let (mut old, _) = bucket.remove();
@@ -215,17 +233,9 @@ where
         unsafe { old.as_mut() }.set_state(State::Tombstone);
 
         let evicted = self.evict(&hasher, &try_evict)?;
-
-        let mut ptr =
-          NonNull::from_mut(Box::leak(Box::new(CacheEntry::new_main(key.clone()))));
-        self
-          .table
-          .insert_unique(hash, ptr, make_hasher(hash_builder));
-        self.main.push(ptr);
-        self.main_count += 1;
-        Ok(GetOrReserve::Reserved(Reserved::new(
+        Ok(GetOrEvicted::Evicted(Evicted::new(
           evicted,
-          unsafe { ptr.as_mut() }.value_ptr(),
+          EvictedTo::Main,
         )))
       }
       State::Tombstone => unreachable!(),
@@ -444,36 +454,31 @@ impl<K, V> Drop for CacheNode<K, V> {
   }
 }
 
-pub enum GetOrReserve<'a, K, V, R> {
+pub enum GetOrEvicted<'a, K, V, R> {
   Hit(&'a V),
-  Reserved(Reserved<K, V, R>),
+  Evicted(Evicted<K, V, R>),
 }
 
-/**
- * Reserved uninitialized value slot in the cache.
- *
- * Cache insertion first reserves capacity and, if necessary, evicts an existing
- * value. The caller may need to process that evicted value before it can build
- * the replacement, so the cache returns a reserved value slot instead of taking
- * `V` immediately. A `Reserved` must be fulfilled exactly once before it is
- * dropped.
- */
-pub struct Reserved<K, V, R> {
+pub struct Evicted<K, V, R> {
   evicted: Option<(K, V, R, u64)>,
-  value: *mut V,
+  toward: EvictedTo,
 }
-impl<K, V, R> Reserved<K, V, R> {
-  const fn new(evicted: Option<(K, V, R, u64)>, value: *mut V) -> Self {
-    Self { evicted, value }
+impl<K, V, R> Evicted<K, V, R> {
+  const fn new(evicted: Option<(K, V, R, u64)>, toward: EvictedTo) -> Self {
+    Self { evicted, toward }
   }
-
   pub const fn take_evicted(&mut self) -> Option<(K, V, R, u64)> {
     self.evicted.take()
   }
-
-  pub const fn fulfill(&mut self, value: V) {
-    unsafe { self.value.write(value) };
+  pub const fn toward(&self) -> EvictedTo {
+    self.toward
   }
+}
+
+#[derive(Clone, Copy)]
+pub enum EvictedTo {
+  Main,
+  Small,
 }
 
 #[cfg(test)]

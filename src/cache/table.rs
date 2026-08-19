@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{CacheNode, GetOrReserve, Reserved, ShrinkSet};
+use super::{CacheNode, Evicted, GetOrEvicted, ShrinkSet};
 use crate::{
   background::OnceParker,
   disk::Pointer,
@@ -200,7 +200,7 @@ impl MappingTable {
     loop {
       let mut guard = shard.l();
       debug_assert!(guard.eviction.get(hash, &key).is_none());
-      let Ok(reserved) = guard.node.reserve(&key, hash, hasher, try_evict) else {
+      let Ok(reserved) = guard.node.reserve(hasher, try_evict) else {
         drop(guard);
         backoff.snooze();
         continue;
@@ -251,8 +251,8 @@ impl MappingTable {
         backoff.snooze();
         continue;
       };
-      let reserved = match result {
-        GetOrReserve::Hit(&bid) => {
+      let evicted = match result {
+        GetOrEvicted::Hit(&bid) => {
           if let Some(token) = get_pin(bid).try_shared() {
             return Acquired::Hit(bid, token);
           }
@@ -260,11 +260,11 @@ impl MappingTable {
           backoff.snooze();
           continue;
         }
-        GetOrReserve::Reserved(reserved) => reserved,
+        GetOrEvicted::Evicted(evicted) => evicted,
       };
 
       if let Some(guard) =
-        self.handle_reserved(reserved, key, hash, guard, shard, offset, try_evict)
+        self.handle_reserved(evicted, key, hash, guard, shard, offset, try_evict)
       {
         return Acquired::Evicted(guard);
       };
@@ -274,7 +274,7 @@ impl MappingTable {
 
   fn handle_reserved<'a, F>(
     &'a self,
-    mut reserved: Reserved<Key, BlockId, ExclusiveToken<'a>>,
+    mut evicted: Evicted<Key, BlockId, ExclusiveToken<'a>>,
     key: Key,
     hash: u64,
     mut guard: MutexGuard<'a, Shard>,
@@ -285,11 +285,12 @@ impl MappingTable {
   where
     F: Fn(&BlockId) -> Option<ExclusiveToken<'a>>,
   {
-    if let Some((evicted, bid, token, evicted_hash)) = reserved.take_evicted() {
+    let toward = evicted.toward();
+    if let Some((evicted, bid, token, evicted_hash)) = evicted.take_evicted() {
       // Reuse the evicted cache slot for the new key. The mapping is reserved now,
       // but the slot may still contain the old page until the caller finishes the
       // eviction/load work, so keep the old key blocked during the transition.
-      reserved.fulfill(bid);
+      guard.node.insert_to(&key, hash, bid, &self.hasher, toward);
       guard.eviction.insert_unchecked(
         evicted,
         OnceCell::new(),
@@ -316,7 +317,7 @@ impl MappingTable {
       );
       (id + offset, None)
     });
-    reserved.fulfill(bid);
+    guard.node.insert_to(&key, hash, bid, &self.hasher, toward);
 
     let Some((evicted, evicted_hash)) = evicted else {
       let token = try_evict(&bid).unwrap();
