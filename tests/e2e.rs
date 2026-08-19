@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU8;
 use std::thread;
 use std::time::Duration;
 use std::{
@@ -1364,6 +1365,7 @@ fn test_concurrent_drop_returns_conflict() {
   let mut tx2 = engine.new_tx().unwrap();
 
   tx1.drop_table(TEST_TABLE).unwrap();
+  tx1.commit().unwrap();
   match tx2.drop_table(TEST_TABLE) {
     Err(Error::WriteConflict) => {}
     Err(e) => panic!("expected WriteConflict, got {:?}", e),
@@ -1815,4 +1817,65 @@ fn test_rev_scan() {
     assert_eq!(v, kvs[c].1);
   }
   assert_eq!(c, 0);
+}
+
+/**
+ * 33. Test dead lock.
+ */
+#[test]
+fn test_deadlock() {
+  let dir = tempdir_in(".").unwrap();
+  let engine = build_engine(&dir);
+
+  {
+    let mut tx = engine.new_tx().unwrap();
+    tx.open_table(TEST_TABLE).unwrap();
+    tx.commit().unwrap();
+  };
+
+  let k1 = vec![1];
+  let k2 = vec![2];
+
+  let aborted = Arc::new(AtomicU8::new(0));
+
+  std::thread::scope(|scope| {
+    let tx1 = engine.new_tx().unwrap();
+    tx1
+      .table(TEST_TABLE)
+      .unwrap()
+      .insert(k1.clone(), k1.clone())
+      .unwrap();
+    let tx2 = engine.new_tx().unwrap();
+    tx2
+      .table(TEST_TABLE)
+      .unwrap()
+      .insert(k2.clone(), k2.clone())
+      .unwrap();
+
+    let ac = aborted.clone();
+    let h1 = scope.spawn(move || {
+      let r = tx1
+        .table(TEST_TABLE)
+        .unwrap()
+        .insert(k2.clone(), k2.clone());
+      if matches!(r, Err(Error::WriteConflict)) {
+        ac.fetch_add(1, Ordering::Relaxed);
+      }
+    });
+
+    let ac = aborted.clone();
+    let h2 = scope.spawn(move || {
+      let r = tx2
+        .table(TEST_TABLE)
+        .unwrap()
+        .insert(k1.clone(), k1.clone());
+      if matches!(r, Err(Error::WriteConflict)) {
+        ac.fetch_add(1, Ordering::Relaxed);
+      }
+    });
+
+    h2.join().unwrap();
+    h1.join().unwrap();
+    assert_eq!(aborted.load(Ordering::Relaxed), 1);
+  });
 }
