@@ -68,3 +68,7 @@ impl PartialEq for TableName {
   }
 }
 impl Eq for TableName {}
+
+#[cfg(test)]
+#[path = "tests/table_name.rs"]
+mod tests;

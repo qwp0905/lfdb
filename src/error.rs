@@ -42,7 +42,7 @@ pub enum Error {
   #[error("table name is empty.")]
   TableNameEmpty,
 
-  #[error("un allowed char {}", 0)]
+  #[error("character '{0}' is not allowed in table names (only alphanumeric, '-', and '_' are permitted)")]
   NotAllowedChar(char),
 
   #[error("exceeded maximum key length. maximum {0}, received {1}")]
