@@ -11,13 +11,12 @@ fn never_fail<V>(_: &V) -> Option<()> {
 }
 
 fn insert(node: &mut CacheNode<usize, usize>, hasher: &RandomState, k: usize, v: usize) {
-  let reserved = node
-    .get_or_reserve(&k, h(hasher, k), hasher, never_fail)
-    .unwrap();
+  let h = h(hasher, k);
+  let reserved = node.get_or_reserve(&k, h, hasher, never_fail).unwrap();
   match reserved {
-    GetOrReserve::Hit(_) => panic!("must reserved"),
-    GetOrReserve::Reserved(mut reserved) => {
-      reserved.fulfill(v);
+    GetOrEvicted::Hit(_) => panic!("must reserved"),
+    GetOrEvicted::Evicted(evicted) => {
+      node.insert_to(&k, h, v, hasher, evicted.toward);
     }
   }
 }
@@ -25,7 +24,7 @@ fn get<'a>(
   node: &'a mut CacheNode<usize, usize>,
   hasher: &'a RandomState,
   k: usize,
-) -> GetOrReserve<'a, usize, usize, ()> {
+) -> GetOrEvicted<'a, usize, usize, ()> {
   node
     .get_or_reserve(&k, h(hasher, k), hasher, never_fail)
     .unwrap()
@@ -41,15 +40,15 @@ fn test_basic_reserve_and_get() {
 
   assert!(matches!(
     get(&mut node, &hasher, 1),
-    GetOrReserve::Hit(&100)
+    GetOrEvicted::Hit(&100)
   ));
   assert!(matches!(
     get(&mut node, &hasher, 2),
-    GetOrReserve::Hit(&200)
+    GetOrEvicted::Hit(&200)
   ));
   assert!(matches!(
     get(&mut node, &hasher, 3),
-    GetOrReserve::Reserved(_)
+    GetOrEvicted::Evicted(_)
   ));
 }
 
@@ -63,6 +62,6 @@ fn test_remove() {
   assert_eq!(node.remove(&1, h(&hasher, 1), &hasher), None);
   assert!(matches!(
     get(&mut node, &hasher, 1),
-    GetOrReserve::Reserved(_)
+    GetOrEvicted::Evicted(_)
   ));
 }
