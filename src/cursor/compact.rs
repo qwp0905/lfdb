@@ -169,7 +169,13 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
-  fn wait_close(&self, _owner: TxId) {}
+  /**
+   * Since the MiniTx is a background transaction,
+   * it treats conflicts as deadlocks and immediately terminates the insert operation.
+   */
+  fn resolve_conflict(&self, _: TxId) -> super::ResolvedConflict {
+    super::ResolvedConflict::DeadLock
+  }
 }
 
 /**

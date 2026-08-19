@@ -131,7 +131,7 @@ impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
-  fn wait_close(&self, owner: TxId) {
-    self.orchestrator.wait_commit(owner);
+  fn resolve_conflict(&self, owner: TxId) -> crate::cursor::ResolvedConflict {
+    self.orchestrator.resolve_conflict(owner, &self.state)
   }
 }
