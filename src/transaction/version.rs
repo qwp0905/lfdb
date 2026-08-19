@@ -13,7 +13,9 @@ use super::{ActiveSet, ActiveState};
 
 use crate::{
   background::{EventBus, SharedSubscription},
-  binding_events, error,
+  binding_events,
+  cursor::ResolvedConflict,
+  error,
   utils::{OffsetBitmap, SBox},
   wal::{TxId, WALFailed, RESERVED_TX},
   Result,
@@ -140,8 +142,8 @@ impl VersionVisibility {
     self.aborted.contains(tx_id)
   }
 
-  pub fn wait_commit(&self, owner: TxId) {
-    self.active.wait(&owner)
+  pub fn resolve_conflict(&self, owner: TxId, current: &ActiveState) -> ResolvedConflict {
+    self.active.resolve_conflict(owner, current)
   }
 
   /**

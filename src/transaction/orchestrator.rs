@@ -7,13 +7,14 @@ use super::{
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{Compactor, GarbageCollector},
+  cursor::{Compactor, GarbageCollector, ResolvedConflict},
   disk::{IOPool, Pointer},
   error::Result,
   info, measure,
   metrics::MetricsRegistry,
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
+  transaction::active::ActiveState,
   utils::SBox,
   wal::{TxId, WriteAheadLog},
 };
@@ -157,8 +158,8 @@ impl TxOrchestrator {
     self.tables.meta_table()
   }
 
-  pub fn wait_commit(&self, owner: TxId) {
-    self.version_visibility.wait_commit(owner);
+  pub fn resolve_conflict(&self, owner: TxId, current: &ActiveState) -> ResolvedConflict {
+    self.version_visibility.resolve_conflict(owner, current)
   }
 
   pub fn get_blob_handle(&self, blob_id: BlobId) -> Option<SBox<BlobHandle>> {

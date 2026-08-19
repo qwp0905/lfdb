@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
   BTreeIter, BTreeRevIter, BufferedValue, CreatablePolicy, KVSnapshot, ReadonlyPolicy,
-  Snapshotter, VecRef, WritablePolicy,
+  ResolvedConflict, Snapshotter, VecRef, WritablePolicy,
 };
 
 /**
@@ -567,7 +567,7 @@ where
     enum State<'a> {
       Move(Pointer, WriteOp),
       Break(WriteResult),
-      Conflict(TxId),
+      Conflict(TxId, WriteOp),
       Split(StaticKey, Pointer, WriteResult),
       CopyOld(ReserveGuard<'a>, Option<Pointer>, VersionRecord, WriteOp),
     }
@@ -579,22 +579,21 @@ where
         let (mut node, pos, found) = match leaf.find(key)? {
           NodeFindResult::Move(i) => return Ok(State::Move(i, op)),
           NodeFindResult::Found(pos, old, entry_ptr) => {
-            if self.0.is_conflict(old.owner, old.version) {
-              // Fast-fail before touching the data-entry chain when the latest leaf record
-              // already belongs to a conflicting writer/version.
-              return Ok(State::Conflict(old.owner));
+            let writable = self.0.is_owned(old.owner) || self.0.is_aborted(old.owner);
+            let visible = self.0.is_readable(old.version) && !self.0.is_active(old.owner);
+            match (writable, visible) {
+              (true, _) => (leaf.into_owned()?, pos, true),
+              (false, false) => return Ok(State::Conflict(old.owner, op)),
+              (false, true) => {
+                return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
+                  Ok(g) => {
+                    let old = old.into_owned_with(slot.as_ref());
+                    State::CopyOld(g, entry_ptr, old, op)
+                  }
+                  Err(i) => State::Conflict(i, op),
+                })
+              }
             }
-
-            if !self.0.is_aborted(old.owner) && !self.0.is_owned(old.owner) {
-              return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
-                Ok(g) => {
-                  let old = old.into_owned_with(slot.as_ref());
-                  State::CopyOld(g, entry_ptr, old, op)
-                }
-                Err(i) => State::Conflict(i),
-              });
-            }
-            (leaf.into_owned()?, pos, true)
           }
           NodeFindResult::NotFound(pos) => {
             if !create {
@@ -636,9 +635,17 @@ where
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
         }
-        State::Conflict(i) => {
-          self.0.wait_close(i);
-          return Err(Error::WriteConflict);
+        State::Conflict(i, o) => {
+          match self.0.resolve_conflict(i) {
+            ResolvedConflict::DeadLock => return Err(Error::WriteConflict),
+            ResolvedConflict::Closed => {
+              if self.0.is_aborted(i) {
+                op = o;
+                continue;
+              }
+              return Err(Error::WriteConflict);
+            }
+          };
         }
         State::CopyOld(guard, entry_ptr, old, o) => {
           return self.copy_and_update(key, o, ptr, table, entry_ptr, old, stack, guard);

@@ -136,6 +136,11 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   }
 }
 
+pub enum ResolvedConflict {
+  DeadLock,
+  Closed,
+}
+
 /**
  * Record-creation capabilities required by insert/update paths.
  *
@@ -144,20 +149,13 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
  * version records.
  */
 pub trait CreatablePolicy: WritablePolicy {
-  /**
-   * Write conflict cares about unfinished foreign owners. An aborted owner is
-   * already closed, so active-ness is the relevant owner state here.
-   */
-  fn is_conflict(&self, owner: TxId, version: TxId) -> bool {
-    !self.is_owned(owner) && (!self.is_readable(version) || self.is_active(owner))
-  }
-  fn wait_close(&self, owner: TxId);
   fn current_owner(&self) -> TxId;
   fn current_version(&self) -> TxId;
+  fn resolve_conflict(&self, owner: TxId) -> ResolvedConflict;
 }
 impl<Policy: CreatablePolicy> CreatablePolicy for &Policy {
-  fn wait_close(&self, owner: TxId) {
-    (*self).wait_close(owner)
+  fn resolve_conflict(&self, owner: TxId) -> ResolvedConflict {
+    (*self).resolve_conflict(owner)
   }
   fn current_owner(&self) -> TxId {
     (*self).current_owner()
