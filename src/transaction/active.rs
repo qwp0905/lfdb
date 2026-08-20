@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
   background::OnceParker,
+  cache::ShrinkMap,
   cursor::ResolvedConflict,
   utils::{OffsetBitmap, SBox, ShortenedMutex, ShortenedRwLock},
   wal::{AtomicTxId, TxId},
@@ -34,7 +35,6 @@ pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
   parker: OnceParker,
-  waiting: Mutex<Option<TxId>>,
 }
 impl ActiveState {
   pub const fn new(tx_id: TxId) -> Self {
@@ -42,7 +42,6 @@ impl ActiveState {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
       parker: OnceParker::new(),
-      waiting: Mutex::new(None),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -99,18 +98,6 @@ impl ActiveState {
   pub fn make_available(&self) {
     self.status.store(STATUS_AVAILABLE, Ordering::Release)
   }
-
-  pub fn set_waiting(&self, owner: TxId) -> WaitGuard<'_> {
-    *self.waiting.l() = Some(owner);
-    WaitGuard(self)
-  }
-}
-
-pub struct WaitGuard<'a>(&'a ActiveState);
-impl<'a> Drop for WaitGuard<'a> {
-  fn drop(&mut self) {
-    *self.0.waiting.l() = None;
-  }
 }
 
 /**
@@ -123,12 +110,14 @@ impl<'a> Drop for WaitGuard<'a> {
 pub struct ActiveSet {
   inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
   last_tx_id: AtomicTxId,
+  wait_graph: Mutex<ShrinkMap<TxId, TxId>>,
 }
 impl ActiveSet {
-  pub const fn new(last_tx_id: TxId) -> Self {
+  pub fn new(last_tx_id: TxId) -> Self {
     Self {
       inner: RwLock::new(BTreeMap::new()),
       last_tx_id: AtomicTxId::new(last_tx_id),
+      wait_graph: Mutex::new(ShrinkMap::new()),
     }
   }
   pub fn current_version(&self) -> TxId {
@@ -190,23 +179,26 @@ impl ActiveSet {
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
   }
-  pub fn resolve_conflict(&self, tx_id: TxId, current: &ActiveState) -> ResolvedConflict {
-    let Some(target) = self.get(&tx_id) else {
+  pub fn resolve_conflict(&self, tx_id: TxId, current: TxId) -> ResolvedConflict {
+    let Some(state) = self.get(&tx_id) else {
       return ResolvedConflict::Closed;
     };
-    let _guard = current.set_waiting(tx_id);
-    let mut parent = tx_id;
-    while let Some(state) = self.get(&parent) {
-      let Some(id) = state.waiting.l().as_ref().copied() else {
-        break;
-      };
-      if id == current.get_id() {
-        warn!("dead lock detected at tx {}.", current.get_id());
-        return ResolvedConflict::DeadLock;
+
+    {
+      let mut graph = self.wait_graph.l();
+      let mut id = tx_id;
+      while let Some(&next) = graph.get(&id) {
+        if next == current {
+          warn!("dead lock detected at tx {}.", current);
+          return ResolvedConflict::DeadLock;
+        }
+        id = next;
       }
-      parent = id;
+      graph.insert(current, tx_id);
     }
-    target.parker.park();
+
+    state.parker.park();
+    self.wait_graph.l().remove(&current);
     ResolvedConflict::Closed
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
