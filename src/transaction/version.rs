@@ -142,7 +142,7 @@ impl VersionVisibility {
     self.aborted.contains(tx_id)
   }
 
-  pub fn resolve_conflict(&self, owner: TxId, current: &ActiveState) -> ResolvedConflict {
+  pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
     self.active.resolve_conflict(owner, current)
   }
 

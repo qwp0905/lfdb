@@ -14,7 +14,6 @@ use crate::{
   metrics::MetricsRegistry,
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
-  transaction::active::ActiveState,
   utils::SBox,
   wal::{TxId, WriteAheadLog},
 };
@@ -158,7 +157,7 @@ impl TxOrchestrator {
     self.tables.meta_table()
   }
 
-  pub fn resolve_conflict(&self, owner: TxId, current: &ActiveState) -> ResolvedConflict {
+  pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
     self.version_visibility.resolve_conflict(owner, current)
   }
 
