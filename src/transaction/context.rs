@@ -132,6 +132,8 @@ impl<'a> CreatablePolicy for TxContext<'a> {
     self.state.current_version()
   }
   fn resolve_conflict(&self, owner: TxId) -> crate::cursor::ResolvedConflict {
-    self.orchestrator.resolve_conflict(owner, &self.state)
+    self
+      .orchestrator
+      .resolve_conflict(owner, self.state.get_id())
   }
 }

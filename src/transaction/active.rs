@@ -2,16 +2,14 @@ use std::{
   collections::BTreeMap,
   sync::{
     atomic::{AtomicU8, Ordering},
-    Mutex, RwLock,
+    RwLock,
   },
 };
 
 use crate::{
   background::OnceParker,
-  cursor::ResolvedConflict,
-  utils::{OffsetBitmap, SBox, ShortenedMutex, ShortenedRwLock},
+  utils::{OffsetBitmap, SBox, ShortenedRwLock},
   wal::{AtomicTxId, TxId},
-  warn,
 };
 
 const STATUS_AVAILABLE: u8 = 0;
@@ -34,7 +32,6 @@ pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
   parker: OnceParker,
-  waiting: Mutex<Option<TxId>>,
 }
 impl ActiveState {
   pub const fn new(tx_id: TxId) -> Self {
@@ -42,7 +39,6 @@ impl ActiveState {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
       parker: OnceParker::new(),
-      waiting: Mutex::new(None),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -100,16 +96,11 @@ impl ActiveState {
     self.status.store(STATUS_AVAILABLE, Ordering::Release)
   }
 
-  pub fn set_waiting(&self, owner: TxId) -> WaitGuard<'_> {
-    *self.waiting.l() = Some(owner);
-    WaitGuard(self)
+  pub fn park(&self) {
+    self.parker.park();
   }
-}
-
-pub struct WaitGuard<'a>(&'a ActiveState);
-impl<'a> Drop for WaitGuard<'a> {
-  fn drop(&mut self) {
-    *self.0.waiting.l() = None;
+  pub fn wake_all(&self) {
+    self.parker.wake_all();
   }
 }
 
@@ -175,11 +166,8 @@ impl ActiveSet {
     }
     snapshot
   }
-  pub fn remove(&self, tx_id: &TxId) {
-    let Some(state) = self.inner.wl().remove(tx_id) else {
-      return;
-    };
-    state.parker.wake_all();
+  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
+    self.inner.wl().remove(tx_id)
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
@@ -189,25 +177,6 @@ impl ActiveSet {
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
-  }
-  pub fn resolve_conflict(&self, tx_id: TxId, current: &ActiveState) -> ResolvedConflict {
-    let Some(target) = self.get(&tx_id) else {
-      return ResolvedConflict::Closed;
-    };
-    let _guard = current.set_waiting(tx_id);
-    let mut parent = tx_id;
-    while let Some(state) = self.get(&parent) {
-      let Some(id) = state.waiting.l().as_ref().copied() else {
-        break;
-      };
-      if id == current.get_id() {
-        warn!("dead lock detected at tx {}.", current.get_id());
-        return ResolvedConflict::DeadLock;
-      }
-      parent = id;
-    }
-    target.parker.park();
-    ResolvedConflict::Closed
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
     self.inner.rl().values().cloned().collect()
