@@ -2,17 +2,14 @@ use std::{
   collections::BTreeMap,
   sync::{
     atomic::{AtomicU8, Ordering},
-    Mutex, RwLock,
+    RwLock,
   },
 };
 
 use crate::{
   background::OnceParker,
-  cache::ShrinkMap,
-  cursor::ResolvedConflict,
-  utils::{OffsetBitmap, SBox, ShortenedMutex, ShortenedRwLock},
+  utils::{OffsetBitmap, SBox, ShortenedRwLock},
   wal::{AtomicTxId, TxId},
-  warn,
 };
 
 const STATUS_AVAILABLE: u8 = 0;
@@ -98,6 +95,13 @@ impl ActiveState {
   pub fn make_available(&self) {
     self.status.store(STATUS_AVAILABLE, Ordering::Release)
   }
+
+  pub fn park(&self) {
+    self.parker.park();
+  }
+  pub fn wake_all(&self) {
+    self.parker.wake_all();
+  }
 }
 
 /**
@@ -110,14 +114,12 @@ impl ActiveState {
 pub struct ActiveSet {
   inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
   last_tx_id: AtomicTxId,
-  wait_graph: Mutex<ShrinkMap<TxId, TxId>>,
 }
 impl ActiveSet {
-  pub fn new(last_tx_id: TxId) -> Self {
+  pub const fn new(last_tx_id: TxId) -> Self {
     Self {
       inner: RwLock::new(BTreeMap::new()),
       last_tx_id: AtomicTxId::new(last_tx_id),
-      wait_graph: Mutex::new(ShrinkMap::new()),
     }
   }
   pub fn current_version(&self) -> TxId {
@@ -164,11 +166,8 @@ impl ActiveSet {
     }
     snapshot
   }
-  pub fn remove(&self, tx_id: &TxId) {
-    let Some(state) = self.inner.wl().remove(tx_id) else {
-      return;
-    };
-    state.parker.wake_all();
+  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
+    self.inner.wl().remove(tx_id)
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
@@ -178,28 +177,6 @@ impl ActiveSet {
   }
   pub fn until(&self, max: TxId) -> Vec<TxId> {
     self.inner.rl().range(..max).map(|(k, _)| *k).collect()
-  }
-  pub fn resolve_conflict(&self, tx_id: TxId, current: TxId) -> ResolvedConflict {
-    let Some(state) = self.get(&tx_id) else {
-      return ResolvedConflict::Closed;
-    };
-
-    {
-      let mut graph = self.wait_graph.l();
-      let mut id = tx_id;
-      while let Some(&next) = graph.get(&id) {
-        if next == current {
-          warn!("dead lock detected at tx {}.", current);
-          return ResolvedConflict::DeadLock;
-        }
-        id = next;
-      }
-      graph.insert(current, tx_id);
-    }
-
-    state.parker.park();
-    self.wait_graph.l().remove(&current);
-    ResolvedConflict::Closed
   }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
     self.inner.rl().values().cloned().collect()

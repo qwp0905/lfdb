@@ -3,7 +3,7 @@ use std::{
   ops::Deref,
   sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
   },
 };
 
@@ -14,12 +14,20 @@ use super::{ActiveSet, ActiveState};
 use crate::{
   background::{EventBus, SharedSubscription},
   binding_events,
+  cache::ShrinkMap,
   cursor::ResolvedConflict,
   error,
-  utils::{OffsetBitmap, SBox},
+  utils::{OffsetBitmap, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
-  Result,
+  warn, Result,
 };
+
+fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
+  let Some(state) = active.remove(tx_id) else {
+    return;
+  };
+  state.wake_all();
+}
 
 pub struct TxState<'a> {
   state: SBox<ActiveState>,
@@ -30,7 +38,7 @@ impl<'a> TxState<'a> {
     Self { state, set }
   }
   pub fn deactive(&self) {
-    self.set.remove(&self.state.get_id());
+    remove_and_wake(self.set, &self.state.get_id());
   }
   pub fn current_version(&self) -> TxId {
     self.set.current_version()
@@ -70,6 +78,30 @@ impl<'a> TxSnapshot<'a> {
   }
 }
 
+struct WaitGraph(Mutex<ShrinkMap<TxId, TxId>>);
+impl WaitGraph {
+  fn new() -> Self {
+    Self(Default::default())
+  }
+
+  fn get_or_insert(&self, waiter: TxId, target: TxId) -> bool {
+    let mut this = self.0.l();
+    let mut id = target;
+    while let Some(&next) = this.get(&id) {
+      if next == waiter {
+        return false;
+      }
+      id = next;
+    }
+    this.insert(waiter, target);
+    true
+  }
+
+  fn remove(&self, waiter: TxId) {
+    self.0.l().remove(&waiter);
+  }
+}
+
 /**
  * Tracks MVCC visibility for transactions.
  *
@@ -80,6 +112,7 @@ impl<'a> TxSnapshot<'a> {
 pub struct VersionVisibility {
   aborted: SkipSet<TxId>,
   active: ActiveSet,
+  wait_graph: WaitGraph,
   closed: AtomicBool,
 }
 impl VersionVisibility {
@@ -107,6 +140,7 @@ impl VersionVisibility {
         .filter(|c| !closed.contains(c))
         .collect(),
       active: ActiveSet::new(last_tx_id),
+      wait_graph: WaitGraph::new(),
       closed: AtomicBool::new(false),
     });
     event_bus.register(&this);
@@ -116,6 +150,7 @@ impl VersionVisibility {
     let this = Arc::new(Self {
       aborted: Default::default(),
       active: ActiveSet::new(RESERVED_TX + 1),
+      wait_graph: WaitGraph::new(),
       closed: AtomicBool::new(false),
     });
     event_bus.register(&this);
@@ -143,7 +178,16 @@ impl VersionVisibility {
   }
 
   pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
-    self.active.resolve_conflict(owner, current)
+    let Some(state) = self.active.get(&owner) else {
+      return ResolvedConflict::Closed;
+    };
+    if !self.wait_graph.get_or_insert(current, owner) {
+      warn!("dead lock detected at tx {}.", current);
+      return ResolvedConflict::DeadLock;
+    }
+    state.park();
+    self.wait_graph.remove(current);
+    ResolvedConflict::Closed
   }
 
   /**
@@ -205,7 +249,7 @@ impl SharedSubscription<WALFailed> for VersionVisibility {
     }
     for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
       self.aborted.insert(state.get_id());
-      self.active.remove(&state.get_id());
+      remove_and_wake(&self.active, &state.get_id());
     }
     error!("all versions transit to abort since wal failure detected.");
   }
