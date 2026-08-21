@@ -6,7 +6,7 @@ use crate::{
   Error, Result,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotFormatVersion {
   V0,
 }

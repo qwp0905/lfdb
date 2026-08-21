@@ -106,8 +106,8 @@ impl Engine {
       let manifest = Manifest::new(
         PAGE_SIZE as u32,
         metadata,
-        SnapshotFormatVersion::CURRENT.as_u16(),
-        WALFormatVersion::CURRENT.as_u16(),
+        SnapshotFormatVersion::CURRENT,
+        WALFormatVersion::CURRENT,
       );
       save_manifest(&io_pool, &manifest)?;
       io_pool.sync_dir()?;
@@ -176,20 +176,18 @@ impl Engine {
       TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
 
     info!("trying to replay...");
-    let Some(version) = WALFormatVersion::from_u16(manifest.wal_version) else {
-      return Err(Error::UnsupportedVersion);
-    };
-    let (wal, replay) =
-      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone(), version)?;
+    let (wal, replay) = WriteAheadLog::replay(
+      &wal_config,
+      event_bus.clone(),
+      io_pool.clone(),
+      manifest.wal_version,
+    )?;
     let wal = wal.to_arc();
 
-    let Some(version) = SnapshotFormatVersion::from_u16(manifest.snapshot_version) else {
-      return Err(Error::UnsupportedVersion);
-    };
     let snapshot = match replay.last_snapshot {
       Some(file) => {
         let mut handle = io_pool.open_scan_io(file)?;
-        CheckpointSnapshot::read_from(&mut handle, version)?
+        CheckpointSnapshot::read_from(&mut handle, manifest.snapshot_version)?
       }
       None => CheckpointSnapshot::empty(),
     };
@@ -279,11 +277,11 @@ impl Engine {
       );
 
       // TODO: Implement offline compaction of the metadata table here when a change to the table format version is actually required.
-      manifest.metadata_table.version = TableFormatVersion::CURRENT.as_u16();
+      // manifest.metadata_table.version = TableFormatVersion::CURRENT;
     }
 
-    manifest.snapshot_version = SnapshotFormatVersion::CURRENT.as_u16();
-    manifest.wal_version = WALFormatVersion::CURRENT.as_u16();
+    manifest.snapshot_version = SnapshotFormatVersion::CURRENT;
+    manifest.wal_version = WALFormatVersion::CURRENT;
     save_manifest(&io_pool, &manifest)?;
 
     recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
