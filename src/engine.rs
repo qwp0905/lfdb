@@ -21,7 +21,7 @@ use crate::{
   error, info,
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
-  table::{TableId, TableMapper, META_TABLE_ID},
+  table::{TableId, TableMapper},
   transaction::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
     TransactionConfig, TxOrchestrator, VersionVisibility,
@@ -176,12 +176,21 @@ impl Engine {
       TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
 
     info!("trying to replay...");
+    let Some(version) = WALFormatVersion::from_u16(manifest.wal_version) else {
+      return Err(Error::UnsupportedVersion);
+    };
     let (wal, replay) =
-      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
+      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone(), version)?;
     let wal = wal.to_arc();
 
+    let Some(version) = SnapshotFormatVersion::from_u16(manifest.snapshot_version) else {
+      return Err(Error::UnsupportedVersion);
+    };
     let snapshot = match replay.last_snapshot {
-      Some(file) => CheckpointSnapshot::read_from(&mut io_pool.open_scan_io(file)?)?,
+      Some(file) => {
+        let mut handle = io_pool.open_scan_io(file)?;
+        CheckpointSnapshot::read_from(&mut handle, version)?
+      }
       None => CheckpointSnapshot::empty(),
     };
     let mut blob_metadata = snapshot.blob_metadata;
@@ -201,13 +210,14 @@ impl Engine {
     let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
+    let meta_table_id = meta_table.get_id();
     for (_, ptr, data) in replay
       .redo
       .iter()
-      .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
+      .filter(|(table_id, _, _)| *table_id == meta_table_id)
     {
       max_used
-        .entry(META_TABLE_ID)
+        .entry(meta_table_id)
         .and_modify(|v| *v = (*v).max(*ptr))
         .or_insert(*ptr);
       block_cache
@@ -231,7 +241,7 @@ impl Engine {
     for (table_id, ptr, data) in replay
       .redo
       .iter()
-      .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
+      .filter(|(table_id, _, _)| *table_id != meta_table_id)
     {
       let Some((_, handle)) = handles.get(table_id) else {
         continue;

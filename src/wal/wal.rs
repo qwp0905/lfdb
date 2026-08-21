@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
   replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, RecordEncoding, ReplayResult,
-  SegmentPreload, SyncQueue, TxId, WALSegment, WAL_BLOCK_SIZE,
+  SegmentPreload, SyncQueue, TxId, WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -137,13 +137,14 @@ impl WriteAheadLog {
     config: &WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
-    info!("start to replay wal segments");
+    info!("start to replay wal segments version: {}", replay_version);
 
-    let replay_result = replay(&io_pool)?;
+    let replay_result = replay(&io_pool, replay_version)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} redo {} segments {} last snapshot {:?}",

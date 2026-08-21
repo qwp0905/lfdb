@@ -135,6 +135,9 @@ impl TableMapper {
   pub fn meta_table(&self) -> TableHandleRef {
     self.metadata.clone()
   }
+  pub fn meta_table_id(&self) -> TableId {
+    self.metadata.get_id()
+  }
 
   /**
    * Return every table handle known to the registry, including the metadata table.
