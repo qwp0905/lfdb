@@ -14,14 +14,14 @@ use crate::{
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
-    GarbageCollectionConfig, GarbageCollector,
+    initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
+    CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
-  table::{TableId, TableMapper},
+  table::{TableFormatVersion, TableId, TableMapper},
   transaction::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
     TransactionConfig, TxOrchestrator, VersionVisibility,
@@ -90,7 +90,7 @@ impl Engine {
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
 
-    let Some(manifest) = load_manifest(&io_pool)? else {
+    let Some(mut manifest) = load_manifest(&io_pool)? else {
       info!("engine initial state.");
       let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
 
@@ -230,8 +230,8 @@ impl Engine {
 
     let mut handles = HashMap::new();
     let found_handles = open_tables(&block_cache, &tables, &version_visibility, &blob)?;
-    for (table, metadata) in found_handles.handles {
-      handles.insert(table.get_id(), (metadata, table));
+    for (table, metadata) in found_handles.handles.iter() {
+      handles.insert(table.get_id(), (metadata.clone(), table.clone()));
     }
     for ((table, metadata), (c_table, c_meta)) in found_handles.in_compaction.iter() {
       handles.insert(table.get_id(), (metadata.clone(), table.clone()));
@@ -270,6 +270,22 @@ impl Engine {
     )?;
 
     tables.replay(handles.into_values())?;
+
+    if !meta_table.get_version().is_current() {
+      info!(
+        "metadata table format version has been expired. it will be updated from {} to {}",
+        meta_table.get_version(),
+        TableFormatVersion::CURRENT
+      );
+
+      // TODO: Implement offline compaction of the metadata table here when a change to the table format version is actually required.
+      manifest.metadata_table.version = TableFormatVersion::CURRENT.as_u16();
+    }
+
+    manifest.snapshot_version = SnapshotFormatVersion::CURRENT.as_u16();
+    manifest.wal_version = WALFormatVersion::CURRENT.as_u16();
+    save_manifest(&io_pool, &manifest)?;
+
     recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
 
     let gc = GarbageCollector::new(
@@ -292,6 +308,13 @@ impl Engine {
       blob.clone(),
       compaction_config,
     );
+
+    let events = found_handles
+      .handles
+      .into_iter()
+      .filter(|(_, metadata)| !metadata.get_version().is_current())
+      .map(|(table, _)| CompactionTriggered::new(table));
+    event_bus.batch_publish(events);
 
     let events =
       found_handles

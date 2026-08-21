@@ -1,5 +1,6 @@
 use std::{
   ffi::OsStr,
+  fmt,
   path::{Path, PathBuf},
   sync::atomic::AtomicU32,
 };
@@ -16,7 +17,7 @@ pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
 pub type AtomicTableId = AtomicU32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableFormatVersion {
   V0,
 }
@@ -34,8 +35,22 @@ impl TableFormatVersion {
       Self::V0 => 0,
     }
   }
+  pub const fn is_current(&self) -> bool {
+    matches!(self, &Self::CURRENT)
+  }
+  const fn as_str(&self) -> &str {
+    match self {
+      Self::V0 => "v0",
+    }
+  }
 
   const BYTE_LEN: usize = u16::BITS as usize >> 3;
+}
+
+impl fmt::Display for TableFormatVersion {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Display::fmt(self.as_str(), f)
+  }
 }
 
 #[derive(Debug)]
@@ -218,8 +233,11 @@ impl TableMetadata {
     &self.spec.filename
   }
   #[inline]
-  pub fn get_name(&self) -> &TableName {
+  pub const fn get_name(&self) -> &TableName {
     &self.name
+  }
+  pub const fn get_version(&self) -> TableFormatVersion {
+    self.spec.version
   }
 }
 

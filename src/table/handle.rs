@@ -2,7 +2,7 @@ use std::{mem::forget, ops::Deref};
 
 use crossbeam_skiplist::{map::Entry, SkipMap};
 
-use super::{TableId, TableMetadata, TableName};
+use super::{TableFormatVersion, TableId, TableMetadata, TableName};
 use crate::{
   disk::{BlockIOHandle, FreeList, PAGE_SIZE},
   utils::{ExclusivePin, SBox, SharedToken},
@@ -22,6 +22,7 @@ pub type TableHandleRef = SBox<TableHandle>;
 pub struct TableHandle {
   id: TableId,
   name: TableName,
+  version: TableFormatVersion,
   disk: BlockIOHandle<PAGE_SIZE>,
   free_list: FreeList,
   /**
@@ -39,6 +40,7 @@ impl TableHandle {
     Self {
       id: metadata.get_id(),
       name: metadata.get_name().clone(),
+      version: metadata.get_version(),
       disk,
       free_list: FreeList::new(),
       pin: ExclusivePin::new(),
@@ -51,6 +53,9 @@ impl TableHandle {
   }
   pub const fn get_id(&self) -> TableId {
     self.id
+  }
+  pub const fn get_version(&self) -> TableFormatVersion {
+    self.version
   }
 
   #[inline(always)]
