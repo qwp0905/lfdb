@@ -9,7 +9,6 @@
 use std::{
   alloc::{alloc_zeroed, dealloc, Layout},
   ops::{Deref, DerefMut},
-  ptr::copy_nonoverlapping,
   slice::{from_raw_parts, from_raw_parts_mut},
 };
 
@@ -66,6 +65,9 @@ pub struct AlignedBuf {
 impl AlignedBuf {
   pub fn new(len: usize) -> Self {
     let layout = unsafe { Layout::from_size_align_unchecked(aligned_len(len), ALIGN) };
+    Self::from_layout(layout, len)
+  }
+  fn from_layout(layout: Layout, len: usize) -> Self {
     let ptr = unsafe { alloc_zeroed(layout) };
     Self { ptr, len, layout }
   }
@@ -73,8 +75,8 @@ impl AlignedBuf {
     self.layout.size()
   }
   pub fn from_vec(data: Vec<u8>) -> Self {
-    let buf = Self::new(data.len());
-    unsafe { copy_nonoverlapping(data.as_ptr(), buf.ptr, buf.len) };
+    let mut buf = Self::new(data.len());
+    buf.as_mut_slice().copy_from_slice(&data);
     buf
   }
   /**
@@ -105,9 +107,6 @@ impl AlignedBuf {
   pub const fn len(&self) -> usize {
     self.len
   }
-  pub const fn as_ptr(&self) -> *const u8 {
-    self.ptr
-  }
 }
 impl Drop for AlignedBuf {
   fn drop(&mut self) {
@@ -117,12 +116,8 @@ impl Drop for AlignedBuf {
 unsafe impl Send for AlignedBuf {}
 impl Clone for AlignedBuf {
   fn clone(&self) -> Self {
-    let ptr = unsafe { alloc_zeroed(self.layout) };
-    unsafe { copy_nonoverlapping(self.ptr, ptr, self.len) };
-    Self {
-      ptr,
-      len: self.len,
-      layout: self.layout,
-    }
+    let mut cloned = Self::from_layout(self.layout, self.len);
+    cloned.as_mut_slice().copy_from_slice(self.as_slice());
+    cloned
   }
 }

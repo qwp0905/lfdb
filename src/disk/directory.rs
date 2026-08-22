@@ -53,11 +53,9 @@ impl DirHandle {
   }
   pub fn read(&self) -> IOResult<Vec<DirEntry>> {
     let mut entries = Vec::new();
-
     for entry in self.disk_backend.read_dir(&self.path)? {
       entries.push(entry?);
     }
-
     Ok(entries)
   }
   pub fn remove(&self, filename: &Path) -> IOResult<()> {
