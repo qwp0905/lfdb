@@ -29,4 +29,8 @@ members = ["bench"]
 [lints]
 clippy.module_inception = "allow"
 clippy.too_many_arguments = "allow"
-clippy.big_endian_bytes = "deny"
+clippy.big_endian_bytes = "forbid"
+
+[lints.rust]
+unused = "deny"
+dead_code = "deny"
