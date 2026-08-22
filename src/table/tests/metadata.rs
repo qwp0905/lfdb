@@ -12,6 +12,7 @@ fn test_simple() {
   let d = TableMetadata::from_bytes(&bytes).unwrap();
   assert_eq!(d.get_id(), id);
   assert_eq!(d.get_name(), &name);
+  assert_eq!(d.get_version(), TableFormatVersion::CURRENT);
   assert_eq!(d.get_filename(), path);
 }
 
@@ -31,8 +32,10 @@ fn test_compaction() {
   let d = TableMetadata::from_bytes(&bytes).unwrap();
   assert_eq!(d.get_id(), id);
   assert_eq!(d.get_name(), &name);
+  assert_eq!(d.get_version(), TableFormatVersion::CURRENT);
   assert_eq!(d.get_filename(), path);
   let m = d.get_compaction_metadata().unwrap();
   assert_eq!(m.get_id(), cid);
+  assert_eq!(m.get_version(), TableFormatVersion::CURRENT);
   assert_eq!(m.get_filename(), cpath.as_path());
 }

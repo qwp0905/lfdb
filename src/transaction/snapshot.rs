@@ -6,18 +6,18 @@ use crate::{
   Error, Result,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotFormatVersion {
   V0,
 }
 impl SnapshotFormatVersion {
   pub const CURRENT: Self = Self::V0;
-  // pub const fn from_u16(version: u16) -> Option<Self> {
-  //   match version {
-  //     0 => Some(Self::V0),
-  //     _ => None,
-  //   }
-  // }
+  pub const fn from_u16(version: u16) -> Option<Self> {
+    match version {
+      0 => Some(Self::V0),
+      _ => None,
+    }
+  }
   pub const fn as_u16(&self) -> u16 {
     match self {
       Self::V0 => 0,
@@ -50,7 +50,10 @@ impl CheckpointSnapshot {
     }
   }
 
-  pub fn read_from(file: &mut ScanIOHandle) -> Result<Self> {
+  pub fn read_from(
+    file: &mut ScanIOHandle,
+    _version: SnapshotFormatVersion,
+  ) -> Result<Self> {
     let mut active_versions = Vec::new();
     let mut aborted_versions = Vec::new();
     let mut blob_metadata = Vec::new();

@@ -3,7 +3,7 @@ use std::{
   path::PathBuf,
 };
 
-use super::{LogId, LogRecord, Operation, TxId, FILE_EXT};
+use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
 use crate::{
   blob::BlobMetadata,
   disk::{IOPool, Pointer, ScanIOHandle},
@@ -60,7 +60,7 @@ impl ReplayResult {
   }
 }
 
-pub fn replay(io_pool: &IOPool) -> Result<ReplayResult> {
+pub fn replay(io_pool: &IOPool, _version: WALFormatVersion) -> Result<ReplayResult> {
   let mut files = Vec::new();
   for file in io_pool.read_dir()? {
     let filename = PathBuf::from(file.file_name());

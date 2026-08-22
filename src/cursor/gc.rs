@@ -21,7 +21,7 @@ use crate::{
     BTreeNode, BTreeNodeView, DataEntry, DataEntryView, RecordDataView, StaticKey,
     TreeHeader, HEADER_POINTER,
   },
-  table::{TableHandleRef, TableMapper, META_TABLE_ID},
+  table::{TableHandleRef, TableMapper},
   transaction::{PageRecorder, VersionVisibility},
   utils::{ChunkQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX},
@@ -530,7 +530,7 @@ fn run_tick(
       continue;
     }
 
-    if table.get_id() == META_TABLE_ID {
+    if table.get_id() == tables.meta_table_id() {
       continue;
     }
     if table.free().file_len() <= compaction_min_size {

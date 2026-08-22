@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  AtomicTableId, InitMetadata, TableHandle, TableHandleRef, TableId, TableMetadata,
-  TableName, META_TABLE,
+  AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata, TableName,
+  META_TABLE,
 };
 use crate::{
   cache::ShrinkMap,
@@ -40,11 +40,12 @@ pub struct TableMapper {
   last_table_id: AtomicTableId,
 }
 impl TableMapper {
-  pub fn open_new(io_pool: Arc<IOPool>) -> Result<(Self, InitMetadata)> {
-    let filename = format!("{}.{}", META_TABLE, FILE_EXT);
-    let init = InitMetadata::new(META_TABLE_ID, META_TABLE.to_string(), filename.clone());
-    let disk = BlockIOHandle::new(io_pool.open_direct_io(PathBuf::from(filename))?);
-    let metadata = TableHandle::new(&init.try_cast().unwrap(), disk);
+  pub fn open_new(io_pool: Arc<IOPool>) -> Result<(Self, TableMetadata)> {
+    let name = unsafe { TableName::from_str_unchecked(META_TABLE) };
+    let filename = to_path(&name);
+    let init = TableMetadata::new(META_TABLE_ID, name, filename.clone());
+    let disk = BlockIOHandle::new(io_pool.open_direct_io(filename)?);
+    let metadata = TableHandle::new(&init, disk);
     Ok((
       Self {
         open_handles: Default::default(),
@@ -55,11 +56,10 @@ impl TableMapper {
       init,
     ))
   }
-  pub fn open_exists(io_pool: Arc<IOPool>, init: &InitMetadata) -> Result<Self> {
-    let casted = init.try_cast()?;
+  pub fn open_exists(io_pool: Arc<IOPool>, init: &TableMetadata) -> Result<Self> {
     let disk =
-      BlockIOHandle::new(io_pool.open_direct_io(casted.get_filename().to_path_buf())?);
-    let metadata = TableHandle::new(&casted, disk);
+      BlockIOHandle::new(io_pool.open_direct_io(init.get_filename().to_path_buf())?);
+    let metadata = TableHandle::new(init, disk);
     Ok(Self {
       open_handles: Default::default(),
       metadata: SBox::new(metadata),
@@ -134,6 +134,9 @@ impl TableMapper {
 
   pub fn meta_table(&self) -> TableHandleRef {
     self.metadata.clone()
+  }
+  pub fn meta_table_id(&self) -> TableId {
+    self.metadata.get_id()
   }
 
   /**

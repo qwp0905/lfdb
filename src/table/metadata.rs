@@ -1,10 +1,9 @@
 use std::{
   ffi::OsStr,
+  fmt,
   path::{Path, PathBuf},
   sync::atomic::AtomicU32,
 };
-
-use serde::{Deserialize, Serialize};
 
 use super::TableName;
 use crate::{
@@ -16,7 +15,7 @@ pub type TableId = u32;
 pub const TABLE_ID_BYTES: usize = TableId::BITS as usize >> 3;
 pub type AtomicTableId = AtomicU32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableFormatVersion {
   V0,
 }
@@ -34,8 +33,22 @@ impl TableFormatVersion {
       Self::V0 => 0,
     }
   }
+  pub const fn is_current(&self) -> bool {
+    matches!(self, &Self::CURRENT)
+  }
+  const fn as_str(&self) -> &str {
+    match self {
+      Self::V0 => "v0",
+    }
+  }
 
   const BYTE_LEN: usize = u16::BITS as usize >> 3;
+}
+
+impl fmt::Display for TableFormatVersion {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Display::fmt(self.as_str(), f)
+  }
 }
 
 #[derive(Debug)]
@@ -56,7 +69,10 @@ impl SegmentSpec {
     let Some(id) = reader.read_array().map(TableId::from_le_bytes) else {
       return Err(Error::InvalidFormat("metadata crashed."));
     };
-    let Some(version) = reader.read_u16().and_then(TableFormatVersion::from_u16) else {
+    let Some(v) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(version) = TableFormatVersion::from_u16(v) else {
       return Err(Error::UnsupportedVersion);
     };
     let Some(len) = reader.read_u16() else {
@@ -153,7 +169,7 @@ impl TableMetadata {
     })
   }
 
-  fn byte_len(&self) -> usize {
+  pub fn byte_len(&self) -> usize {
     1 + self
       .compaction
       .as_ref()
@@ -218,8 +234,11 @@ impl TableMetadata {
     &self.spec.filename
   }
   #[inline]
-  pub fn get_name(&self) -> &TableName {
+  pub const fn get_name(&self) -> &TableName {
     &self.name
+  }
+  pub const fn get_version(&self) -> TableFormatVersion {
+    self.spec.version
   }
 }
 
@@ -230,34 +249,6 @@ impl Clone for TableMetadata {
       spec: self.spec.clone(),
       compaction: self.compaction.as_ref().cloned(),
     }
-  }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct InitMetadata {
-  pub id: TableId,
-  pub name: String,
-  pub filename: String,
-  pub version: u16,
-}
-impl InitMetadata {
-  pub const fn new(id: TableId, name: String, filename: String) -> Self {
-    Self {
-      id,
-      name,
-      filename,
-      version: TableFormatVersion::CURRENT.as_u16(),
-    }
-  }
-  pub fn try_cast(&self) -> Result<TableMetadata> {
-    let Some(version) = TableFormatVersion::from_u16(self.version) else {
-      return Err(Error::UnsupportedVersion);
-    };
-    Ok(TableMetadata {
-      name: unsafe { TableName::from_str_unchecked(&self.name) },
-      spec: SegmentSpec::new(self.id, PathBuf::from(self.filename.as_str()), version),
-      compaction: None,
-    })
   }
 }
 

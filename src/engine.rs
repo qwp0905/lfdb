@@ -14,14 +14,14 @@ use crate::{
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished, Compactor,
-    GarbageCollectionConfig, GarbageCollector,
+    initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
+    CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   error, info,
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
-  table::{TableId, TableMapper, META_TABLE_ID},
+  table::{TableFormatVersion, TableId, TableMapper},
   transaction::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
     TransactionConfig, TxOrchestrator, VersionVisibility,
@@ -90,7 +90,7 @@ impl Engine {
     let block_cache =
       BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
 
-    let Some(manifest) = load_manifest(&io_pool)? else {
+    let Some(mut manifest) = load_manifest(&io_pool)? else {
       info!("engine initial state.");
       let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
 
@@ -106,8 +106,8 @@ impl Engine {
       let manifest = Manifest::new(
         PAGE_SIZE as u32,
         metadata,
-        SnapshotFormatVersion::CURRENT.as_u16(),
-        WALFormatVersion::CURRENT.as_u16(),
+        SnapshotFormatVersion::CURRENT,
+        WALFormatVersion::CURRENT,
       );
       save_manifest(&io_pool, &manifest)?;
       io_pool.sync_dir()?;
@@ -176,12 +176,19 @@ impl Engine {
       TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
 
     info!("trying to replay...");
-    let (wal, replay) =
-      WriteAheadLog::replay(&wal_config, event_bus.clone(), io_pool.clone())?;
+    let (wal, replay) = WriteAheadLog::replay(
+      &wal_config,
+      event_bus.clone(),
+      io_pool.clone(),
+      manifest.wal_version,
+    )?;
     let wal = wal.to_arc();
 
     let snapshot = match replay.last_snapshot {
-      Some(file) => CheckpointSnapshot::read_from(&mut io_pool.open_scan_io(file)?)?,
+      Some(file) => {
+        let mut handle = io_pool.open_scan_io(file)?;
+        CheckpointSnapshot::read_from(&mut handle, manifest.snapshot_version)?
+      }
       None => CheckpointSnapshot::empty(),
     };
     let mut blob_metadata = snapshot.blob_metadata;
@@ -201,13 +208,14 @@ impl Engine {
     let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
+    let meta_table_id = meta_table.get_id();
     for (_, ptr, data) in replay
       .redo
       .iter()
-      .filter(|(table_id, _, _)| *table_id == META_TABLE_ID)
+      .filter(|(table_id, _, _)| *table_id == meta_table_id)
     {
       max_used
-        .entry(META_TABLE_ID)
+        .entry(meta_table_id)
         .and_modify(|v| *v = (*v).max(*ptr))
         .or_insert(*ptr);
       block_cache
@@ -220,8 +228,8 @@ impl Engine {
 
     let mut handles = HashMap::new();
     let found_handles = open_tables(&block_cache, &tables, &version_visibility, &blob)?;
-    for (table, metadata) in found_handles.handles {
-      handles.insert(table.get_id(), (metadata, table));
+    for (table, metadata) in found_handles.handles.iter() {
+      handles.insert(table.get_id(), (metadata.clone(), table.clone()));
     }
     for ((table, metadata), (c_table, c_meta)) in found_handles.in_compaction.iter() {
       handles.insert(table.get_id(), (metadata.clone(), table.clone()));
@@ -231,7 +239,7 @@ impl Engine {
     for (table_id, ptr, data) in replay
       .redo
       .iter()
-      .filter(|(table_id, _, _)| *table_id != META_TABLE_ID)
+      .filter(|(table_id, _, _)| *table_id != meta_table_id)
     {
       let Some((_, handle)) = handles.get(table_id) else {
         continue;
@@ -260,6 +268,22 @@ impl Engine {
     )?;
 
     tables.replay(handles.into_values())?;
+
+    if !meta_table.get_version().is_current() {
+      info!(
+        "metadata table format version has been expired. it will be updated from {} to {}",
+        meta_table.get_version(),
+        TableFormatVersion::CURRENT
+      );
+
+      // TODO: Implement offline compaction of the metadata table here when a change to the table format version is actually required.
+      // manifest.metadata_table.version = TableFormatVersion::CURRENT;
+    }
+
+    manifest.snapshot_version = SnapshotFormatVersion::CURRENT;
+    manifest.wal_version = WALFormatVersion::CURRENT;
+    save_manifest(&io_pool, &manifest)?;
+
     recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
 
     let gc = GarbageCollector::new(
@@ -282,6 +306,13 @@ impl Engine {
       blob.clone(),
       compaction_config,
     );
+
+    let events = found_handles
+      .handles
+      .into_iter()
+      .filter(|(_, metadata)| !metadata.get_version().is_current())
+      .map(|(table, _)| CompactionTriggered::new(table));
+    event_bus.batch_publish(events);
 
     let events =
       found_handles
