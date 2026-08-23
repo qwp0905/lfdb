@@ -10,9 +10,9 @@ use crossbeam::queue::SegQueue;
 const MAX_BATCH_SIZE: usize = 32;
 
 struct VTable {
-  call: unsafe fn(NonNull<()>, NonNull<()>),
+  call: unsafe fn(NonNull<Header>, NonNull<()>),
 }
-unsafe fn call<T, F>(ptr: NonNull<()>, data: NonNull<()>)
+unsafe fn call<T, F>(ptr: NonNull<Header>, data: NonNull<()>)
 where
   F: FnOnce(&mut T),
 {
@@ -22,7 +22,16 @@ where
     .call(data.cast().as_mut())
 }
 
+struct Header {}
+impl Header {
+  const fn new() -> Self {
+    Self {}
+  }
+}
+
+#[repr(C)]
 pub struct BatchFn<T, F> {
+  header: Header,
   handler: ManuallyDrop<F>,
   _marker: PhantomData<fn(&mut T)>,
 }
@@ -34,6 +43,7 @@ where
 
   pub const fn new(handler: F) -> Self {
     Self {
+      header: Header::new(),
       handler: ManuallyDrop::new(handler),
       _marker: PhantomData,
     }
@@ -50,12 +60,12 @@ where
   }
 }
 pub struct BatchTask<T> {
-  ptr: NonNull<()>,
+  ptr: NonNull<Header>,
   vtable: &'static VTable,
   _marker: PhantomData<fn(&mut T)>,
 }
 impl<T> BatchTask<T> {
-  const fn new(ptr: NonNull<()>, vtable: &'static VTable) -> Self {
+  const fn new(ptr: NonNull<Header>, vtable: &'static VTable) -> Self {
     Self {
       ptr,
       vtable,
