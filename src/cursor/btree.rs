@@ -452,7 +452,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
       snapshot.owner,
       snapshot.version,
       match snapshot.value {
-        BufferedValue::Data(data) => RecordData::Data(data.into_vec()),
+        BufferedValue::Data(data) => RecordData::Data(data.to_vec()),
         BufferedValue::Blob(id, offset, len) => RecordData::Blob(id, offset, len),
       },
     );

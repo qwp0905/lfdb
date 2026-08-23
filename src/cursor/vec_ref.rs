@@ -17,6 +17,9 @@ enum Type {
  * keeps an `ReadonlySlot` reference to the page and exposes the requested range as a
  * slice. When bytes must be materialized elsewhere, it stores the copied aligned
  * buffer but presents the same `[u8]` interface.
+ *
+ * This object is created for read-only use. Behavior is not guaranteed if it is
+ * converted to `&mut [u8]` and used. Please copy it before use.
  */
 pub struct VecRef(Type);
 impl VecRef {
@@ -26,20 +29,7 @@ impl VecRef {
   pub const fn copied(data: AlignedBuf) -> Self {
     Self(Type::Copied(data))
   }
-
-  /**
-   * Materialize this view as owned bytes.
-   *
-   * Use this only when the caller needs an owned `Vec`; otherwise `VecRef` can be
-   * read directly as a byte slice.
-   */
-  pub fn into_vec(self) -> Vec<u8> {
-    match self.0 {
-      Type::Refed(slot, range) => slot.as_ref().copy_range(range),
-      Type::Copied(data) => data.as_slice().to_vec(),
-    }
-  }
-  fn as_slice(&self) -> &[u8] {
+  pub fn as_slice(&self) -> &[u8] {
     match &self.0 {
       Type::Refed(slot, range) => slot.as_ref().range(range.clone()),
       Type::Copied(data) => data.as_slice(),
