@@ -9,45 +9,72 @@ use crossbeam::queue::SegQueue;
 
 const MAX_BATCH_SIZE: usize = 32;
 
-pub struct BatchFn<T, F>(ManuallyDrop<F>, PhantomData<fn(&mut T)>);
-impl<T, F> BatchFn<T, F> {
-  pub const fn new(f: F) -> Self {
-    Self(ManuallyDrop::new(f), PhantomData)
+struct VTable {
+  call: unsafe fn(NonNull<Header>, NonNull<()>),
+}
+unsafe fn call<T, F>(ptr: NonNull<Header>, data: NonNull<()>)
+where
+  F: FnOnce(&mut T),
+{
+  ptr
+    .cast::<BatchFn<T, F>>()
+    .as_mut()
+    .call(data.cast().as_mut())
+}
+
+struct Header {}
+impl Header {
+  const fn new() -> Self {
+    Self {}
+  }
+}
+
+#[repr(C)]
+pub struct BatchFn<T, F> {
+  header: Header,
+  handler: ManuallyDrop<F>,
+  _marker: PhantomData<fn(&mut T)>,
+}
+impl<T, F> BatchFn<T, F>
+where
+  F: FnOnce(&mut T),
+{
+  const VTABLE: VTable = VTable { call: call::<T, F> };
+
+  pub const fn new(handler: F) -> Self {
+    Self {
+      header: Header::new(),
+      handler: ManuallyDrop::new(handler),
+      _marker: PhantomData,
+    }
   }
   pub const fn task(&mut self) -> BatchTask<T>
   where
     F: FnOnce(&mut T),
   {
-    BatchTask::new(NonNull::from_mut(self))
+    BatchTask::new(NonNull::from_mut(self).cast(), &Self::VTABLE)
   }
-  unsafe fn take(&mut self) -> F {
-    unsafe { ManuallyDrop::take(&mut self.0) }
+  unsafe fn call(&mut self, data: &mut T) {
+    let handler = unsafe { ManuallyDrop::take(&mut self.handler) };
+    handler(data)
   }
 }
 pub struct BatchTask<T> {
-  ptr: NonNull<()>,
-  call: unsafe fn(NonNull<()>, &mut T),
+  ptr: NonNull<Header>,
+  vtable: &'static VTable,
+  _marker: PhantomData<fn(&mut T)>,
 }
 impl<T> BatchTask<T> {
-  const fn new<F>(ptr: NonNull<BatchFn<T, F>>) -> Self
-  where
-    F: FnOnce(&mut T),
-  {
+  const fn new(ptr: NonNull<Header>, vtable: &'static VTable) -> Self {
     Self {
-      ptr: ptr.cast(),
-      call: call::<T, F>,
+      ptr,
+      vtable,
+      _marker: PhantomData,
     }
   }
-  fn call_with(self, data: &mut T) {
-    unsafe { (self.call)(self.ptr, data) };
+  fn call_with(self, data: NonNull<()>) {
+    unsafe { (self.vtable.call)(self.ptr, data) }
   }
-}
-unsafe fn call<T, F>(ptr: NonNull<()>, data: &mut T)
-where
-  F: FnOnce(&mut T),
-{
-  let f = unsafe { ptr.cast::<BatchFn<T, F>>().as_mut().take() };
-  f(data);
 }
 
 /**
@@ -80,8 +107,9 @@ impl<T> BatchHandle<T> {
    * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
    */
   pub unsafe fn flush_with(&self, data: &mut T) {
+    let ptr = NonNull::from_mut(data).cast();
     for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle.call_with(data);
+      handle.call_with(ptr);
     }
   }
 

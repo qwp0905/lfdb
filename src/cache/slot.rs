@@ -177,19 +177,12 @@ pub struct BatchSlot<'a> {
   _token: SharedToken<'a>,
 }
 impl<'a> BatchSlot<'a> {
-  const fn batch_fn<F>(f: F) -> BatchFn<RefedSlot, F>
-  where
-    F: FnOnce(&mut RefedSlot),
-  {
-    BatchFn::new(f)
-  }
-
   pub fn mutate<T, F>(self, handler: F) -> T
   where
     F: FnOnce(&mut RefedSlot) -> T + Unpin,
   {
     let (o, f) = oneshot();
-    let mut pinned = pin!(Self::batch_fn(|slot| f.fulfill(handler(slot))));
+    let mut pinned = pin!(BatchFn::new(|slot| f.fulfill(handler(slot))));
     if !self.batch.register(pinned.task()) {
       return o.wait().unwrap();
     }
