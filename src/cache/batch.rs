@@ -9,45 +9,54 @@ use crossbeam::queue::SegQueue;
 
 const MAX_BATCH_SIZE: usize = 32;
 
-pub struct BatchFn<T, F>(ManuallyDrop<F>, PhantomData<fn(&mut T)>);
-impl<T, F> BatchFn<T, F> {
-  pub const fn new(f: F) -> Self {
-    Self(ManuallyDrop::new(f), PhantomData)
-  }
-  pub const fn task(&mut self) -> BatchTask<T>
-  where
-    F: FnOnce(&mut T),
-  {
-    BatchTask::new(NonNull::from_mut(self))
-  }
-  unsafe fn take(&mut self) -> F {
-    unsafe { ManuallyDrop::take(&mut self.0) }
-  }
-}
-pub struct BatchTask<T> {
-  ptr: NonNull<()>,
+struct VTable<T> {
   call: unsafe fn(NonNull<()>, &mut T),
-}
-impl<T> BatchTask<T> {
-  const fn new<F>(ptr: NonNull<BatchFn<T, F>>) -> Self
-  where
-    F: FnOnce(&mut T),
-  {
-    Self {
-      ptr: ptr.cast(),
-      call: call::<T, F>,
-    }
-  }
-  fn call_with(self, data: &mut T) {
-    unsafe { (self.call)(self.ptr, data) };
-  }
 }
 unsafe fn call<T, F>(ptr: NonNull<()>, data: &mut T)
 where
   F: FnOnce(&mut T),
 {
-  let f = unsafe { ptr.cast::<BatchFn<T, F>>().as_mut().take() };
-  f(data);
+  ptr.cast::<BatchFn<T, F>>().as_mut().call(data)
+}
+
+pub struct BatchFn<T, F> {
+  handler: ManuallyDrop<F>,
+  _marker: PhantomData<fn(&mut T)>,
+}
+impl<T, F> BatchFn<T, F>
+where
+  F: FnOnce(&mut T),
+{
+  const VTABLE: VTable<T> = VTable { call: call::<T, F> };
+
+  pub const fn new(handler: F) -> Self {
+    Self {
+      handler: ManuallyDrop::new(handler),
+      _marker: PhantomData,
+    }
+  }
+  pub const fn task(&mut self) -> BatchTask<'static, T>
+  where
+    F: FnOnce(&mut T),
+  {
+    BatchTask::new(NonNull::from_mut(self).cast(), &Self::VTABLE)
+  }
+  unsafe fn call(&mut self, data: &mut T) {
+    let handler = unsafe { ManuallyDrop::take(&mut self.handler) };
+    handler(data)
+  }
+}
+pub struct BatchTask<'a, T> {
+  ptr: NonNull<()>,
+  vtable: &'a VTable<T>,
+}
+impl<'a, T> BatchTask<'a, T> {
+  const fn new(ptr: NonNull<()>, vtable: &'a VTable<T>) -> Self {
+    Self { ptr, vtable }
+  }
+  fn call_with(self, data: &mut T) {
+    unsafe { (self.vtable.call)(self.ptr, data) }
+  }
 }
 
 /**
@@ -58,8 +67,8 @@ where
  * one winner owns the batch pass that applies queued handlers to the same
  * `RefedSlot`.
  */
-pub struct BatchHandle<T> {
-  queue: SegQueue<BatchTask<T>>,
+pub struct BatchHandle<T: 'static> {
+  queue: SegQueue<BatchTask<'static, T>>,
   occupied: AtomicBool,
 }
 impl<T> BatchHandle<T> {
@@ -70,7 +79,7 @@ impl<T> BatchHandle<T> {
     }
   }
 
-  pub fn register(&self, handler: BatchTask<T>) -> bool {
+  pub fn register(&self, handler: BatchTask<'static, T>) -> bool {
     self.queue.push(handler);
     !self.occupied.fetch_or(true, Ordering::Release)
   }
