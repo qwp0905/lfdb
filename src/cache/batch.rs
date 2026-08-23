@@ -9,14 +9,17 @@ use crossbeam::queue::SegQueue;
 
 const MAX_BATCH_SIZE: usize = 32;
 
-struct VTable<T> {
-  call: unsafe fn(NonNull<()>, &mut T),
+struct VTable {
+  call: unsafe fn(NonNull<()>, NonNull<()>),
 }
-unsafe fn call<T, F>(ptr: NonNull<()>, data: &mut T)
+unsafe fn call<T, F>(ptr: NonNull<()>, data: NonNull<()>)
 where
   F: FnOnce(&mut T),
 {
-  ptr.cast::<BatchFn<T, F>>().as_mut().call(data)
+  ptr
+    .cast::<BatchFn<T, F>>()
+    .as_mut()
+    .call(data.cast().as_mut())
 }
 
 pub struct BatchFn<T, F> {
@@ -27,7 +30,7 @@ impl<T, F> BatchFn<T, F>
 where
   F: FnOnce(&mut T),
 {
-  const VTABLE: VTable<T> = VTable { call: call::<T, F> };
+  const VTABLE: VTable = VTable { call: call::<T, F> };
 
   pub const fn new(handler: F) -> Self {
     Self {
@@ -35,7 +38,7 @@ where
       _marker: PhantomData,
     }
   }
-  pub const fn task(&mut self) -> BatchTask<'static, T>
+  pub const fn task(&mut self) -> BatchTask<T>
   where
     F: FnOnce(&mut T),
   {
@@ -46,15 +49,20 @@ where
     handler(data)
   }
 }
-pub struct BatchTask<'a, T> {
+pub struct BatchTask<T> {
   ptr: NonNull<()>,
-  vtable: &'a VTable<T>,
+  vtable: &'static VTable,
+  _marker: PhantomData<fn(&mut T)>,
 }
-impl<'a, T> BatchTask<'a, T> {
-  const fn new(ptr: NonNull<()>, vtable: &'a VTable<T>) -> Self {
-    Self { ptr, vtable }
+impl<T> BatchTask<T> {
+  const fn new(ptr: NonNull<()>, vtable: &'static VTable) -> Self {
+    Self {
+      ptr,
+      vtable,
+      _marker: PhantomData,
+    }
   }
-  fn call_with(self, data: &mut T) {
+  fn call_with(self, data: NonNull<()>) {
     unsafe { (self.vtable.call)(self.ptr, data) }
   }
 }
@@ -67,8 +75,8 @@ impl<'a, T> BatchTask<'a, T> {
  * one winner owns the batch pass that applies queued handlers to the same
  * `RefedSlot`.
  */
-pub struct BatchHandle<T: 'static> {
-  queue: SegQueue<BatchTask<'static, T>>,
+pub struct BatchHandle<T> {
+  queue: SegQueue<BatchTask<T>>,
   occupied: AtomicBool,
 }
 impl<T> BatchHandle<T> {
@@ -79,7 +87,7 @@ impl<T> BatchHandle<T> {
     }
   }
 
-  pub fn register(&self, handler: BatchTask<'static, T>) -> bool {
+  pub fn register(&self, handler: BatchTask<T>) -> bool {
     self.queue.push(handler);
     !self.occupied.fetch_or(true, Ordering::Release)
   }
@@ -89,8 +97,9 @@ impl<T> BatchHandle<T> {
    * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
    */
   pub unsafe fn flush_with(&self, data: &mut T) {
+    let ptr = NonNull::from_mut(data).cast();
     for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle.call_with(data);
+      handle.call_with(ptr);
     }
   }
 
