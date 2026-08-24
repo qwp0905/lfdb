@@ -293,60 +293,6 @@ impl WritablePolicy for CompactionWritePolicy {
 
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
-/**
- * Start compaction by publishing the new physical table segment in metadata.
- *
- * The metadata entry is the durable compaction state for the logical table. Once
- * this update commits, the logical table is represented by the old segment plus
- * the new compaction segment, and transactions can route through that state.
- */
-fn create_compaction(
-  version_visibility: &VersionVisibility,
-  wal: &WriteAheadLog,
-  block_cache: &BlockCache,
-  recorder: &PageRecorder,
-  tables: &TableMapper,
-  blob: &BlobStorage,
-  meta_table: &TableHandleRef,
-  table_name: &TableName,
-) -> Result<Option<(TableHandleRef, TxId, TableMetadata)>> {
-  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
-  let index = BTreeIndex::new(&tx);
-
-  let GetResult::Present(bytes) = index.get(table_name.as_bytes(), meta_table)? else {
-    return Ok(None);
-  };
-
-  let mut metadata = TableMetadata::from_bytes(&bytes)?;
-  if metadata.get_compaction_id().is_some() {
-    trace!("table {table_name} compacting skipped since already compacted.");
-    return Ok(None);
-  }
-
-  info!("table {table_name} compacting triggered.");
-  let table_meta = tables.create_metadata(table_name);
-  metadata.set_compaction(&table_meta);
-
-  if let Err(err) = index.insert_if_matched(
-    table_name.as_bytes(),
-    WriteOp::Insert(metadata.to_vec()),
-    meta_table,
-  ) {
-    if matches!(err, Error::WriteConflict) {
-      info!("table {table_name} already set compaction state");
-      return Ok(None);
-    }
-    return Err(err);
-  };
-
-  let new_table = tables.create_handle(&table_meta)?;
-  index.initialize(&new_table)?;
-  tables.insert(new_table.clone());
-
-  tx.commit()?;
-  Ok(Some((new_table, tx.current_version(), table_meta)))
-}
-
 pub struct CompactionCommitted {
   old: TableHandleRef,
   new: TableHandleRef,
@@ -410,17 +356,300 @@ pub struct CompactionConfig {
   pub batch_size: usize,
 }
 
-pub struct Compactor {
-  incoming: Arc<SegQueue<CompactTask>>,
-  in_progress: Arc<SegQueue<CompactionCycle>>,
-  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<IntervalWorkThread<()>>,
+struct CompactionWorker {
   block_cache: Arc<BlockCache>,
   version_visibility: Arc<VersionVisibility>,
   wal: Arc<WriteAheadLog>,
   recorder: Arc<PageRecorder>,
   blob: Arc<BlobStorage>,
+  tables: Arc<TableMapper>,
   meta_table: TableHandleRef,
+  event_bus: Arc<EventBus>,
+  old_index: BTreeIndex<Arc<CompactionReadPolicy>>,
+  new_index: BTreeIndex<CompactionWritePolicy>,
+}
+impl CompactionWorker {
+  fn new(
+    block_cache: Arc<BlockCache>,
+    version_visibility: Arc<VersionVisibility>,
+    wal: Arc<WriteAheadLog>,
+    recorder: Arc<PageRecorder>,
+    blob: Arc<BlobStorage>,
+    tables: Arc<TableMapper>,
+    meta_table: TableHandleRef,
+    event_bus: Arc<EventBus>,
+  ) -> Self {
+    let old_index = BTreeIndex::new(
+      CompactionReadPolicy {
+        block_cache: block_cache.clone(),
+        version_visibility: version_visibility.clone(),
+      }
+      .to_arc(),
+    );
+    let new_index = BTreeIndex::new(CompactionWritePolicy {
+      block_cache: block_cache.clone(),
+      version_visibility: version_visibility.clone(),
+      recorder: recorder.clone(),
+    });
+    Self {
+      block_cache,
+      version_visibility,
+      wal,
+      recorder,
+      blob,
+      tables,
+      meta_table,
+      old_index,
+      new_index,
+      event_bus,
+    }
+  }
+
+  fn create_tx(&self) -> Result<MiniTx<'_>> {
+    MiniTx::start(
+      &self.version_visibility,
+      &self.wal,
+      &self.block_cache,
+      &self.recorder,
+      &self.blob,
+    )
+  }
+
+  /**
+   * Finish compaction by removing the compaction marker from metadata.
+   *
+   * After this commit, the logical table is represented only by the compacted
+   * segment. The returned transaction id/version are used to defer physical
+   * removal of the old segment until that metadata transition is visible to all
+   * active transactions.
+   */
+  fn remove_compaction(
+    &self,
+    table_metadata: &TableMetadata,
+  ) -> Result<Option<(TxId, TxId)>> {
+    let mut tx = self.create_tx()?;
+    let index = BTreeIndex::new(&tx);
+
+    let table_name = table_metadata.get_name();
+    if !index.contains(table_name.as_bytes(), &self.meta_table)? {
+      warn!("table {table_name} already dropped.");
+      return Ok(None);
+    }
+
+    if let Err(err) = index.insert_if_matched(
+      table_name.as_bytes(),
+      WriteOp::Insert(table_metadata.to_vec()),
+      &self.meta_table,
+    ) {
+      if matches!(err, Error::WriteConflict) {
+        warn!("table {table_name} already dropped.");
+        return Ok(None);
+      }
+      return Err(err);
+    };
+
+    tx.commit()?;
+    Ok(Some((tx.state.get_id(), tx.current_version())))
+  }
+
+  /**
+   * Check whether the logical table still exists before continuing compaction.
+   *
+   * Compaction can race with table drop. The compactor only needs to know whether
+   * the logical table is still present in metadata; if it has been removed, the
+   * in-progress compaction can be abandoned.
+   */
+  fn check_compaction(&self, table_name: &TableName) -> Result<bool> {
+    let tx = self.create_tx()?;
+    BTreeIndex::new(&tx).contains(table_name.as_bytes(), &self.meta_table)
+  }
+
+  /**
+   * Start compaction by publishing the new physical table segment in metadata.
+   *
+   * The metadata entry is the durable compaction state for the logical table. Once
+   * this update commits, the logical table is represented by the old segment plus
+   * the new compaction segment, and transactions can route through that state.
+   */
+  fn create_compaction(
+    &self,
+    table_name: &TableName,
+  ) -> Result<Option<(TableHandleRef, TxId, TableMetadata)>> {
+    let mut tx = self.create_tx()?;
+    let index = BTreeIndex::new(&tx);
+
+    let GetResult::Present(bytes) = index.get(table_name.as_bytes(), &self.meta_table)?
+    else {
+      return Ok(None);
+    };
+
+    let mut metadata = TableMetadata::from_bytes(&bytes)?;
+    if metadata.get_compaction_id().is_some() {
+      trace!("table {table_name} compacting skipped since already compacted.");
+      return Ok(None);
+    }
+
+    info!("table {table_name} compacting triggered.");
+    let table_meta = self.tables.create_metadata(table_name);
+    metadata.set_compaction(&table_meta);
+
+    if let Err(err) = index.insert_if_matched(
+      table_name.as_bytes(),
+      WriteOp::Insert(metadata.to_vec()),
+      &self.meta_table,
+    ) {
+      if matches!(err, Error::WriteConflict) {
+        info!("table {table_name} already set compaction state");
+        return Ok(None);
+      }
+      return Err(err);
+    };
+
+    let new_table = self.tables.create_handle(&table_meta)?;
+    index.initialize(&new_table)?;
+    self.tables.insert(new_table.clone());
+
+    tx.commit()?;
+    Ok(Some((new_table, tx.current_version(), table_meta)))
+  }
+
+  fn finalize_cycle(&self, cycle: &mut CompactionCycle) -> Result {
+    if !self.check_compaction(cycle.metadata.get_name())? {
+      return Ok(());
+    }
+
+    let (Some(old), Some(new)) = (cycle.old.try_pin(), cycle.new.try_pin()) else {
+      return Ok(());
+    };
+
+    let mut snapshotter = match cycle.snapshotter.take() {
+      Some(v) => v,
+      None => self.old_index.snapshot(old.handle())?,
+    };
+
+    while let Some(snap) = snapshotter.next_snapshot()? {
+      self.new_index.apply_snapshot(snap, new.handle())?;
+    }
+
+    self.remove_compaction(&cycle.metadata)?;
+    Ok(())
+  }
+
+  fn execute(&self, current: &mut CompactionCycle, batch_size: usize) -> Result<bool> {
+    let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
+      return Ok(true);
+    };
+
+    let Some(snapshotter) = &mut current.snapshotter else {
+      info!(
+        "table {} compaction start to create snapshot.",
+        current.metadata.get_name()
+      );
+      current.snapshotter = Some(self.old_index.snapshot(old.handle())?);
+      return Ok(false);
+    };
+
+    if snapshotter.is_done() {
+      let Some((owner, version)) = self.remove_compaction(&current.metadata)? else {
+        return Ok(true);
+      };
+      info!(
+        "table {} compacting copied record complete.",
+        current.metadata.get_name()
+      );
+      self.event_bus.publish(DropTableCommitted::new(
+        old.handle().clone(),
+        owner,
+        version,
+      ));
+      return Ok(true);
+    };
+
+    if !self.check_compaction(current.metadata.get_name())? {
+      warn!("table {} already dropped.", current.metadata.get_name());
+      return Ok(true);
+    }
+
+    for _ in 0..batch_size {
+      let Some(snap) = snapshotter.next_snapshot()? else {
+        break;
+      };
+
+      // to protect stale pointer from gc.
+      let _guard = pin();
+      self.new_index.apply_snapshot(snap, new.handle())?;
+    }
+
+    Ok(false)
+  }
+
+  fn run_tick(
+    &self,
+    incoming: &SegQueue<CompactTask>,
+    in_progress: &SegQueue<CompactionCycle>,
+    cycle: &AtomicCell<Option<CompactionCycle>>,
+    batch_size: usize,
+    waiting_publish: &mut LinkedList<(
+      TableHandleRef,
+      TableHandleRef,
+      TableMetadata,
+      TxId,
+    )>,
+  ) -> Result {
+    while let Some(task) = incoming.pop() {
+      match task {
+        CompactTask::Committed(committed) => waiting_publish.push_back((
+          committed.old,
+          committed.new,
+          committed.metadata,
+          committed.commit_version,
+        )),
+        CompactTask::New(trigger) => {
+          let old = trigger.old;
+          let table_name = old.get_name();
+          let Some((new_table, wait_until, metadata)) =
+            self.create_compaction(table_name)?
+          else {
+            continue;
+          };
+
+          info!("table {table_name} compacting wait until another tx close.");
+          waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
+        }
+      }
+    }
+
+    let min_version = self.version_visibility.min_version();
+    for (old, new, metadata, _) in
+      waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
+    {
+      in_progress.push(CompactionCycle::new(old, new, metadata));
+    }
+
+    // SAFETY: single threaded access to cycle.
+    let cycle_ref = unsafe { &mut *cycle.as_ptr() };
+    let Some(current) = cycle_ref.as_mut().or_else(|| {
+      in_progress
+        .pop()
+        .map(|v| unsafe { (*cycle.as_ptr()).insert(v) })
+    }) else {
+      return Ok(());
+    };
+
+    if !self.execute(current, batch_size)? {
+      return Ok(());
+    }
+    *cycle_ref = None;
+    Ok(())
+  }
+}
+
+pub struct Compactor {
+  incoming: Arc<SegQueue<CompactTask>>,
+  in_progress: Arc<SegQueue<CompactionCycle>>,
+  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
+  ticker: Box<IntervalWorkThread<()>>,
+  worker: Arc<CompactionWorker>,
 }
 impl Compactor {
   pub fn new(
@@ -433,9 +662,21 @@ impl Compactor {
     blob: Arc<BlobStorage>,
     config: CompactionConfig,
   ) -> Arc<Self> {
+    let meta_table = tables.meta_table();
     let incoming = SegQueue::new().to_arc();
     let in_progress = SegQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
+    let worker = CompactionWorker::new(
+      block_cache,
+      version_visibility,
+      wal,
+      recorder,
+      blob,
+      tables,
+      meta_table,
+      event_bus.clone(),
+    )
+    .to_arc();
     let ticker = ThreadBuilder::new()
       .name("compaction")
       .stack_size(2 << 20)
@@ -445,13 +686,7 @@ impl Compactor {
         compaction_loop(
           incoming.clone(),
           in_progress.clone(),
-          tables.clone(),
-          block_cache.clone(),
-          version_visibility.clone(),
-          wal.clone(),
-          recorder.clone(),
-          event_bus.clone(),
-          blob.clone(),
+          worker.clone(),
           cycle.clone(),
           config.batch_size,
         ),
@@ -463,12 +698,7 @@ impl Compactor {
       in_progress,
       cycle,
       ticker,
-      block_cache,
-      version_visibility,
-      recorder,
-      wal,
-      blob,
-      meta_table: tables.meta_table(),
+      worker,
     });
     event_bus.register(&this);
     this
@@ -483,7 +713,7 @@ impl Compactor {
    * observed.
    */
   pub fn close(&self) -> Result {
-    if !self.wal.is_available() {
+    if !self.worker.wal.is_available() {
       self.failover();
       return Ok(());
     }
@@ -499,54 +729,8 @@ impl Compactor {
       self.in_progress.len()
     );
 
-    let old_index = BTreeIndex::new(
-      CompactionReadPolicy {
-        block_cache: self.block_cache.clone(),
-        version_visibility: self.version_visibility.clone(),
-      }
-      .to_arc(),
-    );
-    let new_index = BTreeIndex::new(CompactionWritePolicy {
-      block_cache: self.block_cache.clone(),
-      version_visibility: self.version_visibility.clone(),
-      recorder: self.recorder.clone(),
-    });
-
     while let Some(mut cycle) = cycle.take().or_else(|| self.in_progress.pop()) {
-      if !check_compaction(
-        &self.version_visibility,
-        &self.wal,
-        &self.block_cache,
-        &self.recorder,
-        &self.blob,
-        &self.meta_table,
-        cycle.metadata.get_name(),
-      )? {
-        continue;
-      }
-
-      let (Some(old), Some(new)) = (cycle.old.try_pin(), cycle.new.try_pin()) else {
-        continue;
-      };
-
-      let mut snapshotter = match cycle.snapshotter.take() {
-        Some(v) => v,
-        None => old_index.snapshot(old.handle())?,
-      };
-
-      while let Some(snap) = snapshotter.next_snapshot()? {
-        new_index.apply_snapshot(snap, new.handle())?;
-      }
-
-      remove_compaction(
-        &self.version_visibility,
-        &self.wal,
-        &self.block_cache,
-        &self.recorder,
-        &self.blob,
-        &self.meta_table,
-        &cycle.metadata,
-      )?;
+      self.worker.finalize_cycle(&mut cycle)?;
     }
     Ok(())
   }
@@ -591,48 +775,6 @@ binding_events!(Compactor {
 });
 
 /**
- * Finish compaction by removing the compaction marker from metadata.
- *
- * After this commit, the logical table is represented only by the compacted
- * segment. The returned transaction id/version are used to defer physical
- * removal of the old segment until that metadata transition is visible to all
- * active transactions.
- */
-fn remove_compaction(
-  version_visibility: &VersionVisibility,
-  wal: &WriteAheadLog,
-  block_cache: &BlockCache,
-  recorder: &PageRecorder,
-  blob: &BlobStorage,
-  meta_table: &TableHandleRef,
-  table_metadata: &TableMetadata,
-) -> Result<Option<(TxId, TxId)>> {
-  let mut tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
-  let index = BTreeIndex::new(&tx);
-
-  let table_name = table_metadata.get_name();
-  if !index.contains(table_name.as_bytes(), meta_table)? {
-    warn!("table {table_name} already dropped.");
-    return Ok(None);
-  }
-
-  if let Err(err) = index.insert_if_matched(
-    table_name.as_bytes(),
-    WriteOp::Insert(table_metadata.to_vec()),
-    meta_table,
-  ) {
-    if matches!(err, Error::WriteConflict) {
-      warn!("table {table_name} already dropped.");
-      return Ok(None);
-    }
-    return Err(err);
-  };
-
-  tx.commit()?;
-  Ok(Some((tx.state.get_id(), tx.current_version())))
-}
-
-/**
  * Shared storage for the currently active compaction cycle.
  *
  * The interval worker is the only thread that mutates this while it is running,
@@ -661,214 +803,28 @@ impl CompactionCycle {
   }
 }
 
-/**
- * Check whether the logical table still exists before continuing compaction.
- *
- * Compaction can race with table drop. The compactor only needs to know whether
- * the logical table is still present in metadata; if it has been removed, the
- * in-progress compaction can be abandoned.
- */
-fn check_compaction(
-  version_visibility: &VersionVisibility,
-  wal: &WriteAheadLog,
-  block_cache: &BlockCache,
-  recorder: &PageRecorder,
-  blob: &BlobStorage,
-  meta_table: &TableHandleRef,
-  table_name: &TableName,
-) -> Result<bool> {
-  let tx = MiniTx::start(version_visibility, wal, block_cache, recorder, blob)?;
-  BTreeIndex::new(&tx).contains(table_name.as_bytes(), meta_table)
-}
-
-fn run_tick(
-  incoming: &SegQueue<CompactTask>,
-  in_progress: &SegQueue<CompactionCycle>,
-  tables: &TableMapper,
-  block_cache: &BlockCache,
-  version_visibility: &VersionVisibility,
-  wal: &WriteAheadLog,
-  recorder: &PageRecorder,
-  event_bus: &EventBus,
-  blob: &BlobStorage,
-  cycle: &AtomicCell<Option<CompactionCycle>>,
-  batch_size: usize,
-  waiting_publish: &mut LinkedList<(TableHandleRef, TableHandleRef, TableMetadata, TxId)>,
-  meta_table: &TableHandleRef,
-  old_index: &BTreeIndex<Arc<CompactionReadPolicy>>,
-  new_index: &BTreeIndex<CompactionWritePolicy>,
-) -> Result {
-  // SAFETY: single threaded access to cycle.
-  let cycle_ref = unsafe { &mut *cycle.as_ptr() };
-  while let Some(task) = incoming.pop() {
-    match task {
-      CompactTask::Committed(committed) => waiting_publish.push_back((
-        committed.old,
-        committed.new,
-        committed.metadata,
-        committed.commit_version,
-      )),
-      CompactTask::New(trigger) => {
-        let old = trigger.old;
-        let table_name = old.get_name();
-        let Some((new_table, wait_until, metadata)) = create_compaction(
-          version_visibility,
-          wal,
-          block_cache,
-          recorder,
-          tables,
-          blob,
-          meta_table,
-          table_name,
-        )?
-        else {
-          continue;
-        };
-
-        info!("table {table_name} compacting wait until another tx close.");
-        waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
-      }
-    }
-  }
-
-  let min_version = version_visibility.min_version();
-  for (old, new, metadata, _) in
-    waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
-  {
-    in_progress.push(CompactionCycle::new(old, new, metadata));
-  }
-
-  let Some(current) = cycle_ref.as_mut().or_else(|| {
-    in_progress
-      .pop()
-      .map(|v| unsafe { (*cycle.as_ptr()).insert(v) })
-  }) else {
-    return Ok(());
-  };
-
-  let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
-    *cycle_ref = None;
-    return Ok(());
-  };
-
-  let Some(snapshotter) = &mut current.snapshotter else {
-    info!(
-      "table {} compaction start to create snapshot.",
-      current.metadata.get_name()
-    );
-    current.snapshotter = Some(old_index.snapshot(old.handle())?);
-    return Ok(());
-  };
-
-  if snapshotter.is_done() {
-    let Some((owner, version)) = remove_compaction(
-      version_visibility,
-      wal,
-      block_cache,
-      recorder,
-      blob,
-      meta_table,
-      &current.metadata,
-    )?
-    else {
-      return Ok(());
-    };
-    info!(
-      "table {} compacting copied record complete.",
-      current.metadata.get_name()
-    );
-    event_bus.publish(DropTableCommitted::new(
-      old.handle().clone(),
-      owner,
-      version,
-    ));
-    drop(old);
-    drop(new);
-    *cycle_ref = None;
-    return Ok(());
-  }
-
-  if !check_compaction(
-    version_visibility,
-    wal,
-    block_cache,
-    recorder,
-    blob,
-    meta_table,
-    current.metadata.get_name(),
-  )? {
-    warn!("table {} already dropped.", current.metadata.get_name());
-    drop(old);
-    drop(new);
-    *cycle_ref = None;
-    return Ok(());
-  }
-
-  for _ in 0..batch_size {
-    let Some(snap) = snapshotter.next_snapshot()? else {
-      break;
-    };
-
-    // to protect stale pointer from gc.
-    let _guard = pin();
-    new_index.apply_snapshot(snap, new.handle())?;
-  }
-
-  Ok(())
-}
-
 fn compaction_loop(
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
-  tables: Arc<TableMapper>,
-  block_cache: Arc<BlockCache>,
-  version_visibility: Arc<VersionVisibility>,
-  wal: Arc<WriteAheadLog>,
-  recorder: Arc<PageRecorder>,
-  event_bus: Arc<EventBus>,
-  blob: Arc<BlobStorage>,
+  worker: Arc<CompactionWorker>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
 ) -> impl FnMut(Option<()>) {
-  let meta_table = tables.meta_table();
   // Wait until the compaction metadata publication is globally visible.
   // `waiting_publish` holds compactions whose metadata update has committed, but
   // may still be invisible to transactions that were already active. Once the
   // commit version is below the global minimum visible version, future access can
   // observe the old/new table-segment pair from metadata.
   let mut waiting_publish = LinkedList::new();
-
-  let old_index = BTreeIndex::new(
-    CompactionReadPolicy {
-      block_cache: block_cache.clone(),
-      version_visibility: version_visibility.clone(),
-    }
-    .to_arc(),
-  );
-  let new_index = BTreeIndex::new(CompactionWritePolicy {
-    block_cache: block_cache.clone(),
-    version_visibility: version_visibility.clone(),
-    recorder: recorder.clone(),
-  });
-
   move |_| {
-    run_tick(
-      &incoming,
-      &in_progress,
-      &tables,
-      &block_cache,
-      &version_visibility,
-      &wal,
-      &recorder,
-      &event_bus,
-      &blob,
-      &cycle,
-      batch_size,
-      &mut waiting_publish,
-      &meta_table,
-      &old_index,
-      &new_index,
-    )
-    .unwrap()
+    worker
+      .run_tick(
+        &incoming,
+        &in_progress,
+        &cycle,
+        batch_size,
+        &mut waiting_publish,
+      )
+      .unwrap()
   }
 }
