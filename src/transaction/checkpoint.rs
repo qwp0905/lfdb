@@ -104,19 +104,11 @@ pub struct Checkpoint {
    * synchronously.
    */
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
-  wal: Arc<WriteAheadLog>,
-  block_cache: Arc<BlockCache>,
-  version_visibility: Arc<VersionVisibility>,
-  io_pool: Arc<IOPool>,
-  blob_storage: Arc<BlobStorage>,
+  worker: Arc<CheckpointWorker>,
 }
 impl Checkpoint {
-  pub fn new(
-    wal: Arc<WriteAheadLog>,
-    block_cache: Arc<BlockCache>,
-    version_visibility: Arc<VersionVisibility>,
-    io_pool: Arc<IOPool>,
-    blob_storage: Arc<BlobStorage>,
+  fn with_worker(
+    worker: Arc<CheckpointWorker>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
@@ -131,11 +123,7 @@ impl Checkpoint {
         CHECKPOINT_TICK,
         checkpoint_loop(
           incoming.clone(),
-          wal.clone(),
-          block_cache.clone(),
-          version_visibility.clone(),
-          io_pool.clone(),
-          blob_storage.clone(),
+          worker.clone(),
           event_bus.clone(),
           cycle.clone(),
           metrics,
@@ -148,14 +136,25 @@ impl Checkpoint {
       incoming,
       ticker,
       cycle,
-      wal,
-      block_cache,
-      version_visibility,
-      io_pool,
-      blob_storage,
+      worker,
     });
     event_bus.register(&this);
     this
+  }
+  pub fn new(
+    wal: Arc<WriteAheadLog>,
+    block_cache: Arc<BlockCache>,
+    version_visibility: Arc<VersionVisibility>,
+    io_pool: Arc<IOPool>,
+    blob_storage: Arc<BlobStorage>,
+    event_bus: Arc<EventBus>,
+    metrics: Arc<MetricsRegistry>,
+    flush_factor: f64,
+  ) -> Arc<Self> {
+    let worker =
+      CheckpointWorker::new(wal, block_cache, version_visibility, io_pool, blob_storage)
+        .to_arc();
+    Self::with_worker(worker, event_bus, metrics, flush_factor)
   }
 
   pub fn initial_checkpoint(
@@ -168,40 +167,11 @@ impl Checkpoint {
     metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
   ) -> Result<Arc<Self>> {
-    Self::run_hard(
-      &wal,
-      &block_cache,
-      &version_visibility,
-      &io_pool,
-      &blob_storage,
-    )?;
-
-    Ok(Self::new(
-      wal,
-      block_cache,
-      version_visibility,
-      io_pool,
-      blob_storage,
-      event_bus,
-      metrics,
-      flush_factor,
-    ))
-  }
-
-  fn run_hard(
-    wal: &WriteAheadLog,
-    block_cache: &BlockCache,
-    version: &VersionVisibility,
-    io_pool: &IOPool,
-    blob_storage: &BlobStorage,
-  ) -> Result {
-    let log_id = wal.current_log_id();
-    info!("hard checkpoint trigger id {log_id}.");
-
-    block_cache.create_flusher().flush_hard()?;
-    finalize_checkpoint(version, io_pool, wal, blob_storage, log_id)?;
-    info!("hard checkpoint complete id {log_id}");
-    Ok(())
+    let worker =
+      CheckpointWorker::new(wal, block_cache, version_visibility, io_pool, blob_storage)
+        .to_arc();
+    worker.run_hard()?;
+    Ok(Self::with_worker(worker, event_bus, metrics, flush_factor))
   }
 
   fn failover(&self) {
@@ -219,7 +189,7 @@ impl Checkpoint {
    * checkpoint and retires them as well.
    */
   pub fn close(&self) -> Result {
-    if !self.wal.is_available() {
+    if !self.worker.wal.is_available() {
       self.failover();
       return Ok(());
     }
@@ -231,26 +201,13 @@ impl Checkpoint {
       };
 
       cycle.flush_hard()?;
-      finalize_checkpoint(
-        &self.version_visibility,
-        &self.io_pool,
-        &self.wal,
-        &self.blob_storage,
-        cycle.get_log_id(),
-      )?;
+      self.worker.finalize_checkpoint(cycle.get_log_id())?;
       cycle.truncate_all()?;
       info!("last checkpoint completed.");
       return Ok(());
     }
 
-    Self::run_hard(
-      &self.wal,
-      &self.block_cache,
-      &self.version_visibility,
-      &self.io_pool,
-      &self.blob_storage,
-    )?;
-
+    self.worker.run_hard()?;
     while let Some(segment) = self.incoming.pop() {
       segment.truncate()?;
     }
@@ -280,72 +237,141 @@ binding_events!(Checkpoint {
   shared: [WALFailed]
 });
 
-fn run_tick<F: Fn(usize) -> usize>(
-  incoming: &SegQueue<WALSegment>,
-  wal: &WriteAheadLog,
-  block_cache: &BlockCache,
-  version: &VersionVisibility,
-  io_pool: &IOPool,
-  blob_storage: &BlobStorage,
-  event_bus: &EventBus,
-  cycle: &AtomicCell<Option<CheckpointCycle>>,
-  metrics: &MetricsRegistry,
-  calc_batch_size: &F,
-) -> Result {
-  // SAFETY: single threaded access to cycle.
-  let cycle = unsafe { &mut *cycle.as_ptr() };
-  let Some(current) = cycle else {
-    let log_id = wal.current_log_id();
-    let new = CheckpointCycle::new(
+const FILE_EXT: &str = "snap";
+
+struct CheckpointWorker {
+  wal: Arc<WriteAheadLog>,
+  block_cache: Arc<BlockCache>,
+  version_visibility: Arc<VersionVisibility>,
+  io_pool: Arc<IOPool>,
+  blob_storage: Arc<BlobStorage>,
+}
+impl CheckpointWorker {
+  const fn new(
+    wal: Arc<WriteAheadLog>,
+    block_cache: Arc<BlockCache>,
+    version_visibility: Arc<VersionVisibility>,
+    io_pool: Arc<IOPool>,
+    blob_storage: Arc<BlobStorage>,
+  ) -> Self {
+    Self {
+      wal,
+      block_cache,
+      version_visibility,
+      io_pool,
+      blob_storage,
+    }
+  }
+
+  fn finalize_checkpoint(&self, log_id: LogId) -> Result {
+    let (current_version, active, aborted) = self.version_visibility.snapshot();
+    let blobs = self.blob_storage.metadata_snapshot();
+    let snapshot = CheckpointSnapshot::new(active, aborted, blobs);
+
+    let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    snapshot.write_at(&mut self.io_pool.open_append_io(current.clone())?)?;
+    debug!("checkpoint snapshot persisted.");
+    self.io_pool.sync_dir()?;
+
+    self
+      .wal
+      .checkpoint_and_flush(log_id, current_version, current.clone())?;
+
+    for entry in self.io_pool.read_dir()? {
+      let name = PathBuf::from(entry.file_name());
+      if name.extension().is_none_or(|ext| ext != FILE_EXT) {
+        continue;
+      };
+      if name == current {
+        continue;
+      }
+      self.io_pool.truncate(&name)?;
+    }
+    Ok(())
+  }
+
+  fn run_hard(&self) -> Result {
+    let log_id = self.wal.current_log_id();
+    info!("hard checkpoint trigger id {log_id}.");
+
+    self.block_cache.create_flusher().flush_hard()?;
+    self.finalize_checkpoint(log_id)?;
+    info!("hard checkpoint complete id {log_id}");
+    Ok(())
+  }
+
+  fn create_cycle(
+    &self,
+    incoming: &SegQueue<WALSegment>,
+    metrics: &MetricsRegistry,
+  ) -> CheckpointCycle {
+    let log_id = self.wal.current_log_id();
+    CheckpointCycle::new(
       repeat(()).map_while(|_| incoming.pop()),
-      block_cache.create_flusher(),
+      self.block_cache.create_flusher(),
       log_id,
       metrics.checkpoint_cycle.start(),
-    );
-    if new.is_empty() {
-      debug!("no checkpoint required.");
+    )
+  }
+
+  fn run_tick<F: Fn(usize) -> usize>(
+    &self,
+    incoming: &SegQueue<WALSegment>,
+    event_bus: &EventBus,
+    cycle: &AtomicCell<Option<CheckpointCycle>>,
+    metrics: &MetricsRegistry,
+    calc_batch_size: &F,
+  ) -> Result {
+    // SAFETY: single threaded access to cycle.
+    let cycle = unsafe { &mut *cycle.as_ptr() };
+    let Some(current) = cycle else {
+      let new = self.create_cycle(incoming, metrics);
+      if new.is_empty() {
+        debug!("no checkpoint required.");
+        return Ok(());
+      }
+
+      info!(
+        "new checkpoint cycle created for id {}, dirty blocks {}, segments {}",
+        new.get_log_id(),
+        new.dirty_len(),
+        new.segments_len(),
+      );
+      *cycle = Some(new);
+      return Ok(());
+    };
+
+    if !current.flush_done() {
+      // Increase checkpoint work as WAL rotation pressure grows.
+      // The number of retired-but-not-yet-reusable WAL segments is treated as write
+      // pressure. Higher pressure flushes more dirty blocks per tick, both throttling
+      // ongoing write load indirectly and moving segment reuse forward sooner.
+      let batch_size = calc_batch_size(current.segments_len() + incoming.len());
+      trace!("checkpoint flush {} blocks", batch_size);
+      return current.advance_flush(batch_size);
+    }
+
+    info!("checkpoint id {} trying to finish.", current.get_log_id());
+
+    current.finish_flush()?;
+    debug!("block cache all flushed.");
+
+    if current.segments_len() == 0 {
+      debug!("skip create checkpoint snapshot since nothing to rotate.");
+      metrics.checkpoint_cycle.record(current.take_start());
+      *cycle = None;
       return Ok(());
     }
 
-    info!(
-      "new checkpoint cycle created for id {log_id}, dirty blocks {}, segments {}",
-      new.dirty_len(),
-      new.segments_len(),
-    );
-    *cycle = Some(new);
-    return Ok(());
-  };
-
-  if !current.flush_done() {
-    // Increase checkpoint work as WAL rotation pressure grows.
-    // The number of retired-but-not-yet-reusable WAL segments is treated as write
-    // pressure. Higher pressure flushes more dirty blocks per tick, both throttling
-    // ongoing write load indirectly and moving segment reuse forward sooner.
-    let batch_size = calc_batch_size(current.segments_len() + incoming.len());
-    trace!("checkpoint flush {} blocks", batch_size);
-    return current.advance_flush(batch_size);
-  }
-
-  info!("checkpoint id {} trying to finish.", current.get_log_id());
-
-  current.finish_flush()?;
-  debug!("block cache all flushed.");
-
-  if current.segments_len() == 0 {
-    debug!("skip create checkpoint snapshot since nothing to rotate.");
+    self.finalize_checkpoint(current.get_log_id())?;
     metrics.checkpoint_cycle.record(current.take_start());
+    info!("checkpoint complete id {}", current.get_log_id());
+
+    let events = current.drain_all().map(SegmentReuseable::new);
+    event_bus.batch_publish(events);
     *cycle = None;
-    return Ok(());
+    Ok(())
   }
-
-  finalize_checkpoint(version, io_pool, wal, blob_storage, current.get_log_id())?;
-  metrics.checkpoint_cycle.record(current.take_start());
-  info!("checkpoint complete id {}", current.get_log_id());
-
-  let events = current.drain_all().map(SegmentReuseable::new);
-  event_bus.batch_publish(events);
-  *cycle = None;
-  Ok(())
 }
 
 /**
@@ -355,11 +381,7 @@ fn run_tick<F: Fn(usize) -> usize>(
  */
 fn checkpoint_loop(
   incoming: Arc<SegQueue<WALSegment>>,
-  wal: Arc<WriteAheadLog>,
-  block_cache: Arc<BlockCache>,
-  version: Arc<VersionVisibility>,
-  io_pool: Arc<IOPool>,
-  blob_storage: Arc<BlobStorage>,
+  worker: Arc<CheckpointWorker>,
   event_bus: Arc<EventBus>,
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
@@ -381,51 +403,8 @@ fn checkpoint_loop(
   };
 
   move |_| {
-    run_tick(
-      &incoming,
-      &wal,
-      &block_cache,
-      &version,
-      &io_pool,
-      &blob_storage,
-      &event_bus,
-      &cycle,
-      &metrics,
-      &calc_batch_size,
-    )
-    .unwrap()
+    worker
+      .run_tick(&incoming, &event_bus, &cycle, &metrics, &calc_batch_size)
+      .unwrap()
   }
-}
-
-const FILE_EXT: &str = "snap";
-
-fn finalize_checkpoint(
-  version: &VersionVisibility,
-  io_pool: &IOPool,
-  wal: &WriteAheadLog,
-  blob_storage: &BlobStorage,
-  log_id: LogId,
-) -> Result {
-  let (current_version, active, aborted) = version.snapshot();
-  let blobs = blob_storage.metadata_snapshot();
-  let snapshot = CheckpointSnapshot::new(active, aborted, blobs);
-
-  let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-  snapshot.write_at(&mut io_pool.open_append_io(current.clone())?)?;
-  debug!("checkpoint snapshot persisted.");
-  io_pool.sync_dir()?;
-
-  wal.checkpoint_and_flush(log_id, current_version, current.clone())?;
-
-  for entry in io_pool.read_dir()? {
-    let name = PathBuf::from(entry.file_name());
-    if name.extension().is_none_or(|ext| ext != FILE_EXT) {
-      continue;
-    };
-    if name == current {
-      continue;
-    }
-    io_pool.truncate(&name)?;
-  }
-  Ok(())
 }
