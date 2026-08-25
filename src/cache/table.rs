@@ -130,7 +130,6 @@ pub enum Acquired<'a> {
   Evicted(EvictionGuard<'a>),
 }
 
-#[derive(Clone, Copy)]
 struct SelectedShard<'a> {
   shard: &'a Mutex<Shard>,
   offset: usize,
