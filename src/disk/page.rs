@@ -1,5 +1,5 @@
 use std::{
-  alloc::{alloc_zeroed, dealloc, Layout},
+  alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout},
   marker::PhantomData,
   ops::Range,
   slice::{from_raw_parts, from_raw_parts_mut},
@@ -38,7 +38,11 @@ impl<const T: usize> Page<T> {
 
   #[inline]
   pub fn new() -> Self {
-    Self(unsafe { alloc_zeroed(Self::LAYOUT) }, PhantomData)
+    let ptr = unsafe { alloc_zeroed(Self::LAYOUT) };
+    if ptr.is_null() {
+      handle_alloc_error(Self::LAYOUT);
+    }
+    Self(ptr, PhantomData)
   }
   #[inline]
   pub const fn copy_from(&mut self, data: &[u8], offset: usize) {
