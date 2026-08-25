@@ -1,7 +1,8 @@
 use std::{
-  mem::MaybeUninit,
+  alloc::{alloc, handle_alloc_error, Layout},
+  mem::{ManuallyDrop, MaybeUninit},
   ops::Deref,
-  ptr::NonNull,
+  ptr::{copy_nonoverlapping, slice_from_raw_parts_mut, NonNull},
   sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
@@ -37,11 +38,15 @@ pub struct SBox<T: ?Sized> {
 }
 impl<T> SBox<T> {
   pub fn new(data: T) -> Self {
-    Self {
-      inner: NonNull::from_mut(Box::leak(Box::new(Inner::new(data)))),
-    }
+    unsafe { Self::from_inner_ptr(Box::into_raw(Box::new(Inner::new(data)))) }
   }
 
+  pub fn new_uninit() -> SBox<MaybeUninit<T>> {
+    SBox::new(MaybeUninit::uninit())
+  }
+}
+
+impl<T: ?Sized> SBox<T> {
   pub fn get_mut(this: &mut SBox<T>) -> Option<&mut T> {
     let inner = unsafe { this.inner.as_mut() };
     if inner.count.load(Ordering::Acquire) > 1 {
@@ -49,7 +54,50 @@ impl<T> SBox<T> {
     }
     Some(&mut inner.data)
   }
+
+  const unsafe fn from_inner_ptr(ptr: *mut Inner<T>) -> Self {
+    Self {
+      inner: NonNull::new_unchecked(ptr),
+    }
+  }
 }
+
+impl<T> SBox<MaybeUninit<T>> {
+  pub unsafe fn assume_init(self) -> SBox<T> {
+    let inner = self.inner;
+    std::mem::forget(self);
+    SBox {
+      inner: inner.cast(),
+    }
+  }
+}
+
+impl<T> SBox<[T]> {
+  pub fn from_boxed_slice(boxed: Box<[T]>) -> Self {
+    let layout = Layout::new::<Inner<()>>()
+      .extend(Layout::for_value(&*boxed))
+      .unwrap()
+      .0
+      .pad_to_align();
+
+    let len = boxed.len();
+    unsafe {
+      let ptr = alloc(layout);
+      if ptr.is_null() {
+        handle_alloc_error(layout);
+      }
+
+      let src = Box::into_raw(boxed);
+      let inner = slice_from_raw_parts_mut(ptr, len) as *mut Inner<[T]>;
+      (&raw mut (*inner).count).write(AtomicUsize::new(1));
+      copy_nonoverlapping(src as *const T, &raw mut (*inner).data as *mut T, len);
+      let _ = Box::from_raw(src as *mut ManuallyDrop<[T]>);
+
+      Self::from_inner_ptr(inner)
+    }
+  }
+}
+
 impl<T: ?Sized> Clone for SBox<T> {
   fn clone(&self) -> Self {
     if unsafe { self.inner.as_ref() }
@@ -86,20 +134,6 @@ impl<T: ?Sized> Deref for SBox<T> {
 
   fn deref(&self) -> &T {
     unsafe { &self.inner.as_ref().data }
-  }
-}
-impl<T> SBox<T> {
-  pub fn new_uninit() -> SBox<MaybeUninit<T>> {
-    SBox::new(MaybeUninit::uninit())
-  }
-}
-impl<T> SBox<MaybeUninit<T>> {
-  pub unsafe fn assume_init(self) -> SBox<T> {
-    let inner = self.inner;
-    std::mem::forget(self);
-    SBox {
-      inner: inner.cast(),
-    }
   }
 }
 

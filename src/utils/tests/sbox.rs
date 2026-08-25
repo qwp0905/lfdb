@@ -19,6 +19,22 @@ impl Drop for T {
 unsafe impl Send for T {}
 unsafe impl Sync for T {}
 
+struct C {
+  c: SBox<AtomicUsize>,
+}
+impl C {
+  fn new(c: SBox<AtomicUsize>) -> Self {
+    Self { c }
+  }
+}
+impl Drop for C {
+  fn drop(&mut self) {
+    self.c.fetch_add(1, Ordering::Relaxed);
+  }
+}
+unsafe impl Send for C {}
+unsafe impl Sync for C {}
+
 #[test]
 fn test_drop() {
   let c = SBox::new(Cell::new(false));
@@ -52,4 +68,23 @@ fn test_drop_with_move() {
   th.join().unwrap();
 
   assert!(c.get())
+}
+
+#[test]
+fn test_drop_counts() {
+  let l = 10;
+  let mut vec = Vec::with_capacity(l);
+  let c = SBox::new(AtomicUsize::new(0));
+  vec.resize_with(l, || C::new(c.clone()));
+
+  {
+    let boxed = SBox::from_boxed_slice(vec.into_boxed_slice());
+    assert_eq!(l, boxed.len());
+    let _ = boxed.clone();
+    let _ = boxed.clone();
+    let _ = boxed.clone();
+    let _ = boxed.clone();
+  }
+
+  assert_eq!(c.load(Ordering::Relaxed), l)
 }
