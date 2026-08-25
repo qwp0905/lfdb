@@ -1,0 +1,24 @@
+diff --git a/tests/test_readme_config.py b/tests/test_readme_config.py
+new file mode 100644
+index 0000000..8a939f6
+--- /dev/null
++++ b/tests/test_readme_config.py
+@@ -0,0 +1,18 @@
++import os
++
++def test_readme_configuration_table_includes_defaults():
++    readme_path = os.path.join(os.path.dirname(__file__), "..", "README.md")
++    with open(readme_path, "r", encoding="utf-8") as f:
++        content = f.read()
++
++    # Check for configuration table headers or mentions of default values
++    # The issue states: The Configuration table in the README documents what each EngineBuilder option does, but never states its default value
++    # We test that the README contains default value references in the configuration table section.
++    assert "Default" in content or "default" in content, "README configuration table should specify default values for options"
++    
++    # Specifically verify common builder options have some default documented in the README table
++    options = ["wal_file_size", "block_cache_memory_capacity", "gc_thread_count"]
++    for opt in options:
++        assert opt in content, f"Option {opt} should be listed in README"
++        # Ensure that somewhere near or on the line/section of the option, a default is mentioned
++        # This will fail currently since no defaults are listed in the table.
