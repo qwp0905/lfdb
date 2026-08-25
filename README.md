@@ -118,20 +118,20 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 
 ## Configuration
 
-| Option | Description |
-|--------|-------------|
-| `wal_file_size` | Size limit of a single WAL segment file. When exceeded, a new segment is created. Larger segments improve write throughput by reducing rotation/checkpoint frequency, but extend recovery time on crash since more records must be replayed before the engine becomes available. |
-| `wal_buffer_size` | Soft limit of WAL buffer size. |
-| `io_thread_count` | Number of background IO worker threads shared across tables for write batching. Each table holds at most one worker at a time. |
-| `checkpoint_flush_factor` | Determines the growth factor at which to flush the block cache at the checkpoint. In environments with frequent WAL segment replacement, such as write-heavy workloads, pressure increases exponentially at the set ratio. |
-| `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
-| `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
-| `gc_thread_count` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
-| `gc_batch_size` | Number of keys to advance per gc tick. |
-| `compaction_threshold` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
-| `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
-| `compaction_batch_size` | Number of keys to copy per compaction tick. |
-| `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `wal_file_size` | `128 MB` (`128 << 20`) | Size limit of a single WAL segment file. When exceeded, a new segment is created. Larger segments improve write throughput by reducing rotation/checkpoint frequency, but extend recovery time on crash since more records must be replayed before the engine becomes available. |
+| `wal_buffer_size` | `8 MB` (`8 << 20`) | Soft limit of WAL buffer size. |
+| `io_thread_count` | `32` | Number of background IO worker threads shared across tables for write batching. Each table holds at most one worker at a time. |
+| `checkpoint_flush_factor` | `1.25` | Determines the growth factor at which to flush the block cache at the checkpoint. In environments with frequent WAL segment replacement, such as write-heavy workloads, pressure increases exponentially at the set ratio. |
+| `block_cache_memory_capacity` | `32 MB` (`32 << 20`) | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
+| `block_cache_shard_count` | `64` (`1 << 6`) | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
+| `gc_thread_count` | `3` | Number of GC threads. In write-heavy workloads with frequent WAL segment rotation, increasing this can improve write throughput. |
+| `gc_batch_size` | `32` | Number of keys to advance per gc tick. |
+| `compaction_threshold` | `0.5` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
+| `compaction_min_size` | `512 MB` (`512 << 20`) | Minimum size requirements for auto compaction triggers. |
+| `compaction_batch_size` | `128` | Number of keys to copy per compaction tick. |
+| `transaction_timeout` | `3 mins` (`Duration::from_mins(3)`) | Maximum lifetime of a transaction before it is automatically aborted. |
 
 
 ## Architecture
