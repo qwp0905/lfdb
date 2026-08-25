@@ -3,11 +3,11 @@ use std::{
   ops::{Deref, Range},
 };
 
-use crate::{cache::ReadonlySlot, disk::AlignedBuf};
+use crate::{cache::ReadonlySlot, disk::AlignedBuf, utils::SBox};
 
 enum Type {
   Refed(ReadonlySlot, Range<usize>),
-  Copied(AlignedBuf),
+  Copied(SBox<AlignedBuf>),
 }
 
 /**
@@ -26,8 +26,8 @@ impl VecRef {
   pub const fn refed(page: ReadonlySlot, range: Range<usize>) -> Self {
     Self(Type::Refed(page, range))
   }
-  pub const fn copied(data: AlignedBuf) -> Self {
-    Self(Type::Copied(data))
+  pub fn copied(data: AlignedBuf) -> Self {
+    Self(Type::Copied(SBox::new(data)))
   }
   pub fn as_slice(&self) -> &[u8] {
     match &self.0 {
@@ -79,7 +79,7 @@ impl Clone for VecRef {
   fn clone(&self) -> Self {
     match &self.0 {
       Type::Refed(page, range) => Self::refed(page.clone(), range.clone()),
-      Type::Copied(data) => Self::copied(data.clone()),
+      Type::Copied(data) => Self(Type::Copied(data.clone())),
     }
   }
 }

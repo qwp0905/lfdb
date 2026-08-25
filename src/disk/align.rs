@@ -114,10 +114,4 @@ impl Drop for AlignedBuf {
   }
 }
 unsafe impl Send for AlignedBuf {}
-impl Clone for AlignedBuf {
-  fn clone(&self) -> Self {
-    let mut cloned = Self::from_layout(self.layout, self.len);
-    cloned.as_mut_slice().copy_from_slice(self.as_slice());
-    cloned
-  }
-}
+unsafe impl Sync for AlignedBuf {}
