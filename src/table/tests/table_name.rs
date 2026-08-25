@@ -3,7 +3,10 @@ use crate::Error;
 
 #[test]
 fn rejects_names_with_a_disallowed_character_and_names_it_in_the_error() {
-  assert!(matches!(TableName::from_str("bad.name"), Err(Error::NotAllowedChar(_))));
+  assert!(matches!(
+    TableName::from_str("bad.name"),
+    Err(Error::NotAllowedChar(_))
+  ));
 }
 
 #[test]
