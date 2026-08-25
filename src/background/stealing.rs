@@ -63,7 +63,7 @@ fn handle_task<T, R>(
 const fn worker_loop<T, R>(
   local: Worker<ExecutableContext<T, R>>,
   global: SBox<Injector<ExecutableContext<T, R>>>,
-  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
+  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
   idle: SBox<SegQueue<Idle>>,
   work: SharedFn<'static, T, R>,
   id: usize,
@@ -168,9 +168,9 @@ impl Idle {
 pub struct StealingWorkThread<T, R = ()> {
   global: SBox<Injector<ExecutableContext<T, R>>>,
   idle: SBox<SegQueue<Idle>>,
-  wakers: SBox<Vec<Thread>>,
+  wakers: SBox<[Thread]>,
   threads: Vec<ThreadSlot>,
-  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
+  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> StealingWorkThread<T, R> {
@@ -195,7 +195,7 @@ impl<T, R> StealingWorkThread<T, R> {
     }
 
     let global = SBox::new(Injector::new());
-    let stealers = SBox::new(stealers);
+    let stealers = SBox::from_boxed_slice(stealers.into_boxed_slice());
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -218,7 +218,7 @@ impl<T, R> StealingWorkThread<T, R> {
     Self {
       global,
       idle,
-      wakers: SBox::new(wakers),
+      wakers: SBox::from_boxed_slice(wakers.into_boxed_slice()),
       threads,
       stealers,
       work,
@@ -325,9 +325,9 @@ impl<T, R> PendingCoop<T, R> {
 
 pub struct Coworker<T, R> {
   global: SBox<Injector<ExecutableContext<T, R>>>,
-  stealers: SBox<Vec<Stealer<ExecutableContext<T, R>>>>,
+  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
   work: SharedFn<'static, T, R>,
-  wakers: SBox<Vec<Thread>>,
+  wakers: SBox<[Thread]>,
 }
 impl<T, R> Coworker<T, R> {
   pub fn run(&self) -> bool {

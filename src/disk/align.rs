@@ -7,7 +7,7 @@
  * rounded up to the required alignment.
  */
 use std::{
-  alloc::{alloc_zeroed, dealloc, Layout},
+  alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout},
   ops::{Deref, DerefMut},
   slice::{from_raw_parts, from_raw_parts_mut},
 };
@@ -69,6 +69,9 @@ impl AlignedBuf {
   }
   fn from_layout(layout: Layout, len: usize) -> Self {
     let ptr = unsafe { alloc_zeroed(layout) };
+    if ptr.is_null() {
+      handle_alloc_error(layout);
+    }
     Self { ptr, len, layout }
   }
   pub const fn size(&self) -> usize {
