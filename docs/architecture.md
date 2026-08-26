@@ -33,7 +33,7 @@ LFDB is a general-purpose key-value engine and does not impose special constrain
 
 > Isolation
 
-LFDB provides Snapshot Isolation. Every transaction creates its own snapshot at the time it starts and performs reads and writes based on that snapshot. If multiple uncommitted transactions attempt to write to the same row, all transactions except the winner immediately receive a WriteConflict error, allowing them to open a new transaction and retry right away.
+LFDB provides Snapshot Isolation. Every transaction creates its own snapshot at the time it starts and performs reads and writes based on that snapshot. If multiple uncommitted transactions attempt to write to the same row, all transactions except the winner receive a WriteConflict error, allowing them to open a new transaction and retry right away.
 
 > Durability
 
@@ -77,7 +77,11 @@ LFDB reads do not copy any data blocks when the size is small. Through copy-on-w
 
 > Buffered io
 
-All disk writes in LFDB are performed asynchronously on separate threads. Disk writes requested around the same time are buffered and sorted per file, then issued through the pwritev syscall. Like WAL group commit, this distributes the cost of disk writes and provides logical async I/O. Support for io_uring on Linux is planned for the future.
+All disk writes in LFDB are performed asynchronously on separate threads. Disk writes requested around the same time are buffered per file, deduplicated and sorted by offset, then issued through the pwritev syscall. Like WAL group commit, this distributes the cost of disk writes and provides logical async I/O.
+
+> Incremental background work
+
+LFDB divides potentially large background operations, such as garbage collection, checkpoint flushing, and compaction, into incremental execution cycles. Each cycle retains its progress and processes only a bounded number of logical work units at a time, preventing background maintenance from monopolizing CPU, cache, or I/O resources while foreground operations continue to run.
 
 
 ### Disk management
@@ -86,7 +90,7 @@ LFDB manages disk space through the following design points:
 
 > MVCC / Background GC
 
-In LFDB, data is written by version into disk space separate from the B-tree index. Each transaction reads data based on the snapshot created when it started and searches for the version that is visible to it.
+In LFDB, the latest version of a record is stored inline within the leaf node, while other versions are stored in a space separate from the B-tree index. Each transaction reads data based on the snapshot created when it started and searches for the version that is visible to it.
 Version chains that can no longer be observed due to transaction lifecycle progression are reclaimed by a periodically running background GC.
 
 > Page allocation
@@ -95,4 +99,8 @@ Pages reclaimed by the background GC are stored in a free list and reused. Howev
 
 > Online auto compaction
 
-When the number of blocks reclaimed by the background GC exceeds a threshold, compaction is triggered automatically. Compaction is performed through a copy-and-remove process, and when compacting a large table, disk usage may temporarily increase significantly until all data has been moved into the new file. This does not cause any interruption. It may slightly reduce runtime read performance, but it does not affect writes at all; in fact, write performance may improve. Automatic compaction can also be disabled.
+When the ratio of deleted or rolled-back records exceeds the threshold based on the latest records, compaction is triggered automatically. Compaction is performed through a copy-and-remove process, and when compacting a large table, disk usage may temporarily increase significantly until all data has been moved into the new file. This does not cause any interruption. It may slightly reduce runtime read performance, but it does not affect writes at all; in fact, write performance may improve. Automatic compaction can also be disabled.
+
+> Blob support
+
+Values that are too large to store efficiently inside leaf nodes are written to separate append-oriented blob files. Blob contents are synchronized before their references can become durable, and unreachable blob files are reclaimed by background GC.
