@@ -28,6 +28,7 @@ use crate::{
   Result,
 };
 
+#[derive(Clone)]
 pub struct GarbageCollectionConfig {
   pub batch_size: usize,
   pub thread_count: usize,
@@ -87,14 +88,7 @@ impl GarbageCollector {
       .single()
       .interval(
         GC_RUN_INTERVAL,
-        gc_main_loop(
-          worker,
-          entry.clone(),
-          event_bus.clone(),
-          config.batch_size,
-          config.compact_threshold,
-          config.compact_min_size,
-        ),
+        gc_main_loop(worker, entry.clone(), event_bus.clone(), config),
       )
       .to_box();
 
@@ -470,16 +464,14 @@ impl GcWorker {
     buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
     entry_worker: &EntryWorker,
     event_bus: &EventBus,
-    key_count: usize,
-    compaction_threshold: f64,
-    compaction_min_size: Pointer,
+    config: GarbageCollectionConfig,
   ) -> Result {
     let Some(current) = cycle.as_mut() else {
       *cycle = Some(self.create_cycle());
       return Ok(());
     };
 
-    for _ in 0..key_count {
+    for _ in 0..config.batch_size {
       let Some(mut task) = current.tasks.pop() else {
         self.finalize_cycle(current, buffered)?;
         *cycle = None;
@@ -558,10 +550,10 @@ impl GcWorker {
       if table.get_id() == self.mapper.meta_table_id() {
         continue;
       }
-      if table.free().file_len() <= compaction_min_size {
+      if table.free().file_len() <= config.compact_min_size {
         continue;
       }
-      if task.dead as f64 / task.total as f64 <= compaction_threshold {
+      if task.dead as f64 / task.total as f64 <= config.compact_threshold {
         continue;
       }
 
@@ -625,9 +617,7 @@ fn gc_main_loop(
   worker: Arc<GcWorker>,
   entry_worker: Arc<EntryWorker>,
   event_bus: Arc<EventBus>,
-  key_count: usize,
-  compaction_threshold: f64,
-  compaction_min_size: Pointer,
+  config: GarbageCollectionConfig,
 ) -> impl FnMut(Option<()>) {
   let mut cycle = None;
   let mut buffered = VecDeque::new();
@@ -639,9 +629,7 @@ fn gc_main_loop(
         &mut buffered,
         &entry_worker,
         &event_bus,
-        key_count,
-        compaction_threshold,
-        compaction_min_size,
+        config.clone(),
       )
       .unwrap()
   }

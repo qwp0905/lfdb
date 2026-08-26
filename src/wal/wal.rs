@@ -194,14 +194,20 @@ impl WriteAheadLog {
 
   fn append_in_block(
     &self,
-    buffer: &'static LogBuffer,
+    reserved: ReservedAppend,
     record: LogRecordUninit,
-    offset: usize,
-    commit_order: u32,
     flush: bool,
-    token: SharedToken,
-    backoff: &Backoff,
   ) -> Result {
+    let ReservedAppend {
+      buffer_ptr: _buffer_ptr,
+      guard: _guard,
+      buffer,
+      offset,
+      commit_order,
+      token,
+      backoff,
+    } = reserved;
+
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
     buffer.append_at(&record.init(log_id), offset);
     if !flush {
@@ -241,16 +247,20 @@ impl WriteAheadLog {
 
   fn rotate_block(
     &self,
-    buffer_ptr: Shared<LogBuffer>,
-    guard: &Guard,
-    buffer: &'static LogBuffer,
+    reserved: ReservedAppend,
     record: LogRecordUninit,
-    offset: usize,
-    commit_order: u32,
     flush: bool,
-    backoff: &Backoff,
-    token: SharedToken,
   ) -> Result {
+    let ReservedAppend {
+      buffer_ptr,
+      guard,
+      buffer,
+      offset,
+      commit_order,
+      token,
+      backoff,
+    } = reserved;
+
     let record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
     let (remain, overflow) = record.split_at(WAL_BLOCK_SIZE - offset);
     buffer.append_at(remain, offset);
@@ -297,15 +307,17 @@ impl WriteAheadLog {
     self.wait_sync(buffer, token)
   }
 
-  fn rotate_segment(
-    &self,
-    buffer_ptr: Shared<LogBuffer>,
-    guard: &Guard,
-    buffer: &'static LogBuffer,
-    commit_order: u32,
-    mut token: SharedToken,
-    backoff: &Backoff,
-  ) -> Result {
+  fn rotate_segment(&self, reserved: ReservedAppend) -> Result {
+    let ReservedAppend {
+      buffer_ptr,
+      guard,
+      buffer,
+      commit_order,
+      mut token,
+      offset: _,
+      backoff,
+    } = reserved;
+
     let new = match self.preloader.load() {
       Ok(v) => v,
       Err(Error::IO(err)) => return Err(self.failover(err.kind())),
@@ -370,33 +382,25 @@ impl WriteAheadLog {
         continue;
       }
 
+      let reserved = ReservedAppend {
+        buffer_ptr,
+        guard: &guard,
+        buffer,
+        token,
+        offset,
+        commit_order,
+        backoff: &backoff,
+      };
+
       if offset + len <= WAL_BLOCK_SIZE {
-        return self.append_in_block(
-          buffer,
-          record,
-          offset,
-          commit_order,
-          flush,
-          token,
-          &backoff,
-        );
+        return self.append_in_block(reserved, record, flush);
       }
 
       if buffer.get_pointer() + 1 < self.max_len {
-        return self.rotate_block(
-          buffer_ptr,
-          &guard,
-          buffer,
-          record,
-          offset,
-          commit_order,
-          flush,
-          &backoff,
-          token,
-        );
+        return self.rotate_block(reserved, record, flush);
       }
 
-      self.rotate_segment(buffer_ptr, &guard, buffer, commit_order, token, &backoff)?;
+      self.rotate_segment(reserved)?;
       backoff.reset();
     }
   }
@@ -461,4 +465,14 @@ impl WriteAheadLog {
     }
     self.preloader.close();
   }
+}
+
+struct ReservedAppend<'a> {
+  buffer_ptr: Shared<'a, LogBuffer>,
+  guard: &'a Guard,
+  buffer: &'static LogBuffer,
+  token: SharedToken<'a>,
+  offset: usize,
+  commit_order: u32,
+  backoff: &'a Backoff,
 }

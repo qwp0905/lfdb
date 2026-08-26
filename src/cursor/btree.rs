@@ -569,7 +569,7 @@ where
       Break(WriteResult),
       Conflict(TxId, WriteOp),
       Split(StaticKey, Pointer, WriteResult),
-      CopyOld(ReserveGuard<'a>, Option<Pointer>, VersionRecord, WriteOp),
+      CopyOld(CopyOld<'a>),
     }
 
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
@@ -588,7 +588,7 @@ where
                 return Ok(match table.reserve(key.to_vec(), self.0.current_owner()) {
                   Ok(g) => {
                     let old = old.into_owned_with(slot.as_ref());
-                    State::CopyOld(g, entry_ptr, old, op)
+                    State::CopyOld(CopyOld::new(g, entry_ptr, old, op))
                   }
                   Err(i) => State::Conflict(i, op),
                 })
@@ -635,6 +635,7 @@ where
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
         }
+        State::CopyOld(cmd) => return self.copy_and_update(key, ptr, table, stack, cmd),
         State::Conflict(i, o) => {
           match self.0.resolve_conflict(i) {
             ResolvedConflict::DeadLock => return Err(Error::WriteConflict),
@@ -647,9 +648,6 @@ where
             }
           };
         }
-        State::CopyOld(guard, entry_ptr, old, o) => {
-          return self.copy_and_update(key, o, ptr, table, entry_ptr, old, stack, guard);
-        }
       };
     }
   }
@@ -657,19 +655,23 @@ where
   fn copy_and_update(
     &self,
     key: StaticKeyRef,
-    mut op: WriteOp,
     mut leaf_ptr: Pointer,
     table: &TableHandleRef,
-    entry_ptr: Option<Pointer>,
-    old: VersionRecord,
     stack: Vec<Pointer>,
-    _insert_guard: ReserveGuard<'_>,
+    copy_old: CopyOld,
   ) -> Result<WriteResult> {
     enum State {
       Move(Pointer, WriteOp),
       Break(WriteResult),
       Split(StaticKey, Pointer, WriteResult),
     }
+
+    let CopyOld {
+      insert_guard,
+      entry_ptr,
+      old_record: old,
+      mut operation,
+    } = copy_old;
 
     let entry_ptr = match entry_ptr {
       Some(p) => self.copy_old_record(p, old, table).map(|_| p)?,
@@ -686,11 +688,11 @@ where
           let leaf = node.as_leaf_mut()?;
           let pos = match leaf.find_slot(key) {
             FindSlotResult::Replace(i) => i,
-            FindSlotResult::Move(next) => return Ok(State::Move(next, op)),
+            FindSlotResult::Move(next) => return Ok(State::Move(next, operation)),
             FindSlotResult::Insert(_) => unreachable!(),
           };
 
-          let (record, _guard) = self.create_record(op)?;
+          let (record, _guard) = self.create_record(operation)?;
           let new_record =
             VersionRecord::new(self.0.current_owner(), self.0.current_version(), record);
           leaf.replace_at(pos, new_record);
@@ -710,9 +712,10 @@ where
         })?;
 
       match state {
-        State::Move(i, o) => (leaf_ptr, op) = (i, o),
+        State::Move(p, o) => (leaf_ptr, operation) = (p, o),
         State::Break(result) => return Ok(result),
         State::Split(k, p, result) => {
+          drop(insert_guard);
           self.propagate_split(k, p, stack, table)?;
           return Ok(result);
         }
@@ -803,4 +806,26 @@ impl WriteResult {
 pub enum WriteOp {
   Insert(Vec<u8>),
   Remove,
+}
+
+struct CopyOld<'a> {
+  insert_guard: ReserveGuard<'a>,
+  entry_ptr: Option<Pointer>,
+  old_record: VersionRecord,
+  operation: WriteOp,
+}
+impl<'a> CopyOld<'a> {
+  const fn new(
+    insert_guard: ReserveGuard<'a>,
+    entry_ptr: Option<Pointer>,
+    old_record: VersionRecord,
+    operation: WriteOp,
+  ) -> Self {
+    Self {
+      insert_guard,
+      entry_ptr,
+      old_record,
+      operation,
+    }
+  }
 }
