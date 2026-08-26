@@ -389,11 +389,15 @@ impl EventBus {
     self.queue.push(EventMsg::Publish(Box::new(event)));
     self.waker.unpark();
   }
-  pub fn batch_publish<E, I>(&self, events: I)
+  pub fn batch_publish<E, I>(&self, mut events: I)
   where
     E: Any + Send + Sync,
     I: Iterator<Item = E>,
   {
+    let Some(event) = events.next() else {
+      return;
+    };
+    self.queue.push(EventMsg::Publish(Box::new(event)));
     for event in events {
       self.queue.push(EventMsg::Publish(Box::new(event)));
     }
