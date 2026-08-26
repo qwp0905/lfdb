@@ -225,9 +225,7 @@ impl<T, R> StealingWorkThread<T, R> {
     }
   }
 
-  fn register(&self, ctx: ExecutableContext<T, R>) {
-    self.global.push(ctx);
-
+  fn wake_one(&self) {
     let Some(idle) = self.idle.pop() else {
       return;
     };
@@ -236,6 +234,11 @@ impl<T, R> StealingWorkThread<T, R> {
     if let State::Parked = idle.state.swap(State::Unqueued) {
       self.wakers[idle.id].unpark();
     }
+  }
+
+  fn register(&self, ctx: ExecutableContext<T, R>) {
+    self.global.push(ctx);
+    self.wake_one();
   }
 
   pub fn coworker(&self) -> Coworker<T, R> {
@@ -298,6 +301,22 @@ impl<T: Send, R: Send> StealingWorkThread<T, R> {
   pub fn cooperate(&self, value: T) -> PendingCoop<T, R> {
     PendingCoop::new(Execute::execute(self, value), self.coworker())
   }
+
+  pub fn fork<I: ExactSizeIterator<Item = T>>(&self, values: I) -> ForkJoin<T, R> {
+    let len = values.len();
+    let mut receivers = Vec::with_capacity(len);
+    for value in values {
+      let (o, f) = oneshot();
+      self.global.push(ExecutableContext::Work(value, f));
+      receivers.push(o);
+    }
+
+    for _ in 0..self.threads.len().min(len) {
+      self.wake_one();
+    }
+
+    ForkJoin::new(receivers, self.coworker())
+  }
 }
 
 pub struct PendingCoop<T, R> {
@@ -309,17 +328,48 @@ impl<T, R> PendingCoop<T, R> {
     Self { recv, coworker }
   }
 
-  pub fn wait(mut self) -> std::result::Result<R, WaitDisconnectedError> {
-    loop {
-      match self.recv.try_wait() {
-        Ok(v) => return Ok(v),
-        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-        Err(TryWaitError::Empty(recv)) => self.recv = recv,
-      }
-      if !self.coworker.run() {
-        return self.recv.wait_slow();
-      }
+  pub fn wait(self) -> std::result::Result<R, WaitDisconnectedError> {
+    wait(&self.coworker, self.recv)
+  }
+}
+
+fn wait<T, R>(
+  coworker: &Coworker<T, R>,
+  mut recv: Oneshot<R>,
+) -> std::result::Result<R, WaitDisconnectedError> {
+  loop {
+    match recv.try_wait() {
+      Ok(v) => return Ok(v),
+      Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+      Err(TryWaitError::Empty(r)) => recv = r,
     }
+    if !coworker.run() {
+      return recv.wait_slow();
+    }
+  }
+}
+
+pub struct ForkJoin<T, R> {
+  receivers: Vec<Oneshot<R>>,
+  coworker: Coworker<T, R>,
+}
+impl<T, R> ForkJoin<T, R> {
+  const fn new(receivers: Vec<Oneshot<R>>, coworker: Coworker<T, R>) -> Self {
+    Self {
+      receivers,
+      coworker,
+    }
+  }
+
+  pub fn join(self) -> impl Iterator<Item = R>
+  where
+    T: 'static,
+    R: 'static,
+  {
+    self
+      .receivers
+      .into_iter()
+      .map(move |recv| wait(&self.coworker, recv).unwrap())
   }
 }
 
