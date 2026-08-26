@@ -155,15 +155,12 @@ pub fn recovery(
   let thread = ThreadBuilder::new()
     .name("release orphan")
     .multi(open_handles.len().min(5))
-    .stealing(handle_recovery(block_cache, recorder, Arc::new(max_used)));
-
-  let mut waiting = Vec::with_capacity(open_handles.len());
-  for table in open_handles {
-    waiting.push(thread.cooperate(table));
-  }
-
-  thread.close();
-  waiting.into_iter().try_for_each(|th| th.wait().unwrap())?;
+    .stealing(handle_recovery(block_cache, recorder, max_used))
+    .into_once();
+  thread
+    .fork(open_handles.into_iter())
+    .join()
+    .collect::<Result>()?;
   info!("orphaned block has released successfully.");
   Ok(())
 }
@@ -222,7 +219,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
 const fn handle_recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
-  max_used: Arc<HashMap<TableId, Pointer>>,
+  max_used: HashMap<TableId, Pointer>,
 ) -> impl Fn(TableHandleRef) -> Result {
   move |table| recovery_table(&block_cache, &recorder, &table, &max_used)
 }
