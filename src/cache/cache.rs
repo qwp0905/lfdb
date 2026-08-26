@@ -298,13 +298,13 @@ impl CacheFlusher {
 
   pub fn advance(&mut self, count: usize) -> Result {
     let count = count.min(self.dirty_blocks.len());
-    let mut waiting = Vec::with_capacity(count);
-    for &id in self.dirty_blocks.iter().take(count) {
-      waiting.push(self.executor.cooperate(FlushTask::Write(id)));
-    }
-    waiting
-      .into_iter()
-      .try_for_each(|done| done.wait().unwrap())?;
+    let tasks = self
+      .dirty_blocks
+      .iter()
+      .take(count)
+      .copied()
+      .map(FlushTask::Write);
+    self.executor.fork(tasks).join().collect::<Result>()?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }
