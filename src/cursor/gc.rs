@@ -36,7 +36,6 @@ pub struct GarbageCollectionConfig {
   pub compact_min_size: Pointer,
 }
 
-const RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
 enum EntryWork {
@@ -51,7 +50,6 @@ pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   main: Box<IntervalWorkThread<()>>,
   entry: Arc<EntryWorker>,
-  table: Arc<IntervalWorkThread<()>>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -73,22 +71,19 @@ impl GarbageCollector {
       .stealing(run_entry(worker.clone()))
       .to_arc();
 
-    let table = ThreadBuilder::new()
-      .name("gc release tables")
-      .single()
-      .interval(
-        RELEASE_CHECK_INTERVAL,
-        run_release_table(release_queue.clone(), worker.clone()),
-      )
-      .to_arc();
-
     let main = ThreadBuilder::new()
       .name("gc main")
       .stack_size(2 << 20)
       .single()
       .interval(
         GC_RUN_INTERVAL,
-        gc_main_loop(worker, entry.clone(), event_bus.clone(), config),
+        gc_main_loop(
+          worker,
+          entry.clone(),
+          event_bus.clone(),
+          release_queue.clone(),
+          config,
+        ),
       )
       .to_box();
 
@@ -96,7 +91,6 @@ impl GarbageCollector {
       release_queue,
       main,
       entry,
-      table,
     });
     event_bus.register(&this);
     this
@@ -104,7 +98,6 @@ impl GarbageCollector {
 
   pub fn close(&self) {
     self.main.close();
-    self.table.close();
     self.entry.close();
   }
 }
@@ -150,35 +143,6 @@ impl DropTableCommitted {
       handle,
       owner,
       commit_version,
-    }
-  }
-}
-
-const fn run_release_table(
-  queue: Arc<SegQueue<DropTableCommitted>>,
-  worker: Arc<GcWorker>,
-) -> impl FnMut(Option<()>) {
-  let mut tables = LinkedList::new();
-  let mut unpinned = LinkedList::new();
-  let mut unreachable = LinkedList::new();
-  move |_| {
-    while let Some(committed) = queue.pop() {
-      tables.push_back((committed.handle, committed.owner, committed.commit_version));
-    }
-
-    let min_version = worker.version_visibility.min_version();
-    for (table, _, _) in tables.extract_if(|(_, tx_id, version)| {
-      worker.version_visibility.is_aborted(tx_id) || min_version >= *version
-    }) {
-      unpinned.push_back(table)
-    }
-
-    for table in unpinned.extract_if(|table| table.try_close()) {
-      unreachable.push_back(table);
-    }
-
-    for table in unreachable.extract_if(|table| table.truncate().is_ok()) {
-      worker.mapper.remove(table.get_id());
     }
   }
 }
@@ -563,6 +527,24 @@ impl GcWorker {
     current.flush_buffered(buffered)?;
     Ok(())
   }
+
+  fn release_tables(
+    &self,
+    release_queue: &SegQueue<DropTableCommitted>,
+    steps: &mut TableSteps,
+  ) {
+    steps.ingest(release_queue);
+
+    let min_version = self.version_visibility.min_version();
+    steps.move_unreachable(min_version, |tx_id| {
+      self.version_visibility.is_aborted(tx_id)
+    });
+    steps.move_unpinned();
+
+    for table in steps.extract_truncated() {
+      self.mapper.remove(table.get_id());
+    }
+  }
 }
 
 struct GcCycle {
@@ -613,14 +595,57 @@ impl GcTask {
   }
 }
 
+struct TableSteps {
+  incoming: LinkedList<(TableHandleRef, TxId, TxId)>,
+  unpinned: LinkedList<TableHandleRef>,
+  unreachable: LinkedList<TableHandleRef>,
+}
+impl TableSteps {
+  const fn new() -> Self {
+    Self {
+      incoming: LinkedList::new(),
+      unpinned: LinkedList::new(),
+      unreachable: LinkedList::new(),
+    }
+  }
+
+  fn ingest(&mut self, queue: &SegQueue<DropTableCommitted>) {
+    while let Some(committed) = queue.pop() {
+      self.incoming.push_back((
+        committed.handle,
+        committed.owner,
+        committed.commit_version,
+      ));
+    }
+  }
+  fn move_unreachable(&mut self, min_version: TxId, is_aborted: impl Fn(&TxId) -> bool) {
+    for (table, _, _) in self
+      .incoming
+      .extract_if(|(_, tx_id, version)| is_aborted(tx_id) || min_version >= *version)
+    {
+      self.unreachable.push_back(table)
+    }
+  }
+  fn move_unpinned(&mut self) {
+    for table in self.unreachable.extract_if(|table| table.try_close()) {
+      self.unpinned.push_back(table);
+    }
+  }
+  fn extract_truncated(&mut self) -> impl Iterator<Item = TableHandleRef> + '_ {
+    self.unpinned.extract_if(|table| table.truncate().is_ok())
+  }
+}
+
 fn gc_main_loop(
   worker: Arc<GcWorker>,
   entry_worker: Arc<EntryWorker>,
   event_bus: Arc<EventBus>,
+  release_queue: Arc<SegQueue<DropTableCommitted>>,
   config: GarbageCollectionConfig,
 ) -> impl FnMut(Option<()>) {
   let mut cycle = None;
   let mut buffered = VecDeque::new();
+  let mut steps = TableSteps::new();
 
   move |_| {
     worker
@@ -631,6 +656,7 @@ fn gc_main_loop(
         &event_bus,
         config.clone(),
       )
-      .unwrap()
+      .unwrap();
+    worker.release_tables(&release_queue, &mut steps);
   }
 }
