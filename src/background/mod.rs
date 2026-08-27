@@ -7,9 +7,6 @@ pub use builder::*;
 mod oneshot;
 pub use oneshot::*;
 
-mod stealing;
-pub use stealing::*;
-
 mod thread;
 pub use thread::*;
 
@@ -33,3 +30,9 @@ pub use slot::*;
 
 mod panic;
 pub use panic::*;
+
+mod task;
+use task::*;
+
+mod pool;
+pub use pool::*;
