@@ -12,7 +12,6 @@ fn test_basic_send_and_receive() {
   let thread = ThreadBuilder::new()
     .name("test-basic")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(16, |values: Vec<usize>| values.iter().sum::<usize>());
 
   let result = thread.execute(10).wait().unwrap();
@@ -32,7 +31,6 @@ fn test_try_recv_drains_pending() {
   let thread = ThreadBuilder::new()
     .name("test-drain")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(64, move |values: Vec<usize>| {
       batch_sizes_c.lock().unwrap().push(values.len());
       // slow processing so requests accumulate
@@ -72,7 +70,6 @@ fn test_max_count_respected() {
   let thread = ThreadBuilder::new()
     .name("test-max-count")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(max_count, move |values: Vec<usize>| {
       let len = values.len();
       batch_sizes_c.lock().unwrap().push(len);
@@ -104,7 +101,6 @@ fn test_result_per_item() {
   let thread = ThreadBuilder::new()
     .name("test-result")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(16, |values: Vec<usize>| {
       values.iter().map(|v| v * 3).collect::<Vec<_>>()
     });
@@ -124,7 +120,6 @@ fn test_close_flushes_remaining() {
   let thread = ThreadBuilder::new()
     .name("test-close-flush")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(1024, move |values: Vec<usize>| {
       total_c.fetch_add(values.len(), Ordering::Release);
       values.len()
@@ -146,7 +141,6 @@ fn test_multiple_close() {
   let thread = ThreadBuilder::new()
     .name("test-multi-close")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(16, |v: Vec<()>| v.len());
 
   thread.close();
@@ -162,7 +156,6 @@ fn test_concurrent_senders() {
   let thread = ThreadBuilder::new()
     .name("test-concurrent")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .buffering(64, move |values: Vec<usize>| {
       let sum: usize = values.iter().sum();
       total_c.fetch_add(sum, Ordering::Release);

@@ -56,7 +56,7 @@ unsafe impl<T: Send + Sync + ?Sized> Sync for Pair<T> {}
 
 pub enum TryWaitError<T> {
   Disconnected,
-  Empty(Oneshot<T>),
+  Empty(T),
 }
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
@@ -144,7 +144,7 @@ impl<T> Oneshot<T> {
    * the receiver is returned in `TryWaitError::Empty` so the caller can try again
    * or fall back to blocking `wait`.
    */
-  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<T>> {
+  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<Self>> {
     match self
       .0
       .state

@@ -680,7 +680,6 @@ impl Compactor {
     let ticker = ThreadBuilder::new()
       .name("compaction")
       .stack_size(2 << 20)
-      .single()
       .interval(
         COMPACTION_INTERVAL,
         compaction_loop(

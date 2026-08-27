@@ -57,7 +57,7 @@ impl SyncQueue {
 
   pub fn drain(&self) {
     while let Some(fsync) = self.queue.pop() {
-      let _ = fsync.wait();
+      let _ = fsync.wait().unwrap();
       self.synced_count.fetch_add(1, Ordering::Release);
     }
   }

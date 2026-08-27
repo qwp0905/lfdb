@@ -9,7 +9,7 @@ use super::{
   EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
-  background::{Close, StealingWorkThread, ThreadBuilder},
+  background::{ThreadPool, TypedExecutor},
   disk::{PagePool, Pointer, PAGE_SIZE},
   error, measure,
   metrics::MetricsRegistry,
@@ -45,12 +45,17 @@ pub struct BlockCache {
   batch_handles: Box<[BatchHandle<RefedSlot>]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
+  flush_executor: TypedExecutor<BlockId, Result>,
+  sync_executor: TypedExecutor<TableHandleRef, (Result, TableHandleRef)>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl BlockCache {
-  pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
+  pub fn open(
+    config: BlockCacheConfig,
+    thread_pool: &Arc<ThreadPool>,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Result<Self> {
     let page_pool = PagePool::new(config.capacity);
 
     // 90% of page pool capacity reserved for blocks; the remaining 10% is kept
@@ -72,16 +77,16 @@ impl BlockCache {
 
     let dirty_tables = DirtyTables::new().to_arc();
 
-    let flush_executor = ThreadBuilder::new()
-      .name("flush executor")
-      .multi(PRE_FLUSH_CONCURRENCY)
-      .stealing(handle_execute(
+    let flush_executor = thread_pool.typed_executor(
+      FLUSH_CONCURRENCY,
+      flush_write(
         cached_blocks.clone(),
         pins.clone(),
         dirty_blocks.clone(),
         dirty_tables.clone(),
-      ))
-      .to_arc();
+      ),
+    );
+    let sync_executor = thread_pool.typed_executor(FLUSH_CONCURRENCY, flush_sync());
 
     Ok(Self {
       cached_blocks,
@@ -91,6 +96,7 @@ impl BlockCache {
       dirty_blocks,
       page_pool,
       flush_executor,
+      sync_executor,
       metrics,
       dirty_tables,
     })
@@ -242,12 +248,9 @@ impl BlockCache {
     CacheFlusher::new(
       VecDeque::from(dirty),
       self.flush_executor.clone(),
+      self.sync_executor.clone(),
       self.dirty_tables.clone(),
     )
-  }
-
-  pub fn close(&self) {
-    self.flush_executor.close();
   }
 }
 
@@ -280,31 +283,29 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<StealingWorkThread<FlushTask, Result>>,
+  flush_executor: TypedExecutor<BlockId, Result>,
+  sync_executor: TypedExecutor<TableHandleRef, (Result, TableHandleRef)>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<StealingWorkThread<FlushTask, Result>>,
+    flush_executor: TypedExecutor<BlockId, Result>,
+    sync_executor: TypedExecutor<TableHandleRef, (Result, TableHandleRef)>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
     Self {
       dirty_blocks,
-      executor,
+      flush_executor,
       dirty_tables,
+      sync_executor,
     }
   }
 
   pub fn advance(&mut self, count: usize) -> Result {
     let count = count.min(self.dirty_blocks.len());
-    let tasks = self
-      .dirty_blocks
-      .iter()
-      .take(count)
-      .copied()
-      .map(FlushTask::Write);
-    self.executor.fork(tasks).join().collect::<Result>()?;
+    let tasks = self.dirty_blocks.iter().take(count).copied();
+    self.flush_executor.fork(tasks).join().collect::<Result>()?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }
@@ -323,14 +324,8 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    let mut waiting = Vec::new();
-    for table in self.dirty_tables.drain() {
-      let done = self.executor.cooperate(FlushTask::Fsync(table.clone()));
-      waiting.push((table, done));
-    }
-
-    for (table, done) in waiting {
-      let Err(err) = done.wait().unwrap() else {
+    for (result, table) in self.sync_executor.fork(self.dirty_tables.drain()).join() {
+      let Err(err) = result else {
         continue;
       };
 
@@ -344,43 +339,39 @@ impl CacheFlusher {
   }
 }
 
-const PRE_FLUSH_CONCURRENCY: usize = 3;
+const FLUSH_CONCURRENCY: usize = 3;
 
-enum FlushTask {
-  Write(BlockId),
-  Fsync(TableHandleRef),
-}
-
-const fn handle_execute(
+const fn flush_write(
   blocks: Arc<[BlockCell]>,
   pins: Arc<[ExclusivePin]>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
-) -> impl Fn(FlushTask) -> Result {
-  move |task| match task {
-    FlushTask::Write(id) => {
-      let Some(_token) = pins[id].try_shared() else {
-        return Ok(());
-      };
+) -> impl Fn(BlockId) -> Result {
+  move |id| {
+    let Some(_token) = pins[id].try_shared() else {
+      return Ok(());
+    };
 
-      let block = blocks[id].get();
-      let flusher = block.exclusive_flusher();
-      if !dirty_blocks.remove(id) {
-        return Ok(());
-      }
-
-      let pending = flusher.submit();
-      let (epoch, Err(err)) = pending.finalize() else {
-        dirty_tables.mark(block.handle());
-        return Ok(());
-      };
-
-      let latch = block.latch();
-      if latch.epoch() == epoch {
-        dirty_blocks.insert(id);
-      }
-      Err(err)
+    let block = blocks[id].get();
+    let flusher = block.exclusive_flusher();
+    if !dirty_blocks.remove(id) {
+      return Ok(());
     }
-    FlushTask::Fsync(table) => table.disk().fsync(),
+
+    let pending = flusher.submit();
+    let (epoch, Err(err)) = pending.finalize() else {
+      dirty_tables.mark(block.handle());
+      return Ok(());
+    };
+
+    let latch = block.latch();
+    if latch.epoch() == epoch {
+      dirty_blocks.insert(id);
+    }
+    Err(err)
   }
+}
+
+const fn flush_sync() -> impl Fn(TableHandleRef) -> (Result, TableHandleRef) {
+  |table| (table.disk().fsync(), table)
 }

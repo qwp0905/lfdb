@@ -43,7 +43,6 @@ impl SegmentPreload {
     let ready = SegQueue::new().to_arc();
     let reuse = ThreadBuilder::new()
       .name("wal segment reuse")
-      .single()
       .buffering(
         SEGMENT_MAX_BATCH,
         handle_reuse(ready.clone(), io_pool.clone()),
@@ -51,7 +50,6 @@ impl SegmentPreload {
       .to_arc();
     let preload = ThreadBuilder::new()
       .name("wal segment preload")
-      .single()
       .preload(
         SEGMENT_MAX_LIFE,
         handle_preload(ready.clone(), io_pool, max_len),

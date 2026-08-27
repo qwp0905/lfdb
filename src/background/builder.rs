@@ -1,9 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use super::{
-  BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SharedFn, SingleFn,
-  StealingWorkThread,
-};
+use super::{BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SingleFn};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -35,52 +32,14 @@ impl ThreadBuilder {
     self.stack_size = size;
     self
   }
-  pub const fn multi(self, count: usize) -> MultiThreadBuilder {
-    MultiThreadBuilder {
-      builder: self,
-      count,
-    }
-  }
-  pub const fn single(self) -> SingleThreadBuilder {
-    SingleThreadBuilder { builder: self }
-  }
-}
-pub struct MultiThreadBuilder {
-  builder: ThreadBuilder,
-  count: usize,
-}
-impl MultiThreadBuilder {
-  pub fn stealing<T, R, F>(self, build: F) -> StealingWorkThread<T, R>
-  where
-    T: Send + 'static,
-    R: Send + 'static,
-    F: Fn(T) -> R + Send + Sync + 'static,
-  {
-    StealingWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      self.count,
-      SharedFn::new(Arc::new(build)),
-    )
-  }
-}
 
-pub struct SingleThreadBuilder {
-  builder: ThreadBuilder,
-}
-impl SingleThreadBuilder {
   pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> IntervalWorkThread<T, R>
   where
     T: Send + 'static,
     R: Send + 'static,
     F: FnMut(Option<T>) -> R + Send + Sync + 'static,
   {
-    IntervalWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      timeout,
-      SingleFn::new(f),
-    )
+    IntervalWorkThread::new(self.name, self.stack_size, timeout, SingleFn::new(f))
   }
 
   pub fn buffering<F, T, R>(self, count: usize, when_buffered: F) -> BufferingThread<T, R>
@@ -90,8 +49,8 @@ impl SingleThreadBuilder {
     F: FnMut(Vec<T>) -> R + Send + Sync + 'static,
   {
     BufferingThread::new(
-      self.builder.name,
-      self.builder.stack_size,
+      self.name,
+      self.stack_size,
       count,
       SingleFn::new(when_buffered),
     )
@@ -109,8 +68,8 @@ impl SingleThreadBuilder {
     G: FnMut(Fallback<T>) + Send + 'static,
   {
     PreloadThread::new(
-      self.builder.name,
-      self.builder.stack_size,
+      self.name,
+      self.stack_size,
       timeout,
       SingleFn::new(preload),
       SingleFn::new(fallback),

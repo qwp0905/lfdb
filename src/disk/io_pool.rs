@@ -15,7 +15,7 @@ use super::{
   IOBackend, IOThread, ScanIOHandle, TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Close, Oneshot, ThreadBuilder},
+  background::{Oneshot, ThreadPool},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex},
@@ -52,14 +52,12 @@ pub struct IOPool {
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
     backend: T,
-    thread_count: usize,
     base_path: &Path,
+    thread_pool: &Arc<ThreadPool>,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let thread = ThreadBuilder::new()
-      .name("io pool")
-      .multi(thread_count)
-      .stealing(create_io_thread(metrics.clone()));
+    let thread =
+      thread_pool.typed_executor(usize::MAX, create_io_thread(metrics.clone()));
     let thread = SBox::new(thread);
 
     // The base directory lock prevents multiple engine processes from using the
@@ -156,10 +154,6 @@ impl IOPool {
   }
   pub fn exists(&self, filename: &Path) -> Result<bool> {
     self.base_dir.exists(filename).map_err(Error::IO)
-  }
-
-  pub fn close(&self) {
-    self.thread.close();
   }
 }
 impl Drop for IOPool {

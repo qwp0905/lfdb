@@ -118,7 +118,6 @@ impl Checkpoint {
     let ticker = ThreadBuilder::new()
       .name("checkpoint")
       .stack_size(2 << 20)
-      .single()
       .interval(
         CHECKPOINT_TICK,
         checkpoint_loop(

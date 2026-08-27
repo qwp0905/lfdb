@@ -8,7 +8,7 @@ use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   cache::{BlockCache, CachedSlot, RefedSlot},
   cursor::{Compactor, GarbageCollector, ResolvedConflict},
-  disk::{IOPool, Pointer},
+  disk::Pointer,
   error::Result,
   info, measure,
   metrics::MetricsRegistry,
@@ -37,7 +37,6 @@ pub struct TxOrchestrator {
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
   compactor: Arc<Compactor>,
-  io_pool: Arc<IOPool>,
   blob: Arc<BlobStorage>,
   timeout_thread: TimeoutThread,
   tx_timeout: Duration,
@@ -53,7 +52,6 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
-    io_pool: Arc<IOPool>,
     blob: Arc<BlobStorage>,
     checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
@@ -69,7 +67,6 @@ impl TxOrchestrator {
       recorder,
       compactor,
       timeout_thread,
-      io_pool,
       blob,
       tx_timeout: config.timeout,
       metrics,
@@ -182,12 +179,8 @@ impl TxOrchestrator {
     self.timeout_thread.close();
     self.checkpoint.close()?;
 
-    self.block_cache.close();
-    info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
-    self.io_pool.close();
-    info!("io pool closed.");
     Ok(())
   }
 }

@@ -15,7 +15,7 @@ impl EngineBuilder {
   {
     Self(EngineConfig {
       base_path: PathBuf::from(base_path.as_ref()),
-      io_thread_count: DEFAULT_IO_THREAD_COUNT,
+      thread_count: DEFAULT_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
@@ -31,11 +31,10 @@ impl EngineBuilder {
   }
 
   /**
-   * Number of background IO worker threads shared across tables for write batching.
-   * Each table holds at most one worker at a time.
+   * The number of threads in the background thread pool.
    */
-  pub const fn io_thread_count(mut self, count: usize) -> Self {
-    self.0.io_thread_count = count;
+  pub const fn thread_count(mut self, count: usize) -> Self {
+    self.0.thread_count = count;
     self
   }
 
@@ -154,7 +153,7 @@ const DEFAULT_GC_THREAD_COUNT: usize = 3;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
-const DEFAULT_IO_THREAD_COUNT: usize = 32;
+const DEFAULT_THREAD_COUNT: usize = 16;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
 const DEFAULT_COMPACTION_BATCH_SIZE: usize = 128;

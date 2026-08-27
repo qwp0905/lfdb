@@ -6,7 +6,7 @@ use std::{
 
 use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
-  background::{Close, ThreadBuilder},
+  background::ThreadPool,
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   cache::BlockCache,
   debug,
@@ -149,16 +149,17 @@ pub fn recovery(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
+  thread_pool: &Arc<ThreadPool>,
   max_used: HashMap<TableId, Pointer>,
 ) -> Result {
   let open_handles = tables.get_all();
-  let thread = ThreadBuilder::new()
-    .name("release orphan")
-    .multi(open_handles.len().min(5))
-    .stealing(handle_recovery(block_cache, recorder, max_used))
-    .into_once();
-  thread
-    .fork(open_handles.into_iter())
+  let count = open_handles.len().min(5);
+  thread_pool
+    .fork(
+      open_handles.into_iter(),
+      count,
+      handle_recovery(block_cache, recorder, max_used),
+    )
     .join()
     .collect::<Result>()?;
   info!("orphaned block has released successfully.");

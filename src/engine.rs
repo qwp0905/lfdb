@@ -10,7 +10,7 @@ use std::{
 
 use super::EngineConfig;
 use crate::{
-  background::EventBus,
+  background::{EventBus, ThreadPool},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
@@ -34,6 +34,7 @@ use crate::{
 pub struct Engine {
   orchestrator: TxOrchestrator,
   event_bus: Arc<EventBus>,
+  thread_pool: Arc<ThreadPool>,
   /**
    * Engine-level availability flag.
    *
@@ -57,10 +58,11 @@ impl Engine {
 
     info!("start engine");
 
+    let thread_pool = Arc::new(ThreadPool::new(config.thread_count));
     let io_pool = IOPool::with_backend(
       backend,
-      config.io_thread_count,
       config.base_path.as_ref(),
+      &thread_pool,
       metrics_registry.clone(),
     )?
     .to_arc();
@@ -88,7 +90,8 @@ impl Engine {
     };
 
     let block_cache =
-      BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
+      BlockCache::open(block_cache_config, &thread_pool, metrics_registry.clone())?
+        .to_arc();
 
     let Some(mut manifest) = load_manifest(&io_pool)? else {
       info!("engine initial state.");
@@ -130,6 +133,7 @@ impl Engine {
         tables.clone(),
         event_bus.clone(),
         blob.clone(),
+        &thread_pool,
         gc_config,
       );
 
@@ -153,7 +157,6 @@ impl Engine {
         gc,
         recorder,
         compactor,
-        io_pool,
         blob,
         checkpoint,
         metrics_registry.clone(),
@@ -163,6 +166,7 @@ impl Engine {
       return Ok(Self {
         orchestrator,
         event_bus,
+        thread_pool,
         available: AtomicBool::new(true),
         metrics_registry,
       });
@@ -284,7 +288,13 @@ impl Engine {
     manifest.wal_version = WALFormatVersion::CURRENT;
     save_manifest(&io_pool, &manifest)?;
 
-    recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
+    recovery(
+      block_cache.clone(),
+      recorder.clone(),
+      &tables,
+      &thread_pool,
+      max_used,
+    )?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),
@@ -293,6 +303,7 @@ impl Engine {
       tables.clone(),
       event_bus.clone(),
       blob.clone(),
+      &thread_pool,
       gc_config,
     );
 
@@ -341,7 +352,6 @@ impl Engine {
       gc,
       recorder,
       compactor,
-      io_pool,
       blob,
       checkpoint.clone(),
       metrics_registry.clone(),
@@ -351,6 +361,7 @@ impl Engine {
     Ok(Self {
       orchestrator,
       event_bus,
+      thread_pool,
       available: AtomicBool::new(true),
       metrics_registry,
     })
@@ -412,6 +423,7 @@ impl Drop for Engine {
       };
 
       self.event_bus.close();
+      self.thread_pool.close();
     }
   }
 }

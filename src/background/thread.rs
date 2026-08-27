@@ -11,28 +11,8 @@ use super::{EventBindings, Oneshot, OwnedSubscription};
  */
 pub trait Close: Send + Sync {
   fn close(&self);
-  /**
-   * Automatically close at drop.
-   */
-  fn into_once(self) -> OnceThread<Self>
-  where
-    Self: Sized,
-  {
-    OnceThread(self)
-  }
 }
-pub struct OnceThread<T: Close>(T);
-impl<T: Close> Drop for OnceThread<T> {
-  fn drop(&mut self) {
-    Close::close(&self.0);
-  }
-}
-impl<T: Close> std::ops::Deref for OnceThread<T> {
-  type Target = T;
-  fn deref(&self) -> &Self::Target {
-    &self.0
-  }
-}
+
 /**
  * Submit a command and return a completion handle.
  *

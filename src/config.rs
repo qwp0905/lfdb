@@ -9,7 +9,7 @@ macro_rules! invalid {
 
 pub struct EngineConfig {
   pub base_path: PathBuf,
-  pub io_thread_count: usize,
+  pub thread_count: usize,
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
   pub checkpoint_flush_factor: f64,
@@ -24,8 +24,8 @@ pub struct EngineConfig {
 }
 impl EngineConfig {
   pub fn validate(&self) -> Result {
-    if self.io_thread_count == 0 {
-      return invalid!("io_thread_count must be greater than 0.");
+    if self.thread_count == 0 {
+      return invalid!("thread_count must be greater than 0.");
     }
 
     if self.wal_file_size == 0 {
@@ -87,7 +87,7 @@ impl Clone for EngineConfig {
   fn clone(&self) -> Self {
     Self {
       base_path: self.base_path.clone(),
-      io_thread_count: self.io_thread_count,
+      thread_count: self.thread_count,
       wal_file_size: self.wal_file_size,
       wal_buffer_size: self.wal_buffer_size,
       checkpoint_flush_factor: self.checkpoint_flush_factor,

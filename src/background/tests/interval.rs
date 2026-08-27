@@ -21,7 +21,6 @@ fn test_shared_work_thread_with_timeout() {
   let thread = ThreadBuilder::new()
     .name("test-timeout")
     .stack_size(DEFAULT_STACK_SIZE)
-    .single()
     .interval(interval, work);
 
   // Send a task

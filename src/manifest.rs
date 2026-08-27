@@ -154,7 +154,9 @@ mod tests {
 
   use tempfile::TempDir;
 
-  use crate::{metrics::MetricsRegistry, table::TableName, DefaultIOBackend};
+  use crate::{
+    background::ThreadPool, metrics::MetricsRegistry, table::TableName, DefaultIOBackend,
+  };
 
   use super::*;
 
@@ -162,7 +164,9 @@ mod tests {
   fn test_save_and_load() {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let metrics = Arc::new(MetricsRegistry::new());
-    let io_pool = IOPool::with_backend(DefaultIOBackend, 1, dir.path(), metrics).unwrap();
+    let thread_pool = Arc::new(ThreadPool::new(1));
+    let io_pool =
+      IOPool::with_backend(DefaultIOBackend, dir.path(), &thread_pool, metrics).unwrap();
 
     let page_size = 123;
     let tid = 1;
@@ -185,6 +189,6 @@ mod tests {
     assert_eq!(parsed.snapshot_version, sversion);
     assert_eq!(parsed.wal_version, wversion);
 
-    io_pool.close();
+    thread_pool.close();
   }
 }
