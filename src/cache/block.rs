@@ -88,12 +88,12 @@ impl<'a> ExclusiveBlockFlusher<'a> {
 }
 
 pub struct PendingFlush {
-  handle: Option<PendingIO>,
+  handle: Option<PendingIO<()>>,
   _page: SBox<PageRef<PAGE_SIZE>>,
 }
 impl PendingFlush {
   pub fn finalize(mut self) -> Result {
-    self.handle.take().unwrap().wait()
+    self.handle.take().unwrap().wait_flatten()
   }
 }
 impl Drop for PendingFlush {

@@ -5,7 +5,9 @@ use std::{
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use super::{FsyncResult, SegmentGeneration};
+use crate::disk::PendingIO;
+
+use super::SegmentGeneration;
 
 /**
  * fsync results for rotated segments, pushed asynchronously at rotation time.
@@ -14,7 +16,7 @@ use super::{FsyncResult, SegmentGeneration};
  * (containing the corresponding insert) has not — losing data on crash.
  */
 pub struct SyncQueue {
-  queue: SegQueue<FsyncResult>,
+  queue: SegQueue<PendingIO<()>>,
   synced_count: AtomicU64,
 }
 impl SyncQueue {
@@ -25,7 +27,7 @@ impl SyncQueue {
     }
   }
 
-  pub fn push(&self, fsync: FsyncResult) {
+  pub fn push(&self, fsync: PendingIO<()>) {
     self.queue.push(fsync);
   }
 
@@ -44,7 +46,7 @@ impl SyncQueue {
         continue;
       };
 
-      let result = fsync.wait().unwrap();
+      let result = fsync.wait();
       // The counter tracks completed sync operations, not successful ones. A failed
       // fsync is still consumed from the queue; the error is returned to the caller to
       // handle WAL failure.

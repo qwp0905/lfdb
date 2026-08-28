@@ -20,6 +20,7 @@ mod io_pool;
 pub use io_pool::*;
 
 mod thread;
+pub use thread::PendingIO;
 use thread::*;
 
 mod backend;
