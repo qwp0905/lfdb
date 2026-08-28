@@ -226,6 +226,13 @@ impl ThreadPool {
     }
   }
 
+  fn stream_boxed<T, R>(
+    self: &Arc<Self>,
+    concurrency: usize,
+    handler: SharedFn<'static, T, R>,
+  ) -> ForkStream<T, R> {
+    ForkStream::new(self.clone(), concurrency.min(self.threads.len()), handler)
+  }
   fn fork_boxed<T, R>(
     self: &Arc<Self>,
     input: impl Iterator<Item = T>,
@@ -236,12 +243,9 @@ impl ThreadPool {
     T: Send + 'static,
     R: Send + 'static,
   {
-    ForkJoin::new(
-      self.clone(),
-      handler,
-      input,
-      concurrency.min(self.threads.len()),
-    )
+    let stream = self.stream_boxed(concurrency, handler);
+    stream.extend(input);
+    stream.into_fork_join()
   }
   pub fn fork<T, R, F>(
     self: &Arc<Self>,
@@ -254,7 +258,7 @@ impl ThreadPool {
     R: Send + 'static,
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    self.fork_boxed(input, concurrency, SharedFn::new(Arc::new(handler)))
+    self.fork_boxed(input, concurrency, SharedFn::new(handler))
   }
 
   pub fn typed_executor<T, R, F>(
@@ -357,45 +361,8 @@ pub struct ForkJoin<R> {
   coworker: Coworker,
 }
 impl<R> ForkJoin<R> {
-  fn new<T>(
-    pool: Arc<ThreadPool>,
-    handler: SharedFn<'static, T, R>,
-    input: impl Iterator<Item = T>,
-    concurrency: usize,
-  ) -> Self
-  where
-    T: Send + 'static,
-    R: Send + 'static,
-  {
-    let queue = SBox::new(SegQueue::new());
-    let (result, stream) = unbounded();
-    for task in input {
-      queue.push(task);
-    }
-    for _ in 0..concurrency {
-      Self::recursive(pool.clone(), queue.clone(), handler.clone(), result.clone());
-    }
-    Self {
-      stream,
-      coworker: pool.coworker(),
-    }
-  }
-
-  fn recursive<T>(
-    pool: Arc<ThreadPool>,
-    queue: SBox<SegQueue<T>>,
-    handler: SharedFn<'static, T, R>,
-    result: Sender<R>,
-  ) where
-    T: Send + 'static,
-    R: Send + 'static,
-  {
-    let cloned = Arc::clone(&pool);
-    pool.spawn(move || {
-      let Some(task) = queue.pop() else { return };
-      let _ = result.send(handler.call(task));
-      Self::recursive(cloned, queue, handler, result);
-    });
+  const fn new(stream: Receiver<R>, coworker: Coworker) -> Self {
+    Self { stream, coworker }
   }
 
   pub fn join(mut self) -> impl Iterator<Item = R> {
@@ -428,7 +395,7 @@ impl<T, R> TypedExecutor<T, R> {
   {
     Self {
       pool,
-      handler: SharedFn::new(Arc::new(handler)),
+      handler: SharedFn::new(handler),
       concurrency,
     }
   }
@@ -459,7 +426,9 @@ impl<T, R> TypedExecutor<T, R> {
   }
 
   pub fn stream(&self) -> ForkStream<T, R> {
-    ForkStream::new(self.pool.clone(), self.concurrency, self.handler.clone())
+    self
+      .pool
+      .stream_boxed(self.concurrency, self.handler.clone())
   }
 }
 impl<T, R> Clone for TypedExecutor<T, R> {
@@ -472,6 +441,7 @@ impl<T, R> Clone for TypedExecutor<T, R> {
   }
 }
 
+const STREAM_MAX_DRAIN: usize = 8;
 struct StreamState<T, R> {
   pool: Arc<ThreadPool>,
   handler: SharedFn<'static, T, R>,
@@ -518,7 +488,7 @@ impl<T, R> StreamState<T, R> {
     T: Send + 'static,
     R: Send + 'static,
   {
-    while let Some(input) = self.input.pop() {
+    for input in (0..STREAM_MAX_DRAIN).map_while(|_| self.input.pop()) {
       let _ = self.output.send(self.handler.call(input));
     }
     self.active.fetch_add(1, Ordering::AcqRel);
@@ -542,6 +512,10 @@ impl<T, R> ForkStream<T, R> {
     let state = Arc::new(StreamState::new(pool, handler, output_sender, concurrency));
     Self { state, output }
   }
+  fn into_fork_join(self) -> ForkJoin<R> {
+    ForkJoin::new(self.output, self.state.pool.coworker())
+  }
+
   pub fn push(&self, value: T)
   where
     T: Send + 'static,
@@ -550,9 +524,16 @@ impl<T, R> ForkStream<T, R> {
     self.state.input.push(value);
     self.state.activate();
   }
+  pub fn extend(&self, iter: impl Iterator<Item = T>)
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+  {
+    for input in iter {
+      self.push(input);
+    }
+  }
   pub fn join(self) -> impl Iterator<Item = R> {
-    let coworker = self.state.pool.coworker();
-    let stream = self.output;
-    ForkJoin { stream, coworker }.join()
+    self.into_fork_join().join()
   }
 }
