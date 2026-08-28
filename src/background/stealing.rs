@@ -10,36 +10,9 @@ use crossbeam::{
 use crate::{background::Oneshot, utils::SBox};
 
 use super::{
-  oneshot, Close, Dispatch, ExecutableContext, Execute, SharedFn, ThreadSlot,
-  TryWaitError, UnwindSpawner, WaitDisconnectedError,
+  oneshot, Close, Dispatch, ExecutableContext, Execute, OneshotFulfill, SharedFn,
+  ThreadSlot, TryWaitError, UnwindSpawner, WaitDisconnectedError,
 };
-
-/*
- * Standard work-stealing priority:
- * 1. run local work first,
- * 2. pull a batch from the global injector,
- * 3. steal from other workers as a fallback.
- */
-fn pop_or_steal<'a, A: 'a>(
-  local: &Worker<A>,
-  global: &Injector<A>,
-  mut stealers: impl Iterator<Item = &'a Stealer<A>>,
-) -> Option<A> {
-  if let Some(task) = local.pop() {
-    return Some(task);
-  }
-  if let Some(task) = global.steal_batch_and_pop(local).success() {
-    return Some(task);
-  }
-
-  stealers.find_map(|stealer| stealer.steal().success())
-}
-
-fn drain_task<A>(global: &Injector<A>, local: &Worker<A>) {
-  while let Some(ctx) = local.pop() {
-    global.push(ctx);
-  }
-}
 
 /*
  * A worker that receives `Term` stops processing work. Any tasks already pulled
@@ -62,9 +35,7 @@ fn handle_task<T, R>(
 
 const fn worker_loop<T, R>(
   local: Worker<ExecutableContext<T, R>>,
-  global: SBox<Injector<ExecutableContext<T, R>>>,
-  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
-  idle: SBox<SegQueue<Idle>>,
+  core: SBox<Core<ExecutableContext<T, R>>>,
   work: SharedFn<'static, T, R>,
   id: usize,
 ) -> impl FnOnce()
@@ -73,48 +44,33 @@ where
   R: Send + 'static,
 {
   move || {
-    let state = SBox::new(AtomicCell::new(State::Unqueued));
-
     let backoff = Backoff::new();
-    let mut cycle = (0..stealers.len())
-      .filter(|i| *i != id)
-      .map(|i| &stealers[i])
-      .cycle();
-    let size = stealers.len() - 1;
+    let size = core.size() - 1;
+    let mut cycle = core.create_cycle(id);
 
     loop {
       while !backoff.is_completed() {
-        let Some(ctx) = pop_or_steal(&local, &global, (&mut cycle).take(size)) else {
+        let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
           backoff.snooze();
           continue;
         };
 
         if !handle_task(ctx, &work) {
-          return drain_task(&global, &local);
+          return core.drain_task(&local);
         }
         backoff.reset();
       }
 
       backoff.reset();
-      if state
-        .compare_exchange(State::Unqueued, State::Queued)
-        .is_ok()
-      {
-        // there are no state in idle queue.
-        idle.push(Idle::new(state.clone(), id));
-      }
-
-      let Some(ctx) = pop_or_steal(&local, &global, (&mut cycle).take(size)) else {
-        if state.compare_exchange(State::Queued, State::Parked).is_ok() {
-          park();
-        }
-        // if producer changed state, then never park.
+      core.try_enqueue(id);
+      let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
+        core.try_park(id);
         continue;
       };
 
       // enqueued but tasks are left. state will be changed by producer.
       if !handle_task(ctx, &work) {
-        return drain_task(&global, &local);
+        return core.drain_task(&local);
       }
     }
   }
@@ -143,13 +99,117 @@ enum State {
    */
   Parked,
 }
-struct Idle {
-  state: SBox<AtomicCell<State>>,
-  id: usize,
+struct Core<A> {
+  global: Injector<A>,
+  stealers: Vec<Stealer<A>>,
+  idle: SegQueue<usize>,
+  states: Vec<AtomicCell<State>>,
 }
-impl Idle {
-  const fn new(state: SBox<AtomicCell<State>>, id: usize) -> Self {
-    Self { state, id }
+impl<A> Core<A> {
+  fn new(count: usize) -> (Self, Vec<Worker<A>>) {
+    let mut workers = Vec::with_capacity(count);
+    let mut stealers = Vec::with_capacity(count);
+    let mut states = Vec::with_capacity(count);
+
+    for _ in 0..count {
+      let worker = Worker::new_fifo();
+      stealers.push(worker.stealer());
+      workers.push(worker);
+      states.push(AtomicCell::new(State::Unqueued));
+    }
+
+    (
+      Self {
+        global: Injector::new(),
+        stealers,
+        idle: SegQueue::new(),
+        states,
+      },
+      workers,
+    )
+  }
+  fn wake_one(&self) -> Option<usize> {
+    let id = self.idle.pop()?;
+    // if does not matches parked, worker thread are already working.
+    if let State::Parked = self.states[id].swap(State::Unqueued) {
+      return Some(id);
+    }
+
+    None
+  }
+  const fn size(&self) -> usize {
+    self.stealers.len()
+  }
+
+  fn create_cycle(&self, id: usize) -> impl Iterator<Item = &'_ Stealer<A>> {
+    (0..self.size())
+      .filter(move |i| *i != id)
+      .map(|i| &self.stealers[i])
+      .cycle()
+  }
+
+  fn drain_task(&self, local: &Worker<A>) {
+    while let Some(ctx) = local.pop() {
+      self.global.push(ctx);
+    }
+  }
+
+  fn try_park(&self, id: usize) {
+    // if producer changed state, then never park.
+    if self.states[id]
+      .compare_exchange(State::Queued, State::Parked)
+      .is_ok()
+    {
+      park();
+    }
+  }
+  fn try_enqueue(&self, id: usize) {
+    if self.states[id]
+      .compare_exchange(State::Unqueued, State::Queued)
+      .is_ok()
+    {
+      // there are no state in idle queue.
+      self.idle.push(id);
+    }
+  }
+
+  /*
+   * Standard work-stealing priority:
+   * 1. run local work first,
+   * 2. pull a batch from the global injector,
+   * 3. steal from other workers as a fallback.
+   */
+  fn pop_or_steal<'a>(
+    &self,
+    local: &Worker<A>,
+    mut stealers: impl Iterator<Item = &'a Stealer<A>>,
+  ) -> Option<A>
+  where
+    A: 'a,
+  {
+    if let Some(task) = local.pop() {
+      return Some(task);
+    }
+    if let Some(task) = self.global.steal_batch_and_pop(local).success() {
+      return Some(task);
+    }
+
+    stealers.find_map(|stealer| stealer.steal().success())
+  }
+
+  fn register(&self, value: A) -> Option<usize> {
+    self.push_global(value);
+    self.wake_one()
+  }
+  fn push_global(&self, value: A) {
+    self.global.push(value);
+  }
+  fn pop_global(&self) -> Option<A> {
+    self.global.steal().success()
+  }
+
+  fn steal_one(&self) -> Option<A> {
+    self.stealers.iter().find_map(|s| s.steal().success())
   }
 }
 
@@ -166,11 +226,9 @@ impl Idle {
  * bursts of parallel work without keeping idle threads busy.
  */
 pub struct StealingWorkThread<T, R = ()> {
-  global: SBox<Injector<ExecutableContext<T, R>>>,
-  idle: SBox<SegQueue<Idle>>,
+  core: SBox<Core<ExecutableContext<T, R>>>,
   wakers: SBox<[Thread]>,
   threads: Vec<ThreadSlot>,
-  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
   work: SharedFn<'static, T, R>,
 }
 impl<T, R> StealingWorkThread<T, R> {
@@ -184,18 +242,8 @@ impl<T, R> StealingWorkThread<T, R> {
     T: Send + 'static,
     R: Send + 'static,
   {
-    let idle = SBox::new(SegQueue::new());
-    let mut stealers = Vec::with_capacity(count);
-    let mut workers = Vec::with_capacity(count);
-
-    for _ in 0..count {
-      let worker = Worker::<ExecutableContext<T, R>>::new_fifo();
-      stealers.push(worker.stealer());
-      workers.push(worker);
-    }
-
-    let global = SBox::new(Injector::new());
-    let stealers = SBox::from_boxed_slice(stealers.into_boxed_slice());
+    let (core, workers) = Core::new(count);
+    let core = SBox::new(core);
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -203,51 +251,41 @@ impl<T, R> StealingWorkThread<T, R> {
       let thread = Builder::new()
         .name(name.clone())
         .stack_size(size)
-        .spawn_unwind(worker_loop(
-          local,
-          SBox::clone(&global),
-          SBox::clone(&stealers),
-          SBox::clone(&idle),
-          work.clone(),
-          id,
-        ));
+        .spawn_unwind(worker_loop(local, core.clone(), work.clone(), id));
 
       wakers.push(thread.thread().clone());
       threads.push(ThreadSlot::new(thread));
     }
+
     Self {
-      global,
-      idle,
+      core,
       wakers: SBox::from_boxed_slice(wakers.into_boxed_slice()),
       threads,
-      stealers,
       work,
     }
   }
 
-  fn wake_one(&self) {
-    let Some(idle) = self.idle.pop() else {
-      return;
-    };
-
-    // if does not matches parked, worker thread are already working.
-    if let State::Parked = idle.state.swap(State::Unqueued) {
-      self.wakers[idle.id].unpark();
-    }
-  }
-
   fn register(&self, ctx: ExecutableContext<T, R>) {
-    self.global.push(ctx);
-    self.wake_one();
+    if let Some(id) = self.core.register(ctx) {
+      self.wakers[id].unpark();
+    }
   }
 
-  pub fn coworker(&self) -> Coworker<T, R> {
+  fn coworker(&self) -> Coworker<T, R> {
     Coworker {
-      global: SBox::clone(&self.global),
-      stealers: SBox::clone(&self.stealers),
+      core: self.core.clone(),
       work: self.work.clone(),
-      wakers: SBox::clone(&self.wakers),
+      wakers: self.wakers.clone(),
     }
+  }
+
+  pub fn create_pending<O>(&self) -> (PendingCoop<T, R, O>, OneshotFulfill<O>) {
+    let (o, f) = oneshot();
+    (PendingCoop::new(o, self.coworker()), f)
+  }
+
+  pub fn stream(&self) -> ForkStream<T, R> {
+    ForkStream::new(self.coworker())
   }
 }
 impl<T: Send, R: Send> Close for StealingWorkThread<T, R> {
@@ -273,14 +311,14 @@ impl<T: Send, R: Send> Close for StealingWorkThread<T, R> {
     }
 
     for _ in 0..threads.len() {
-      self.global.push(ExecutableContext::Term);
+      self.core.push_global(ExecutableContext::Term);
     }
     for th in threads {
       th.thread().unpark();
       th.join().unwrap();
     }
 
-    while let Some(ctx) = self.global.steal().success() {
+    while let Some(ctx) = self.core.pop_global() {
       handle_task(ctx, &self.work);
     }
   }
@@ -307,36 +345,56 @@ impl<T: Send, R: Send> StealingWorkThread<T, R> {
     let mut receivers = Vec::with_capacity(len);
     for value in values {
       let (o, f) = oneshot();
-      self.global.push(ExecutableContext::Work(value, f));
+      self.core.push_global(ExecutableContext::Work(value, f));
       receivers.push(o);
     }
 
-    for _ in 0..self.threads.len().min(len) {
-      self.wake_one();
+    for id in (0..self.threads.len().min(len)).map_while(|_| self.core.wake_one()) {
+      self.wakers[id].unpark();
     }
 
     ForkJoin::new(receivers, self.coworker())
   }
 }
 
-pub struct PendingCoop<T, R> {
-  recv: Oneshot<R>,
+pub struct ForkStream<T, R>(ForkJoin<T, R>);
+impl<T, R> ForkStream<T, R> {
+  const fn new(coworker: Coworker<T, R>) -> Self {
+    Self(ForkJoin::new(Vec::new(), coworker))
+  }
+  pub fn push(&mut self, value: T) {
+    let (o, f) = oneshot();
+    self.0.coworker.push(ExecutableContext::Work(value, f));
+    self.0.receivers.push(o);
+  }
+
+  pub fn join(self) -> impl ExactSizeIterator<Item = R>
+  where
+    T: 'static,
+    R: 'static,
+  {
+    self.0.join()
+  }
+}
+
+pub struct PendingCoop<T, R, O = R> {
+  recv: Oneshot<O>,
   coworker: Coworker<T, R>,
 }
-impl<T, R> PendingCoop<T, R> {
-  pub const fn new(recv: Oneshot<R>, coworker: Coworker<T, R>) -> Self {
+impl<T, R, O> PendingCoop<T, R, O> {
+  const fn new(recv: Oneshot<O>, coworker: Coworker<T, R>) -> Self {
     Self { recv, coworker }
   }
 
-  pub fn wait(self) -> std::result::Result<R, WaitDisconnectedError> {
-    wait(&self.coworker, self.recv)
+  pub fn wait(self) -> std::result::Result<O, WaitDisconnectedError> {
+    wait_with(&self.coworker, self.recv)
   }
 }
 
-fn wait<T, R>(
+fn wait_with<T, R, O>(
   coworker: &Coworker<T, R>,
-  mut recv: Oneshot<R>,
-) -> std::result::Result<R, WaitDisconnectedError> {
+  mut recv: Oneshot<O>,
+) -> std::result::Result<O, WaitDisconnectedError> {
   loop {
     match recv.try_wait() {
       Ok(v) => return Ok(v),
@@ -361,7 +419,7 @@ impl<T, R> ForkJoin<T, R> {
     }
   }
 
-  pub fn join(self) -> impl Iterator<Item = R>
+  pub fn join(self) -> impl ExactSizeIterator<Item = R>
   where
     T: 'static,
     R: 'static,
@@ -369,24 +427,24 @@ impl<T, R> ForkJoin<T, R> {
     self
       .receivers
       .into_iter()
-      .map(move |recv| wait(&self.coworker, recv).unwrap())
+      .map(move |recv| wait_with(&self.coworker, recv).unwrap())
   }
 }
 
-pub struct Coworker<T, R> {
-  global: SBox<Injector<ExecutableContext<T, R>>>,
-  stealers: SBox<[Stealer<ExecutableContext<T, R>>]>,
+struct Coworker<T, R> {
+  core: SBox<Core<ExecutableContext<T, R>>>,
   work: SharedFn<'static, T, R>,
   wakers: SBox<[Thread]>,
 }
 impl<T, R> Coworker<T, R> {
-  pub fn run(&self) -> bool {
-    let Some(ctx) = self
-      .global
-      .steal()
-      .success()
-      .or_else(|| self.stealers.iter().find_map(|s| s.steal().success()))
-    else {
+  fn push(&self, ctx: ExecutableContext<T, R>) {
+    if let Some(id) = self.core.register(ctx) {
+      self.wakers[id].unpark();
+    }
+  }
+
+  fn run(&self) -> bool {
+    let Some(ctx) = self.core.pop_global().or_else(|| self.core.steal_one()) else {
       return false;
     };
 
@@ -394,7 +452,7 @@ impl<T, R> Coworker<T, R> {
       return true;
     }
 
-    self.global.push(ExecutableContext::Term);
+    self.core.push_global(ExecutableContext::Term);
     for thread in self.wakers.iter() {
       thread.unpark();
     }
