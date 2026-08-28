@@ -45,7 +45,7 @@ pub struct BlockCache {
   batch_handles: Box<[BatchHandle<RefedSlot>]>,
   dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
+  flush_executor: Arc<StealingWorkThread<FlushTask, FlushTaskResult>>,
   metrics: Arc<MetricsRegistry>,
   dirty_tables: Arc<DirtyTables>,
 }
@@ -280,13 +280,13 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<StealingWorkThread<FlushTask, Result>>,
+  executor: Arc<StealingWorkThread<FlushTask, FlushTaskResult>>,
   dirty_tables: Arc<DirtyTables>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<StealingWorkThread<FlushTask, Result>>,
+    executor: Arc<StealingWorkThread<FlushTask, FlushTaskResult>>,
     dirty_tables: Arc<DirtyTables>,
   ) -> Self {
     Self {
@@ -304,7 +304,11 @@ impl CacheFlusher {
       .take(count)
       .copied()
       .map(FlushTask::Write);
-    self.executor.fork(tasks).join().collect::<Result>()?;
+    self
+      .executor
+      .fork(tasks)
+      .join()
+      .try_for_each(|r| r.into_write())?;
     self.dirty_blocks.drain(..count);
     Ok(())
   }
@@ -323,14 +327,13 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    let mut waiting = Vec::new();
+    let mut stream = self.executor.stream();
     for table in self.dirty_tables.drain() {
-      let done = self.executor.cooperate(FlushTask::Fsync(table.clone()));
-      waiting.push((table, done));
+      stream.push(FlushTask::Fsync(table));
     }
 
-    for (table, done) in waiting {
-      let Err(err) = done.wait().unwrap() else {
+    for (result, table) in stream.join().map(|r| r.into_fsync()) {
+      let Err(err) = result else {
         continue;
       };
 
@@ -350,37 +353,68 @@ enum FlushTask {
   Write(BlockId),
   Fsync(TableHandleRef),
 }
+enum FlushTaskResult {
+  Write(Result),
+  Fsync(Result, TableHandleRef),
+}
+impl FlushTaskResult {
+  fn into_write(self) -> Result {
+    match self {
+      Self::Write(v) => v,
+      Self::Fsync(_, _) => unreachable!(),
+    }
+  }
+  fn into_fsync(self) -> (Result, TableHandleRef) {
+    match self {
+      Self::Write(_) => unreachable!(),
+      Self::Fsync(r, t) => (r, t),
+    }
+  }
+}
 
+fn handle_write(
+  blocks: &[BlockCell],
+  pins: &[ExclusivePin],
+  dirty_blocks: &AtomicBitmap,
+  dirty_tables: &DirtyTables,
+  id: BlockId,
+) -> Result {
+  let Some(_token) = pins[id].try_shared() else {
+    return Ok(());
+  };
+
+  let block = blocks[id].get();
+  let flusher = block.exclusive_flusher();
+  if !dirty_blocks.remove(id) {
+    return Ok(());
+  }
+
+  let pending = flusher.submit();
+  let (epoch, Err(err)) = pending.finalize() else {
+    dirty_tables.mark(block.handle());
+    return Ok(());
+  };
+
+  let latch = block.latch();
+  if latch.epoch() == epoch {
+    dirty_blocks.insert(id);
+  }
+  Err(err)
+}
 const fn handle_execute(
   blocks: Arc<[BlockCell]>,
   pins: Arc<[ExclusivePin]>,
   dirty_blocks: Arc<AtomicBitmap>,
   dirty_tables: Arc<DirtyTables>,
-) -> impl Fn(FlushTask) -> Result {
+) -> impl Fn(FlushTask) -> FlushTaskResult {
   move |task| match task {
-    FlushTask::Write(id) => {
-      let Some(_token) = pins[id].try_shared() else {
-        return Ok(());
-      };
-
-      let block = blocks[id].get();
-      let flusher = block.exclusive_flusher();
-      if !dirty_blocks.remove(id) {
-        return Ok(());
-      }
-
-      let pending = flusher.submit();
-      let (epoch, Err(err)) = pending.finalize() else {
-        dirty_tables.mark(block.handle());
-        return Ok(());
-      };
-
-      let latch = block.latch();
-      if latch.epoch() == epoch {
-        dirty_blocks.insert(id);
-      }
-      Err(err)
-    }
-    FlushTask::Fsync(table) => table.disk().fsync(),
+    FlushTask::Write(id) => FlushTaskResult::Write(handle_write(
+      &blocks,
+      &pins,
+      &dirty_blocks,
+      &dirty_tables,
+      id,
+    )),
+    FlushTask::Fsync(table) => FlushTaskResult::Fsync(table.disk().fsync(), table),
   }
 }

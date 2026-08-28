@@ -9,7 +9,7 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, PendingCoop,
+    Close, EventBus, ForkStream, IntervalWorkThread, OwnedSubscription,
     SharedSubscription, StealingWorkThread, ThreadBuilder,
   },
   binding_events,
@@ -325,9 +325,9 @@ impl GcWorker {
   fn finalize_cycle(
     &self,
     cycle: &mut GcCycle,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+    stream: ForkStream<EntryWorkArg, EntryWorkResult>,
   ) -> Result {
-    cycle.flush_buffered(buffered)?;
+    cycle.flush_stream(stream)?;
     self.version_visibility.remove_aborted(&cycle.min_version);
 
     for &id in cycle
@@ -364,8 +364,7 @@ impl GcWorker {
   fn release_leaf(
     &self,
     table: &TableHandleRef,
-    entry_worker: &EntryWorker,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+    stream: &mut ForkStream<EntryWorkArg, EntryWorkResult>,
     mut candidates: HashSet<StaticKey>,
     ptr: Pointer,
   ) -> Result {
@@ -395,8 +394,7 @@ impl GcWorker {
               || entry.record.version >= min_version
               || self.version_visibility.is_aborted(&entry.record.owner)
             {
-              let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Check));
-              buffered.push_back(handle);
+              stream.push((table.clone(), ptr, EntryWork::Check));
               continue;
             }
 
@@ -414,8 +412,7 @@ impl GcWorker {
           Ok(targets)
         })?;
       for ptr in targets {
-        let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Release));
-        buffered.push_back(handle);
+        stream.push((table.clone(), ptr, EntryWork::Release));
       }
     }
 
@@ -425,7 +422,6 @@ impl GcWorker {
   fn run_tick(
     &self,
     cycle: &mut Option<GcCycle>,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
     entry_worker: &EntryWorker,
     event_bus: &EventBus,
     config: GarbageCollectionConfig,
@@ -435,9 +431,10 @@ impl GcWorker {
       return Ok(());
     };
 
+    let mut stream = entry_worker.stream();
     for _ in 0..config.batch_size {
       let Some(mut task) = current.tasks.pop() else {
-        self.finalize_cycle(current, buffered)?;
+        self.finalize_cycle(current, stream)?;
         *cycle = None;
         return Ok(());
       };
@@ -466,9 +463,7 @@ impl GcWorker {
           if self.version_visibility.is_aborted(&e.record.owner) {
             task.dead += 1;
             if let Some(p) = e.next {
-              let handle =
-                entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
-              buffered.push_back(handle);
+              stream.push((table.handle().clone(), p, EntryWork::Check));
             }
             continue;
           }
@@ -488,21 +483,13 @@ impl GcWorker {
             release_candidates.insert(slot.as_ref().copy_range(e.range));
             continue;
           }
-          let handle =
-            entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
-          buffered.push_back(handle);
+          stream.push((table.handle().clone(), p, EntryWork::Check));
         }
 
         node.get_next()
       };
 
-      self.release_leaf(
-        table.handle(),
-        entry_worker,
-        buffered,
-        release_candidates,
-        ptr,
-      )?;
+      self.release_leaf(table.handle(), &mut stream, release_candidates, ptr)?;
 
       if let Some(i) = has_next {
         task.leaf_ptr = Some(i);
@@ -524,7 +511,7 @@ impl GcWorker {
       event_bus.publish(CompactionTriggered::new(table.into_inner()));
     }
 
-    current.flush_buffered(buffered)?;
+    current.flush_stream(stream)?;
     Ok(())
   }
 
@@ -563,18 +550,17 @@ impl GcCycle {
     }
   }
 
-  fn flush_buffered(
+  fn flush_stream(
     &mut self,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
+    stream: ForkStream<EntryWorkArg, EntryWorkResult>,
   ) -> Result {
-    while let Some(handle) = buffered.pop_front() {
-      let Some(result) = handle.wait().unwrap()? else {
+    for result in stream.join() {
+      let Some(result) = result? else {
         continue;
       };
       self.min_version = self.min_version.min(result.min_version);
       self.blob_refs.extend(result.blob_refs);
     }
-
     Ok(())
   }
 }
@@ -644,18 +630,11 @@ fn gc_main_loop(
   config: GarbageCollectionConfig,
 ) -> impl FnMut(Option<()>) {
   let mut cycle = None;
-  let mut buffered = VecDeque::new();
   let mut steps = TableSteps::new();
 
   move |_| {
     worker
-      .run_tick(
-        &mut cycle,
-        &mut buffered,
-        &entry_worker,
-        &event_bus,
-        config.clone(),
-      )
+      .run_tick(&mut cycle, &entry_worker, &event_bus, config.clone())
       .unwrap();
     worker.release_tables(&release_queue, &mut steps);
   }
