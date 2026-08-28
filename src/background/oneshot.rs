@@ -107,13 +107,6 @@ impl<T> OneshotInner<T> {
       caller: AtomicCell::new(None),
     }
   }
-  const fn fulfilled(value: T) -> Self {
-    Self {
-      state: AtomicCell::new(State::Fulfilled),
-      value: UnsafeCell::new(MaybeUninit::new(value)),
-      caller: AtomicCell::new(None),
-    }
-  }
   #[inline]
   const fn get_value(&self) -> &MaybeUninit<T> {
     unsafe { &*self.value.get() }
@@ -131,11 +124,6 @@ impl<T> OneshotInner<T> {
  */
 pub struct Oneshot<T>(Pair<OneshotInner<T>>);
 impl<T> Oneshot<T> {
-  pub fn fulfilled(value: T) -> Self {
-    let inner = OneshotInner::fulfilled(value);
-    let (inner, _) = Pair::new(inner);
-    Oneshot(inner)
-  }
   /**
    * Try to consume the result without blocking.
    *

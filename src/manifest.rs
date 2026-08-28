@@ -162,7 +162,7 @@ mod tests {
   fn test_save_and_load() {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let metrics = Arc::new(MetricsRegistry::new());
-    let io_pool = IOPool::with_backend(DefaultIOBackend, 1, dir.path(), metrics).unwrap();
+    let io_pool = IOPool::with_backend(DefaultIOBackend, dir.path(), metrics).unwrap();
 
     let page_size = 123;
     let tid = 1;

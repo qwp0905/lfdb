@@ -57,13 +57,9 @@ impl Engine {
 
     info!("start engine");
 
-    let io_pool = IOPool::with_backend(
-      backend,
-      config.io_thread_count,
-      config.base_path.as_ref(),
-      metrics_registry.clone(),
-    )?
-    .to_arc();
+    let io_pool =
+      IOPool::with_backend(backend, config.base_path.as_ref(), metrics_registry.clone())?
+        .to_arc();
 
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
