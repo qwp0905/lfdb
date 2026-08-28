@@ -12,10 +12,10 @@ use crossbeam::utils::Backoff;
 
 use super::{
   create_io_thread, AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState,
-  IOBackend, IOThread, ScanIOHandle, TaskPublisher, WriteTask,
+  IOBackend, IOThread, PendingIO, ScanIOHandle, TaskPublisher, WriteTask,
 };
 use crate::{
-  background::{Close, Oneshot, ThreadBuilder},
+  background::{Close, ThreadBuilder},
   error, measure,
   metrics::MetricsRegistry,
   utils::{SBox, ShortenedMutex},
@@ -25,16 +25,7 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub struct PendingIO<T = ()>(Oneshot<IOResult<T>>);
-impl<T> PendingIO<T> {
-  pub const fn new(inner: Oneshot<IOResult<T>>) -> Self {
-    Self(inner)
-  }
-
-  pub fn wait(self) -> Result<T> {
-    self.0.wait().unwrap().map_err(Error::IO)
-  }
-}
+const IO_THREAD_COUNT: usize = 3;
 
 /**
  * Engine-local filesystem facade.
@@ -52,13 +43,12 @@ pub struct IOPool {
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
     backend: T,
-    thread_count: usize,
     base_path: &Path,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
     let thread = ThreadBuilder::new()
       .name("io pool")
-      .multi(thread_count)
+      .multi(IO_THREAD_COUNT)
       .stealing(create_io_thread(metrics.clone()));
     let thread = SBox::new(thread);
 
@@ -146,7 +136,7 @@ impl IOPool {
    * boundary.
    */
   pub fn sync_dir(&self) -> Result {
-    self.base_dir.fdatasync().wait().unwrap().map_err(Error::IO)
+    self.base_dir.fdatasync().wait_flatten()
   }
   pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
     self.base_dir.read().map_err(Error::IO)
@@ -213,11 +203,7 @@ impl IOHandle {
     }
   }
 
-  pub fn alloc_and_write(
-    &self,
-    buf: &'static [u8],
-    offset: u64,
-  ) -> Oneshot<IOResult<()>> {
+  pub fn alloc_and_write(&self, buf: &'static [u8], offset: u64) -> PendingIO<()> {
     self.write_handle.publish_alloc_and_write(
       &self.state,
       &self.thread,
@@ -226,7 +212,7 @@ impl IOHandle {
       (offset, IoSlice::new(buf)),
     )
   }
-  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> Oneshot<IOResult<()>> {
+  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> PendingIO<()> {
     self.write_handle.publish_write_only(
       &self.state,
       &self.thread,
@@ -235,7 +221,7 @@ impl IOHandle {
     )
   }
 
-  pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
+  pub fn fdatasync(&self) -> PendingIO<()> {
     self
       .sync_handle
       .publish_sync(&self.state, &self.thread, &self.backend)
