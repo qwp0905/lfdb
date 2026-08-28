@@ -11,13 +11,30 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{oneshot, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread},
+  background::{Dispatch, OneshotFulfill, PendingCoop, StealingWorkThread},
   measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
 pub type WriteTask = (u64, IoSlice<'static>);
+
+pub enum PendingIO<T> {
+  Fulfilled(Result<T>),
+  Wait(PendingCoop<ThreadArg, (), Result<T>>),
+}
+impl<T> PendingIO<T> {
+  pub fn wait(self) -> Result<T> {
+    match self {
+      Self::Fulfilled(v) => v,
+      Self::Wait(coop) => coop.wait().unwrap(),
+    }
+  }
+
+  pub fn wait_flatten(self) -> crate::Result<T> {
+    self.wait().map_err(crate::Error::IO)
+  }
+}
 
 /**
  * Tracks the file size already covered by preallocation.
@@ -104,15 +121,15 @@ impl SBox<TaskPublisher<WriteTask>> {
     backend: &Arc<dyn IOBackend>,
     alloc: &SBox<AllocState>,
     task: WriteTask,
-  ) -> Oneshot<Result<()>> {
+  ) -> PendingIO<()> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return PendingIO::Fulfilled(Ok(()));
     }
 
-    let (o, f) = oneshot();
+    let (o, f) = thread.create_pending();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return PendingIO::Wait(o);
     }
 
     thread.dispatch((
@@ -120,7 +137,7 @@ impl SBox<TaskPublisher<WriteTask>> {
       IOTask::Write(self.clone(), Some(alloc.clone())),
       state.clone(),
     ));
-    o
+    PendingIO::Wait(o)
   }
   /**
    * For fixed-size or externally preallocated files.
@@ -132,15 +149,15 @@ impl SBox<TaskPublisher<WriteTask>> {
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
     task: WriteTask,
-  ) -> Oneshot<Result<()>> {
+  ) -> PendingIO<()> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return PendingIO::Fulfilled(Ok(()));
     }
 
-    let (o, f) = oneshot();
+    let (o, f) = thread.create_pending();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return PendingIO::Wait(o);
     }
 
     thread.dispatch((
@@ -148,7 +165,7 @@ impl SBox<TaskPublisher<WriteTask>> {
       IOTask::Write(self.clone(), None),
       state.clone(),
     ));
-    o
+    PendingIO::Wait(o)
   }
 
   const MAX_FLUSH_COUNT: usize = max_iov();
@@ -191,19 +208,19 @@ impl SBox<TaskPublisher<()>> {
     state: &SBox<HandleState>,
     thread: &IOThread,
     backend: &Arc<dyn IOBackend>,
-  ) -> Oneshot<Result<()>> {
+  ) -> PendingIO<()> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return PendingIO::Fulfilled(Ok(()));
     }
 
-    let (o, f) = oneshot();
+    let (o, f) = thread.create_pending();
     self.queue.push(((), f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return PendingIO::Wait(o);
     }
 
     thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
-    o
+    PendingIO::Wait(o)
   }
 
   const MAX_FLUSH_COUNT: usize = 512;
