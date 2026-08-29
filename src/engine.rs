@@ -74,7 +74,6 @@ impl Engine {
       capacity: config.block_cache_memory_capacity / PAGE_SIZE,
     };
     let gc_config = GarbageCollectionConfig {
-      thread_count: config.gc_thread_count,
       batch_size: config.gc_batch_size,
       compact_threshold: config.compaction_threshold,
       compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
