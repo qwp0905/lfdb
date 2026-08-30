@@ -44,7 +44,7 @@ impl SyncQueue {
         continue;
       };
 
-      let result = fsync.wait().unwrap();
+      let result = fsync.wait();
       // The counter tracks completed sync operations, not successful ones. A failed
       // fsync is still consumed from the queue; the error is returned to the caller to
       // handle WAL failure.

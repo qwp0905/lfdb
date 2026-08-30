@@ -50,7 +50,7 @@ impl<const N: usize> BlockIOHandle<N> {
     // completion, and completion means the worker no longer holds or reads the
     // submitted slice. Therefore the borrowed page cannot outlive this call.
     let static_ref = unsafe { transmute::<&Page<N>, &'static Page<N>>(page) };
-    self.write_async(pointer, static_ref).wait()
+    self.write_async(pointer, static_ref).wait_flatten()
   }
 
   /**
@@ -62,7 +62,7 @@ impl<const N: usize> BlockIOHandle<N> {
    */
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> PendingIO {
     let slice = page.as_slice();
-    PendingIO::new(self.handle.alloc_and_write(slice, Self::cvt(pointer)))
+    self.handle.alloc_and_write(slice, Self::cvt(pointer))
   }
 
   #[inline]

@@ -5,9 +5,8 @@ use std::{
   sync::Arc,
 };
 
-use crate::{background::Oneshot, utils::SBox};
-
-use super::{DiskBackend, HandleState, IOBackend, IOThread, TaskPublisher};
+use super::{DiskBackend, HandleState, IOBackend, PendingIO, TaskPublisher};
+use crate::{background::ThreadPool, metrics::MetricsRegistry, utils::SBox};
 
 /**
  * Base-directory-bound disk backend.
@@ -20,15 +19,17 @@ pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
   sync_handle: SBox<TaskPublisher<()>>,
-  thread: SBox<IOThread>,
+  thread: Arc<ThreadPool>,
   state: SBox<HandleState>,
   path: PathBuf,
+  metrics: Arc<MetricsRegistry>,
 }
 impl DirHandle {
   pub fn ensure(
     path: &Path,
     disk_backend: Box<dyn DiskBackend>,
-    thread: SBox<IOThread>,
+    thread: Arc<ThreadPool>,
+    metrics: Arc<MetricsRegistry>,
   ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
@@ -41,12 +42,15 @@ impl DirHandle {
       thread,
       state: SBox::new(HandleState::new()),
       path,
+      metrics,
     })
   }
-  pub fn fdatasync(&self) -> Oneshot<IOResult<()>> {
+  pub fn fdatasync(&self) -> PendingIO {
     self
       .sync_handle
-      .publish_sync(&self.state, &self.thread, &self.io_backend)
+      .publish_sync(&self.state, &self.thread, &self.io_backend, &self.metrics)
+      .map(PendingIO::Pending)
+      .unwrap_or_else(|| PendingIO::Fulfilled(Ok(())))
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()

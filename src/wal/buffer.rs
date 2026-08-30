@@ -1,14 +1,12 @@
 use std::{
   cell::{Cell, UnsafeCell},
-  io::Result as IOResult,
   mem::MaybeUninit,
   sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
 use crate::{
-  background::Oneshot,
-  disk::{PageRef, Pointer},
+  disk::{PageRef, PendingIO, Pointer},
   utils::{ExclusivePin, SBox, SharedToken},
 };
 
@@ -168,7 +166,7 @@ impl LogBuffer {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn flush_block(&'static self) -> Oneshot<IOResult<()>> {
+  pub fn flush_block(&'static self) -> PendingIO {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
       .write_async(self.segment_ptr, unsafe { &*self.entry.get() })
