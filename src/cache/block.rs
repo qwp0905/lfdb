@@ -93,7 +93,7 @@ pub struct PendingFlush {
 }
 impl PendingFlush {
   pub fn finalize(mut self) -> Result {
-    self.handle.take().unwrap().wait()
+    self.handle.take().unwrap().wait_flatten()
   }
 }
 impl Drop for PendingFlush {

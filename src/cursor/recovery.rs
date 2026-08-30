@@ -155,10 +155,12 @@ pub fn recovery(
   let thread = ThreadBuilder::new()
     .name("release orphan")
     .multi(open_handles.len().min(5))
-    .stealing(handle_recovery(block_cache, recorder, max_used))
     .into_once();
   thread
-    .fork(open_handles.into_iter())
+    .fork(
+      open_handles.into_iter(),
+      handle_recovery(block_cache, recorder, max_used),
+    )
     .join()
     .collect::<Result>()?;
   info!("orphaned block has released successfully.");

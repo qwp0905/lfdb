@@ -1,6 +1,6 @@
 use std::{
   cell::UnsafeCell,
-  mem::MaybeUninit,
+  mem::{forget, MaybeUninit},
   ops::Deref,
   ptr::NonNull,
   sync::atomic::{fence, AtomicBool, Ordering},
@@ -11,6 +11,7 @@ use crossbeam::atomic::AtomicCell;
 
 use crate::utils::Backoff;
 
+#[repr(C)]
 struct PairInner<T: ?Sized> {
   dropped: AtomicBool,
   value: T,
@@ -24,12 +25,24 @@ impl<T> PairInner<T> {
   }
 }
 
-struct Pair<T: ?Sized>(NonNull<PairInner<T>>);
+pub struct Pair<T: ?Sized>(NonNull<PairInner<T>>);
 impl<T> Pair<T> {
   pub fn new(value: T) -> (Self, Self) {
     let inner = PairInner::new(value);
     let ptr = NonNull::from_mut(Box::leak(Box::new(inner)));
     (Self(ptr), Self(ptr))
+  }
+
+  pub fn into_raw(this: Self) -> *mut T {
+    let ptr = unsafe { &raw mut (*this.0.as_ptr()).value };
+    forget(this);
+    ptr
+  }
+
+  pub unsafe fn from_raw(ptr: *mut T) -> Self {
+    let offset = std::mem::offset_of!(PairInner<T>, value);
+    let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
+    Self(NonNull::new_unchecked(ptr))
   }
 }
 impl<T: ?Sized> Drop for Pair<T> {
@@ -56,7 +69,7 @@ unsafe impl<T: Send + Sync + ?Sized> Sync for Pair<T> {}
 
 pub enum TryWaitError<T> {
   Disconnected,
-  Empty(Oneshot<T>),
+  Empty(T),
 }
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
@@ -67,7 +80,7 @@ pub struct WaitDisconnectedError;
  * The receiver parks until the sender fulfills the value or disconnects.
  */
 pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = Pair::new(OneshotInner::new());
+  let inner = Pair::new(OneshotBehavior::new());
   (Oneshot(inner.0), OneshotFulfill(inner.1))
 }
 
@@ -94,29 +107,88 @@ enum State {
  * first dropped handle only marks the allocation as disconnected; the second
  * dropped handle reclaims the heap allocation.
  */
-struct OneshotInner<T> {
+pub struct OneshotBehavior<T> {
   state: AtomicCell<State>,
   value: UnsafeCell<MaybeUninit<T>>,
   caller: AtomicCell<Option<Thread>>,
 }
-impl<T> OneshotInner<T> {
-  const fn new() -> Self {
+impl<T> OneshotBehavior<T> {
+  pub const fn new() -> Self {
     Self {
       state: AtomicCell::new(State::Waiting),
       value: UnsafeCell::new(MaybeUninit::uninit()),
       caller: AtomicCell::new(None),
     }
   }
-  const fn fulfilled(value: T) -> Self {
-    Self {
-      state: AtomicCell::new(State::Fulfilled),
-      value: UnsafeCell::new(MaybeUninit::new(value)),
-      caller: AtomicCell::new(None),
+
+  pub fn fulfill(&self, result: T) {
+    let value = unsafe { &mut *self.value.get() };
+    value.write(result);
+    match self
+      .state
+      .compare_exchange(State::Waiting, State::Fulfilled)
+      .unwrap_or_else(|s| s)
+    {
+      State::Waiting => {
+        let Some(thread) = self.caller.take() else {
+          return;
+        };
+        thread.unpark();
+      }
+      State::Disconnected => unsafe { value.assume_init_drop() },
+      State::Fulfilled => unreachable!(),
     }
   }
-  #[inline]
-  const fn get_value(&self) -> &MaybeUninit<T> {
-    unsafe { &*self.value.get() }
+
+  pub fn try_wait(&self) -> std::result::Result<T, TryWaitError<()>> {
+    match self
+      .state
+      .compare_exchange(State::Fulfilled, State::Disconnected)
+      .unwrap_or_else(|s| s)
+    {
+      State::Waiting => Err(TryWaitError::Empty(())),
+      State::Fulfilled => Ok(unsafe { (*self.value.get()).assume_init_read() }),
+      State::Disconnected => Err(TryWaitError::Disconnected),
+    }
+  }
+
+  pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
+    let backoff = Backoff::new();
+    self.caller.store(Some(current()));
+    loop {
+      match self.try_wait() {
+        Ok(v) => return Ok(v),
+        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+        Err(TryWaitError::Empty(_)) => {}
+      };
+      if !backoff.is_complete() {
+        backoff.snooze();
+        continue;
+      }
+
+      park();
+      backoff.reset();
+    }
+  }
+
+  pub fn drop_receiver(&self) {
+    if let State::Fulfilled = self.state.swap(State::Disconnected) {
+      unsafe { (*self.value.get()).assume_init_drop() };
+    }
+  }
+
+  pub fn drop_sender(&self) {
+    if self
+      .state
+      .compare_exchange(State::Waiting, State::Disconnected)
+      .is_err()
+    {
+      return;
+    }
+    let Some(thread) = self.caller.take() else {
+      return;
+    };
+    thread.unpark();
   }
 }
 
@@ -129,13 +201,8 @@ impl<T> OneshotInner<T> {
  * pair shared by the waiter and fulfiller to keep the synchronization surface
  * small and predictable.
  */
-pub struct Oneshot<T>(Pair<OneshotInner<T>>);
+pub struct Oneshot<T>(Pair<OneshotBehavior<T>>);
 impl<T> Oneshot<T> {
-  pub fn fulfilled(value: T) -> Self {
-    let inner = OneshotInner::fulfilled(value);
-    let (inner, _) = Pair::new(inner);
-    Oneshot(inner)
-  }
   /**
    * Try to consume the result without blocking.
    *
@@ -144,97 +211,37 @@ impl<T> Oneshot<T> {
    * the receiver is returned in `TryWaitError::Empty` so the caller can try again
    * or fall back to blocking `wait`.
    */
-  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<T>> {
-    match self
-      .0
-      .state
-      .compare_exchange(State::Fulfilled, State::Disconnected)
-      .unwrap_or_else(|s| s)
-    {
-      State::Waiting => Err(TryWaitError::Empty(self)),
-      State::Fulfilled => Ok(unsafe { self.0.get_value().assume_init_read() }),
-      State::Disconnected => Err(TryWaitError::Disconnected),
+  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<Self>> {
+    match self.0.try_wait() {
+      Ok(v) => Ok(v),
+      Err(TryWaitError::Empty(_)) => Err(TryWaitError::Empty(self)),
+      Err(TryWaitError::Disconnected) => Err(TryWaitError::Disconnected),
     }
   }
-  pub fn wait(mut self) -> Result<T, WaitDisconnectedError> {
-    let backoff = Backoff::new();
-    self.0.caller.store(Some(current()));
-    loop {
-      match self.try_wait() {
-        Ok(v) => return Ok(v),
-        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-        Err(TryWaitError::Empty(this)) => self = this,
-      };
-      if !backoff.is_complete() {
-        backoff.snooze();
-        continue;
-      }
-
-      park();
-      backoff.reset();
-    }
-  }
-
-  pub fn wait_slow(mut self) -> Result<T, WaitDisconnectedError> {
-    self.0.caller.store(Some(current()));
-    loop {
-      match self.try_wait() {
-        Ok(v) => return Ok(v),
-        Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-        Err(TryWaitError::Empty(this)) => self = this,
-      };
-      park();
-    }
+  pub fn wait(self) -> Result<T, WaitDisconnectedError> {
+    self.0.wait()
   }
 }
 impl<T> Drop for Oneshot<T> {
   fn drop(&mut self) {
-    if let State::Fulfilled = self.0.state.swap(State::Disconnected) {
-      unsafe { (*self.0.value.get()).assume_init_drop() };
-    }
+    self.0.drop_receiver();
   }
 }
 
-pub struct OneshotFulfill<T>(Pair<OneshotInner<T>>);
+pub struct OneshotFulfill<T>(Pair<OneshotBehavior<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
-    let value = unsafe { &mut *self.0.value.get() };
-    value.write(result);
-    match self
-      .0
-      .state
-      .compare_exchange(State::Waiting, State::Fulfilled)
-      .unwrap_or_else(|s| s)
-    {
-      State::Waiting => {
-        let Some(thread) = self.0.caller.take() else {
-          return;
-        };
-        thread.unpark();
-      }
-      State::Disconnected => unsafe { value.assume_init_drop() },
-      State::Fulfilled => unreachable!(),
-    }
+    self.0.fulfill(result);
   }
 }
 impl<T> Drop for OneshotFulfill<T> {
   fn drop(&mut self) {
-    let Ok(_) = self
-      .0
-      .state
-      .compare_exchange(State::Waiting, State::Disconnected)
-    else {
-      return;
-    };
-    let Some(thread) = self.0.caller.take() else {
-      return;
-    };
-    thread.unpark();
+    self.0.drop_sender();
   }
 }
 
-unsafe impl<T: Send> Sync for OneshotInner<T> {}
-unsafe impl<T: Send> Send for OneshotInner<T> {}
+unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
+unsafe impl<T: Send> Send for OneshotBehavior<T> {}
 
 #[cfg(test)]
 #[path = "tests/oneshot.rs"]

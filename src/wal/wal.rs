@@ -224,7 +224,7 @@ impl WriteAheadLog {
     while !buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
-    if let Err(err) = done.wait().unwrap() {
+    if let Err(err) = done.wait() {
       return Err(self.failover(err.kind()));
     };
 
@@ -239,10 +239,7 @@ impl WriteAheadLog {
       return Err(self.failover(err.kind()));
     }
 
-    done
-      .wait()
-      .unwrap()
-      .map_err(|err| self.failover(err.kind()))
+    done.wait().map_err(|err| self.failover(err.kind()))
   }
 
   fn rotate_block(
@@ -283,7 +280,7 @@ impl WriteAheadLog {
     }
 
     if !flush {
-      let result = buffer.flush_block().wait().unwrap();
+      let result = buffer.flush_block().wait();
       buffer.increase_rotated_count();
       return result.map_err(|err| self.failover(err.kind()));
     }
@@ -291,7 +288,7 @@ impl WriteAheadLog {
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
     let done = new_buffer.flush_block();
 
-    let result = buffer.flush_block().wait().unwrap();
+    let result = buffer.flush_block().wait();
     buffer.increase_rotated_count();
     if let Err(err) = result {
       return Err(self.failover(err.kind()));
@@ -300,7 +297,7 @@ impl WriteAheadLog {
     while !new_buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
-    if let Err(err) = done.wait().unwrap() {
+    if let Err(err) = done.wait() {
       return Err(self.failover(err.kind()));
     };
 
@@ -347,7 +344,7 @@ impl WriteAheadLog {
     while !buffer.prev_blocks_rotated() {
       backoff.snooze();
     }
-    if let Err(err) = done.wait().unwrap() {
+    if let Err(err) = done.wait() {
       return Err(self.failover(err.kind()));
     };
 
