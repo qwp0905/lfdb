@@ -9,7 +9,7 @@ use super::{
   EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
-  background::{Close, StealingWorkThread, ThreadBuilder},
+  background::{Close, ThreadBuilder, ThreadPool},
   disk::{PagePool, Pointer, PAGE_SIZE},
   error, measure,
   metrics::MetricsRegistry,
@@ -22,6 +22,35 @@ pub struct BlockCacheConfig {
   pub shard_count: usize,
   pub capacity: usize,
 }
+
+struct Core {
+  cached_blocks: Box<[BlockCell]>,
+  /**
+   * pin to protect each block in cached blocks from eviction
+   */
+  pins: Box<[ExclusivePin]>,
+  /**
+   * each dirty bits are protected by each block's latch
+   */
+  dirty_blocks: AtomicBitmap,
+  dirty_tables: DirtyTables,
+}
+impl Core {
+  const fn new(
+    cached_blocks: Box<[BlockCell]>,
+    pins: Box<[ExclusivePin]>,
+    dirty_blocks: AtomicBitmap,
+    dirty_tables: DirtyTables,
+  ) -> Self {
+    Self {
+      cached_blocks,
+      pins,
+      dirty_blocks,
+      dirty_tables,
+    }
+  }
+}
+
 /**
  * Central block-cache manager and higher-level disk abstraction.
  *
@@ -34,20 +63,11 @@ pub struct BlockCacheConfig {
  */
 pub struct BlockCache {
   table: MappingTable,
-  cached_blocks: Arc<[BlockCell]>,
-  /**
-   * pin to protect each block in cached blocks from eviction
-   */
-  pins: Arc<[ExclusivePin]>,
-  /**
-   * each dirty bits are protected by each block's latch
-   */
+  core: Arc<Core>,
   batch_handles: Box<[BatchHandle<RefedSlot>]>,
-  dirty_blocks: Arc<AtomicBitmap>,
   page_pool: PagePool<PAGE_SIZE>,
-  flush_executor: Arc<StealingWorkThread<FlushTask, Result>>,
+  flush_executor: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
-  dirty_tables: Arc<DirtyTables>,
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
@@ -64,43 +84,35 @@ impl BlockCache {
 
     let mut batch_handles = Vec::with_capacity(block_cap);
     batch_handles.resize_with(block_cap, BatchHandle::new);
-
-    let cached_blocks = Arc::<[_]>::from(blocks.into_boxed_slice());
-    let pins = Arc::<[_]>::from(pins.into_boxed_slice());
     let batch_handles = batch_handles.into_boxed_slice();
-    let dirty_blocks = AtomicBitmap::new(block_cap).to_arc();
 
-    let dirty_tables = DirtyTables::new().to_arc();
+    let core = Arc::new(Core::new(
+      blocks.into_boxed_slice(),
+      pins.into_boxed_slice(),
+      AtomicBitmap::new(block_cap),
+      DirtyTables::new(),
+    ));
 
     let flush_executor = ThreadBuilder::new()
       .name("flush executor")
       .multi(PRE_FLUSH_CONCURRENCY)
-      .stealing(handle_execute(
-        cached_blocks.clone(),
-        pins.clone(),
-        dirty_blocks.clone(),
-        dirty_tables.clone(),
-      ))
       .to_arc();
 
     Ok(Self {
-      cached_blocks,
-      pins,
-      batch_handles,
       table: MappingTable::new(config.shard_count, block_cap),
-      dirty_blocks,
+      core,
+      batch_handles,
       page_pool,
       flush_executor,
       metrics,
-      dirty_tables,
     })
   }
 
   #[inline]
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
-      self.cached_blocks[id].get(),
-      &self.dirty_blocks,
+      self.core.cached_blocks[id].get(),
+      &self.core.dirty_blocks,
       &self.batch_handles[id],
       id,
       token,
@@ -120,7 +132,9 @@ impl BlockCache {
     handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = self.table.alloc(table_id, pointer, |id| &self.pins[id]);
+    let guard = self
+      .table
+      .alloc(table_id, pointer, |id| &self.core.pins[id]);
 
     let pending = self.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
@@ -140,7 +154,10 @@ impl BlockCache {
     handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
+    let guard = match self
+      .table
+      .acquire(table_id, pointer, |id| &self.core.pins[id])
+    {
       Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
       Acquired::Evicted(guard) => guard,
     };
@@ -157,11 +174,11 @@ impl BlockCache {
       return None;
     }
     let block_id = guard.get_block_id();
-    if !self.dirty_blocks.contains(block_id) {
+    if !self.core.dirty_blocks.contains(block_id) {
       return None;
     }
 
-    Some(self.cached_blocks[block_id].get().flusher().submit())
+    Some(self.core.cached_blocks[block_id].get().flusher().submit())
   }
   fn resolve_eviction<'a>(
     &'a self,
@@ -170,7 +187,7 @@ impl BlockCache {
     new: CachedBlock,
   ) -> Result<CachedSlot<'a>> {
     let block_id = guard.get_block_id();
-    let block = &self.cached_blocks[block_id];
+    let block = &self.core.cached_blocks[block_id];
 
     if !guard.is_evicted() {
       block.write(new);
@@ -179,8 +196,8 @@ impl BlockCache {
 
     if let Some(pending) = pending {
       pending.finalize()?;
-      self.dirty_blocks.remove(block_id);
-      self.dirty_tables.mark(block.get().handle());
+      self.core.dirty_blocks.remove(block_id);
+      self.core.dirty_tables.mark(block.get().handle());
     }
 
     block.replace(new);
@@ -189,7 +206,10 @@ impl BlockCache {
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self.table.acquire(table_id, pointer, |id| &self.pins[id]) {
+    let guard = match self
+      .table
+      .acquire(table_id, pointer, |id| &self.core.pins[id])
+    {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
         return Ok(self.cache_slot(block_id, token));
@@ -216,8 +236,8 @@ impl BlockCache {
   pub fn create_flusher(&self) -> CacheFlusher {
     let mut buckets = HashMap::<_, Vec<_>>::new();
     let mut len = 0;
-    for id in self.dirty_blocks.iter() {
-      let Some(_token) = self.pins[id].try_shared() else {
+    for id in self.core.dirty_blocks.iter() {
+      let Some(_token) = self.core.pins[id].try_shared() else {
         // An exclusive owner is already handling this slot, for example during
         // eviction/install. Do not add it to this flush snapshot.
         continue;
@@ -226,7 +246,7 @@ impl BlockCache {
       // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
       // pointers from the same table together reduces random write scattering during
       // checkpoint.
-      let block = self.cached_blocks[id].get();
+      let block = self.core.cached_blocks[id].get();
       let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
       buckets.entry(key).or_default().push(id);
       len += 1;
@@ -242,7 +262,7 @@ impl BlockCache {
     CacheFlusher::new(
       VecDeque::from(dirty),
       self.flush_executor.clone(),
-      self.dirty_tables.clone(),
+      self.core.clone(),
     )
   }
 
@@ -258,7 +278,7 @@ impl Drop for BlockCache {
       .len_per_shard()
       .flat_map(|(len, offset)| offset..offset + len)
     {
-      self.cached_blocks[i].drop_in_place();
+      self.core.cached_blocks[i].drop_in_place();
     }
   }
 }
@@ -280,32 +300,34 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  executor: Arc<StealingWorkThread<FlushTask, Result>>,
-  dirty_tables: Arc<DirtyTables>,
+  core: Arc<Core>,
+  executor: Arc<ThreadPool>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<StealingWorkThread<FlushTask, Result>>,
-    dirty_tables: Arc<DirtyTables>,
+    executor: Arc<ThreadPool>,
+    core: Arc<Core>,
   ) -> Self {
     Self {
       dirty_blocks,
       executor,
-      dirty_tables,
+      core,
     }
   }
 
   pub fn advance(&mut self, count: usize) -> Result {
     let count = count.min(self.dirty_blocks.len());
-    let tasks = self
-      .dirty_blocks
-      .iter()
-      .take(count)
-      .copied()
-      .map(FlushTask::Write);
-    self.executor.fork(tasks).join().collect::<Result>()?;
+    let handler = handle_flush_blocks(self.core.clone());
+    let tasks = self.dirty_blocks.iter().take(count).copied();
+
+    self
+      .executor
+      .fork(tasks, handler)
+      .join()
+      .collect::<Result>()?;
     self.dirty_blocks.drain(..count);
+
     Ok(())
   }
 
@@ -323,21 +345,20 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    let mut waiting = Vec::new();
-    for table in self.dirty_tables.drain() {
-      let done = self.executor.cooperate(FlushTask::Fsync(table.clone()));
-      waiting.push((table, done));
+    let mut stream = self.executor.stream(handle_flush_table);
+    for table in self.core.dirty_tables.drain() {
+      stream.push(table);
     }
 
-    for (table, done) in waiting {
-      let Err(err) = done.wait().unwrap() else {
+    for (result, table) in stream.join() {
+      let Err(err) = result else {
         continue;
       };
 
       // Preserve the unfinished fsync marker for a future caller. This flusher
       // reports the failure; retry policy belongs to the caller.
       error!("error occurs in flush table: {err}");
-      self.dirty_tables.mark(&table);
+      self.core.dirty_tables.mark(&table);
       return Err(err);
     }
     Ok(())
@@ -346,41 +367,32 @@ impl CacheFlusher {
 
 const PRE_FLUSH_CONCURRENCY: usize = 3;
 
-enum FlushTask {
-  Write(BlockId),
-  Fsync(TableHandleRef),
+const fn handle_flush_blocks(core: Arc<Core>) -> impl Fn(BlockId) -> Result {
+  move |id| {
+    let Some(_token) = core.pins[id].try_shared() else {
+      return Ok(());
+    };
+
+    let block = core.cached_blocks[id].get();
+    let flusher = block.exclusive_flusher();
+    if !core.dirty_blocks.remove(id) {
+      return Ok(());
+    }
+
+    let pending = flusher.submit();
+    let (epoch, Err(err)) = pending.finalize() else {
+      core.dirty_tables.mark(block.handle());
+      return Ok(());
+    };
+
+    let latch = block.latch();
+    if latch.epoch() == epoch {
+      core.dirty_blocks.insert(id);
+    }
+    Err(err)
+  }
 }
 
-const fn handle_execute(
-  blocks: Arc<[BlockCell]>,
-  pins: Arc<[ExclusivePin]>,
-  dirty_blocks: Arc<AtomicBitmap>,
-  dirty_tables: Arc<DirtyTables>,
-) -> impl Fn(FlushTask) -> Result {
-  move |task| match task {
-    FlushTask::Write(id) => {
-      let Some(_token) = pins[id].try_shared() else {
-        return Ok(());
-      };
-
-      let block = blocks[id].get();
-      let flusher = block.exclusive_flusher();
-      if !dirty_blocks.remove(id) {
-        return Ok(());
-      }
-
-      let pending = flusher.submit();
-      let (epoch, Err(err)) = pending.finalize() else {
-        dirty_tables.mark(block.handle());
-        return Ok(());
-      };
-
-      let latch = block.latch();
-      if latch.epoch() == epoch {
-        dirty_blocks.insert(id);
-      }
-      Err(err)
-    }
-    FlushTask::Fsync(table) => table.disk().fsync(),
-  }
+fn handle_flush_table(table: TableHandleRef) -> (Result, TableHandleRef) {
+  (table.disk().fsync(), table)
 }
