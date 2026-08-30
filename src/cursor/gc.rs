@@ -9,8 +9,8 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, PendingCoop,
-    SharedSubscription, StealingWorkThread, ThreadBuilder,
+    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   binding_events,
   blob::{BlobId, BlobStorage},
@@ -31,25 +31,15 @@ use crate::{
 #[derive(Clone)]
 pub struct GarbageCollectionConfig {
   pub batch_size: usize,
-  pub thread_count: usize,
   pub compact_threshold: f64,
   pub compact_min_size: Pointer,
 }
 
 const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
-enum EntryWork {
-  Check,
-  Release,
-}
-type EntryWorkArg = (TableHandleRef, Pointer, EntryWork);
-type EntryWorkResult = Result<Option<EntryRelease>>;
-type EntryWorker = StealingWorkThread<EntryWorkArg, EntryWorkResult>;
-
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   main: Box<IntervalWorkThread<()>>,
-  entry: Arc<EntryWorker>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -65,32 +55,19 @@ impl GarbageCollector {
     let worker =
       GcWorker::new(block_cache, version_visibility, recorder, mapper, blob).to_arc();
 
-    let entry = ThreadBuilder::new()
-      .name("gc found entry")
-      .multi(config.thread_count)
-      .stealing(run_entry(worker.clone()))
-      .to_arc();
-
     let main = ThreadBuilder::new()
       .name("gc main")
       .stack_size(2 << 20)
       .single()
       .interval(
         GC_RUN_INTERVAL,
-        gc_main_loop(
-          worker,
-          entry.clone(),
-          event_bus.clone(),
-          release_queue.clone(),
-          config,
-        ),
+        gc_main_loop(worker, event_bus.clone(), release_queue.clone(), config),
       )
       .to_box();
 
     let this = Arc::new(Self {
       release_queue,
       main,
-      entry,
     });
     event_bus.register(&this);
     this
@@ -98,7 +75,6 @@ impl GarbageCollector {
 
   pub fn close(&self) {
     self.main.close();
-    self.entry.close();
   }
 }
 
@@ -121,15 +97,6 @@ binding_events!(GarbageCollector {
 struct EntryRelease {
   min_version: TxId,
   blob_refs: Vec<BlobId>,
-}
-
-const fn run_entry(
-  worker: Arc<GcWorker>,
-) -> impl Fn((TableHandleRef, Pointer, EntryWork)) -> Result<Option<EntryRelease>> {
-  move |(table, pointer, work)| match work {
-    EntryWork::Check => worker.check_and_release_entry(pointer, &table),
-    EntryWork::Release => worker.release_entry(pointer, &table).map(|_| None),
-  }
 }
 
 pub struct DropTableCommitted {
@@ -229,7 +196,7 @@ impl GcWorker {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<Option<EntryRelease>> {
+  ) -> Result<EntryRelease> {
     let table_id = table.get_id();
     let mut next = Some(pointer);
     let mut max_found = None;
@@ -286,10 +253,10 @@ impl GcWorker {
         })?;
     }
 
-    Ok(Some(EntryRelease {
+    Ok(EntryRelease {
       min_version: max_found.unwrap_or(min_version),
       blob_refs,
-    }))
+    })
   }
 
   fn release_entry(&self, pointer: Pointer, table: &TableHandleRef) -> Result {
@@ -317,19 +284,13 @@ impl GcWorker {
       self.version_visibility.min_version(),
       self.blob.readonly_handle_ids(),
     );
-    for task in self.mapper.get_all().into_iter().map(GcTask::new) {
+    for task in self.mapper.get_all().into_iter().map(GcTask::uninit) {
       cycle.tasks.push(task);
     }
     cycle
   }
-  fn finalize_cycle(
-    &self,
-    cycle: &mut GcCycle,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
-  ) -> Result {
-    cycle.flush_buffered(buffered)?;
+  fn finalize_cycle(&self, cycle: &mut GcCycle) -> Result {
     self.version_visibility.remove_aborted(&cycle.min_version);
-
     for &id in cycle
       .exists_blobs
       .iter()
@@ -364,10 +325,9 @@ impl GcWorker {
   fn release_leaf(
     &self,
     table: &TableHandleRef,
-    entry_worker: &EntryWorker,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
     mut candidates: HashSet<StaticKey>,
     ptr: Pointer,
+    task_queue: &mut ChunkQueue<GcTask>,
   ) -> Result {
     let count = candidates.len();
     if count == 0 {
@@ -395,8 +355,8 @@ impl GcWorker {
               || entry.record.version >= min_version
               || self.version_visibility.is_aborted(&entry.record.owner)
             {
-              let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Check));
-              buffered.push_back(handle);
+              let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
+              task_queue.push(task);
               continue;
             }
 
@@ -414,8 +374,8 @@ impl GcWorker {
           Ok(targets)
         })?;
       for ptr in targets {
-        let handle = entry_worker.cooperate((table.clone(), ptr, EntryWork::Release));
-        buffered.push_back(handle);
+        let task = GcTask::new(TaskType::ReleaseEntry(ptr), table.clone());
+        task_queue.push(task);
       }
     }
 
@@ -425,8 +385,6 @@ impl GcWorker {
   fn run_tick(
     &self,
     cycle: &mut Option<GcCycle>,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
-    entry_worker: &EntryWorker,
     event_bus: &EventBus,
     config: GarbageCollectionConfig,
   ) -> Result {
@@ -437,7 +395,7 @@ impl GcWorker {
 
     for _ in 0..config.batch_size {
       let Some(mut task) = current.tasks.pop() else {
-        self.finalize_cycle(current, buffered)?;
+        self.finalize_cycle(current)?;
         *cycle = None;
         return Ok(());
       };
@@ -446,29 +404,44 @@ impl GcWorker {
         continue;
       };
 
-      let Some(ptr) = task.leaf_ptr.take() else {
-        task.leaf_ptr = Some(self.get_predecessor(table.handle())?);
-        drop(table);
-        current.tasks.push(task);
-        continue;
+      let mut inner = match task.inner {
+        TaskType::Uninit => {
+          let ptr = self.get_predecessor(table.handle())?;
+          task.inner = TaskType::CheckLeaf(CheckLeafTask::new(ptr));
+          drop(table);
+          current.tasks.push(task);
+          continue;
+        }
+        TaskType::CheckEntry(ptr) => {
+          let result = self.check_and_release_entry(ptr, table.handle())?;
+          current.apply_release(result);
+          continue;
+        }
+        TaskType::ReleaseEntry(ptr) => {
+          self.release_entry(ptr, table.handle())?;
+          continue;
+        }
+        TaskType::CheckLeaf(inner) => inner,
       };
 
       let mut release_candidates = HashSet::new();
       let has_next = {
         let min_version = self.version_visibility.min_version();
-        let slot = self.block_cache.read(ptr, table.handle())?.for_read();
+        let slot = self
+          .block_cache
+          .read(inner.pointer, table.handle())?
+          .for_read();
         let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let mut iter = node.get_entries();
         while let Some(e) = iter.try_next()? {
           current.min_version = current.min_version.min(e.record.version);
-          task.total += 1;
+          inner.total += 1;
 
           if self.version_visibility.is_aborted(&e.record.owner) {
-            task.dead += 1;
+            inner.dead += 1;
             if let Some(p) = e.next {
-              let handle =
-                entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
-              buffered.push_back(handle);
+              let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
+              current.tasks.push(task);
             }
             continue;
           }
@@ -477,7 +450,7 @@ impl GcWorker {
             RecordDataView::Blob(id, _, _) => {
               current.blob_refs.insert(id);
             }
-            RecordDataView::Tombstone => task.dead += 1,
+            RecordDataView::Tombstone => inner.dead += 1,
             _ => {}
           }
 
@@ -488,9 +461,9 @@ impl GcWorker {
             release_candidates.insert(slot.as_ref().copy_range(e.range));
             continue;
           }
-          let handle =
-            entry_worker.cooperate((table.handle().clone(), p, EntryWork::Check));
-          buffered.push_back(handle);
+
+          let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
+          current.tasks.push(task);
         }
 
         node.get_next()
@@ -498,14 +471,14 @@ impl GcWorker {
 
       self.release_leaf(
         table.handle(),
-        entry_worker,
-        buffered,
         release_candidates,
-        ptr,
+        inner.pointer,
+        &mut current.tasks,
       )?;
 
-      if let Some(i) = has_next {
-        task.leaf_ptr = Some(i);
+      if let Some(p) = has_next {
+        inner.pointer = p;
+        task.inner = TaskType::CheckLeaf(inner);
         drop(table);
         current.tasks.push(task);
         continue;
@@ -517,14 +490,14 @@ impl GcWorker {
       if table.free().file_len() <= config.compact_min_size {
         continue;
       }
-      if task.dead as f64 / task.total as f64 <= config.compact_threshold {
+      if inner.dead as f64 / inner.total as f64 <= config.compact_threshold {
         continue;
       }
 
-      event_bus.publish(CompactionTriggered::new(table.into_inner()));
+      drop(table);
+      event_bus.publish(CompactionTriggered::new(task.table));
     }
 
-    current.flush_buffered(buffered)?;
     Ok(())
   }
 
@@ -532,18 +505,53 @@ impl GcWorker {
     &self,
     release_queue: &SegQueue<DropTableCommitted>,
     steps: &mut TableSteps,
-  ) {
+  ) -> Result {
     steps.ingest(release_queue);
 
     let min_version = self.version_visibility.min_version();
     steps.move_unreachable(min_version, |tx_id| {
       self.version_visibility.is_aborted(tx_id)
     });
-    steps.move_unpinned();
-
-    for table in steps.extract_truncated() {
+    for table in steps.extract_unpinned() {
+      table.truncate()?;
       self.mapper.remove(table.get_id());
     }
+    Ok(())
+  }
+}
+
+struct CheckLeafTask {
+  pointer: Pointer,
+  total: u64,
+  dead: u64,
+}
+impl CheckLeafTask {
+  const fn new(pointer: Pointer) -> Self {
+    Self {
+      pointer,
+      total: 0,
+      dead: 0,
+    }
+  }
+}
+
+enum TaskType {
+  Uninit,
+  CheckLeaf(CheckLeafTask),
+  CheckEntry(Pointer),
+  ReleaseEntry(Pointer),
+}
+
+struct GcTask {
+  inner: TaskType,
+  table: TableHandleRef,
+}
+impl GcTask {
+  const fn uninit(table: TableHandleRef) -> Self {
+    Self::new(TaskType::Uninit, table)
+  }
+  const fn new(inner: TaskType, table: TableHandleRef) -> Self {
+    Self { inner, table }
   }
 }
 
@@ -563,48 +571,20 @@ impl GcCycle {
     }
   }
 
-  fn flush_buffered(
-    &mut self,
-    buffered: &mut VecDeque<PendingCoop<EntryWorkArg, EntryWorkResult>>,
-  ) -> Result {
-    while let Some(handle) = buffered.pop_front() {
-      let Some(result) = handle.wait().unwrap()? else {
-        continue;
-      };
-      self.min_version = self.min_version.min(result.min_version);
-      self.blob_refs.extend(result.blob_refs);
-    }
-
-    Ok(())
-  }
-}
-struct GcTask {
-  table: TableHandleRef,
-  total: usize,
-  dead: usize,
-  leaf_ptr: Option<Pointer>,
-}
-impl GcTask {
-  const fn new(table: TableHandleRef) -> Self {
-    Self {
-      table,
-      total: 0,
-      dead: 0,
-      leaf_ptr: None,
-    }
+  fn apply_release(&mut self, result: EntryRelease) {
+    self.min_version = self.min_version.min(result.min_version);
+    self.blob_refs.extend(result.blob_refs);
   }
 }
 
 struct TableSteps {
   incoming: LinkedList<(TableHandleRef, TxId, TxId)>,
-  unpinned: LinkedList<TableHandleRef>,
   unreachable: LinkedList<TableHandleRef>,
 }
 impl TableSteps {
   const fn new() -> Self {
     Self {
       incoming: LinkedList::new(),
-      unpinned: LinkedList::new(),
       unreachable: LinkedList::new(),
     }
   }
@@ -626,37 +606,24 @@ impl TableSteps {
       self.unreachable.push_back(table)
     }
   }
-  fn move_unpinned(&mut self) {
-    for table in self.unreachable.extract_if(|table| table.try_close()) {
-      self.unpinned.push_back(table);
-    }
-  }
-  fn extract_truncated(&mut self) -> impl Iterator<Item = TableHandleRef> + '_ {
-    self.unpinned.extract_if(|table| table.truncate().is_ok())
+  fn extract_unpinned(&mut self) -> impl Iterator<Item = TableHandleRef> + '_ {
+    self.unreachable.extract_if(|table| table.try_close())
   }
 }
 
 fn gc_main_loop(
   worker: Arc<GcWorker>,
-  entry_worker: Arc<EntryWorker>,
   event_bus: Arc<EventBus>,
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   config: GarbageCollectionConfig,
 ) -> impl FnMut(Option<()>) {
   let mut cycle = None;
-  let mut buffered = VecDeque::new();
   let mut steps = TableSteps::new();
 
   move |_| {
     worker
-      .run_tick(
-        &mut cycle,
-        &mut buffered,
-        &entry_worker,
-        &event_bus,
-        config.clone(),
-      )
+      .run_tick(&mut cycle, &event_bus, config.clone())
+      .and_then(|_| worker.release_tables(&release_queue, &mut steps))
       .unwrap();
-    worker.release_tables(&release_queue, &mut steps);
   }
 }

@@ -19,7 +19,6 @@ impl EngineBuilder {
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
-      gc_thread_count: DEFAULT_GC_THREAD_COUNT,
       gc_batch_size: DEFAULT_GC_BATCH_SIZE,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
       compaction_min_size: DEFAULT_COMPACTION_MIN_SIZE,
@@ -91,15 +90,7 @@ impl EngineBuilder {
     self.0.gc_batch_size = count;
     self
   }
-  /**
-   * Number of threads used for GC. More threads speed up GC and therefore
-   * checkpoint completion. In write-heavy workloads with frequent WAL segment
-   * rotation, increasing this can improve write throughput.
-   */
-  pub const fn gc_thread_count(mut self, count: usize) -> Self {
-    self.0.gc_thread_count = count;
-    self
-  }
+
   /**
    * Maximum lifetime of a transaction before it is automatically aborted.
    */
@@ -150,7 +141,6 @@ const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
 const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
-const DEFAULT_GC_THREAD_COUNT: usize = 3;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);

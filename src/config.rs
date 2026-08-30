@@ -14,7 +14,6 @@ pub struct EngineConfig {
   pub wal_buffer_size: usize,
   pub checkpoint_flush_factor: f64,
   pub gc_batch_size: usize,
-  pub gc_thread_count: usize,
   pub compaction_threshold: f64,
   pub compaction_min_size: usize,
   pub compaction_batch_size: usize,
@@ -56,10 +55,6 @@ impl EngineConfig {
       return invalid!("gc_batch_size must be greater than 0.");
     }
 
-    if self.gc_thread_count == 0 {
-      return invalid!("gc_thread_count must be greater than 0.");
-    }
-
     if self.transaction_timeout == Duration::ZERO {
       return invalid!("transaction_timeout must be greater than 0.");
     }
@@ -92,7 +87,6 @@ impl Clone for EngineConfig {
       wal_buffer_size: self.wal_buffer_size,
       checkpoint_flush_factor: self.checkpoint_flush_factor,
       gc_batch_size: self.gc_batch_size,
-      gc_thread_count: self.gc_thread_count,
       compaction_threshold: self.compaction_threshold,
       compaction_min_size: self.compaction_min_size,
       compaction_batch_size: self.compaction_batch_size,
