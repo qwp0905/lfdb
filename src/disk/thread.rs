@@ -11,7 +11,7 @@ use crossbeam::queue::SegQueue;
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{oneshot, Dispatch, Oneshot, OneshotFulfill, StealingWorkThread},
+  background::{oneshot, Oneshot, OneshotFulfill, ThreadPool},
   measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
@@ -100,27 +100,30 @@ impl SBox<TaskPublisher<WriteTask>> {
   pub fn publish_alloc_and_write(
     &self,
     state: &SBox<HandleState>,
-    thread: &IOThread,
+    thread: &Arc<ThreadPool>,
     backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
     alloc: &SBox<AllocState>,
     task: WriteTask,
-  ) -> Oneshot<Result<()>> {
+  ) -> Option<Oneshot<Result<()>>> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return None;
     }
 
     let (o, f) = oneshot();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return Some(o);
     }
 
-    thread.dispatch((
-      backend.clone(),
-      IOTask::Write(self.clone(), Some(alloc.clone())),
-      state.clone(),
-    ));
-    o
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    let alloc = alloc.clone();
+    thread.spawn(move || this.drain_write(state, cloned, backend, metrics, Some(alloc)));
+    Some(o)
   }
   /**
    * For fixed-size or externally preallocated files.
@@ -129,55 +132,56 @@ impl SBox<TaskPublisher<WriteTask>> {
   pub fn publish_write_only(
     &self,
     state: &SBox<HandleState>,
-    thread: &IOThread,
+    thread: &Arc<ThreadPool>,
     backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
     task: WriteTask,
-  ) -> Oneshot<Result<()>> {
+  ) -> Option<Oneshot<Result<()>>> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return None;
     }
 
     let (o, f) = oneshot();
     self.queue.push((task, f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return Some(o);
     }
 
-    thread.dispatch((
-      backend.clone(),
-      IOTask::Write(self.clone(), None),
-      state.clone(),
-    ));
-    o
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    thread.spawn(move || this.drain_write(state, cloned, backend, metrics, None));
+    Some(o)
   }
-
   const MAX_FLUSH_COUNT: usize = max_iov();
-  fn handle_write(
+  fn drain_write(
     &self,
-    metrics: &MetricsRegistry,
-    backend: &dyn IOBackend,
-    state: &HandleState,
-    alloc: Option<&AllocState>,
+    state: SBox<HandleState>,
+    thread: Arc<ThreadPool>,
+    backend: Arc<dyn IOBackend>,
+    metrics: Arc<MetricsRegistry>,
+    alloc: Option<SBox<AllocState>>,
   ) {
     let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
-
-    loop {
-      for task in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
-        buffered.push(task);
-      }
-      flush_write(metrics, backend, state, &mut buffered, alloc);
-
-      // Drop ownership before checking the queue so a new publisher can schedule a
-      // worker. If work is already visible after that, try to reacquire ownership and
-      // continue draining it here. Losing the race means another worker was scheduled.
-      self.occupied.fetch_and(false, Ordering::Release);
-      if self.queue.is_empty() {
-        break;
-      }
-      if self.occupied.fetch_or(true, Ordering::AcqRel) {
-        break;
-      }
+    for task in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+      buffered.push(task);
     }
+
+    flush_write(&metrics, &*backend, &state, &mut buffered, alloc.as_deref());
+    self.occupied.fetch_and(false, Ordering::Release);
+    if self.queue.is_empty() {
+      return;
+    }
+    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+      return;
+    }
+
+    let this = self.clone();
+    thread
+      .clone()
+      .spawn(move || this.drain_write(state, thread, backend, metrics, alloc));
   }
 }
 
@@ -189,67 +193,58 @@ impl SBox<TaskPublisher<()>> {
   pub fn publish_sync(
     &self,
     state: &SBox<HandleState>,
-    thread: &IOThread,
+    thread: &Arc<ThreadPool>,
     backend: &Arc<dyn IOBackend>,
-  ) -> Oneshot<Result<()>> {
+    metrics: &Arc<MetricsRegistry>,
+  ) -> Option<Oneshot<Result<()>>> {
     if state.is_closed() {
-      return Oneshot::fulfilled(Ok(()));
+      return None;
     }
 
     let (o, f) = oneshot();
     self.queue.push(((), f));
     if self.occupied.fetch_or(true, Ordering::Release) {
-      return o;
+      return Some(o);
     }
 
-    thread.dispatch((backend.clone(), IOTask::Sync(self.clone()), state.clone()));
-    o
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    thread.spawn(move || this.drain_sync(state, cloned, backend, metrics));
+    Some(o)
   }
 
   const MAX_FLUSH_COUNT: usize = 512;
-  fn handle_sync(
+  fn drain_sync(
     &self,
-    metrics: &MetricsRegistry,
-    backend: &dyn IOBackend,
-    state: &HandleState,
+    state: SBox<HandleState>,
+    thread: Arc<ThreadPool>,
+    backend: Arc<dyn IOBackend>,
+    metrics: Arc<MetricsRegistry>,
   ) {
     let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
-
-    loop {
-      for (_, fulfill) in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
-        buffered.push(fulfill);
-      }
-
-      flush_fdatasync(metrics, backend, state, &mut buffered);
-      self.occupied.fetch_and(false, Ordering::Release);
-      if self.queue.is_empty() {
-        break;
-      }
-      if self.occupied.fetch_or(true, Ordering::AcqRel) {
-        break;
-      }
+    for (_, fulfill) in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+      buffered.push(fulfill);
     }
+
+    flush_fdatasync(&metrics, &*backend, &state, &mut buffered);
+    self.occupied.fetch_and(false, Ordering::Release);
+    if self.queue.is_empty() {
+      return;
+    }
+    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+      return;
+    }
+
+    let this = self.clone();
+    thread
+      .clone()
+      .spawn(move || this.drain_sync(state, thread, backend, metrics));
   }
 }
-pub enum IOTask {
-  Write(SBox<TaskPublisher<WriteTask>>, Option<SBox<AllocState>>),
-  Sync(SBox<TaskPublisher<()>>),
-}
-type ThreadArg = (Arc<dyn IOBackend>, IOTask, SBox<HandleState>);
-pub type IOThread = StealingWorkThread<ThreadArg, ()>;
 
-pub fn create_io_thread(metrics: Arc<MetricsRegistry>) -> impl Fn(ThreadArg) {
-  move |(backend, task, state)| {
-    metrics.active_io_threads.inc();
-    match task {
-      IOTask::Write(handle, alloc) => {
-        handle.handle_write(&metrics, &*backend, &state, alloc.as_deref())
-      }
-      IOTask::Sync(handle) => handle.handle_sync(&metrics, &*backend, &state),
-    }
-    metrics.active_io_threads.dec();
-  }
-}
 fn flush_write(
   metrics: &MetricsRegistry,
   backend: &dyn IOBackend,
