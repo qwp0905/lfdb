@@ -370,3 +370,7 @@ impl<T> ForkJoin<T> {
       .map(move |recv| recv.wait().unwrap())
   }
 }
+
+#[cfg(test)]
+#[path = "tests/pool.rs"]
+mod tests;
