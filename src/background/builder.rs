@@ -1,8 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use super::{
-  BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SharedFn, SingleFn,
-  StealingWorkThread,
+  BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SingleFn, ThreadPool,
 };
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
@@ -30,38 +29,16 @@ impl ThreadBuilder {
     self.name = name.to_string();
     self
   }
-  #[allow(dead_code)]
+  #[allow(unused)]
   pub const fn stack_size(mut self, size: usize) -> Self {
     self.stack_size = size;
     self
   }
-  pub const fn multi(self, count: usize) -> MultiThreadBuilder {
-    MultiThreadBuilder {
-      builder: self,
-      count,
-    }
+  pub fn multi(self, count: usize) -> ThreadPool {
+    ThreadPool::new(self.name, self.stack_size, count)
   }
   pub const fn single(self) -> SingleThreadBuilder {
     SingleThreadBuilder { builder: self }
-  }
-}
-pub struct MultiThreadBuilder {
-  builder: ThreadBuilder,
-  count: usize,
-}
-impl MultiThreadBuilder {
-  pub fn stealing<T, R, F>(self, build: F) -> StealingWorkThread<T, R>
-  where
-    T: Send + 'static,
-    R: Send + 'static,
-    F: Fn(T) -> R + Send + Sync + 'static,
-  {
-    StealingWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      self.count,
-      SharedFn::new(Arc::new(build)),
-    )
   }
 }
 

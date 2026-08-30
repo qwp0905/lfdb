@@ -26,8 +26,8 @@ pub enum ExecuteOnlyContext<T, R> {
  */
 pub struct SharedFn<'a, T, R>(Arc<dyn Fn(T) -> R + Send + Sync + 'a>);
 impl<'a, T, R> SharedFn<'a, T, R> {
-  pub const fn new(f: Arc<dyn Fn(T) -> R + Send + Sync + 'a>) -> Self {
-    Self(f)
+  pub fn new(f: impl Fn(T) -> R + Send + Sync + 'a) -> Self {
+    Self(Arc::new(f))
   }
   #[inline]
   pub fn call(&self, v: T) -> R {
