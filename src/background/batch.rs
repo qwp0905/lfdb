@@ -1,5 +1,5 @@
 use std::sync::{
-  atomic::{AtomicBool, Ordering},
+  atomic::{fence, AtomicBool, Ordering},
   Arc,
 };
 
@@ -45,7 +45,8 @@ impl<T, R> BatchExecutor<T, R> {
   {
     let (o, f) = oneshot();
     self.queue.buffered.push((value, f));
-    if !self.queue.occupied.fetch_or(true, Ordering::AcqRel) {
+    if !self.queue.occupied.fetch_or(true, Ordering::Relaxed) {
+      fence(Ordering::Acquire);
       let pool = self.pool.clone();
       let queue = self.queue.clone();
       let handler = self.handler.clone();
@@ -84,10 +85,11 @@ impl<T, R> BatchExecutor<T, R> {
     if queue.buffered.is_empty() {
       return;
     }
-    if queue.occupied.fetch_or(true, Ordering::AcqRel) {
+    if queue.occupied.fetch_or(true, Ordering::Relaxed) {
       return;
     }
 
+    fence(Ordering::Acquire);
     pool
       .clone()
       .spawn(move || Self::drain(pool, queue, handler, count));
