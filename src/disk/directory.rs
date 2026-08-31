@@ -5,8 +5,8 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, PendingIO, TaskPublisher};
-use crate::{background::ThreadPool, metrics::MetricsRegistry, utils::SBox};
+use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncHandle};
+use crate::{background::ThreadPool, metrics::MetricsRegistry};
 
 /**
  * Base-directory-bound disk backend.
@@ -18,11 +18,9 @@ use crate::{background::ThreadPool, metrics::MetricsRegistry, utils::SBox};
 pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
-  sync_handle: SBox<TaskPublisher<()>>,
-  thread: Arc<ThreadPool>,
-  state: SBox<HandleState>,
+  sync_handle: SyncHandle,
+  state: Arc<HandleState>,
   path: PathBuf,
-  metrics: Arc<MetricsRegistry>,
 }
 impl DirHandle {
   pub fn ensure(
@@ -34,23 +32,25 @@ impl DirHandle {
     let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
     let path = path.canonicalize()?;
-    let file = disk_backend.open(options.read(true), &path)?;
+    let file = disk_backend
+      .open(options.read(true), &path)
+      .map(Arc::<dyn IOBackend>::from)?;
+    let state = Arc::new(HandleState::new());
+    let sync_handle = SyncHandle::new(thread, state.clone(), file.clone(), metrics);
+
     Ok(Self {
-      io_backend: Arc::from(file),
+      io_backend: file,
       disk_backend,
-      sync_handle: SBox::new(TaskPublisher::new()),
-      thread,
-      state: SBox::new(HandleState::new()),
+      sync_handle,
+      state,
       path,
-      metrics,
     })
   }
   pub fn fdatasync(&self) -> PendingIO {
-    self
-      .sync_handle
-      .publish_sync(&self.state, &self.thread, &self.io_backend, &self.metrics)
-      .map(PendingIO::Pending)
-      .unwrap_or_else(|| PendingIO::Fulfilled(Ok(())))
+    if self.state.is_closed() {
+      return PendingIO::Fulfilled(Ok(()));
+    }
+    PendingIO::Pending(self.sync_handle.publish())
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
