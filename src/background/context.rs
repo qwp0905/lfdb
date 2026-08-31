@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cell::UnsafeCell, sync::Arc};
 
 use super::OneshotFulfill;
 
@@ -54,3 +54,20 @@ impl<'a, T, R> SingleFn<'a, T, R> {
     self.0(v)
   }
 }
+
+pub struct UnsafeFn<T, R>(Arc<UnsafeCell<dyn FnMut(T) -> R + Send>>);
+impl<T, R> UnsafeFn<T, R> {
+  pub fn new<F: FnMut(T) -> R + Send + 'static>(handler: F) -> Self {
+    Self(Arc::new(UnsafeCell::new(handler)))
+  }
+  pub unsafe fn call(&self, arg: T) -> R {
+    (*self.0.get())(arg)
+  }
+}
+impl<T, R> Clone for UnsafeFn<T, R> {
+  fn clone(&self) -> Self {
+    Self(self.0.clone())
+  }
+}
+unsafe impl<T: Send, R: Send> Send for UnsafeFn<T, R> {}
+unsafe impl<T: Send, R: Send> Sync for UnsafeFn<T, R> {}
