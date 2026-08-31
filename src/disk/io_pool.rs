@@ -1,6 +1,6 @@
 use std::{
   fs::{DirEntry, OpenOptions},
-  io::{Error as IoError, ErrorKind, IoSlice, Result as IOResult},
+  io::{Error as IOError, ErrorKind, IoSlice, Result as IOResult},
   mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -12,7 +12,7 @@ use crossbeam::utils::Backoff;
 
 use super::{
   AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend,
-  ScanIOHandle, TaskPublisher, WriteTask,
+  ScanIOHandle, SyncHandle, WriteHandle,
 };
 use crate::{
   background::{Close, Oneshot, ThreadBuilder, ThreadPool},
@@ -27,13 +27,13 @@ const MAX_RETRY: u8 = 10;
 
 pub enum PendingIO<T = ()> {
   Fulfilled(IOResult<T>),
-  Pending(Oneshot<IOResult<T>>),
+  Pending(Oneshot<std::result::Result<T, ErrorKind>>),
 }
 impl<T> PendingIO<T> {
   pub fn wait(self) -> IOResult<T> {
     match self {
       Self::Fulfilled(v) => v,
-      Self::Pending(o) => o.wait().unwrap(),
+      Self::Pending(o) => o.wait().unwrap().map_err(IOError::from),
     }
   }
 
@@ -121,28 +121,78 @@ impl IOPool {
       len,
     ))
   }
-  pub fn open_direct_io(&self, filename: PathBuf) -> Result<IOHandle> {
+
+  fn open_direct(&self, filename: &PathBuf) -> Result<Arc<dyn IOBackend>> {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
     // accumulated and sorted in the eager_buffering layer, then
     // flushed as a single pwritev call per contiguous block.
-    let path = self.base_dir.get_path().join(&filename);
+
+    let path = self.base_dir.get_path().join(filename);
     let mut options = OpenOptions::new();
-    let file = self
+    self
       .base_dir
       .open_direct_io(options.read(true).write(true).create(true), &path)
       .map(Arc::<dyn IOBackend>::from)
-      .map_err(Error::IO)?;
+      .map_err(Error::IO)
+  }
+
+  pub fn open_dynamic_sized(&self, filename: PathBuf) -> Result<IOHandle> {
+    let file = self.open_direct(&filename)?;
     let allocated = file.metadata().map_err(Error::IO)?.len();
+    let state = Arc::new(HandleState::new());
+
+    let write_handle = WriteHandle::new(
+      self.thread.clone(),
+      state.clone(),
+      file.clone(),
+      self.metrics.clone(),
+      Some(AllocState::new(allocated)),
+    );
+    let sync_handle = SyncHandle::new(
+      self.thread.clone(),
+      state.clone(),
+      file.clone(),
+      self.metrics.clone(),
+    );
+
     Ok(IOHandle {
       backend: file,
-      write_handle: SBox::new(TaskPublisher::new()),
-      sync_handle: SBox::new(TaskPublisher::new()),
-      state: SBox::new(HandleState::new()),
-      thread: self.thread.clone(),
+      write_handle,
+      sync_handle,
+      state,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
-      allocated: SBox::new(AllocState::new(allocated)),
+      filename: Mutex::new(filename),
+    })
+  }
+
+  pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
+    let file = self.open_direct(&filename)?;
+    file.fallocate(0, size).map_err(Error::IO)?;
+    let state = Arc::new(HandleState::new());
+
+    let write_handle = WriteHandle::new(
+      self.thread.clone(),
+      state.clone(),
+      file.clone(),
+      self.metrics.clone(),
+      None,
+    );
+    let sync_handle = SyncHandle::new(
+      self.thread.clone(),
+      state.clone(),
+      file.clone(),
+      self.metrics.clone(),
+    );
+
+    Ok(IOHandle {
+      backend: file,
+      write_handle,
+      sync_handle,
+      state,
+      metrics: self.metrics.clone(),
+      base_dir: self.base_dir.clone(),
       filename: Mutex::new(filename),
     })
   }
@@ -188,13 +238,11 @@ impl Drop for IOPool {
  */
 pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
-  write_handle: SBox<TaskPublisher<WriteTask>>,
-  sync_handle: SBox<TaskPublisher<()>>,
-  thread: Arc<ThreadPool>,
-  state: SBox<HandleState>,
+  write_handle: WriteHandle,
+  sync_handle: SyncHandle,
+  state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: SBox<DirHandle>,
-  allocated: SBox<AllocState>,
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {
@@ -218,45 +266,23 @@ impl IOHandle {
     match self.backend.pread(buf, offset) {
       Ok(0) => Ok(()),
       Ok(n) if n == buf.len() => Ok(()),
-      Ok(_) => Err(IoError::from(ErrorKind::UnexpectedEof)),
+      Ok(_) => Err(IOError::from(ErrorKind::UnexpectedEof)),
       Err(err) => Err(err),
     }
   }
 
-  pub fn alloc_and_write(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    self
-      .write_handle
-      .publish_alloc_and_write(
-        &self.state,
-        &self.thread,
-        &self.backend,
-        &self.metrics,
-        &self.allocated,
-        (offset, IoSlice::new(buf)),
-      )
-      .map(PendingIO::Pending)
-      .unwrap_or_else(|| PendingIO::Fulfilled(Ok(())))
-  }
-  pub fn write_only(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    self
-      .write_handle
-      .publish_write_only(
-        &self.state,
-        &self.thread,
-        &self.backend,
-        &self.metrics,
-        (offset, IoSlice::new(buf)),
-      )
-      .map(PendingIO::Pending)
-      .unwrap_or_else(|| PendingIO::Fulfilled(Ok(())))
+  pub fn write(&self, buf: &'static [u8], offset: u64) -> PendingIO {
+    if self.state.is_closed() {
+      return PendingIO::Fulfilled(Ok(()));
+    }
+    PendingIO::Pending(self.write_handle.publish((offset, IoSlice::new(buf))))
   }
 
   pub fn fdatasync(&self) -> PendingIO {
-    self
-      .sync_handle
-      .publish_sync(&self.state, &self.thread, &self.backend, &self.metrics)
-      .map(PendingIO::Pending)
-      .unwrap_or_else(|| PendingIO::Fulfilled(Ok(())))
+    if self.state.is_closed() {
+      return PendingIO::Fulfilled(Ok(()));
+    }
+    PendingIO::Pending(self.sync_handle.publish())
   }
 
   pub fn fsync(&self) -> IOResult<()> {
@@ -264,10 +290,6 @@ impl IOHandle {
       return Ok(());
     };
     self.backend.fsync()
-  }
-
-  pub fn len(&self) -> IOResult<u64> {
-    Ok(self.backend.metadata()?.len())
   }
 
   /**
@@ -294,9 +316,6 @@ impl IOHandle {
     Ok(())
   }
 
-  pub fn fallocate(&self, offset: u64, len: u64) -> IOResult<()> {
-    self.backend.fallocate(offset, len)
-  }
   pub fn filename(&self) -> PathBuf {
     self.filename.l().clone()
   }
