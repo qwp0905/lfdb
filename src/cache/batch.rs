@@ -14,7 +14,7 @@ struct VTable {
 }
 unsafe fn call<T, F>(ptr: NonNull<Header>, data: NonNull<()>)
 where
-  F: FnOnce(&mut T),
+  F: FnOnce(&mut T) + Send,
 {
   ptr
     .cast::<BatchFn<T, F>>()
@@ -37,7 +37,7 @@ pub struct BatchFn<T, F> {
 }
 impl<T, F> BatchFn<T, F>
 where
-  F: FnOnce(&mut T),
+  F: FnOnce(&mut T) + Send,
 {
   const VTABLE: VTable = VTable { call: call::<T, F> };
 
@@ -48,10 +48,7 @@ where
       _marker: PhantomData,
     }
   }
-  pub const fn task(&mut self) -> BatchTask<T>
-  where
-    F: FnOnce(&mut T),
-  {
+  pub const fn task(&mut self) -> BatchTask<T> {
     BatchTask::new(NonNull::from_mut(self).cast(), &Self::VTABLE)
   }
   unsafe fn call(&mut self, data: &mut T) {
