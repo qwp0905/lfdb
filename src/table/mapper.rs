@@ -44,7 +44,7 @@ impl TableMapper {
     let name = unsafe { TableName::from_str_unchecked(META_TABLE) };
     let filename = to_path(&name);
     let init = TableMetadata::new(META_TABLE_ID, name, filename.clone());
-    let disk = BlockIOHandle::new(io_pool.open_direct_io(filename)?);
+    let disk = BlockIOHandle::new(io_pool.open_dynamic_sized(filename)?);
     let metadata = TableHandle::new(&init, disk);
     Ok((
       Self {
@@ -58,7 +58,7 @@ impl TableMapper {
   }
   pub fn open_exists(io_pool: Arc<IOPool>, init: &TableMetadata) -> Result<Self> {
     let disk =
-      BlockIOHandle::new(io_pool.open_direct_io(init.get_filename().to_path_buf())?);
+      BlockIOHandle::new(io_pool.open_dynamic_sized(init.get_filename().to_path_buf())?);
     let metadata = TableHandle::new(init, disk);
     Ok(Self {
       open_handles: Default::default(),
@@ -71,7 +71,7 @@ impl TableMapper {
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
     let io = self
       .io_pool
-      .open_direct_io(table_meta.get_filename().to_path_buf())?;
+      .open_dynamic_sized(table_meta.get_filename().to_path_buf())?;
     let handle = BlockIOHandle::new(io);
     Ok(SBox::new(TableHandle::new(table_meta, handle)))
   }
