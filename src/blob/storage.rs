@@ -7,9 +7,7 @@ use crate::{
   Result,
 };
 
-use super::{
-  BlobHandle, BlobId, BlobLen, BlobMetadata, BlobOffset, BlobReserved, BLOB_SIZE,
-};
+use super::{BlobHandle, BlobId, BlobLen, BlobMetadata, BlobOffset, BlobReserved};
 use std::{
   collections::{HashMap, HashSet},
   path::PathBuf,
@@ -75,7 +73,7 @@ impl BlobStorage {
       last_id = last_id.max(id + 1);
 
       let handle = BlobHandle::new(
-        io_pool.open_dynamic_sized(metadata.get_filename().clone())?,
+        io_pool.open_direct_io(metadata.get_filename().clone())?,
         metadata,
       );
       readonly.insert(id, SBox::new(handle));
@@ -189,7 +187,7 @@ impl BlobStorage {
 
     let io = self
       .io_pool
-      .open_static_sized(metadata.get_filename().clone(), BLOB_SIZE)?;
+      .open_direct_io(metadata.get_filename().clone())?;
     Ok(BlobHandle::new(io, metadata))
   }
 

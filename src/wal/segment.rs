@@ -25,12 +25,13 @@ impl WALSegment {
   const SHIFT: u32 = WAL_BLOCK_SIZE.ilog2();
   pub fn open(max_len: Pointer, pool: &IOPool) -> Result<Self> {
     let filename = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
+    let handle = pool.open_direct_io(filename)?;
 
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
     // at creation avoids metadata updates on every subsequent write.
     let file_len = max_len << Self::SHIFT;
-    let handle = pool.open_static_sized(filename, file_len)?;
+    handle.fallocate(0, file_len).map_err(Error::IO)?;
     handle.fsync().map_err(Error::IO)?;
 
     Ok(Self { handle })
@@ -40,7 +41,10 @@ impl WALSegment {
     pointer: Pointer,
     page: &'static Page<WAL_BLOCK_SIZE>,
   ) -> PendingIO {
-    self.handle.write(page.as_slice(), pointer << Self::SHIFT)
+    // segment must call write only rather than alloc_and_write since it calls fallocate in constructor.
+    self
+      .handle
+      .write_only(page.as_slice(), pointer << Self::SHIFT)
   }
 
   /**
