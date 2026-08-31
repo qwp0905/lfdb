@@ -13,6 +13,7 @@ use crossbeam::{
 use super::{
   into_task, Close, PendingTask, SharedFn, TaskRef, ThreadSlot, UnwindSpawner,
 };
+use crate::utils::SBox;
 
 type ThreadId = usize;
 
@@ -47,7 +48,7 @@ enum State {
 
 const fn worker_loop(
   local: Worker<Context>,
-  core: Arc<Core<Context>>,
+  core: SBox<Core<Context>>,
   id: ThreadId,
 ) -> impl FnOnce() {
   move || {
@@ -70,7 +71,7 @@ const fn worker_loop(
       }
 
       backoff.reset();
-      core.try_enqueue_idle(id);
+      core.try_enqueue(id);
       let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
         core.try_park(id);
         continue;
@@ -149,7 +150,7 @@ impl<A> Core<A> {
       park();
     }
   }
-  fn try_enqueue_idle(&self, id: ThreadId) {
+  fn try_enqueue(&self, id: ThreadId) {
     if self.states[id]
       .compare_exchange(State::Unqueued, State::Queued)
       .is_ok()
@@ -192,14 +193,14 @@ impl<A> Core<A> {
 }
 
 pub struct ThreadPool {
-  core: Arc<Core<Context>>,
-  wakers: Box<[Thread]>,
-  threads: Box<[ThreadSlot]>,
+  core: SBox<Core<Context>>,
+  wakers: SBox<[Thread]>,
+  threads: Vec<ThreadSlot>,
 }
 impl ThreadPool {
   pub fn new<S: ToString>(name: S, size: usize, count: usize) -> Self {
     let (core, workers) = Core::new(count);
-    let core = Arc::new(core);
+    let core = SBox::new(core);
     let mut threads = Vec::with_capacity(count);
     let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
@@ -215,8 +216,8 @@ impl ThreadPool {
 
     Self {
       core,
-      wakers: wakers.into_boxed_slice(),
-      threads: threads.into_boxed_slice(),
+      wakers: SBox::from_boxed_slice(wakers.into_boxed_slice()),
+      threads,
     }
   }
 

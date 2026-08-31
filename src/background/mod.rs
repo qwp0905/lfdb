@@ -37,6 +37,3 @@ use task::*;
 
 mod pool;
 pub use pool::*;
-
-mod batch;
-pub use batch::*;
