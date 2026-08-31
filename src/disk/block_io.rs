@@ -62,7 +62,7 @@ impl<const N: usize> BlockIOHandle<N> {
    */
   pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> PendingIO {
     let slice = page.as_slice();
-    self.handle.write(slice, Self::cvt(pointer))
+    self.handle.alloc_and_write(slice, Self::cvt(pointer))
   }
 
   #[inline]

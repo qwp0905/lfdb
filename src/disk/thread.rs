@@ -1,18 +1,20 @@
 use std::{
   cell::Cell,
-  io::{ErrorKind, IoSlice, Result},
+  io::{Error, IoSlice, Result},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
 };
 
+use crossbeam::queue::SegQueue;
+
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{BatchExecutor, Oneshot, ThreadPool},
+  background::{oneshot, Oneshot, OneshotFulfill, ThreadPool},
   measure,
   metrics::MetricsRegistry,
-  utils::{ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
 pub type WriteTask = (u64, IoSlice<'static>);
@@ -68,6 +70,206 @@ impl HandleState {
   pub fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
     self.pin.try_exclusive()
   }
+}
+
+/**
+ * Per-handle task publisher and batching gate.
+ *
+ * Callers push requests into the queue concurrently. The `occupied` flag elects
+ * exactly one caller as the winner that dispatches this publisher to the IO
+ * worker pool. That worker owns the flush pass, drains the buffered requests,
+ * and may keep ownership while more requests arrive.
+ */
+pub struct TaskPublisher<T> {
+  queue: SegQueue<(T, OneshotFulfill<Result<()>>)>,
+  occupied: AtomicBool,
+}
+impl<T> TaskPublisher<T> {
+  pub const fn new() -> Self {
+    Self {
+      queue: SegQueue::new(),
+      occupied: AtomicBool::new(false),
+    }
+  }
+}
+impl SBox<TaskPublisher<WriteTask>> {
+  /**
+   * For files whose usable space grows with writes, such as table segments.
+   * The worker preallocates up to the highest required offset before writing.
+   */
+  pub fn publish_alloc_and_write(
+    &self,
+    state: &SBox<HandleState>,
+    thread: &Arc<ThreadPool>,
+    backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
+    alloc: &SBox<AllocState>,
+    task: WriteTask,
+  ) -> Option<Oneshot<Result<()>>> {
+    if state.is_closed() {
+      return None;
+    }
+
+    let (o, f) = oneshot();
+    self.queue.push((task, f));
+    if self.occupied.fetch_or(true, Ordering::Release) {
+      return Some(o);
+    }
+
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    let alloc = alloc.clone();
+    thread.spawn(move || this.drain_write(state, cloned, backend, metrics, Some(alloc)));
+    Some(o)
+  }
+  /**
+   * For fixed-size or externally preallocated files.
+   * The worker only batches and writes; allocation is handled outside.
+   */
+  pub fn publish_write_only(
+    &self,
+    state: &SBox<HandleState>,
+    thread: &Arc<ThreadPool>,
+    backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
+    task: WriteTask,
+  ) -> Option<Oneshot<Result<()>>> {
+    if state.is_closed() {
+      return None;
+    }
+
+    let (o, f) = oneshot();
+    self.queue.push((task, f));
+    if self.occupied.fetch_or(true, Ordering::Release) {
+      return Some(o);
+    }
+
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    thread.spawn(move || this.drain_write(state, cloned, backend, metrics, None));
+    Some(o)
+  }
+  const MAX_FLUSH_COUNT: usize = max_iov();
+  fn drain_write(
+    &self,
+    state: SBox<HandleState>,
+    thread: Arc<ThreadPool>,
+    backend: Arc<dyn IOBackend>,
+    metrics: Arc<MetricsRegistry>,
+    alloc: Option<SBox<AllocState>>,
+  ) {
+    let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
+    for task in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+      buffered.push(task);
+    }
+
+    flush_write(&metrics, &*backend, &state, &mut buffered, alloc.as_deref());
+    self.occupied.fetch_and(false, Ordering::Release);
+    if self.queue.is_empty() {
+      return;
+    }
+    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+      return;
+    }
+
+    let this = self.clone();
+    thread
+      .clone()
+      .spawn(move || this.drain_write(state, thread, backend, metrics, alloc));
+  }
+}
+
+impl SBox<TaskPublisher<()>> {
+  /**
+   * Batches multiple fdatasync waiters into one syscall. A sync batch has one
+   * result, so every waiter receives the same completion result.
+   */
+  pub fn publish_sync(
+    &self,
+    state: &SBox<HandleState>,
+    thread: &Arc<ThreadPool>,
+    backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
+  ) -> Option<Oneshot<Result<()>>> {
+    if state.is_closed() {
+      return None;
+    }
+
+    let (o, f) = oneshot();
+    self.queue.push(((), f));
+    if self.occupied.fetch_or(true, Ordering::Release) {
+      return Some(o);
+    }
+
+    let this = self.clone();
+    let state = state.clone();
+    let cloned = thread.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    thread.spawn(move || this.drain_sync(state, cloned, backend, metrics));
+    Some(o)
+  }
+
+  const MAX_FLUSH_COUNT: usize = 512;
+  fn drain_sync(
+    &self,
+    state: SBox<HandleState>,
+    thread: Arc<ThreadPool>,
+    backend: Arc<dyn IOBackend>,
+    metrics: Arc<MetricsRegistry>,
+  ) {
+    let mut buffered = Vec::with_capacity(Self::MAX_FLUSH_COUNT);
+    for (_, fulfill) in (0..Self::MAX_FLUSH_COUNT).map_while(|_| self.queue.pop()) {
+      buffered.push(fulfill);
+    }
+
+    flush_fdatasync(&metrics, &*backend, &state, &mut buffered);
+    self.occupied.fetch_and(false, Ordering::Release);
+    if self.queue.is_empty() {
+      return;
+    }
+    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+      return;
+    }
+
+    let this = self.clone();
+    thread
+      .clone()
+      .spawn(move || this.drain_sync(state, thread, backend, metrics));
+  }
+}
+
+fn flush_write(
+  metrics: &MetricsRegistry,
+  backend: &dyn IOBackend,
+  state: &HandleState,
+  buffered: &mut Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
+  alloc: Option<&AllocState>,
+) {
+  if buffered.is_empty() {
+    return;
+  }
+
+  let (values, waiting): (Vec<_>, Vec<_>) = buffered.drain(..).unzip();
+  let Some(_token) = state.pin.try_shared() else {
+    // If truncate/remove owns the handle exclusively, this request no longer has a
+    // meaningful file to operate on. Mark the handle closed and complete queued
+    // waiters as successful no-ops.
+    state.closed.fetch_or(true, Ordering::Release);
+    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+  };
+
+  let result = exec_write(metrics, backend, values, alloc).map_err(|err| err.kind());
+  metrics.disk_write_batch.record(waiting.len() as f64);
+  waiting
+    .into_iter()
+    .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }
 
 // Preallocate in coarse chunks so the filesystem can keep nearby writes in a
@@ -126,85 +328,24 @@ fn exec_write(
   Ok(())
 }
 
-pub struct WriteHandle(BatchExecutor<WriteTask, std::result::Result<(), ErrorKind>>);
-impl WriteHandle {
-  const MAX_FLUSH_COUNT: usize = max_iov();
-  pub fn new(
-    pool: Arc<ThreadPool>,
-    state: Arc<HandleState>,
-    backend: Arc<dyn IOBackend>,
-    metrics: Arc<MetricsRegistry>,
-    alloc: Option<AllocState>,
-  ) -> Self {
-    let executor = BatchExecutor::new(
-      pool,
-      Self::handle(state, backend, metrics, alloc),
-      Self::MAX_FLUSH_COUNT,
-    );
-    Self(executor)
+fn flush_fdatasync(
+  metrics: &MetricsRegistry,
+  backend: &dyn IOBackend,
+  state: &HandleState,
+  waiting: &mut Vec<OneshotFulfill<Result<()>>>,
+) {
+  if waiting.is_empty() {
+    return;
   }
 
-  pub fn publish(&self, task: WriteTask) -> Oneshot<std::result::Result<(), ErrorKind>> {
-    self.0.execute(task)
-  }
+  let Some(_token) = state.pin.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Release);
+    return waiting.drain(..).for_each(|done| done.fulfill(Ok(())));
+  };
 
-  const fn handle(
-    state: Arc<HandleState>,
-    backend: Arc<dyn IOBackend>,
-    metrics: Arc<MetricsRegistry>,
-    alloc: Option<AllocState>,
-  ) -> impl FnMut(Vec<WriteTask>) -> std::result::Result<(), ErrorKind> {
-    move |buffered| {
-      let Some(_token) = state.pin.try_shared() else {
-        // If truncate/remove owns the handle exclusively, this request no longer has a
-        // meaningful file to operate on. Mark the handle closed and complete queued
-        // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Release);
-        return Ok(());
-      };
-
-      exec_write(&metrics, &*backend, buffered, alloc.as_ref()).map_err(|err| err.kind())
-    }
-  }
-}
-
-pub struct SyncHandle(BatchExecutor<(), std::result::Result<(), ErrorKind>>);
-impl SyncHandle {
-  const MAX_FLUSH_COUNT: usize = 512;
-  pub fn new(
-    pool: Arc<ThreadPool>,
-    state: Arc<HandleState>,
-    backend: Arc<dyn IOBackend>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> Self {
-    let executor = BatchExecutor::new(
-      pool,
-      Self::handle(state, backend, metrics),
-      Self::MAX_FLUSH_COUNT,
-    );
-    Self(executor)
-  }
-
-  pub fn publish(&self) -> Oneshot<std::result::Result<(), ErrorKind>> {
-    self.0.execute(())
-  }
-
-  const fn handle(
-    state: Arc<HandleState>,
-    backend: Arc<dyn IOBackend>,
-    metrics: Arc<MetricsRegistry>,
-  ) -> impl FnMut(Vec<()>) -> std::result::Result<(), ErrorKind> {
-    move |buffered| {
-      let Some(_token) = state.pin.try_shared() else {
-        // If truncate/remove owns the handle exclusively, this request no longer has a
-        // meaningful file to operate on. Mark the handle closed and complete queued
-        // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Release);
-        return Ok(());
-      };
-
-      metrics.disk_sync_batch.record(buffered.len() as f64);
-      backend.fdatasync().map_err(|err| err.kind())
-    }
-  }
+  let result = backend.fdatasync().map_err(|err| err.kind());
+  metrics.disk_sync_batch.record(waiting.len() as f64);
+  waiting
+    .drain(..)
+    .for_each(|done| done.fulfill(result.map_err(Error::from)));
 }
