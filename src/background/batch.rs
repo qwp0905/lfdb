@@ -45,7 +45,7 @@ impl<T, R> BatchExecutor<T, R> {
   {
     let (o, f) = oneshot();
     self.queue.buffered.push((value, f));
-    if !self.queue.occupied.fetch_or(true, Ordering::Release) {
+    if !self.queue.occupied.fetch_or(true, Ordering::AcqRel) {
       let pool = self.pool.clone();
       let queue = self.queue.clone();
       let handler = self.handler.clone();
