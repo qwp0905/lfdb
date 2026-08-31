@@ -179,7 +179,8 @@ pub struct BatchSlot<'a> {
 impl<'a> BatchSlot<'a> {
   pub fn mutate<T, F>(self, handler: F) -> T
   where
-    F: FnOnce(&mut RefedSlot) -> T + Unpin,
+    T: Send,
+    F: FnOnce(&mut RefedSlot) -> T + Unpin + Send,
   {
     let (o, f) = oneshot();
     let mut pinned = pin!(BatchFn::new(|slot| f.fulfill(handler(slot))));

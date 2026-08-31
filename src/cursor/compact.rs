@@ -99,6 +99,7 @@ impl<'a> Drop for MiniTx<'a> {
     let _ = self.abort();
   }
 }
+unsafe impl<'a> Sync for MiniTx<'a> {}
 
 impl<'a> ReadonlyPolicy for MiniTx<'a> {
   fn fetch_slot(

@@ -215,7 +215,7 @@ impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
   }
 }
 
-impl<Policy: WritablePolicy> BTreeIndex<Policy> {
+impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
   pub fn initialize(&self, table: &TableHandleRef) -> Result {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
     {
@@ -517,10 +517,7 @@ impl<Policy: WritablePolicy> BTreeIndex<Policy> {
     }
   }
 }
-impl<Policy> BTreeIndex<Policy>
-where
-  Policy: CreatablePolicy,
-{
+impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
   /**
    * Copy the old leaf record into the data-entry version chain.
    */
