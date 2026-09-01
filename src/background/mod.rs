@@ -40,3 +40,6 @@ pub use pool::*;
 
 mod batch;
 pub use batch::*;
+
+mod vptr;
+pub use vptr::*;
