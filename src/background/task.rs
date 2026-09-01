@@ -8,23 +8,22 @@ type VPtr = VPtrRaw<TaskVTable>;
 
 unsafe fn run<F, R>(ptr: NonNull<()>)
 where
-  F: FnOnce() -> R + 'static,
-  R: 'static,
+  F: FnOnce() -> R,
 {
   let task = VPtr::get_ref::<TaskPayload<F, R>>(ptr);
   task.run();
 }
 
-unsafe fn wait<F: 'static, R: 'static>(ptr: NonNull<()>, value: NonNull<()>) {
+unsafe fn wait<F, R>(ptr: NonNull<()>, value: NonNull<()>) {
   let task = VPtr::get_ref::<TaskPayload<F, R>>(ptr);
   value.cast::<WaitResult<R>>().write(task.wait());
 }
 
-unsafe fn drop_sender<F: 'static, R: 'static>(ptr: NonNull<()>) {
+unsafe fn drop_sender<F, R>(ptr: NonNull<()>) {
   let task = VPtr::get_ref::<TaskPayload<F, R>>(ptr);
   task.drop_sender();
 }
-unsafe fn drop_receiver<F: 'static, R: 'static>(ptr: NonNull<()>) {
+unsafe fn drop_receiver<F, R>(ptr: NonNull<()>) {
   let task = VPtr::get_ref::<TaskPayload<F, R>>(ptr);
   task.drop_receiver();
 }
@@ -42,8 +41,7 @@ struct TaskPayload<F, R> {
 }
 impl<F, R> TaskPayload<F, R>
 where
-  F: FnOnce() -> R + 'static,
-  R: 'static,
+  F: FnOnce() -> R,
 {
   const VTABLE: TaskVTable = TaskVTable {
     run: run::<F, R>,
