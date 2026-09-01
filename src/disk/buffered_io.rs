@@ -139,6 +139,10 @@ impl ScanIOHandle {
     self.base_dir.remove(&self.filename).map_err(Error::IO)
   }
   pub const fn get_offset(&self) -> u64 {
-    self.file_offset + (self.buffer_offset as u64)
+    self.file_offset + (self.buffer_offset as u64) - (ALIGN as u64)
   }
 }
+
+#[cfg(test)]
+#[path = "tests/buffered_io.rs"]
+mod tests;
