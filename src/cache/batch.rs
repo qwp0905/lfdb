@@ -7,34 +7,46 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
+use crate::background::{VObject, VPtr as VPtrRaw};
+
 const MAX_BATCH_SIZE: usize = 32;
 
+type VPtr = VPtrRaw<VTable>;
+
 struct VTable {
-  call: unsafe fn(NonNull<Header>, NonNull<()>),
+  call: unsafe fn(NonNull<()>, NonNull<()>),
 }
-unsafe fn call<T, F>(ptr: NonNull<Header>, data: NonNull<()>)
+unsafe fn call<T, F>(ptr: NonNull<()>, data: NonNull<()>)
 where
   F: FnOnce(&mut T) + Send,
 {
-  ptr
-    .cast::<BatchFn<T, F>>()
-    .as_mut()
-    .call(data.cast().as_mut())
+  let task = VPtr::get_mut::<BatchPayload<T, F>>(ptr);
+  task.call(data.cast().as_mut());
 }
 
-struct Header {}
-impl Header {
-  const fn new() -> Self {
-    Self {}
+struct BatchPayload<T, F> {
+  handler: ManuallyDrop<F>,
+  _marker: PhantomData<fn(&mut T)>,
+}
+impl<T, F> BatchPayload<T, F> {
+  const fn new(handler: F) -> Self {
+    Self {
+      handler: ManuallyDrop::new(handler),
+      _marker: PhantomData,
+    }
+  }
+
+  unsafe fn call(&mut self, data: &mut T)
+  where
+    F: FnOnce(&mut T),
+  {
+    let handler = unsafe { ManuallyDrop::take(&mut self.handler) };
+    handler(data)
   }
 }
 
 #[repr(C)]
-pub struct BatchFn<T, F> {
-  header: Header,
-  handler: ManuallyDrop<F>,
-  _marker: PhantomData<fn(&mut T)>,
-}
+pub struct BatchFn<T, F>(VObject<BatchPayload<T, F>, VTable>);
 impl<T, F> BatchFn<T, F>
 where
   F: FnOnce(&mut T) + Send,
@@ -42,35 +54,28 @@ where
   const VTABLE: VTable = VTable { call: call::<T, F> };
 
   pub const fn new(handler: F) -> Self {
-    Self {
-      header: Header::new(),
-      handler: ManuallyDrop::new(handler),
-      _marker: PhantomData,
-    }
+    Self(VObject::new(BatchPayload::new(handler), &Self::VTABLE))
   }
   pub const fn task(&mut self) -> BatchTask<T> {
-    BatchTask::new(NonNull::from_mut(self).cast(), &Self::VTABLE)
-  }
-  unsafe fn call(&mut self, data: &mut T) {
-    let handler = unsafe { ManuallyDrop::take(&mut self.handler) };
-    handler(data)
+    BatchTask::new(self.0.get_ptr())
   }
 }
 pub struct BatchTask<T> {
-  ptr: NonNull<Header>,
-  vtable: &'static VTable,
+  ptr: VPtr,
   _marker: PhantomData<fn(&mut T)>,
 }
 impl<T> BatchTask<T> {
-  const fn new(ptr: NonNull<Header>, vtable: &'static VTable) -> Self {
+  const fn new(ptr: VPtr) -> Self {
     Self {
       ptr,
-      vtable,
       _marker: PhantomData,
     }
   }
-  fn call_with(self, data: NonNull<()>) {
-    unsafe { (self.vtable.call)(self.ptr, data) }
+  unsafe fn call_with(self, data: NonNull<()>) {
+    let vtable = self.ptr.vtable();
+    let ptr = self.ptr.erased();
+    drop(self); // must drop before call handler because of vobject's lifetime
+    (vtable.call)(ptr, data);
   }
 }
 
