@@ -1,6 +1,6 @@
 use std::{
   fs::{Metadata, OpenOptions, ReadDir},
-  io::{Error, ErrorKind, IoSlice, Read, Result, Write},
+  io::{Error, ErrorKind, IoSlice, Result},
   path::Path,
 };
 
@@ -15,7 +15,7 @@ const RETRY: u8 = 3;
  * backends provide the closest matching behavior, and test backends can use the
  * same interface to inject I/O faults.
  */
-pub trait IOBackend: Send + Sync + Read + Write {
+pub trait IOBackend: Send + Sync {
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
   fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
   fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
@@ -33,7 +33,7 @@ pub trait IOBackend: Send + Sync + Read + Write {
    * retried a small number of times and then reported as EOF if it still does not
    * fill the buffer.
    */
-  fn pread_or_fail(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+  fn pread_exact(&self, buf: &mut [u8], offset: u64) -> Result<()> {
     for _ in 0..RETRY {
       if buf.len() == self.pread(buf, offset)? {
         return Ok(());
@@ -50,7 +50,7 @@ pub trait IOBackend: Send + Sync + Read + Write {
    * operation; otherwise the whole request is retried a small number of times and
    * then reported as failed.
    */
-  fn pwrite_or_fail(&self, buf: &[u8], offset: u64) -> Result<()> {
+  fn pwrite_exact(&self, buf: &[u8], offset: u64) -> Result<()> {
     for _ in 0..RETRY {
       if buf.len() == self.pwrite(buf, offset)? {
         return Ok(());
@@ -65,7 +65,7 @@ pub trait IOBackend: Send + Sync + Read + Write {
    * full batch must complete as one logical operation, or the helper reports
    * failure after a small number of retries.
    */
-  fn pwritev_or_fail(&self, bufs: &[IoSlice<'_>], offset: u64) -> Result<()> {
+  fn pwritev_exact(&self, bufs: &[IoSlice<'_>], offset: u64) -> Result<()> {
     let total: usize = bufs.iter().map(|b| b.len()).sum();
     for _ in 0..RETRY {
       if total == self.pwritev(bufs, offset)? {
