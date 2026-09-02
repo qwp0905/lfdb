@@ -1,6 +1,6 @@
 use std::{
   fs::{DirEntry, OpenOptions},
-  io::{Error as IOError, ErrorKind, IoSlice, Result as IOResult},
+  io::{Error as IOError, ErrorKind, Result as IOResult},
   mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -12,7 +12,7 @@ use crossbeam::utils::Backoff;
 
 use super::{
   AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend,
-  ScanIOHandle, SyncHandle, WriteHandle,
+  ScanIOHandle, SyncScheduler, WriteScheduler,
 };
 use crate::{
   background::{Close, Oneshot, ThreadBuilder, ThreadPool},
@@ -27,13 +27,13 @@ const MAX_RETRY: u8 = 10;
 
 pub enum PendingIO<T = ()> {
   Fulfilled(IOResult<T>),
-  Pending(Oneshot<std::result::Result<T, ErrorKind>>),
+  Pending(Oneshot<IOResult<T>>),
 }
 impl<T> PendingIO<T> {
   pub fn wait(self) -> IOResult<T> {
     match self {
       Self::Fulfilled(v) => v,
-      Self::Pending(o) => o.wait().unwrap().map_err(IOError::from),
+      Self::Pending(o) => o.wait().unwrap(),
     }
   }
 
@@ -142,14 +142,14 @@ impl IOPool {
     let allocated = file.metadata().map_err(Error::IO)?.len();
     let state = Arc::new(HandleState::new());
 
-    let write_handle = WriteHandle::new(
+    let write_handle = WriteScheduler::new(
       self.thread.clone(),
       state.clone(),
       file.clone(),
       self.metrics.clone(),
       Some(AllocState::new(allocated)),
     );
-    let sync_handle = SyncHandle::new(
+    let sync_handle = SyncScheduler::new(
       self.thread.clone(),
       state.clone(),
       file.clone(),
@@ -158,8 +158,8 @@ impl IOPool {
 
     Ok(IOHandle {
       backend: file,
-      write_handle,
-      sync_handle,
+      write_scheduler: write_handle,
+      sync_scheduler: sync_handle,
       state,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
@@ -172,14 +172,14 @@ impl IOPool {
     file.fallocate(0, size).map_err(Error::IO)?;
     let state = Arc::new(HandleState::new());
 
-    let write_handle = WriteHandle::new(
+    let write_handle = WriteScheduler::new(
       self.thread.clone(),
       state.clone(),
       file.clone(),
       self.metrics.clone(),
       None,
     );
-    let sync_handle = SyncHandle::new(
+    let sync_handle = SyncScheduler::new(
       self.thread.clone(),
       state.clone(),
       file.clone(),
@@ -188,8 +188,8 @@ impl IOPool {
 
     Ok(IOHandle {
       backend: file,
-      write_handle,
-      sync_handle,
+      write_scheduler: write_handle,
+      sync_scheduler: sync_handle,
       state,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
@@ -238,8 +238,8 @@ impl Drop for IOPool {
  */
 pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
-  write_handle: WriteHandle,
-  sync_handle: SyncHandle,
+  write_scheduler: WriteScheduler,
+  sync_scheduler: SyncScheduler,
   state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
@@ -271,18 +271,18 @@ impl IOHandle {
     }
   }
 
-  pub fn write(&self, buf: &'static [u8], offset: u64) -> PendingIO {
+  pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.write_handle.publish((offset, IoSlice::new(buf))))
+    PendingIO::Pending(self.write_scheduler.schedule(buf, offset))
   }
 
-  pub fn fdatasync(&self) -> PendingIO {
+  pub fn fdatasync_async(&self) -> PendingIO {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_handle.publish())
+    PendingIO::Pending(self.sync_scheduler.schedule())
   }
 
   pub fn fsync(&self) -> IOResult<()> {

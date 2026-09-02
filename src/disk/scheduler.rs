@@ -1,6 +1,6 @@
 use std::{
   cell::Cell,
-  io::{ErrorKind, IoSlice, Result},
+  io::{Error, IoSlice, Result},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -9,13 +9,14 @@ use std::{
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{BatchExecutor, Oneshot, ThreadPool},
+  background::{oneshot, BatchExecutor, Oneshot, OneshotFulfill, ThreadPool},
   measure,
   metrics::MetricsRegistry,
   utils::{ExclusivePin, ExclusiveToken, SharedToken},
 };
 
-pub type WriteTask = (u64, IoSlice<'static>);
+type WriteTask = (u64, IoSlice<'static>);
+type IOTask<T, R> = (T, OneshotFulfill<Result<R>>);
 
 /**
  * Tracks the file size already covered by preallocation.
@@ -126,8 +127,8 @@ fn exec_write(
   Ok(())
 }
 
-pub struct WriteHandle(BatchExecutor<WriteTask, std::result::Result<(), ErrorKind>>);
-impl WriteHandle {
+pub struct WriteScheduler(BatchExecutor<IOTask<WriteTask, ()>>);
+impl WriteScheduler {
   const MAX_FLUSH_COUNT: usize = max_iov();
   pub fn new(
     pool: Arc<ThreadPool>,
@@ -144,8 +145,10 @@ impl WriteHandle {
     Self(executor)
   }
 
-  pub fn publish(&self, task: WriteTask) -> Oneshot<std::result::Result<(), ErrorKind>> {
-    self.0.execute(task)
+  pub fn schedule(&self, buf: &'static [u8], offset: u64) -> Oneshot<Result<()>> {
+    let (o, f) = oneshot();
+    self.0.dispatch(((offset, IoSlice::new(buf)), f));
+    o
   }
 
   const fn handle(
@@ -153,23 +156,31 @@ impl WriteHandle {
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
     alloc: Option<AllocState>,
-  ) -> impl FnMut(Vec<WriteTask>) -> std::result::Result<(), ErrorKind> {
+  ) -> impl FnMut(Vec<IOTask<WriteTask, ()>>) {
     move |buffered| {
       let Some(_token) = state.pin.try_shared() else {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
         state.closed.fetch_or(true, Ordering::Release);
-        return Ok(());
+        return buffered
+          .into_iter()
+          .for_each(|(_, done)| done.fulfill(Ok(())));
       };
 
-      exec_write(&metrics, &*backend, buffered, alloc.as_ref()).map_err(|err| err.kind())
+      metrics.disk_write_batch.record(buffered.len() as f64);
+      let (values, waiting): (Vec<_>, Vec<_>) = buffered.into_iter().unzip();
+      let result =
+        exec_write(&metrics, &*backend, values, alloc.as_ref()).map_err(|err| err.kind());
+      for done in waiting {
+        done.fulfill(result.map_err(Error::from));
+      }
     }
   }
 }
 
-pub struct SyncHandle(BatchExecutor<(), std::result::Result<(), ErrorKind>>);
-impl SyncHandle {
+pub struct SyncScheduler(BatchExecutor<IOTask<(), ()>>);
+impl SyncScheduler {
   const MAX_FLUSH_COUNT: usize = 512;
   pub fn new(
     pool: Arc<ThreadPool>,
@@ -185,26 +196,33 @@ impl SyncHandle {
     Self(executor)
   }
 
-  pub fn publish(&self) -> Oneshot<std::result::Result<(), ErrorKind>> {
-    self.0.execute(())
+  pub fn schedule(&self) -> Oneshot<Result<()>> {
+    let (o, f) = oneshot();
+    self.0.dispatch(((), f));
+    o
   }
 
   const fn handle(
     state: Arc<HandleState>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
-  ) -> impl FnMut(Vec<()>) -> std::result::Result<(), ErrorKind> {
+  ) -> impl FnMut(Vec<IOTask<(), ()>>) {
     move |buffered| {
       let Some(_token) = state.pin.try_shared() else {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
         state.closed.fetch_or(true, Ordering::Release);
-        return Ok(());
+        return buffered
+          .into_iter()
+          .for_each(|(_, done)| done.fulfill(Ok(())));
       };
 
       metrics.disk_sync_batch.record(buffered.len() as f64);
-      backend.fdatasync().map_err(|err| err.kind())
+      let result = backend.fdatasync().map_err(|err| err.kind());
+      for (_, done) in buffered {
+        done.fulfill(result.map_err(Error::from));
+      }
     }
   }
 }

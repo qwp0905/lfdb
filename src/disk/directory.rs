@@ -5,7 +5,7 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncHandle};
+use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncScheduler};
 use crate::{background::ThreadPool, metrics::MetricsRegistry};
 
 /**
@@ -18,7 +18,7 @@ use crate::{background::ThreadPool, metrics::MetricsRegistry};
 pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
-  sync_handle: SyncHandle,
+  sync_handle: SyncScheduler,
   state: Arc<HandleState>,
   path: PathBuf,
 }
@@ -36,7 +36,7 @@ impl DirHandle {
       .open(options.read(true), &path)
       .map(Arc::<dyn IOBackend>::from)?;
     let state = Arc::new(HandleState::new());
-    let sync_handle = SyncHandle::new(thread, state.clone(), file.clone(), metrics);
+    let sync_handle = SyncScheduler::new(thread, state.clone(), file.clone(), metrics);
 
     Ok(Self {
       io_backend: file,
@@ -50,7 +50,7 @@ impl DirHandle {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_handle.publish())
+    PendingIO::Pending(self.sync_handle.schedule())
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
