@@ -9,7 +9,6 @@ use std::{
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{ThreadSlot, UnwindSpawner};
-use crate::utils::SBox;
 
 /**
  * Subscriber for events that may be observed by multiple consumers.
@@ -298,7 +297,7 @@ enum EventMsg {
   Terminate,
 }
 
-const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
+const fn handle_thread(queue: Arc<SegQueue<EventMsg>>) -> impl FnOnce() {
   move || {
     let mut router = EventRouter::new();
     let backoff = Backoff::new();
@@ -334,13 +333,13 @@ const fn handle_thread(queue: SBox<SegQueue<EventMsg>>) -> impl FnOnce() {
 }
 
 pub struct EventBus {
-  queue: SBox<SegQueue<EventMsg>>,
+  queue: Arc<SegQueue<EventMsg>>,
   waker: Thread,
   slot: ThreadSlot,
 }
 impl EventBus {
   pub fn new() -> Self {
-    let queue = SBox::new(SegQueue::new());
+    let queue = Arc::new(SegQueue::new());
     let handle = Builder::new()
       .name("event bus".to_string())
       .stack_size(2 << 20)

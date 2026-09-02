@@ -22,7 +22,7 @@ pub type WriteTask = (u64, IoSlice<'static>);
  *
  * `AllocState` uses `Cell` because it is only accessed by the single worker that
  * owns the corresponding `AllocAndWrite` flush pass. The value is stored in an
- * `SBox` and can move across threads, but `TaskPublisher::occupied` serializes
+ * `Arc` and can move across threads, but `TaskPublisher::occupied` serializes
  * execution so the state is logically single-threaded.
  */
 pub struct AllocState(Cell<u64>);

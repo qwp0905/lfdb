@@ -1,12 +1,12 @@
 use std::{
   mem::ManuallyDrop,
   ops::{Deref, DerefMut},
+  sync::Arc,
 };
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
 use super::Page;
-use crate::utils::SBox;
 
 /**
  * Owned handle to a pooled page.
@@ -18,17 +18,17 @@ use crate::utils::SBox;
  */
 pub struct PageRef<const N: usize> {
   page: ManuallyDrop<Page<N>>,
-  store: SBox<ArrayQueue<Page<N>>>,
+  store: Arc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PageRef<N> {
-  const fn from_exists(store: SBox<ArrayQueue<Page<N>>>, page: Page<N>) -> Self {
+  const fn from_exists(store: Arc<ArrayQueue<Page<N>>>, page: Page<N>) -> Self {
     Self {
       page: ManuallyDrop::new(page),
       store,
     }
   }
 
-  fn new(store: SBox<ArrayQueue<Page<N>>>) -> Self {
+  fn new(store: Arc<ArrayQueue<Page<N>>>) -> Self {
     Self::from_exists(store, Page::new())
   }
 }
@@ -62,12 +62,12 @@ impl<const N: usize> Drop for PageRef<N> {
  * returned to the pool if there is capacity.
  */
 pub struct PagePool<const N: usize> {
-  store: SBox<ArrayQueue<Page<N>>>,
+  store: Arc<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> PagePool<N> {
   pub fn new(cap: usize) -> Self {
     Self {
-      store: SBox::new(ArrayQueue::new(cap)),
+      store: Arc::new(ArrayQueue::new(cap)),
     }
   }
 

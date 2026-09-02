@@ -18,7 +18,7 @@ use crate::{
   background::{Close, Oneshot, ThreadBuilder, ThreadPool},
   error, measure,
   metrics::MetricsRegistry,
-  utils::{SBox, ShortenedMutex, ToArc},
+  utils::{ShortenedMutex, ToArc},
   Error, Result,
 };
 
@@ -53,7 +53,7 @@ impl<T> PendingIO<T> {
 pub struct IOPool {
   thread: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
-  base_dir: SBox<DirHandle>,
+  base_dir: Arc<DirHandle>,
 }
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
@@ -77,7 +77,7 @@ impl IOPool {
       metrics.clone(),
     )
     .map_err(Error::IO)
-    .map(SBox::new)?;
+    .map(Arc::new)?;
     for _ in 0..MAX_RETRY {
       if base_dir.try_lock().map_err(Error::IO)? {
         return Ok(Self {
@@ -242,7 +242,7 @@ pub struct IOHandle {
   sync_handle: SyncHandle,
   state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
-  base_dir: SBox<DirHandle>,
+  base_dir: Arc<DirHandle>,
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {

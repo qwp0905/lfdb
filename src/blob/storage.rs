@@ -2,7 +2,7 @@ use crate::{
   cache::ShrinkMap,
   debug,
   disk::{AlignedBuf, IOPool},
-  utils::{uuid_simple, SBox, Semaphore, ShortenedRwLock},
+  utils::{uuid_simple, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
   Result,
 };
@@ -35,8 +35,8 @@ const MAX_APPEND: u32 = 5;
  * returning the blob reference.
  */
 pub struct BlobStorage {
-  readonly: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
-  writable: RwLock<ShrinkMap<BlobId, SBox<BlobHandle>>>,
+  readonly: RwLock<ShrinkMap<BlobId, Arc<BlobHandle>>>,
+  writable: RwLock<ShrinkMap<BlobId, Arc<BlobHandle>>>,
   last_id: AtomicU64,
   io_pool: Arc<IOPool>,
   wal: Arc<WriteAheadLog>,
@@ -78,7 +78,7 @@ impl BlobStorage {
         io_pool.open_dynamic_sized(metadata.get_filename().clone())?,
         metadata,
       );
-      readonly.insert(id, SBox::new(handle));
+      readonly.insert(id, Arc::new(handle));
     }
 
     for entry in io_pool.read_dir()? {
@@ -110,7 +110,7 @@ impl BlobStorage {
       .map(|h| h.metadata().get_id())
       .collect()
   }
-  fn writable_handles(&self) -> Vec<SBox<BlobHandle>> {
+  fn writable_handles(&self) -> Vec<Arc<BlobHandle>> {
     self.writable.rl().values().cloned().collect()
   }
 
@@ -122,7 +122,7 @@ impl BlobStorage {
     handle.truncate()
   }
 
-  pub fn get(&self, blob_id: BlobId) -> Option<SBox<BlobHandle>> {
+  pub fn get(&self, blob_id: BlobId) -> Option<Arc<BlobHandle>> {
     self
       .readonly
       .rl()
@@ -179,7 +179,7 @@ impl BlobStorage {
       self
         .writable
         .wl()
-        .insert(new.metadata().get_id(), SBox::new(new));
+        .insert(new.metadata().get_id(), Arc::new(new));
     }
   }
 
@@ -221,14 +221,14 @@ pub struct BlobAppendGuard<'a> {
   id: BlobId,
   offset: BlobOffset,
   len: BlobLen,
-  handle: Option<(SBox<BlobHandle>, &'a BlobStorage)>,
+  handle: Option<(Arc<BlobHandle>, &'a BlobStorage)>,
 }
 impl<'a> BlobAppendGuard<'a> {
   const fn new(
     id: BlobId,
     offset: BlobOffset,
     len: BlobLen,
-    handle: Option<(SBox<BlobHandle>, &'a BlobStorage)>,
+    handle: Option<(Arc<BlobHandle>, &'a BlobStorage)>,
   ) -> Self {
     Self {
       id,

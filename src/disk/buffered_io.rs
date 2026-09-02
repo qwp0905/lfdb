@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use super::{AlignedArray, DirHandle, IOBackend, ALIGN};
-use crate::{error::Result, utils::SBox, Error};
+use crate::{error::Result, Error};
 
 /**
  * Buffered writer for direct-I/O append-style output.
@@ -78,13 +78,13 @@ pub struct ScanIOHandle {
   buffer_offset: usize,
   file_offset: u64,
   file_len: u64,
-  base_dir: SBox<DirHandle>,
+  base_dir: Arc<DirHandle>,
   filename: PathBuf,
 }
 impl ScanIOHandle {
   pub const fn new(
     file: Box<dyn IOBackend>,
-    base_dir: SBox<DirHandle>,
+    base_dir: Arc<DirHandle>,
     filename: PathBuf,
     file_len: u64,
   ) -> Self {
