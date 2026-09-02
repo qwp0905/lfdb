@@ -117,11 +117,11 @@ fn exec_write(
     let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
     let offset = offset[0];
     if bufs.len() == 1 {
-      measure!(metrics.disk_write, backend.pwrite_or_fail(&bufs[0], offset))?;
+      measure!(metrics.disk_write, backend.pwrite_exact(&bufs[0], offset))?;
       continue;
     }
 
-    measure!(metrics.disk_write, backend.pwritev_or_fail(&bufs, offset))?;
+    measure!(metrics.disk_write, backend.pwritev_exact(&bufs, offset))?;
   }
   Ok(())
 }

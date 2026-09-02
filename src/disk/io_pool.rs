@@ -251,7 +251,7 @@ impl IOHandle {
     // If a path for read access to the removed table is established, pin guarantees are required.
     measure!(
       self.metrics.disk_read,
-      self.backend.pread_or_fail(buf, offset)
+      self.backend.pread_exact(buf, offset)
     )
   }
 
@@ -314,9 +314,5 @@ impl IOHandle {
       *filename = new_filename;
     }
     Ok(())
-  }
-
-  pub fn filename(&self) -> PathBuf {
-    self.filename.l().clone()
   }
 }
