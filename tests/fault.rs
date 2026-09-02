@@ -142,11 +142,7 @@ impl FaultBackend {
   }
 }
 impl DiskBackend for FaultBackend {
-  fn open(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> IoResult<Box<dyn IOBackend>> {
+  fn open(&self, options: &mut OpenOptions, path: &Path) -> IoResult<Box<dyn IOBackend>> {
     self
       .inner
       .open(options, path)
