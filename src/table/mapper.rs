@@ -11,7 +11,7 @@ use super::{
 use crate::{
   cache::ShrinkMap,
   disk::{BlockIOHandle, IOPool},
-  utils::{uuid_simple, SBox, ShortenedRwLock},
+  utils::{uuid_simple, ShortenedRwLock},
   Result,
 };
 
@@ -49,7 +49,7 @@ impl TableMapper {
     Ok((
       Self {
         open_handles: Default::default(),
-        metadata: SBox::new(metadata),
+        metadata: Arc::new(metadata),
         io_pool,
         last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
       },
@@ -62,7 +62,7 @@ impl TableMapper {
     let metadata = TableHandle::new(init, disk);
     Ok(Self {
       open_handles: Default::default(),
-      metadata: SBox::new(metadata),
+      metadata: Arc::new(metadata),
       io_pool,
       last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
     })
@@ -73,7 +73,7 @@ impl TableMapper {
       .io_pool
       .open_dynamic_sized(table_meta.get_filename().to_path_buf())?;
     let handle = BlockIOHandle::new(io);
-    Ok(SBox::new(TableHandle::new(table_meta, handle)))
+    Ok(Arc::new(TableHandle::new(table_meta, handle)))
   }
 
   /**

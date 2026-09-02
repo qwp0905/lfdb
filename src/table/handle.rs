@@ -1,16 +1,16 @@
-use std::{mem::forget, ops::Deref};
+use std::{mem::forget, ops::Deref, sync::Arc};
 
 use crossbeam_skiplist::{map::Entry, SkipMap};
 
 use super::{TableFormatVersion, TableId, TableMetadata, TableName};
 use crate::{
   disk::{BlockIOHandle, FreeList, PAGE_SIZE},
-  utils::{ExclusivePin, SBox, SharedToken},
+  utils::{ExclusivePin, SharedToken},
   wal::TxId,
   Result,
 };
 
-pub type TableHandleRef = SBox<TableHandle>;
+pub type TableHandleRef = Arc<TableHandle>;
 
 /**
  * Runtime accessor for one opened table segment.
@@ -102,22 +102,19 @@ impl TableHandle {
   pub fn is_reserved(&self, key: &[u8]) -> bool {
     self.conflict_set.contains_key(key)
   }
+  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle<'_>> {
+    let token = self.pin.try_shared()?;
+    Some(PinnedHandle {
+      handle: self,
+      _token: token,
+    })
+  }
 }
 
 pub struct ReserveGuard<'a>(Entry<'a, Vec<u8>, TxId>);
 impl<'a> Drop for ReserveGuard<'a> {
   fn drop(&mut self) {
     self.0.remove();
-  }
-}
-
-impl TableHandleRef {
-  pub fn try_pin(&self) -> Option<PinnedHandle<'_>> {
-    let token = self.pin.try_shared()?;
-    Some(PinnedHandle {
-      handle: self,
-      _token: token,
-    })
   }
 }
 

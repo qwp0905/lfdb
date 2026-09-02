@@ -14,7 +14,6 @@ use crate::{
   metrics::MetricsRegistry,
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
-  utils::SBox,
   wal::{TxId, WriteAheadLog},
 };
 
@@ -161,7 +160,7 @@ impl TxOrchestrator {
     self.version_visibility.resolve_conflict(owner, current)
   }
 
-  pub fn get_blob_handle(&self, blob_id: BlobId) -> Option<SBox<BlobHandle>> {
+  pub fn get_blob_handle(&self, blob_id: BlobId) -> Option<Arc<BlobHandle>> {
     self.blob.get(blob_id)
   }
   pub fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
