@@ -5,13 +5,13 @@ use std::sync::{
 
 use crossbeam::queue::SegQueue;
 
-use super::{oneshot, Oneshot, OneshotFulfill, ThreadPool, UnsafeFn};
+use super::{ThreadPool, UnsafeFn};
 
-struct BatchQueue<T, R> {
+struct BatchQueue<T> {
   occupied: AtomicBool,
-  buffered: SegQueue<(T, OneshotFulfill<R>)>,
+  buffered: SegQueue<T>,
 }
-impl<T, R> BatchQueue<T, R> {
+impl<T> BatchQueue<T> {
   const fn new() -> Self {
     Self {
       occupied: AtomicBool::new(false),
@@ -19,16 +19,16 @@ impl<T, R> BatchQueue<T, R> {
     }
   }
 }
-pub struct BatchExecutor<T, R> {
+pub struct BatchExecutor<T> {
   pool: Arc<ThreadPool>,
-  handler: UnsafeFn<Vec<T>, R>,
-  queue: Arc<BatchQueue<T, R>>,
+  handler: UnsafeFn<Vec<T>, ()>,
+  queue: Arc<BatchQueue<T>>,
   max_count: usize,
 }
-impl<T, R> BatchExecutor<T, R> {
+impl<T> BatchExecutor<T> {
   pub fn new<F>(pool: Arc<ThreadPool>, handler: F, max_count: usize) -> Self
   where
-    F: FnMut(Vec<T>) -> R + Send + 'static,
+    F: FnMut(Vec<T>) + Send + 'static,
   {
     Self {
       pool,
@@ -38,47 +38,40 @@ impl<T, R> BatchExecutor<T, R> {
     }
   }
 
-  pub fn execute(&self, value: T) -> Oneshot<R>
+  pub fn dispatch(&self, value: T)
   where
     T: Send + 'static,
-    R: Clone + Send + 'static,
   {
-    let (o, f) = oneshot();
-    self.queue.buffered.push((value, f));
-    if !self.queue.occupied.fetch_or(true, Ordering::Relaxed) {
-      fence(Ordering::Acquire);
-      let pool = self.pool.clone();
-      let queue = self.queue.clone();
-      let handler = self.handler.clone();
-      let count = self.max_count;
-      self
-        .pool
-        .spawn(move || Self::drain(pool, queue, handler, count));
+    self.queue.buffered.push(value);
+    if self.queue.occupied.fetch_or(true, Ordering::Relaxed) {
+      return;
     }
-    o
+
+    fence(Ordering::Acquire);
+    let pool = self.pool.clone();
+    let queue = self.queue.clone();
+    let handler = self.handler.clone();
+    let count = self.max_count;
+    self
+      .pool
+      .spawn(move || Self::drain(pool, queue, handler, count));
   }
 
   fn drain(
     pool: Arc<ThreadPool>,
-    queue: Arc<BatchQueue<T, R>>,
-    handler: UnsafeFn<Vec<T>, R>,
+    queue: Arc<BatchQueue<T>>,
+    handler: UnsafeFn<Vec<T>, ()>,
     count: usize,
   ) where
     T: Send + 'static,
-    R: Clone + Send + 'static,
   {
     let mut values = Vec::with_capacity(count);
-    let mut waiting = Vec::with_capacity(count);
-    for (input, done) in (0..count).map_while(|_| queue.buffered.pop()) {
+    for input in (0..count).map_while(|_| queue.buffered.pop()) {
       values.push(input);
-      waiting.push(done);
     }
 
     if !values.is_empty() {
-      let result = unsafe { handler.call(values) };
-      waiting
-        .into_iter()
-        .for_each(|done| done.fulfill(result.clone()));
+      unsafe { handler.call(values) };
     }
 
     queue.occupied.fetch_and(false, Ordering::Release);

@@ -19,8 +19,8 @@ pub use free::*;
 mod io_pool;
 pub use io_pool::*;
 
-mod thread;
-use thread::*;
+mod scheduler;
+use scheduler::*;
 
 mod backend;
 pub use backend::*;

@@ -40,7 +40,9 @@ impl WALSegment {
     pointer: Pointer,
     page: &'static Page<WAL_BLOCK_SIZE>,
   ) -> PendingIO {
-    self.handle.write(page.as_slice(), pointer << Self::SHIFT)
+    self
+      .handle
+      .write_async(page.as_slice(), pointer << Self::SHIFT)
   }
 
   /**
@@ -54,7 +56,7 @@ impl WALSegment {
 
   #[inline]
   pub fn fsync(&self) -> FsyncResult {
-    self.handle.fdatasync()
+    self.handle.fdatasync_async()
   }
 
   #[inline]

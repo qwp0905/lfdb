@@ -84,10 +84,10 @@ impl BlobHandle {
     // `AlignedBuf` cannot be dropped before the worker finishes using the slice.
     let static_ref =
       unsafe { transmute::<&[u8], &'static [u8]>(data.get_aligned_slice()) };
-    self.io.write(static_ref, offset).wait_flatten()
+    self.io.write_async(static_ref, offset).wait_flatten()
   }
   pub fn sync(&self) -> PendingIO {
-    self.io.fdatasync()
+    self.io.fdatasync_async()
   }
   pub fn truncate(&self) -> Result {
     self.io.truncate().map_err(Error::IO)
