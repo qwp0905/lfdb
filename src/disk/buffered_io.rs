@@ -45,7 +45,7 @@ impl AppendIOHandle {
   fn flush_buf(&mut self) -> Result {
     self
       .file
-      .pwrite_or_fail(&*self.buffer, self.file_offset)
+      .pwrite_exact(&*self.buffer, self.file_offset)
       .map_err(Error::IO)?;
     Ok(())
   }
@@ -101,7 +101,7 @@ impl ScanIOHandle {
   fn fill_buf(&mut self) -> Result {
     self
       .file
-      .pread_or_fail(&mut *self.buffer, self.file_offset)
+      .pread_exact(&mut *self.buffer, self.file_offset)
       .map_err(Error::IO)?;
     Ok(())
   }

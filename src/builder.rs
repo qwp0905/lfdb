@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{Engine, EngineConfig, Result};
-use crate::disk::{DefaultIOBackend, DiskBackend};
+use crate::disk::{DefaultDiskBackend, DiskBackend};
 
 pub struct EngineBuilder(EngineConfig);
 
@@ -124,7 +124,7 @@ impl EngineBuilder {
   }
 
   pub fn boot(&self) -> Result<Engine> {
-    Engine::bootstrap(DefaultIOBackend, &self.0)
+    Engine::bootstrap(DefaultDiskBackend, &self.0)
   }
 
   pub fn with_backend<B: DiskBackend + 'static>(&self, backend: B) -> Result<Engine> {

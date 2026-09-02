@@ -22,7 +22,7 @@ pub use error::*;
 mod utils;
 
 mod disk;
-pub use disk::{DefaultIOBackend, DiskBackend, IOBackend};
+pub use disk::{DefaultDiskBackend, DiskBackend, IOBackend};
 
 mod metrics;
 pub use metrics::EngineMetrics;

@@ -1,6 +1,6 @@
 use std::{
   fs::{Metadata, OpenOptions, ReadDir},
-  io::{Error as IoError, ErrorKind, IoSlice, Read, Result as IoResult, Write},
+  io::{Error as IoError, ErrorKind, IoSlice, Result as IoResult},
   path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,7 +9,7 @@ use std::{
   time::Duration,
 };
 
-use lfdb::{DefaultIOBackend, DiskBackend, Engine, EngineBuilder, IOBackend};
+use lfdb::{DefaultDiskBackend, DiskBackend, Engine, EngineBuilder, IOBackend};
 use log::Log;
 use tempfile::{tempdir_in, TempDir};
 
@@ -60,20 +60,6 @@ struct FaultIO {
   inner: Box<dyn IOBackend>,
   controller: FaultController,
   is_wal: bool,
-}
-impl Read for FaultIO {
-  fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-    self.inner.read(buf)
-  }
-}
-impl Write for FaultIO {
-  fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-    self.inner.write(buf)
-  }
-
-  fn flush(&mut self) -> IoResult<()> {
-    self.inner.flush()
-  }
 }
 impl IOBackend for FaultIO {
   fn pread(&self, buf: &mut [u8], offset: u64) -> IoResult<usize> {
@@ -136,13 +122,13 @@ impl IOBackend for FaultIO {
 }
 
 struct FaultBackend {
-  inner: DefaultIOBackend,
+  inner: DefaultDiskBackend,
   controller: FaultController,
 }
 impl FaultBackend {
   fn new(controller: FaultController) -> Self {
     Self {
-      inner: DefaultIOBackend,
+      inner: DefaultDiskBackend,
       controller,
     }
   }

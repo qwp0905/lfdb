@@ -37,8 +37,8 @@ use super::{DiskBackend, IOBackend};
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
  */
-pub type DefaultDiskBackend = File;
-impl IOBackend for DefaultDiskBackend {
+pub type DefaultIOBackend = File;
+impl IOBackend for DefaultIOBackend {
   #[cfg(unix)]
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
     self.read_at(buf, offset)
@@ -136,7 +136,7 @@ impl IOBackend for DefaultDiskBackend {
     self.sync_data()
   }
   fn metadata(&self) -> Result<std::fs::Metadata> {
-    DefaultDiskBackend::metadata(self)
+    DefaultIOBackend::metadata(self)
   }
   fn try_flock(&self) -> Result<bool> {
     match self.try_lock() {
@@ -146,15 +146,15 @@ impl IOBackend for DefaultDiskBackend {
     }
   }
   fn unlock(&self) -> Result<()> {
-    DefaultDiskBackend::unlock(self)
+    DefaultIOBackend::unlock(self)
   }
 }
 
 /**
  * Filesystem namespace operations implemented with the standard library.
  */
-pub struct DefaultIOBackend;
-impl DiskBackend for DefaultIOBackend {
+pub struct DefaultDiskBackend;
+impl DiskBackend for DefaultDiskBackend {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>
   where
     Self: Sized,
