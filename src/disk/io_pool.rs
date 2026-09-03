@@ -140,61 +140,45 @@ impl IOPool {
   pub fn open_dynamic_sized(&self, filename: PathBuf) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
     let allocated = file.metadata().map_err(Error::IO)?.len();
-    let state = Arc::new(HandleState::new());
+    Ok(self.create_handle(file, filename, Some(AllocState::new(allocated))))
+  }
 
+  fn create_handle(
+    &self,
+    backend: Arc<dyn IOBackend>,
+    filename: PathBuf,
+    alloc: Option<AllocState>,
+  ) -> IOHandle {
+    let state = Arc::new(HandleState::new());
     let write_handle = WriteScheduler::new(
       self.thread.clone(),
       state.clone(),
-      file.clone(),
+      backend.clone(),
       self.metrics.clone(),
-      Some(AllocState::new(allocated)),
+      alloc,
     );
     let sync_handle = SyncScheduler::new(
       self.thread.clone(),
       state.clone(),
-      file.clone(),
+      backend.clone(),
       self.metrics.clone(),
     );
 
-    Ok(IOHandle {
-      backend: file,
+    IOHandle {
+      backend,
       write_scheduler: write_handle,
       sync_scheduler: sync_handle,
       state,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
       filename: Mutex::new(filename),
-    })
+    }
   }
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
     file.fallocate(0, size).map_err(Error::IO)?;
-    let state = Arc::new(HandleState::new());
-
-    let write_handle = WriteScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      file.clone(),
-      self.metrics.clone(),
-      None,
-    );
-    let sync_handle = SyncScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      file.clone(),
-      self.metrics.clone(),
-    );
-
-    Ok(IOHandle {
-      backend: file,
-      write_scheduler: write_handle,
-      sync_scheduler: sync_handle,
-      state,
-      metrics: self.metrics.clone(),
-      base_dir: self.base_dir.clone(),
-      filename: Mutex::new(filename),
-    })
+    Ok(self.create_handle(file, filename, None))
   }
 
   /**
