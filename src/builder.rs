@@ -137,8 +137,8 @@ impl Clone for EngineBuilder {
   }
 }
 
-const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 64 mb
-const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20;
+const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 128 mib
+const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20; // 8 mib
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
@@ -146,5 +146,5 @@ const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mb
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_IO_THREAD_COUNT: usize = 16;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
-const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20;
+const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20; // 512 mib
 const DEFAULT_COMPACTION_BATCH_SIZE: usize = 128;
