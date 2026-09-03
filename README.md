@@ -126,6 +126,7 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `checkpoint_flush_factor` | Determines the growth factor at which to flush the block cache at the checkpoint. In environments with frequent WAL segment replacement, such as write-heavy workloads, pressure increases exponentially at the set ratio. |
 | `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
 | `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |
+|`block_cache_buffer_size`| This specifies the size of the cache and buffers used for zero-copy reads and copy-on-write operations, cache evictions. We recommend setting the size to (number of threads expected to access simultaneously) × 4 MiB. |
 | `gc_batch_size` | Number of keys to advance per gc tick. |
 | `compaction_threshold` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
 | `compaction_min_size` | Minimum size requirements for auto compaction triggers. |

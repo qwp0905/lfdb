@@ -19,6 +19,7 @@ pub struct EngineConfig {
   pub compaction_batch_size: usize,
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
+  pub block_cache_buffer_size: usize,
   pub transaction_timeout: Duration,
 }
 impl EngineConfig {
@@ -92,6 +93,7 @@ impl Clone for EngineConfig {
       compaction_batch_size: self.compaction_batch_size,
       block_cache_shard_count: self.block_cache_shard_count,
       block_cache_memory_capacity: self.block_cache_memory_capacity,
+      block_cache_buffer_size: self.block_cache_buffer_size,
       transaction_timeout: self.transaction_timeout,
     }
   }
