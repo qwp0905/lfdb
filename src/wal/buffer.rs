@@ -1,5 +1,5 @@
 use std::{
-  cell::{Cell, UnsafeCell},
+  cell::Cell,
   mem::MaybeUninit,
   sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
@@ -79,7 +79,7 @@ pub struct LogBuffer {
    * must mark records count before write to disk.
    * records count can be obtained from pinning entry.
    */
-  entry: UnsafeCell<PageRef<WAL_BLOCK_SIZE>>,
+  entry: PageRef<WAL_BLOCK_SIZE>,
   /**
    * written complete count for data entry which has valid offset
    */
@@ -131,7 +131,7 @@ impl LogBuffer {
   ) -> Self {
     Self {
       offset: AtomicU64::new(offset as u64),
-      entry: UnsafeCell::new(entry),
+      entry,
       commit_count: AtomicU32::new(0),
       segment_ptr,
       segment_state,
@@ -157,7 +157,7 @@ impl LogBuffer {
     ((prev & MASK) as usize, (prev >> BITS) as u32)
   }
   pub fn append_at(&self, record: &[u8], offset: usize) {
-    unsafe { (*self.entry.get()).copy_from(record, offset) };
+    unsafe { self.entry.copy_from_unchecked(record, offset) }
   }
   pub fn load_committed_append(&self) -> u32 {
     self.commit_count.load(Ordering::Acquire)
@@ -169,7 +169,7 @@ impl LogBuffer {
   pub fn flush_block(&'static self) -> PendingIO {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }
-      .write_async(self.segment_ptr, unsafe { &*self.entry.get() })
+      .write_async(self.segment_ptr, &self.entry)
   }
   /**
    * to complete writing data to entry
