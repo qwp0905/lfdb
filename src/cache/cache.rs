@@ -21,6 +21,7 @@ use crate::{
 pub struct BlockCacheConfig {
   pub shard_count: usize,
   pub capacity: usize,
+  pub buffer_size: usize,
 }
 
 struct Core {
@@ -49,6 +50,125 @@ impl Core {
       dirty_tables,
     }
   }
+
+  const fn get_block_cell(&self, block_id: BlockId) -> &BlockCell {
+    &self.cached_blocks[block_id]
+  }
+  const fn get_pin(&self, block_id: BlockId) -> &ExclusivePin {
+    &self.pins[block_id]
+  }
+  const fn get_dirty_blocks(&self) -> &AtomicBitmap {
+    &self.dirty_blocks
+  }
+
+  fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
+    if !guard.is_evicted() {
+      return None;
+    }
+    let block_id = guard.get_block_id();
+    if !self.dirty_blocks.contains(block_id) {
+      return None;
+    }
+
+    Some(self.cached_blocks[block_id].get().flusher().submit())
+  }
+
+  fn resolve_eviction(
+    &self,
+    pending: Option<PendingFlush>,
+    guard: &EvictionGuard,
+    new: CachedBlock,
+  ) -> Result {
+    let block_id = guard.get_block_id();
+    let block = &self.cached_blocks[block_id];
+
+    if !guard.is_evicted() {
+      block.write(new);
+      return Ok(());
+    }
+
+    if let Some(pending) = pending {
+      pending.finalize()?;
+      self.dirty_blocks.remove(block_id);
+      self.dirty_tables.mark(block.get().handle());
+    }
+
+    block.replace(new);
+    Ok(())
+  }
+
+  fn flush_block(&self, id: BlockId) -> Result {
+    let Some(_token) = self.pins[id].try_shared() else {
+      return Ok(());
+    };
+
+    let block = self.cached_blocks[id].get();
+
+    let flusher = block.exclusive_flusher();
+    if !self.dirty_blocks.remove(id) {
+      return Ok(());
+    }
+
+    let pending = flusher.submit();
+    let (epoch, Err(err)) = pending.finalize() else {
+      self.dirty_tables.mark(block.handle());
+      return Ok(());
+    };
+
+    let latch = block.latch();
+    if latch.epoch() == epoch {
+      self.dirty_blocks.insert(id);
+    }
+    Err(err)
+  }
+
+  fn flush_tables_with(&self, executor: &Arc<ThreadPool>) -> Result {
+    let mut stream = executor.stream(handle_flush_table);
+    for table in self.dirty_tables.drain() {
+      stream.push(table);
+    }
+
+    for (result, table) in stream.join() {
+      let Err(err) = result else {
+        continue;
+      };
+
+      // Preserve the unfinished fsync marker for a future caller. This flusher
+      // reports the failure; retry policy belongs to the caller.
+      error!("error occurs in flush table: {err}");
+      self.dirty_tables.mark(&table);
+      return Err(err);
+    }
+    Ok(())
+  }
+
+  fn aggregate_dirty_blocks(&self) -> Vec<BlockId> {
+    let mut buckets = HashMap::<_, Vec<_>>::new();
+    let mut len = 0;
+    for id in self.dirty_blocks.iter() {
+      let Some(_token) = self.pins[id].try_shared() else {
+        // An exclusive owner is already handling this slot, for example during
+        // eviction/install. Do not add it to this flush snapshot.
+        continue;
+      };
+
+      // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
+      // pointers from the same table together reduces random write scattering during
+      // checkpoint.
+      let block = self.cached_blocks[id].get();
+      let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
+      buckets.entry(key).or_default().push(id);
+      len += 1;
+    }
+
+    let mut dirty = vec![0; len];
+    let mut offset = 0;
+    for bucket in buckets.into_values() {
+      let end = offset + bucket.len();
+      dirty[replace(&mut offset, end)..end].copy_from_slice(&bucket);
+    }
+    dirty
+  }
 }
 
 /**
@@ -71,25 +191,22 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.capacity);
+    let page_pool = PagePool::new(config.capacity + config.buffer_size);
 
-    // 90% of page pool capacity reserved for blocks; the remaining 10% is kept
-    // free for copy on write.
-    let block_cap = (config.capacity * 9) / 10;
-    let mut blocks = Vec::with_capacity(block_cap);
-    blocks.resize_with(block_cap, BlockCell::uninit);
+    let mut blocks = Vec::with_capacity(config.capacity);
+    blocks.resize_with(config.capacity, BlockCell::uninit);
 
-    let mut pins = Vec::with_capacity(block_cap);
-    pins.resize_with(block_cap, ExclusivePin::new);
+    let mut pins = Vec::with_capacity(config.capacity);
+    pins.resize_with(config.capacity, ExclusivePin::new);
 
-    let mut batch_handles = Vec::with_capacity(block_cap);
-    batch_handles.resize_with(block_cap, BatchHandle::new);
+    let mut batch_handles = Vec::with_capacity(config.capacity);
+    batch_handles.resize_with(config.capacity, BatchHandle::new);
     let batch_handles = batch_handles.into_boxed_slice();
 
     let core = Arc::new(Core::new(
       blocks.into_boxed_slice(),
       pins.into_boxed_slice(),
-      AtomicBitmap::new(block_cap),
+      AtomicBitmap::new(config.capacity),
       DirtyTables::new(),
     ));
 
@@ -99,7 +216,7 @@ impl BlockCache {
       .to_arc();
 
     Ok(Self {
-      table: MappingTable::new(config.shard_count, block_cap),
+      table: MappingTable::new(config.shard_count, config.capacity),
       core,
       batch_handles,
       page_pool,
@@ -111,8 +228,8 @@ impl BlockCache {
   #[inline]
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
-      self.core.cached_blocks[id].get(),
-      &self.core.dirty_blocks,
+      self.core.get_block_cell(id).get(),
+      self.core.get_dirty_blocks(),
       &self.batch_handles[id],
       id,
       token,
@@ -134,9 +251,9 @@ impl BlockCache {
     let table_id = handle.get_id();
     let guard = self
       .table
-      .alloc(table_id, pointer, |id| &self.core.pins[id]);
+      .alloc(table_id, pointer, |id| self.core.get_pin(id));
 
-    let pending = self.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard);
     let new_block = CachedBlock::new(pointer, self.page_pool.acquire(), handle.clone());
     self.resolve_eviction(pending, guard, new_block)
   }
@@ -156,52 +273,27 @@ impl BlockCache {
     let table_id = handle.get_id();
     let guard = match self
       .table
-      .acquire(table_id, pointer, |id| &self.core.pins[id])
+      .acquire(table_id, pointer, |id| self.core.get_pin(id))
     {
       Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read_unchecked(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
     self.resolve_eviction(pending, guard, new_block)
   }
 
-  fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
-    if !guard.is_evicted() {
-      return None;
-    }
-    let block_id = guard.get_block_id();
-    if !self.core.dirty_blocks.contains(block_id) {
-      return None;
-    }
-
-    Some(self.core.cached_blocks[block_id].get().flusher().submit())
-  }
   fn resolve_eviction<'a>(
     &'a self,
     pending: Option<PendingFlush>,
     guard: EvictionGuard<'a>,
     new: CachedBlock,
   ) -> Result<CachedSlot<'a>> {
-    let block_id = guard.get_block_id();
-    let block = &self.core.cached_blocks[block_id];
-
-    if !guard.is_evicted() {
-      block.write(new);
-      return Ok(self.cache_slot(block_id, guard.commit()));
-    }
-
-    if let Some(pending) = pending {
-      pending.finalize()?;
-      self.core.dirty_blocks.remove(block_id);
-      self.core.dirty_tables.mark(block.get().handle());
-    }
-
-    block.replace(new);
-    Ok(self.cache_slot(block_id, guard.commit()))
+    self.core.resolve_eviction(pending, &guard, new)?;
+    Ok(self.cache_slot(guard.get_block_id(), guard.commit()))
   }
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
@@ -217,7 +309,7 @@ impl BlockCache {
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard);
     let mut new = self.page_pool.acquire();
     handle.disk().read(pointer, &mut new)?;
     let new_block = CachedBlock::new(pointer, new, handle.clone());
@@ -234,33 +326,8 @@ impl BlockCache {
   }
 
   pub fn create_flusher(&self) -> CacheFlusher {
-    let mut buckets = HashMap::<_, Vec<_>>::new();
-    let mut len = 0;
-    for id in self.core.dirty_blocks.iter() {
-      let Some(_token) = self.core.pins[id].try_shared() else {
-        // An exclusive owner is already handling this slot, for example during
-        // eviction/install. Do not add it to this flush snapshot.
-        continue;
-      };
-
-      // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
-      // pointers from the same table together reduces random write scattering during
-      // checkpoint.
-      let block = self.core.cached_blocks[id].get();
-      let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
-      buckets.entry(key).or_default().push(id);
-      len += 1;
-    }
-
-    let mut dirty = vec![0; len];
-    let mut offset = 0;
-    for bucket in buckets.into_values() {
-      let end = offset + bucket.len();
-      dirty[replace(&mut offset, end)..end].copy_from_slice(&bucket);
-    }
-
     CacheFlusher::new(
-      VecDeque::from(dirty),
+      VecDeque::from(self.core.aggregate_dirty_blocks()),
       self.flush_executor.clone(),
       self.core.clone(),
     )
@@ -278,7 +345,7 @@ impl Drop for BlockCache {
       .len_per_shard()
       .flat_map(|(len, offset)| offset..offset + len)
     {
-      self.core.cached_blocks[i].drop_in_place();
+      self.core.get_block_cell(i).drop_in_place();
     }
   }
 }
@@ -345,52 +412,14 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    let mut stream = self.executor.stream(handle_flush_table);
-    for table in self.core.dirty_tables.drain() {
-      stream.push(table);
-    }
-
-    for (result, table) in stream.join() {
-      let Err(err) = result else {
-        continue;
-      };
-
-      // Preserve the unfinished fsync marker for a future caller. This flusher
-      // reports the failure; retry policy belongs to the caller.
-      error!("error occurs in flush table: {err}");
-      self.core.dirty_tables.mark(&table);
-      return Err(err);
-    }
-    Ok(())
+    self.core.flush_tables_with(&self.executor)
   }
 }
 
 const PRE_FLUSH_CONCURRENCY: usize = 3;
 
 const fn handle_flush_blocks(core: Arc<Core>) -> impl Fn(BlockId) -> Result {
-  move |id| {
-    let Some(_token) = core.pins[id].try_shared() else {
-      return Ok(());
-    };
-
-    let block = core.cached_blocks[id].get();
-    let flusher = block.exclusive_flusher();
-    if !core.dirty_blocks.remove(id) {
-      return Ok(());
-    }
-
-    let pending = flusher.submit();
-    let (epoch, Err(err)) = pending.finalize() else {
-      core.dirty_tables.mark(block.handle());
-      return Ok(());
-    };
-
-    let latch = block.latch();
-    if latch.epoch() == epoch {
-      core.dirty_blocks.insert(id);
-    }
-    Err(err)
-  }
+  move |id| core.flush_block(id)
 }
 
 fn handle_flush_table(table: TableHandleRef) -> (Result, TableHandleRef) {

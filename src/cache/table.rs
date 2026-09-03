@@ -93,6 +93,7 @@ impl<'a> EvictionGuard<'a> {
    * the caller can continue with read access while other readers are allowed in.
    */
   pub fn commit(mut self) -> SharedToken<'a> {
+    debug_assert!(!self.committed);
     self.committed = true;
     unsafe { ManuallyDrop::take(&mut self.token) }.downgrade()
   }

@@ -72,6 +72,7 @@ impl Engine {
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,
       capacity: config.block_cache_memory_capacity / PAGE_SIZE,
+      buffer_size: config.block_cache_buffer_size / PAGE_SIZE,
     };
     let gc_config = GarbageCollectionConfig {
       batch_size: config.gc_batch_size,
