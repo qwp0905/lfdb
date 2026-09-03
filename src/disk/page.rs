@@ -49,6 +49,10 @@ impl<const T: usize> Page<T> {
     let len = data.len();
     self.range_mut(offset..(offset + len)).copy_from_slice(data);
   }
+  pub const unsafe fn copy_from_unchecked(&self, data: &[u8], offset: usize) {
+    let ptr = self.0.add(offset);
+    data.as_ptr().copy_to_nonoverlapping(ptr, data.len());
+  }
   #[inline]
   pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
     self.range(range).to_vec()
