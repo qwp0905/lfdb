@@ -212,7 +212,7 @@ impl WriteAheadLog {
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
     buffer.append_at(&record.init(log_id), offset);
     while commit_order > buffer.load_committed_append() {
-      backoff.spin();
+      backoff.snooze();
     }
     buffer.commit_append();
     if !flush {
@@ -272,7 +272,7 @@ impl WriteAheadLog {
 
     unsafe { guard.defer_destroy(buffer_ptr) };
     while commit_order > buffer.load_committed_append() {
-      backoff.spin();
+      backoff.snooze();
     }
     buffer.flush_and_forget(&self.page_pool);
     if !flush {
@@ -319,7 +319,7 @@ impl WriteAheadLog {
     unsafe { guard.defer_destroy(buffer_ptr) };
 
     while commit_order > buffer.load_committed_append() {
-      backoff.spin();
+      backoff.snooze();
     }
     let done = buffer.flush_block_with(WAL_BLOCK_SIZE, &self.page_pool);
     if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
