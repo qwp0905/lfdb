@@ -120,7 +120,7 @@ impl WriteAheadLog {
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
-    let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
+    let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0, max_len);
 
     Ok(Self {
       last_log_id: AtomicLogId::new(0),
@@ -156,7 +156,7 @@ impl WriteAheadLog {
     );
 
     let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
-    let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0);
+    let buffer = LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0, max_len);
 
     Ok((
       Self {
@@ -203,6 +203,7 @@ impl WriteAheadLog {
       guard: _guard,
       buffer,
       offset,
+      len,
       commit_order,
       token,
       backoff,
@@ -210,24 +211,18 @@ impl WriteAheadLog {
 
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
     buffer.append_at(&record.init(log_id), offset);
+    while commit_order > buffer.load_committed_append() {
+      backoff.spin();
+    }
+    buffer.commit_append();
     if !flush {
-      buffer.commit_append();
       return Ok(());
     }
 
-    while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
-    }
-    buffer.commit_append();
-
-    let done = buffer.flush_block();
-    while !buffer.prev_blocks_rotated() {
-      backoff.snooze();
-    }
-    if let Err(err) = done.wait() {
+    let done = buffer.flush_block_with(offset + len, &self.page_pool);
+    if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
-    };
-
+    }
     self.wait_sync(buffer, token)
   }
 
@@ -235,11 +230,11 @@ impl WriteAheadLog {
     let done = buffer.sync_segment();
     drop(token);
 
-    if let Err(err) = self.sync_queue.wait_until(buffer.get_generation()) {
-      return Err(self.failover(err.kind()));
-    }
-
-    done.wait().map_err(|err| self.failover(err.kind()))
+    self
+      .sync_queue
+      .wait_until(buffer.get_generation())
+      .and_then(|_| done.wait())
+      .map_err(|err| self.failover(err.kind()))
   }
 
   fn rotate_block(
@@ -253,6 +248,7 @@ impl WriteAheadLog {
       guard,
       buffer,
       offset,
+      len: _,
       commit_order,
       token,
       backoff,
@@ -276,28 +272,17 @@ impl WriteAheadLog {
 
     unsafe { guard.defer_destroy(buffer_ptr) };
     while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
+      backoff.spin();
     }
-
+    buffer.flush_and_forget(&self.page_pool);
     if !flush {
-      let result = buffer.flush_block().wait();
-      buffer.increase_rotated_count();
-      return result.map_err(|err| self.failover(err.kind()));
+      return Ok(());
     }
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
-    let done = new_buffer.flush_block();
+    let done = new_buffer.flush_block_with(overflow.len(), &self.page_pool);
 
-    let result = buffer.flush_block().wait();
-    buffer.increase_rotated_count();
-    if let Err(err) = result {
-      return Err(self.failover(err.kind()));
-    };
-
-    while !new_buffer.prev_blocks_rotated() {
-      backoff.snooze();
-    }
-    if let Err(err) = done.wait() {
+    if let Err(err) = new_buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
     };
 
@@ -312,6 +297,7 @@ impl WriteAheadLog {
       commit_order,
       mut token,
       offset: _,
+      len: _,
       backoff,
     } = reserved;
 
@@ -320,8 +306,12 @@ impl WriteAheadLog {
       Err(Error::IO(err)) => return Err(self.failover(err.kind())),
       Err(err) => return Err(err),
     };
-    let replacement =
-      LogBuffer::init_new(self.page_pool.acquire(), new, buffer.get_generation() + 1);
+    let replacement = LogBuffer::init_new(
+      self.page_pool.acquire(),
+      new,
+      buffer.get_generation() + 1,
+      self.max_len,
+    );
 
     self
       .buffer
@@ -329,10 +319,13 @@ impl WriteAheadLog {
     unsafe { guard.defer_destroy(buffer_ptr) };
 
     while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
+      backoff.spin();
     }
+    let done = buffer.flush_block_with(WAL_BLOCK_SIZE, &self.page_pool);
+    if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
+      return Err(self.failover(err.kind()));
+    };
 
-    let done = buffer.flush_block();
     loop {
       match token.try_upgrade() {
         Ok(t) => break forget(t),
@@ -341,15 +334,10 @@ impl WriteAheadLog {
       backoff.snooze();
     }
 
-    while !buffer.prev_blocks_rotated() {
-      backoff.snooze();
-    }
-    if let Err(err) = done.wait() {
-      return Err(self.failover(err.kind()));
-    };
-
     let segment = buffer.take_segment();
-    self.sync_queue.push(segment.fsync());
+    self
+      .sync_queue
+      .push(buffer.get_generation(), segment.fsync());
     self.event_bus.publish(WALSegmentRotated(segment));
     Ok(())
   }
@@ -385,6 +373,7 @@ impl WriteAheadLog {
         buffer,
         token,
         offset,
+        len,
         commit_order,
         backoff: &backoff,
       };
@@ -456,7 +445,9 @@ impl WriteAheadLog {
     let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
     if !ptr.is_null() {
       unsafe { guard.defer_destroy(ptr) };
+      unsafe { (*ptr.as_raw()).drain_batch() };
     }
+
     if !self.state.load().is_available() {
       return;
     }
@@ -470,6 +461,7 @@ struct ReservedAppend<'a> {
   buffer: &'static LogBuffer,
   token: SharedToken<'a>,
   offset: usize,
+  len: usize,
   commit_order: u32,
   backoff: &'a Backoff,
 }

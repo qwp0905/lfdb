@@ -4,6 +4,7 @@ use std::{
 };
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam_skiplist::SkipSet;
 
 use super::{FsyncResult, SegmentGeneration};
 
@@ -14,19 +15,21 @@ use super::{FsyncResult, SegmentGeneration};
  * (containing the corresponding insert) has not — losing data on crash.
  */
 pub struct SyncQueue {
-  queue: SegQueue<FsyncResult>,
-  synced_count: AtomicU64,
+  queue: SegQueue<(SegmentGeneration, FsyncResult)>,
+  frontier: AtomicU64,
+  buffered: SkipSet<SegmentGeneration>,
 }
 impl SyncQueue {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self {
       queue: SegQueue::new(),
-      synced_count: AtomicU64::new(0),
+      frontier: AtomicU64::new(0),
+      buffered: SkipSet::new(),
     }
   }
 
-  pub fn push(&self, fsync: FsyncResult) {
-    self.queue.push(fsync);
+  pub fn push(&self, generation: SegmentGeneration, fsync: FsyncResult) {
+    self.queue.push((generation, fsync));
   }
 
   /**
@@ -38,27 +41,34 @@ impl SyncQueue {
    */
   pub fn wait_until(&self, generation: SegmentGeneration) -> IOResult<()> {
     let backoff = Backoff::new();
-    while generation > self.synced_count.load(Ordering::Acquire) {
-      let Some(fsync) = self.queue.pop() else {
+    loop {
+      let current = self.frontier.load(Ordering::Acquire);
+      if generation <= current {
+        return Ok(());
+      }
+      let Some((gen, pending)) = self.queue.pop() else {
         backoff.snooze();
         continue;
       };
 
-      let result = fsync.wait();
-      // The counter tracks completed sync operations, not successful ones. A failed
-      // fsync is still consumed from the queue; the error is returned to the caller to
-      // handle WAL failure.
-      self.synced_count.fetch_add(1, Ordering::Release);
+      let result = pending.wait();
+      self.buffered.insert(gen);
+      for i in (current..).take_while(|i| self.buffered.remove(i).is_some()) {
+        self.frontier.fetch_max(i + 1, Ordering::Release);
+      }
       result?;
     }
-
-    Ok(())
   }
 
   pub fn drain(&self) {
-    while let Some(fsync) = self.queue.pop() {
-      let _ = fsync.wait();
-      self.synced_count.fetch_add(1, Ordering::Release);
+    while let Some((gen, pending)) = self.queue.pop() {
+      let _ = pending.wait();
+      self.buffered.insert(gen);
+      for i in (self.frontier.load(Ordering::Acquire)..)
+        .take_while(|i| self.buffered.remove(i).is_some())
+      {
+        self.frontier.fetch_max(i + 1, Ordering::Release);
+      }
     }
   }
 }
