@@ -74,6 +74,7 @@ impl LogRecord {
   }
 
   pub const LEN_BYTES: usize = 2;
+  pub const MIN_BYTES: usize = Self::LEN_BYTES + 4 + (TX_ID_BYTES << 1) + 1;
 
   pub fn read_from(buf: &[u8]) -> Option<Self> {
     let mut reader = OffsetReader::new(buf);

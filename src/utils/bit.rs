@@ -159,6 +159,41 @@ impl OffsetBitmap {
   }
 }
 
+pub struct AtomicSizedBitmap<const N: usize> {
+  bits: [AtomicU64; N],
+}
+impl<const N: usize> AtomicSizedBitmap<N> {
+  pub const fn new() -> Self {
+    Self {
+      bits: [const { AtomicU64::new(0) }; N],
+    }
+  }
+
+  pub const fn calc_capacity() -> usize {
+    (N + MASK as usize) >> SHIFT
+  }
+
+  pub fn insert(&self, n: u64) -> bool {
+    let i = (n >> SHIFT) as usize;
+    if i >= N {
+      return false;
+    };
+    let j = n & MASK;
+    let b = 1 << j;
+    let prev = self.bits[i].fetch_or(b, Ordering::Release);
+    prev & b == 0
+  }
+
+  pub fn contains(&self, n: u64) -> bool {
+    let i = (n >> SHIFT) as usize;
+    if i >= N {
+      return false;
+    };
+    let j = n & MASK;
+    self.bits[i].load(Ordering::Acquire) & (1 << j) != 0
+  }
+}
+
 #[cfg(test)]
 #[path = "tests/bit.rs"]
 mod tests;

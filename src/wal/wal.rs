@@ -206,20 +206,15 @@ impl WriteAheadLog {
       len,
       commit_order,
       token,
-      backoff,
     } = reserved;
 
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
-    buffer.append_at(&record.init(log_id), offset);
-    while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
-    }
-    buffer.commit_append();
+    buffer.append_at(&record.init(log_id), offset, commit_order);
     if !flush {
       return Ok(());
     }
 
-    let done = buffer.flush_block_with(offset + len, &self.page_pool);
+    let done = buffer.flush_block_with(offset + len, commit_order, &self.page_pool);
     if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
     }
@@ -251,12 +246,12 @@ impl WriteAheadLog {
       len: _,
       commit_order,
       token,
-      backoff,
     } = reserved;
 
     let record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
     let (remain, overflow) = record.split_at(WAL_BLOCK_SIZE - offset);
-    buffer.append_at(remain, offset);
+    buffer.append_at(remain, offset, commit_order);
+    buffer.flush_and_forget(&self.page_pool, commit_order);
 
     let mut new_page = self.page_pool.acquire();
     new_page.copy_from(overflow, 0);
@@ -271,16 +266,12 @@ impl WriteAheadLog {
     };
 
     unsafe { guard.defer_destroy(buffer_ptr) };
-    while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
-    }
-    buffer.flush_and_forget(&self.page_pool);
     if !flush {
       return Ok(());
     }
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
-    let done = new_buffer.flush_block_with(overflow.len(), &self.page_pool);
+    let done = new_buffer.flush_block_with(overflow.len(), 0, &self.page_pool);
 
     if let Err(err) = new_buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
@@ -289,7 +280,7 @@ impl WriteAheadLog {
     self.wait_sync(buffer, token)
   }
 
-  fn rotate_segment(&self, reserved: ReservedAppend) -> Result {
+  fn rotate_segment(&self, reserved: ReservedAppend, backoff: &Backoff) -> Result {
     let ReservedAppend {
       buffer_ptr,
       guard,
@@ -298,7 +289,6 @@ impl WriteAheadLog {
       mut token,
       offset: _,
       len: _,
-      backoff,
     } = reserved;
 
     let new = match self.preloader.load() {
@@ -318,10 +308,7 @@ impl WriteAheadLog {
       .store(Owned::init(replacement), Ordering::Release);
     unsafe { guard.defer_destroy(buffer_ptr) };
 
-    while commit_order > buffer.load_committed_append() {
-      backoff.snooze();
-    }
-    let done = buffer.flush_block_with(WAL_BLOCK_SIZE, &self.page_pool);
+    let done = buffer.flush_block_with(WAL_BLOCK_SIZE, commit_order, &self.page_pool);
     if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
     };
@@ -375,7 +362,6 @@ impl WriteAheadLog {
         offset,
         len,
         commit_order,
-        backoff: &backoff,
       };
 
       if offset + len <= WAL_BLOCK_SIZE {
@@ -386,7 +372,7 @@ impl WriteAheadLog {
         return self.rotate_block(reserved, record, flush);
       }
 
-      self.rotate_segment(reserved)?;
+      self.rotate_segment(reserved, &backoff)?;
       backoff.reset();
     }
   }
@@ -463,5 +449,4 @@ struct ReservedAppend<'a> {
   offset: usize,
   len: usize,
   commit_order: u32,
-  backoff: &'a Backoff,
 }
