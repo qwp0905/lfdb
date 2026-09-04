@@ -100,7 +100,6 @@ impl BatchedWrite {
   }
 
   pub fn wait(self) -> io::Result<()> {
-    let backoff = Backoff::new();
     loop {
       select! {
         recv(self.current) -> v => return v.unwrap(),
@@ -109,24 +108,8 @@ impl BatchedWrite {
             return self.current.recv().unwrap();
           };
           self.handle_pending(pending);
-          continue;
         },
-        default => if !backoff.is_completed() {
-          backoff.snooze();
-          continue;
-        }
       }
-
-      select! {
-        recv(self.current) -> v => return v.unwrap(),
-        recv(self.pending) -> p => {
-          let Ok(pending) = p else {
-            return self.current.recv().unwrap();
-          };
-          self.handle_pending(pending);
-        },
-      };
-      backoff.reset();
     }
   }
 }
