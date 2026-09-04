@@ -47,16 +47,21 @@ impl SyncQueue {
         return Ok(());
       }
       let Some((gen, pending)) = self.queue.pop() else {
+        self.try_advance(current);
         backoff.snooze();
         continue;
       };
 
       let result = pending.wait();
       self.buffered.insert(gen);
-      for i in (current..).take_while(|i| self.buffered.remove(i).is_some()) {
-        self.frontier.fetch_max(i + 1, Ordering::Release);
-      }
+      self.try_advance(current);
       result?;
+    }
+  }
+
+  fn try_advance(&self, current: SegmentGeneration) {
+    for i in (current..).take_while(|i| self.buffered.remove(i).is_some()) {
+      self.frontier.fetch_max(i + 1, Ordering::Release);
     }
   }
 
