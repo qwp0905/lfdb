@@ -1,5 +1,3 @@
-use std::mem::transmute;
-
 use super::{IOHandle, Page, PendingIO, Pointer};
 use crate::{error::Result, Error};
 
@@ -41,16 +39,6 @@ impl<const N: usize> BlockIOHandle<N> {
       .handle
       .read_unchecked(page.as_mut_slice(), Self::cvt(pointer))
       .map_err(Error::IO)
-  }
-
-  #[inline]
-  pub fn write(&self, pointer: Pointer, page: &Page<N>) -> Result {
-    // SAFETY: `write_async` requires a `'static` page because the buffer crosses
-    // into the IO worker queue. This synchronous wrapper immediately waits for
-    // completion, and completion means the worker no longer holds or reads the
-    // submitted slice. Therefore the borrowed page cannot outlive this call.
-    let static_ref = unsafe { transmute::<&Page<N>, &'static Page<N>>(page) };
-    self.write_async(pointer, static_ref).wait_flatten()
   }
 
   /**
