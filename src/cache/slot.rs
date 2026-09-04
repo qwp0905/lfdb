@@ -4,11 +4,11 @@ use std::{
   pin::pin,
 };
 
-use super::{BatchFn, BatchHandle, BlockId, BlockLatch, CachedBlock};
+use super::{BatchFn, BatchHandle, BlockId, BlockLatch, CachedBlock, DirtyBlocks};
 use crate::{
   background::oneshot,
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
-  utils::{AtomicBitmap, SBox, SharedToken},
+  utils::{SBox, SharedToken},
 };
 
 /**
@@ -53,7 +53,7 @@ impl AsMut<Page> for RefedSlot {
  */
 pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
-  dirty: &'a AtomicBitmap,
+  dirty: &'a DirtyBlocks,
   batch_handle: &'a BatchHandle<RefedSlot>,
   block_id: BlockId,
   token: SharedToken<'a>,
@@ -62,7 +62,7 @@ pub struct CachedSlot<'a> {
 impl<'a> CachedSlot<'a> {
   pub fn new(
     block: &'a CachedBlock,
-    dirty: &'a AtomicBitmap,
+    dirty: &'a DirtyBlocks,
     batch_handle: &'a BatchHandle<RefedSlot>,
     block_id: BlockId,
     token: SharedToken<'a>,
@@ -172,7 +172,7 @@ pub struct BatchSlot<'a> {
   block: &'a CachedBlock,
   batch: &'a BatchHandle<RefedSlot>,
   page_pool: &'a PagePool<PAGE_SIZE>,
-  dirty: &'a AtomicBitmap,
+  dirty: &'a DirtyBlocks,
   block_id: BlockId,
   _token: SharedToken<'a>,
 }
