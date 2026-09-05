@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyTables,
-  EvictionGuard, MappingTable, PendingFlush, RefedSlot,
+  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks,
+  DirtyTables, EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
   background::{Close, ThreadBuilder, ThreadPool},
@@ -14,7 +14,7 @@ use crate::{
   error, measure,
   metrics::MetricsRegistry,
   table::TableHandleRef,
-  utils::{AtomicBitmap, ExclusivePin, SharedToken, ToArc},
+  utils::{ExclusivePin, SharedToken, ToArc},
   Result,
 };
 
@@ -33,14 +33,14 @@ struct Core {
   /**
    * each dirty bits are protected by each block's latch
    */
-  dirty_blocks: AtomicBitmap,
+  dirty_blocks: DirtyBlocks,
   dirty_tables: DirtyTables,
 }
 impl Core {
   const fn new(
     cached_blocks: Box<[BlockCell]>,
     pins: Box<[ExclusivePin]>,
-    dirty_blocks: AtomicBitmap,
+    dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
   ) -> Self {
     Self {
@@ -57,7 +57,7 @@ impl Core {
   const fn get_pin(&self, block_id: BlockId) -> &ExclusivePin {
     &self.pins[block_id]
   }
-  const fn get_dirty_blocks(&self) -> &AtomicBitmap {
+  const fn get_dirty_blocks(&self) -> &DirtyBlocks {
     &self.dirty_blocks
   }
 
@@ -206,7 +206,7 @@ impl BlockCache {
     let core = Arc::new(Core::new(
       blocks.into_boxed_slice(),
       pins.into_boxed_slice(),
-      AtomicBitmap::new(config.capacity),
+      DirtyBlocks::new(config.capacity),
       DirtyTables::new(),
     ));
 

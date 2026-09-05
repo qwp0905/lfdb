@@ -21,7 +21,7 @@ mod fallback {
       }
     }
 
-    pub fn acquire(&self) -> Permit<'_> {
+    pub fn acquire(&self) {
       let mut state = self.state.lock().unwrap();
       while state.permits == 0 {
         state.waiting += 1;
@@ -29,22 +29,14 @@ mod fallback {
         state.waiting -= 1;
       }
       state.permits -= 1;
-      Permit(self)
     }
 
-    fn release(&self) {
+    pub fn release(&self) {
       let mut state = self.state.lock().unwrap();
       state.permits += 1;
       if state.waiting > 0 {
         self.cvar.notify_one();
       }
-    }
-  }
-
-  pub struct Permit<'a>(&'a Semaphore);
-  impl<'a> Drop for Permit<'a> {
-    fn drop(&mut self) {
-      self.0.release();
     }
   }
 }
@@ -99,26 +91,26 @@ mod futex {
       }
     }
 
-    fn try_acquire(&self) -> Option<Permit<'_>> {
+    fn try_acquire(&self) -> bool {
       let n = self.permits.load(Ordering::Acquire);
       if n == 0 {
-        return None;
+        return false;
       }
       if self
         .permits
         .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
       {
-        return None;
+        return false;
       }
 
-      Some(Permit(self))
+      true
     }
 
-    pub fn acquire(&self) -> Permit<'_> {
+    pub fn acquire(&self) {
       loop {
-        if let Some(permit) = self.try_acquire() {
-          return permit;
+        if self.try_acquire() {
+          return;
         }
 
         self.waiting.fetch_add(1, Ordering::Relaxed);
@@ -129,26 +121,46 @@ mod futex {
       }
     }
 
-    fn release(&self) {
+    pub fn release(&self) {
       self.permits.fetch_add(1, Ordering::Release);
       if self.waiting.load(Ordering::Acquire) > 0 {
         wake_one(&self.permits);
       }
     }
   }
-
-  pub struct Permit<'a>(&'a Semaphore);
-  impl<'a> Drop for Permit<'a> {
-    fn drop(&mut self) {
-      self.0.release();
-    }
-  }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub use fallback::*;
+pub struct Semaphore(fallback::Semaphore);
 #[cfg(target_os = "linux")]
-pub use futex::*;
+pub struct Semaphore(futex::Semaphore);
+
+impl Semaphore {
+  #[cfg(not(target_os = "linux"))]
+  pub const fn new(permits: u32) -> Self {
+    Self(fallback::Semaphore::new(permits))
+  }
+  #[cfg(target_os = "linux")]
+  pub const fn new(permits: u32) -> Self {
+    Self(futex::Semaphore::new(permits))
+  }
+
+  fn release(&self) {
+    self.0.release();
+  }
+
+  pub fn acquire(&self) -> Permit<'_> {
+    self.0.acquire();
+    Permit(self)
+  }
+}
+
+pub struct Permit<'a>(&'a Semaphore);
+impl<'a> Drop for Permit<'a> {
+  fn drop(&mut self) {
+    self.0.release();
+  }
+}
 
 #[cfg(test)]
 #[path = "tests/semaphore.rs"]

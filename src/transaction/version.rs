@@ -231,7 +231,7 @@ impl VersionVisibility {
     let tx_id = self.active.current_version();
     (
       tx_id,
-      self.active.until(tx_id),
+      self.active.snapshot_until(tx_id).iter().collect(),
       self.aborted.range(..tx_id).map(|e| *e.value()).collect(),
     )
   }

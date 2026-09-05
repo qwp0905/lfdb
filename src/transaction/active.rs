@@ -175,9 +175,6 @@ impl ActiveSet {
   pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
     self.inner.rl().get(tx_id).cloned()
   }
-  pub fn until(&self, max: TxId) -> Vec<TxId> {
-    self.inner.rl().range(..max).map(|(k, _)| *k).collect()
-  }
   pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
     self.inner.rl().values().cloned().collect()
   }

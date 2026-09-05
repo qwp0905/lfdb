@@ -1,12 +1,9 @@
-use std::{
-  mem::transmute,
-  sync::{Mutex, MutexGuard},
-};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{AtomicSBox, SBox, ShortenedMutex},
+  utils::{create_static_ref, AtomicSBox, SBox, ShortenedMutex},
   Result,
 };
 
@@ -54,7 +51,7 @@ impl<'a> BlockFlusher<'a> {
     // loaded page, and `finalize(self)` waits for the async write before that clone
     // is dropped. Therefore the submitted page remains alive until the worker is
     // done with the slice.
-    let static_ref = unsafe { transmute::<&'_ Page, &'static Page>(&**page) };
+    let static_ref = unsafe { create_static_ref::<Page>(&**page) };
     let handle = self.handle.disk().write_async(self.pointer, static_ref);
     PendingFlush {
       handle: Some(handle),

@@ -1,14 +1,125 @@
 use std::{
   cell::Cell,
+  io,
+  iter::repeat,
   mem::MaybeUninit,
-  sync::atomic::{AtomicU32, AtomicU64, Ordering},
+  sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use super::{FsyncResult, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
-use crate::{
-  disk::{PageRef, PendingIO, Pointer},
-  utils::{ExclusivePin, SBox, SharedToken},
+use crossbeam::{
+  channel::{bounded, unbounded, Receiver, Sender},
+  queue::SegQueue,
+  select,
 };
+
+use super::{
+  AppendCompletion, FsyncResult, SegmentGeneration, WALSegment, WriteCompletion,
+  WAL_BLOCK_SIZE,
+};
+use crate::{
+  disk::{Page, PagePool, PageRef, PendingIO, Pointer},
+  utils::{create_static_ref, ExclusivePin, SBox, SharedToken},
+};
+
+type PendingBatch = (
+  PendingIO,
+  PageRef<WAL_BLOCK_SIZE>,
+  Vec<Sender<io::Result<()>>>,
+);
+struct LogBufferBatch {
+  occupied: AtomicBool,
+  queue: SegQueue<(usize, u32, Sender<io::Result<()>>)>,
+  pending_recv: Receiver<PendingBatch>,
+  pending_send: Sender<PendingBatch>,
+  max_offset: Cell<usize>,
+}
+impl LogBufferBatch {
+  fn new() -> Self {
+    let (t, r) = unbounded();
+    Self {
+      occupied: AtomicBool::new(false),
+      queue: SegQueue::new(),
+      pending_recv: r,
+      pending_send: t,
+      max_offset: Cell::new(0),
+    }
+  }
+
+  fn push_and_compete(
+    &self,
+    done: Sender<io::Result<()>>,
+    offset: usize,
+    commit_order: u32,
+  ) -> bool {
+    self.queue.push((offset, commit_order, done));
+    !self.occupied.fetch_or(true, Ordering::Release)
+  }
+
+  fn try_release(&self) -> bool {
+    self.occupied.fetch_and(false, Ordering::Release);
+    if self.queue.is_empty() {
+      return true;
+    }
+    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+      return true;
+    }
+    false
+  }
+
+  fn append_batch(&self, task: PendingBatch) {
+    self.pending_send.send(task).unwrap();
+  }
+
+  fn get_pending(&self) -> Receiver<PendingBatch> {
+    self.pending_recv.clone()
+  }
+
+  fn drain_all(&self) -> impl Iterator<Item = (usize, u32, Sender<io::Result<()>>)> + '_ {
+    repeat(()).map_while(|_| self.queue.pop())
+  }
+
+  const fn get_max_offset(&self) -> usize {
+    self.max_offset.get()
+  }
+  fn set_max_offset(&self, offset: usize) {
+    self.max_offset.set(offset);
+  }
+}
+
+pub struct BatchedWrite {
+  current: Receiver<io::Result<()>>,
+  pending: Receiver<PendingBatch>,
+}
+impl BatchedWrite {
+  const fn new(
+    current: Receiver<io::Result<()>>,
+    pending: Receiver<PendingBatch>,
+  ) -> Self {
+    Self { current, pending }
+  }
+
+  fn handle_pending(&self, (pending, page, waiting): PendingBatch) {
+    let result = pending.wait().map_err(|err| err.kind());
+    let _ = page;
+    for done in waiting {
+      let _ = done.send(result.map_err(io::Error::from));
+    }
+  }
+
+  pub fn wait(self) -> io::Result<()> {
+    loop {
+      select! {
+        recv(self.current) -> v => return v.unwrap(),
+        recv(self.pending) -> p => {
+          let Ok(pending) = p else {
+            return self.current.recv().unwrap();
+          };
+          self.handle_pending(pending);
+        },
+      }
+    }
+  }
+}
 
 /**
  * Shared segment ownership state for buffers in the same WAL segment.
@@ -33,19 +144,25 @@ struct SegmentState {
   /**
    * rotated and written complete data block count for current segment
    */
-  rotated_count: AtomicU64,
+  write_completion: WriteCompletion,
   /**
    * flag which segment has been taken to check drop.
    */
   taken: Cell<bool>,
+
+  /**
+   * current generation for current segment
+   */
+  generation: SegmentGeneration,
 }
 impl SegmentState {
-  const fn new(segment: WALSegment) -> Self {
+  fn new(segment: WALSegment, generation: SegmentGeneration, max_len: Pointer) -> Self {
     Self {
       segment: MaybeUninit::new(segment),
       pin: ExclusivePin::new(),
-      rotated_count: AtomicU64::new(0),
+      write_completion: WriteCompletion::new(max_len as usize),
       taken: Cell::new(false),
+      generation,
     }
   }
 }
@@ -58,7 +175,7 @@ impl Drop for SegmentState {
   }
 }
 
-const BITS: u64 = 40;
+const BITS: u32 = 40;
 const MASK: u64 = (1 << BITS) - 1;
 
 /**
@@ -80,32 +197,29 @@ pub struct LogBuffer {
    * records count can be obtained from pinning entry.
    */
   entry: PageRef<WAL_BLOCK_SIZE>,
-  /**
-   * written complete count for data entry which has valid offset
-   */
-  commit_count: AtomicU32,
+
+  append_completion: AppendCompletion,
   /**
    * disk pointer for current data block
    */
   segment_ptr: Pointer,
 
   segment_state: SBox<SegmentState>,
-  /**
-   * current generation for current segment
-   */
-  generation: SegmentGeneration,
+
+  batch: LogBufferBatch,
 }
 impl LogBuffer {
   pub fn init_new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment: WALSegment,
     generation: SegmentGeneration,
+    max_len: Pointer,
   ) -> Self {
     Self::new(
       entry,
       0,
-      SBox::new(SegmentState::new(segment)),
-      generation,
+      SBox::new(SegmentState::new(segment, generation, max_len)),
+      0,
       0,
     )
   }
@@ -117,25 +231,25 @@ impl LogBuffer {
       entry,
       self.segment_ptr + 1,
       self.segment_state.clone(),
-      self.generation,
       offset,
+      1,
     )
   }
 
-  const fn new(
+  fn new(
     entry: PageRef<WAL_BLOCK_SIZE>,
     segment_ptr: Pointer,
     segment_state: SBox<SegmentState>,
-    generation: SegmentGeneration,
     offset: usize,
+    ready: u32,
   ) -> Self {
     Self {
-      offset: AtomicU64::new(offset as u64),
+      offset: AtomicU64::new(offset as u64 | ((ready as u64) << BITS)),
       entry,
-      commit_count: AtomicU32::new(0),
+      append_completion: AppendCompletion::new(ready),
       segment_ptr,
       segment_state,
-      generation,
+      batch: LogBufferBatch::new(),
     }
   }
 
@@ -156,26 +270,67 @@ impl LogBuffer {
       .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
     ((prev & MASK) as usize, (prev >> BITS) as u32)
   }
-  pub fn append_at(&self, record: &[u8], offset: usize) {
-    unsafe { self.entry.copy_from_unchecked(record, offset) }
+  pub fn append_at(&self, record: &[u8], offset: usize, commit_order: u32) {
+    unsafe { self.entry.copy_from_unchecked(record, offset) };
+    self.append_completion.complete(commit_order);
   }
-  pub fn load_committed_append(&self) -> u32 {
-    self.commit_count.load(Ordering::Acquire)
-  }
+
   pub fn sync_segment(&self) -> FsyncResult {
     debug_assert!(!self.segment_state.taken.get());
     unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
   }
-  pub fn flush_block(&'static self) -> PendingIO {
-    debug_assert!(!self.segment_state.taken.get());
-    unsafe { self.segment_state.segment.assume_init_ref() }
-      .write_async(self.segment_ptr, &self.entry)
+
+  pub fn flush_and_forget(
+    &self,
+    page_pool: &PagePool<WAL_BLOCK_SIZE>,
+    commit_order: u32,
+  ) {
+    let batch = self.flush_block_with(WAL_BLOCK_SIZE, commit_order, page_pool);
+    self
+      .segment_state
+      .write_completion
+      .register(self.segment_ptr, batch);
   }
-  /**
-   * to complete writing data to entry
-   */
-  pub fn commit_append(&self) {
-    self.commit_count.fetch_add(1, Ordering::Release);
+
+  pub fn flush_block_with(
+    &self,
+    offset: usize,
+    commit_order: u32,
+    page_pool: &PagePool<WAL_BLOCK_SIZE>,
+  ) -> BatchedWrite {
+    debug_assert!(!self.segment_state.taken.get());
+
+    let (t, r) = bounded(1);
+    let batched = BatchedWrite::new(r, self.batch.get_pending());
+
+    if !self.batch.push_and_compete(t, offset, commit_order) {
+      return batched;
+    };
+
+    loop {
+      let mut max_offset = self.batch.get_max_offset();
+      let mut waiting = Vec::new();
+      for (offset, commit_order, done) in self.batch.drain_all() {
+        self.append_completion.wait_until(commit_order);
+        max_offset = max_offset.max(offset);
+        waiting.push(done);
+      }
+      self.batch.set_max_offset(max_offset);
+
+      let mut page = page_pool.acquire();
+      page.copy_from(self.entry.range(0..max_offset), 0);
+
+      let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
+      let pending = unsafe { self.segment_state.segment.assume_init_ref() }
+        .write_async(self.segment_ptr, static_ref);
+
+      self.batch.append_batch((pending, page, waiting));
+      if self.batch.try_release() {
+        break;
+      }
+    }
+
+    batched
   }
 
   pub const fn get_pointer(&self) -> Pointer {
@@ -192,22 +347,20 @@ impl LogBuffer {
     self.segment_state.taken.set(true);
     unsafe { self.segment_state.segment.assume_init_read() }
   }
-  pub fn increase_rotated_count(&self) {
+
+  pub fn get_generation(&self) -> SegmentGeneration {
+    self.segment_state.generation
+  }
+
+  pub fn wait_prev_blocks(&self) -> io::Result<()> {
     self
       .segment_state
-      .rotated_count
-      .fetch_add(1, Ordering::Release);
+      .write_completion
+      .wait_until(self.segment_ptr)
   }
-  /**
-   * Returns true when all prior blocks in the segment have been written to disk.
-   * written_count increments after each block rotation completes its disk write,
-   * so segment_ptr <= written_count + 1 means blocks 0..segment_ptr-1 are persisted.
-   */
-  pub fn prev_blocks_rotated(&self) -> bool {
-    self.segment_ptr <= self.segment_state.rotated_count.load(Ordering::Acquire) + 1
-  }
-  pub const fn get_generation(&self) -> SegmentGeneration {
-    self.generation
+
+  pub fn drain_batch(&self) {
+    self.segment_state.write_completion.drain();
   }
 }
 

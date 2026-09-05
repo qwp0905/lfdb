@@ -1,13 +1,11 @@
-use std::{
-  mem::transmute,
-  sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam::utils::Backoff;
 
 use super::{BlobLen, BlobMetadata, BlobOffset, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
   disk::{AlignedBuf, IOHandle, PendingIO},
+  utils::create_static_ref,
   Error, Result,
 };
 
@@ -82,8 +80,7 @@ impl BlobHandle {
     // SAFETY: `write_only` requires a `'static` slice because the IO worker may run
     // later. This method immediately waits for completion, so the borrowed
     // `AlignedBuf` cannot be dropped before the worker finishes using the slice.
-    let static_ref =
-      unsafe { transmute::<&[u8], &'static [u8]>(data.get_aligned_slice()) };
+    let static_ref = unsafe { create_static_ref::<[u8]>(data.get_aligned_slice()) };
     self.io.write_async(static_ref, offset).wait_flatten()
   }
   pub fn sync(&self) -> PendingIO {
