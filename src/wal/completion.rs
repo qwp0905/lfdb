@@ -62,7 +62,7 @@ impl WriteCompletion {
     }
   }
 
-  fn take_from(&self, current: Pointer) -> impl Iterator<Item = Pointer> + '_ {
+  fn completed_from(&self, current: Pointer) -> impl Iterator<Item = Pointer> + '_ {
     (current..).take_while(|&i| self.completed.contains(i))
   }
 
@@ -78,7 +78,7 @@ impl WriteCompletion {
       };
       let result = batched.wait();
       self.completed.insert(ptr);
-      if let Some(i) = self.take_from(current).last() {
+      if let Some(i) = self.completed_from(current).last() {
         self.frontier.fetch_max(i + 1, Ordering::Release);
       }
       result?;
@@ -95,7 +95,7 @@ impl WriteCompletion {
       self.completed.insert(ptr);
 
       let current = self.frontier.load(Ordering::Acquire);
-      if let Some(i) = self.take_from(current).last() {
+      if let Some(i) = self.completed_from(current).last() {
         self.frontier.fetch_max(i + 1, Ordering::Release);
       }
     }
