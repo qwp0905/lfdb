@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
   replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, RecordEncoding, ReplayResult,
-  SegmentPreload, SyncQueue, TxId, WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
+  SegmentPreload, SyncCompletion, TxId, WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -87,7 +87,7 @@ pub struct WriteAheadLog {
    */
   buffer: Atomic<LogBuffer>,
 
-  sync_queue: SyncQueue,
+  sync_completion: SyncCompletion,
   /**
    * wal segment max size
    */
@@ -127,7 +127,7 @@ impl WriteAheadLog {
       preloader,
       buffer: Atomic::new(buffer),
       page_pool,
-      sync_queue: SyncQueue::new(),
+      sync_completion: SyncCompletion::new(),
       state: AtomicCell::new(State::Available),
       max_len,
       event_bus,
@@ -164,7 +164,7 @@ impl WriteAheadLog {
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
-        sync_queue: SyncQueue::new(),
+        sync_completion: SyncCompletion::new(),
         state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
@@ -226,7 +226,7 @@ impl WriteAheadLog {
     drop(token);
 
     self
-      .sync_queue
+      .sync_completion
       .wait_until(buffer.get_generation())
       .and_then(|_| done.wait())
       .map_err(|err| self.failover(err.kind()))
@@ -323,8 +323,8 @@ impl WriteAheadLog {
 
     let segment = buffer.take_segment();
     self
-      .sync_queue
-      .push(buffer.get_generation(), segment.fsync());
+      .sync_completion
+      .register(buffer.get_generation(), segment.fsync());
     self.event_bus.publish(WALSegmentRotated(segment));
     Ok(())
   }
@@ -426,7 +426,7 @@ impl WriteAheadLog {
   }
 
   pub fn close(&self) {
-    self.sync_queue.drain();
+    self.sync_completion.drain();
     let guard = pin();
     let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
     if !ptr.is_null() {

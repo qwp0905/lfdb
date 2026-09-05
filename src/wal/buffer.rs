@@ -10,15 +10,15 @@ use crossbeam::{
   channel::{bounded, unbounded, Receiver, Sender},
   queue::SegQueue,
   select,
-  utils::Backoff,
 };
 
-use super::{FsyncResult, LogRecord, SegmentGeneration, WALSegment, WAL_BLOCK_SIZE};
+use super::{
+  AppendCompletion, FsyncResult, SegmentGeneration, WALSegment, WriteCompletion,
+  WAL_BLOCK_SIZE,
+};
 use crate::{
   disk::{Page, PagePool, PageRef, PendingIO, Pointer},
-  utils::{
-    create_static_ref, AtomicBitmap, AtomicSizedBitmap, ExclusivePin, SBox, SharedToken,
-  },
+  utils::{create_static_ref, ExclusivePin, SBox, SharedToken},
 };
 
 type PendingBatch = (
@@ -121,56 +121,6 @@ impl BatchedWrite {
   }
 }
 
-struct WriteCompletion {
-  queue: SegQueue<(Pointer, BatchedWrite)>,
-  frontier: AtomicU64,
-  bitmap: AtomicBitmap,
-}
-impl WriteCompletion {
-  fn new(max_len: Pointer) -> Self {
-    Self {
-      queue: SegQueue::new(),
-      frontier: AtomicU64::new(0),
-      bitmap: AtomicBitmap::new(max_len as usize),
-    }
-  }
-  fn wait_until(&self, threshold: Pointer) -> io::Result<()> {
-    let backoff = Backoff::new();
-    loop {
-      let current = self.frontier.load(Ordering::Acquire);
-      if threshold <= current {
-        return Ok(());
-      }
-      let Some((ptr, batched)) = self.queue.pop() else {
-        backoff.snooze();
-        continue;
-      };
-      let result = batched.wait();
-      self.bitmap.insert(ptr);
-      if let Some(i) = (current..).take_while(|&i| self.bitmap.contains(i)).last() {
-        self.frontier.fetch_max(i + 1, Ordering::Release);
-      }
-      result?;
-    }
-  }
-
-  fn push(&self, ptr: Pointer, batch: BatchedWrite) {
-    self.queue.push((ptr, batch));
-  }
-
-  fn drain(&self) {
-    while let Some((ptr, batched)) = self.queue.pop() {
-      let _ = batched.wait();
-      self.bitmap.insert(ptr);
-
-      let current = self.frontier.load(Ordering::Acquire);
-      if let Some(i) = (current..).take_while(|&i| self.bitmap.contains(i)).last() {
-        self.frontier.fetch_max(i + 1, Ordering::Release);
-      }
-    }
-  }
-}
-
 /**
  * Shared segment ownership state for buffers in the same WAL segment.
  *
@@ -194,7 +144,7 @@ struct SegmentState {
   /**
    * rotated and written complete data block count for current segment
    */
-  completion: WriteCompletion,
+  write_completion: WriteCompletion,
   /**
    * flag which segment has been taken to check drop.
    */
@@ -210,7 +160,7 @@ impl SegmentState {
     Self {
       segment: MaybeUninit::new(segment),
       pin: ExclusivePin::new(),
-      completion: WriteCompletion::new(max_len),
+      write_completion: WriteCompletion::new(max_len as usize),
       taken: Cell::new(false),
       generation,
     }
@@ -227,9 +177,6 @@ impl Drop for SegmentState {
 
 const BITS: u32 = 40;
 const MASK: u64 = (1 << BITS) - 1;
-
-const MAX_RECORD: usize = WAL_BLOCK_SIZE.div_ceil(LogRecord::MIN_BYTES);
-const CAP: usize = AtomicSizedBitmap::<MAX_RECORD>::calc_capacity();
 
 /**
  * A single WAL block (16KB page) being filled concurrently by multiple writers.
@@ -251,8 +198,7 @@ pub struct LogBuffer {
    */
   entry: PageRef<WAL_BLOCK_SIZE>,
 
-  committed_append: AtomicSizedBitmap<CAP>,
-  ready_order: Cell<u32>,
+  append_completion: AppendCompletion,
   /**
    * disk pointer for current data block
    */
@@ -300,8 +246,7 @@ impl LogBuffer {
     Self {
       offset: AtomicU64::new(offset as u64 | ((ready as u64) << BITS)),
       entry,
-      committed_append: AtomicSizedBitmap::new(),
-      ready_order: Cell::new(ready),
+      append_completion: AppendCompletion::new(ready),
       segment_ptr,
       segment_state,
       batch: LogBufferBatch::new(),
@@ -327,7 +272,7 @@ impl LogBuffer {
   }
   pub fn append_at(&self, record: &[u8], offset: usize, commit_order: u32) {
     unsafe { self.entry.copy_from_unchecked(record, offset) };
-    self.committed_append.insert(commit_order as u64);
+    self.append_completion.complete(commit_order);
   }
 
   pub fn sync_segment(&self) -> FsyncResult {
@@ -341,7 +286,10 @@ impl LogBuffer {
     commit_order: u32,
   ) {
     let batch = self.flush_block_with(WAL_BLOCK_SIZE, commit_order, page_pool);
-    self.segment_state.completion.push(self.segment_ptr, batch);
+    self
+      .segment_state
+      .write_completion
+      .register(self.segment_ptr, batch);
   }
 
   pub fn flush_block_with(
@@ -359,22 +307,11 @@ impl LogBuffer {
       return batched;
     };
 
-    let backoff = Backoff::new();
     loop {
       let mut max_offset = self.batch.get_max_offset();
       let mut waiting = Vec::new();
       for (offset, commit_order, done) in self.batch.drain_all() {
-        loop {
-          let ready = self.ready_order.get();
-          if ready >= commit_order {
-            break;
-          }
-          if self.committed_append.contains(ready as u64) {
-            self.ready_order.set(ready + 1);
-            continue;
-          }
-          backoff.snooze();
-        }
+        self.append_completion.wait_until(commit_order);
         max_offset = max_offset.max(offset);
         waiting.push(done);
       }
@@ -391,8 +328,6 @@ impl LogBuffer {
       if self.batch.try_release() {
         break;
       }
-
-      backoff.reset();
     }
 
     batched
@@ -418,11 +353,14 @@ impl LogBuffer {
   }
 
   pub fn wait_prev_blocks(&self) -> io::Result<()> {
-    self.segment_state.completion.wait_until(self.segment_ptr)
+    self
+      .segment_state
+      .write_completion
+      .wait_until(self.segment_ptr)
   }
 
   pub fn drain_batch(&self) {
-    self.segment_state.completion.drain();
+    self.segment_state.write_completion.drain();
   }
 }
 

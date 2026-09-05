@@ -19,8 +19,8 @@ pub use preload::*;
 mod types;
 pub use types::*;
 
-mod sync_queue;
-use sync_queue::*;
-
 mod compression;
 pub use compression::*;
+
+mod completion;
+use completion::*;
