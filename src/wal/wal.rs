@@ -22,8 +22,9 @@ use crate::{
 };
 
 use super::{
-  replay, AtomicLogId, LogBuffer, LogId, LogRecordUninit, RecordEncoding, ReplayResult,
-  SegmentPreload, SyncCompletion, TxId, WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
+  replay, AppendTicket, AtomicLogId, BookingResult, LogBuffer, LogId, LogRecordUninit,
+  RecordEncoding, ReplayResult, SegmentPreload, SyncCompletion, TxId, WALFormatVersion,
+  WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -202,19 +203,17 @@ impl WriteAheadLog {
       buffer_ptr: _buffer_ptr,
       guard: _guard,
       buffer,
-      offset,
-      len,
-      commit_order,
+      ticket,
       token,
     } = reserved;
 
     let log_id = self.last_log_id.fetch_add(1, Ordering::Release);
-    buffer.append_at(&record.init(log_id), offset, commit_order);
+    buffer.append_at(&record.init(log_id), &ticket);
     if !flush {
       return Ok(());
     }
 
-    let done = buffer.flush_block_with(offset + len, commit_order, &self.page_pool);
+    let done = buffer.flush_block_with(ticket, &self.page_pool);
     if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
     }
@@ -235,6 +234,7 @@ impl WriteAheadLog {
   fn rotate_block(
     &self,
     reserved: ReservedAppend,
+    overflow: AppendTicket,
     record: LogRecordUninit,
     flush: bool,
   ) -> Result {
@@ -242,22 +242,23 @@ impl WriteAheadLog {
       buffer_ptr,
       guard,
       buffer,
-      offset,
-      len: _,
-      commit_order,
+      ticket,
       token,
     } = reserved;
 
     let record = record.init(self.last_log_id.fetch_add(1, Ordering::Release));
-    let (remain, overflow) = record.split_at(WAL_BLOCK_SIZE - offset);
-    buffer.append_at(remain, offset, commit_order);
-    buffer.flush_and_forget(&self.page_pool, commit_order);
+    let (available, remain) = record.split_at(ticket.get_len());
+    debug_assert_eq!(available.len(), ticket.get_len());
+    debug_assert_eq!(remain.len(), overflow.get_len());
+
+    buffer.append_at(available, &ticket);
+    buffer.flush_and_forget(&self.page_pool, ticket);
 
     let mut new_page = self.page_pool.acquire();
-    new_page.copy_from(overflow, 0);
+    new_page.copy_from(remain, 0);
     let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
       buffer_ptr,
-      Owned::new(buffer.init_next(new_page, overflow.len())),
+      Owned::new(buffer.init_next(new_page, overflow.get_len())),
       Ordering::Release,
       Ordering::Acquire,
       guard,
@@ -271,7 +272,7 @@ impl WriteAheadLog {
     }
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
-    let done = new_buffer.flush_block_with(overflow.len(), 0, &self.page_pool);
+    let done = new_buffer.flush_block_with(overflow, &self.page_pool);
 
     if let Err(err) = new_buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
@@ -285,10 +286,8 @@ impl WriteAheadLog {
       buffer_ptr,
       guard,
       buffer,
-      commit_order,
+      ticket,
       mut token,
-      offset: _,
-      len: _,
     } = reserved;
 
     let new = match self.preloader.load() {
@@ -308,7 +307,7 @@ impl WriteAheadLog {
       .store(Owned::init(replacement), Ordering::Release);
     unsafe { guard.defer_destroy(buffer_ptr) };
 
-    let done = buffer.flush_block_with(WAL_BLOCK_SIZE, commit_order, &self.page_pool);
+    let done = buffer.flush_block_with(ticket, &self.page_pool);
     if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
       return Err(self.failover(err.kind()));
     };
@@ -347,29 +346,32 @@ impl WriteAheadLog {
         continue;
       };
 
-      let (offset, commit_order) = buffer.reserve_append(len);
-      if offset > WAL_BLOCK_SIZE {
-        drop(token);
-        backoff.snooze();
-        continue;
-      }
+      let (ticket, overflow) = match buffer.reserve_append(len) {
+        BookingResult::Overflow => {
+          drop(token);
+          backoff.snooze();
+          continue;
+        }
+        BookingResult::Available(ticket) => (ticket, None),
+        BookingResult::Splitted {
+          available,
+          overflow,
+        } => (available, Some(overflow)),
+      };
 
       let reserved = ReservedAppend {
         buffer_ptr,
         guard: &guard,
         buffer,
         token,
-        offset,
-        len,
-        commit_order,
+        ticket,
       };
 
-      if offset + len <= WAL_BLOCK_SIZE {
+      let Some(overflow) = overflow else {
         return self.append_in_block(reserved, record, flush);
-      }
-
+      };
       if buffer.get_pointer() + 1 < self.max_len {
-        return self.rotate_block(reserved, record, flush);
+        return self.rotate_block(reserved, overflow, record, flush);
       }
 
       self.rotate_segment(reserved, &backoff)?;
@@ -446,7 +448,5 @@ struct ReservedAppend<'a> {
   guard: &'a Guard,
   buffer: &'static LogBuffer,
   token: SharedToken<'a>,
-  offset: usize,
-  len: usize,
-  commit_order: u32,
+  ticket: AppendTicket,
 }
