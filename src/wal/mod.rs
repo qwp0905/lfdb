@@ -24,3 +24,6 @@ pub use compression::*;
 
 mod completion;
 use completion::*;
+
+mod append;
+use append::*;
