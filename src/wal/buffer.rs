@@ -3,7 +3,7 @@ use std::{
   io,
   iter::repeat,
   mem::MaybeUninit,
-  sync::atomic::{AtomicBool, AtomicU64, Ordering},
+  sync::atomic::{AtomicBool, Ordering},
 };
 
 use crossbeam::{
@@ -13,8 +13,8 @@ use crossbeam::{
 };
 
 use super::{
-  AppendCompletion, FsyncResult, SegmentGeneration, WALSegment, WriteCompletion,
-  WAL_BLOCK_SIZE,
+  AppendCompletion, AppendTicket, BookingResult, FsyncResult, OffsetBooking,
+  SegmentGeneration, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
 };
 use crate::{
   disk::{Page, PagePool, PageRef, PendingIO, Pointer},
@@ -28,7 +28,7 @@ type PendingBatch = (
 );
 struct LogBufferBatch {
   occupied: AtomicBool,
-  queue: SegQueue<(usize, u32, Sender<io::Result<()>>)>,
+  queue: SegQueue<(AppendTicket, Sender<io::Result<()>>)>,
   pending_recv: Receiver<PendingBatch>,
   pending_send: Sender<PendingBatch>,
   max_offset: Cell<usize>,
@@ -45,13 +45,8 @@ impl LogBufferBatch {
     }
   }
 
-  fn push_and_compete(
-    &self,
-    done: Sender<io::Result<()>>,
-    offset: usize,
-    commit_order: u32,
-  ) -> bool {
-    self.queue.push((offset, commit_order, done));
+  fn push_and_compete(&self, done: Sender<io::Result<()>>, ticket: AppendTicket) -> bool {
+    self.queue.push((ticket, done));
     !self.occupied.fetch_or(true, Ordering::Release)
   }
 
@@ -74,7 +69,9 @@ impl LogBufferBatch {
     self.pending_recv.clone()
   }
 
-  fn drain_all(&self) -> impl Iterator<Item = (usize, u32, Sender<io::Result<()>>)> + '_ {
+  fn drain_all(
+    &self,
+  ) -> impl Iterator<Item = (AppendTicket, Sender<io::Result<()>>)> + '_ {
     repeat(()).map_while(|_| self.queue.pop())
   }
 
@@ -175,22 +172,13 @@ impl Drop for SegmentState {
   }
 }
 
-const BITS: u32 = 40;
-const MASK: u64 = (1 << BITS) - 1;
-
 /**
  * A single WAL block (16KB page) being filled concurrently by multiple writers.
  * Writers atomically claim a slot and sequence number via a single fetch_add on offset,
  * then write their record independently.
  */
 pub struct LogBuffer {
-  /**
-   * entry pin (24bit) + offset (40bit), packed into one AtomicU64.
-   * A single fetch_add atomically reserves a position in the block and increments
-   * the in-flight writer count. The offset portion can grow up to ~4000 bytes per
-   * record, so 40 bits is sufficient; 24 bits accommodates the concurrent writer count.
-   */
-  offset: AtomicU64,
+  offset: OffsetBooking,
   /**
    * data block for current pointer to store wal records.
    * must mark records count before write to disk.
@@ -241,12 +229,12 @@ impl LogBuffer {
     segment_ptr: Pointer,
     segment_state: SBox<SegmentState>,
     offset: usize,
-    ready: u32,
+    order: u32,
   ) -> Self {
     Self {
-      offset: AtomicU64::new(offset as u64 | ((ready as u64) << BITS)),
+      offset: OffsetBooking::new(offset, order),
       entry,
-      append_completion: AppendCompletion::new(ready),
+      append_completion: AppendCompletion::new(order),
       segment_ptr,
       segment_state,
       batch: LogBufferBatch::new(),
@@ -257,22 +245,12 @@ impl LogBuffer {
     self.segment_state.pin.try_shared()
   }
 
-  /**
-   * Atomically reserves a write slot and returns (offset, ready).
-   * ready is the number of writers that claimed a slot before this call.
-   * Since each writer appends exactly one record, ready also equals the number
-   * of records already in the block — used by flush callers to write the correct
-   * record count header and to wait for all prior writers to finish.
-   */
-  pub fn reserve_append(&self, len: usize) -> (usize, u32) {
-    let prev = self
-      .offset
-      .fetch_add(((len as u64) & MASK) | (1 << BITS), Ordering::Release);
-    ((prev & MASK) as usize, (prev >> BITS) as u32)
+  pub fn reserve_append(&self, len: usize) -> BookingResult {
+    self.offset.reserve(len)
   }
-  pub fn append_at(&self, record: &[u8], offset: usize, commit_order: u32) {
-    unsafe { self.entry.copy_from_unchecked(record, offset) };
-    self.append_completion.complete(commit_order);
+  pub fn append_at(&self, record: &[u8], ticket: &AppendTicket) {
+    unsafe { self.entry.copy_from_unchecked(record, ticket.get_offset()) };
+    self.append_completion.complete(ticket.get_order());
   }
 
   pub fn sync_segment(&self) -> FsyncResult {
@@ -283,9 +261,10 @@ impl LogBuffer {
   pub fn flush_and_forget(
     &self,
     page_pool: &PagePool<WAL_BLOCK_SIZE>,
-    commit_order: u32,
+    ticket: AppendTicket,
   ) {
-    let batch = self.flush_block_with(WAL_BLOCK_SIZE, commit_order, page_pool);
+    debug_assert_eq!(ticket.get_offset() + ticket.get_len(), WAL_BLOCK_SIZE);
+    let batch = self.flush_block_with(ticket, page_pool);
     self
       .segment_state
       .write_completion
@@ -294,8 +273,7 @@ impl LogBuffer {
 
   pub fn flush_block_with(
     &self,
-    offset: usize,
-    commit_order: u32,
+    ticket: AppendTicket,
     page_pool: &PagePool<WAL_BLOCK_SIZE>,
   ) -> BatchedWrite {
     debug_assert!(!self.segment_state.taken.get());
@@ -303,16 +281,16 @@ impl LogBuffer {
     let (t, r) = bounded(1);
     let batched = BatchedWrite::new(r, self.batch.get_pending());
 
-    if !self.batch.push_and_compete(t, offset, commit_order) {
+    if !self.batch.push_and_compete(t, ticket) {
       return batched;
     };
 
     loop {
       let mut max_offset = self.batch.get_max_offset();
       let mut waiting = Vec::new();
-      for (offset, commit_order, done) in self.batch.drain_all() {
-        self.append_completion.wait_until(commit_order);
-        max_offset = max_offset.max(offset);
+      for (ticket, done) in self.batch.drain_all() {
+        self.append_completion.wait_until(ticket.get_order());
+        max_offset = max_offset.max(ticket.get_len() + ticket.get_offset());
         waiting.push(done);
       }
       self.batch.set_max_offset(max_offset);
