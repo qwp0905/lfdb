@@ -162,11 +162,6 @@ impl<'a> Drop for Permit<'a> {
   }
 }
 
-// #[cfg(not(target_os = "linux"))]
-// pub use fallback::*;
-// #[cfg(target_os = "linux")]
-// pub use futex::*;
-
 #[cfg(test)]
 #[path = "tests/semaphore.rs"]
 mod tests;

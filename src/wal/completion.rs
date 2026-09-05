@@ -17,13 +17,6 @@ use crate::{
 const MAX_RECORD: usize = WAL_BLOCK_SIZE.div_ceil(LogRecord::MIN_BYTES);
 const CAP: usize = AtomicSizedBitmap::<MAX_RECORD>::calc_capacity();
 
-// pub struct CompletionGate(Semaphore);
-// impl CompletionGate {
-//   pub fn new(count: u32) -> Self {
-//     Self(Semaphore::new(count))
-//   }
-// }
-
 pub struct AppendCompletion {
   frontier: Cell<u32>,
   completed: AtomicSizedBitmap<CAP>,
