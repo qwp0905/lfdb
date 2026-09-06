@@ -227,10 +227,6 @@ impl Engine {
     }
 
     let mut handles = HashMap::new();
-    handles.insert(
-      meta_table_id,
-      (manifest.metadata_table.clone(), meta_table.clone()),
-    );
     let found_handles = open_tables(&block_cache, &tables, &version_visibility, &blob)?;
     for (table, metadata) in found_handles.handles.iter() {
       handles.insert(table.get_id(), (metadata.clone(), table.clone()));
@@ -271,7 +267,7 @@ impl Engine {
       config.checkpoint_flush_factor,
     )?;
 
-    tables.replay(handles.into_values())?;
+    tables.replay(handles.into_values(), &manifest.metadata_table)?;
 
     if !meta_table.get_version().is_current() {
       info!(

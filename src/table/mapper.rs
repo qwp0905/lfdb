@@ -87,11 +87,15 @@ impl TableMapper {
   pub fn replay<Iter: Iterator<Item = (TableMetadata, TableHandleRef)>>(
     &self,
     iter: Iter,
+    metadata: &TableMetadata,
   ) -> Result {
     let mut exists = HashSet::new();
     for entry in self.io_pool.read_dir()? {
       let filename = PathBuf::from(entry.file_name());
       if filename.extension().is_none_or(|ext| ext != FILE_EXT) {
+        continue;
+      }
+      if metadata.get_filename() == filename {
         continue;
       }
       exists.insert(filename);
