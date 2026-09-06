@@ -22,8 +22,8 @@ type IOTask<T, R> = (T, OneshotFulfill<Result<R>>);
  * Tracks the file size already covered by preallocation.
  *
  * `AllocState` uses `Cell` because it is only accessed by the single worker that
- * owns the corresponding `AllocAndWrite` flush pass. The value is stored in an
- * `Arc` and can move across threads, but `TaskPublisher::occupied` serializes
+ * owns the corresponding write flush pass. The value is stored in an
+ * `Arc` and can move across threads, but `BatchExecutor` serializes
  * execution so the state is logically single-threaded.
  */
 pub struct AllocState(Cell<u64>);
