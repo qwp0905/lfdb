@@ -1,13 +1,14 @@
 use std::{
   marker::PhantomData,
-  mem::ManuallyDrop,
+  mem::{ManuallyDrop, MaybeUninit},
+  pin::Pin,
   ptr::NonNull,
   sync::atomic::{AtomicBool, Ordering},
 };
 
 use crossbeam::queue::SegQueue;
 
-use crate::background::{VObject, VPtr as VPtrRaw};
+use crate::background::{OneshotFulfill, VObject, VPtr as VPtrRaw};
 
 const MAX_BATCH_SIZE: usize = 32;
 
@@ -15,49 +16,73 @@ type VPtr = VPtrRaw<VTable>;
 
 struct VTable {
   call: unsafe fn(NonNull<()>, NonNull<()>),
+  complete: unsafe fn(NonNull<()>),
 }
-unsafe fn call<T, F>(ptr: NonNull<()>, data: NonNull<()>)
+unsafe fn call<T, R, F>(ptr: NonNull<()>, data: NonNull<()>)
 where
-  F: FnOnce(&mut T) + Send,
+  F: FnOnce(&mut T) -> R + Send,
 {
-  let task = VPtr::get_mut::<BatchPayload<T, F>>(ptr);
+  let task = VPtr::get_mut::<BatchPayload<T, R, F>>(ptr);
   task.call(data.cast().as_mut());
 }
+unsafe fn complete<T, R, F>(ptr: NonNull<()>)
+where
+  F: FnOnce(&mut T) -> R + Send,
+{
+  let task = VPtr::get_mut::<BatchPayload<T, R, F>>(ptr);
+  task.complete();
+}
 
-struct BatchPayload<T, F> {
+struct BatchPayload<T, R, F> {
   handler: ManuallyDrop<F>,
+  result: MaybeUninit<R>,
+  fulfiller: ManuallyDrop<OneshotFulfill<R>>,
   _marker: PhantomData<fn(&mut T)>,
 }
-impl<T, F> BatchPayload<T, F> {
-  const fn new(handler: F) -> Self {
+impl<T, R, F> BatchPayload<T, R, F> {
+  const fn new(handler: F, fulfiller: OneshotFulfill<R>) -> Self {
     Self {
       handler: ManuallyDrop::new(handler),
+      result: MaybeUninit::uninit(),
+      fulfiller: ManuallyDrop::new(fulfiller),
       _marker: PhantomData,
     }
   }
 
   unsafe fn call(&mut self, data: &mut T)
   where
-    F: FnOnce(&mut T),
+    F: FnOnce(&mut T) -> R,
   {
     let handler = unsafe { ManuallyDrop::take(&mut self.handler) };
-    handler(data)
+    self.result.write(handler(data));
+  }
+
+  unsafe fn complete(&mut self) {
+    let fulfiller = unsafe { ManuallyDrop::take(&mut self.fulfiller) };
+    fulfiller.fulfill(self.result.assume_init_read());
   }
 }
 
 #[repr(C)]
-pub struct BatchFn<T, F>(VObject<BatchPayload<T, F>, VTable>);
-impl<T, F> BatchFn<T, F>
+pub struct BatchFn<T, R, F>(VObject<BatchPayload<T, R, F>, VTable>);
+impl<T, R, F> BatchFn<T, R, F>
 where
-  F: FnOnce(&mut T) + Send,
+  F: FnOnce(&mut T) -> R + Send,
 {
-  const VTABLE: VTable = VTable { call: call::<T, F> };
+  const VTABLE: VTable = VTable {
+    call: call::<T, R, F>,
+    complete: complete::<T, R, F>,
+  };
 
-  pub const fn new(handler: F) -> Self {
-    Self(VObject::new(BatchPayload::new(handler), &Self::VTABLE))
+  pub const fn new(handler: F, fulfiller: OneshotFulfill<R>) -> Self {
+    Self(VObject::new(
+      BatchPayload::new(handler, fulfiller),
+      &Self::VTABLE,
+    ))
   }
-  pub const fn task(&mut self) -> BatchTask<T> {
-    BatchTask::new(self.0.get_ptr())
+  pub fn task(self: Pin<&mut Self>) -> BatchTask<T> {
+    // SAFETY: Only take the pinned object's address; no field is moved.
+    BatchTask::new(unsafe { self.get_unchecked_mut() }.0.get_ptr())
   }
 }
 pub struct BatchTask<T> {
@@ -71,11 +96,17 @@ impl<T> BatchTask<T> {
       _marker: PhantomData,
     }
   }
-  unsafe fn call_with(self, data: NonNull<()>) {
+  pub unsafe fn call_with(&mut self, data: &mut T) {
+    let vtable = self.ptr.vtable();
+    let ptr = self.ptr.erased();
+    (vtable.call)(ptr, NonNull::from_mut(data).cast());
+  }
+
+  pub unsafe fn complete(self) {
     let vtable = self.ptr.vtable();
     let ptr = self.ptr.erased();
     drop(self); // must drop before call handler because of vobject's lifetime
-    (vtable.call)(ptr, data);
+    (vtable.complete)(ptr);
   }
 }
 
@@ -104,15 +135,8 @@ impl<T> BatchHandle<T> {
     !self.occupied.fetch_or(true, Ordering::Release)
   }
 
-  /**
-   * flush handles with given slot.
-   * The lifetime of the batch function which serves as the parent for the registered tasks must be guaranteed.
-   */
-  pub unsafe fn flush_with(&self, data: &mut T) {
-    let ptr = NonNull::from_mut(data).cast();
-    for handle in (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop()) {
-      handle.call_with(ptr);
-    }
+  pub fn drain_tasks(&self) -> impl Iterator<Item = BatchTask<T>> + '_ {
+    (0..MAX_BATCH_SIZE).map_while(|_| self.queue.pop())
   }
 
   pub fn try_release(&self) -> bool {
