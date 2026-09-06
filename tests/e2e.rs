@@ -1878,3 +1878,32 @@ fn test_deadlock() {
     assert_eq!(aborted.load(Ordering::Relaxed), 1);
   });
 }
+
+/**
+ * 34. Test repeated engine reopen.
+ */
+#[test]
+fn test_repeated_reopen() {
+  let dir = tempdir_in(".").unwrap();
+
+  {
+    let engine = build_engine(&dir);
+    let mut tx = engine.new_tx().unwrap();
+    tx.open_table(TEST_TABLE)
+      .unwrap()
+      .insert(b"key".to_vec(), b"value".to_vec())
+      .unwrap();
+    tx.commit().unwrap();
+  }
+
+  for reopen in 0..3 {
+    let engine = build_engine(&dir);
+    let tx = engine.new_tx().unwrap();
+    let table = tx.table(TEST_TABLE).unwrap();
+    assert_eq!(
+      table.get(b"key").unwrap().as_deref(),
+      Some(b"value".as_slice()),
+      "committed value should survive reopen {reopen}",
+    );
+  }
+}

@@ -267,7 +267,7 @@ impl Engine {
       config.checkpoint_flush_factor,
     )?;
 
-    tables.replay(handles.into_values())?;
+    tables.replay(handles.into_values(), &manifest.metadata_table)?;
 
     if !meta_table.get_version().is_current() {
       info!(

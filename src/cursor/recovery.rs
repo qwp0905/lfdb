@@ -152,15 +152,17 @@ pub fn recovery(
   max_used: HashMap<TableId, Pointer>,
 ) -> Result {
   let open_handles = tables.get_all();
-  let thread = ThreadBuilder::new()
+  let count = std::thread::available_parallelism()
+    .map(|v| v.get())
+    .unwrap_or(1)
+    .min(open_handles.len());
+  let handler = handle_recovery(block_cache, recorder, max_used);
+
+  ThreadBuilder::new()
     .name("release orphan")
-    .multi(open_handles.len().min(5))
-    .into_once();
-  thread
-    .fork(
-      open_handles.into_iter(),
-      handle_recovery(block_cache, recorder, max_used),
-    )
+    .multi(count)
+    .into_once()
+    .fork(open_handles.into_iter(), handler)
     .join()
     .collect::<Result>()?;
   info!("orphaned block has released successfully.");
