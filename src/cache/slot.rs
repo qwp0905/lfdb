@@ -183,8 +183,8 @@ impl<'a> BatchSlot<'a> {
     F: FnOnce(&mut RefedSlot) -> T + Unpin + Send,
   {
     let (o, f) = oneshot();
-    let mut pinned = pin!(BatchFn::new(|slot| f.fulfill(handler(slot))));
-    if !self.batch.register(pinned.task()) {
+    let mut pinned = pin!(BatchFn::new(|slot| handler(slot), f));
+    if !self.batch.register(pinned.as_mut().task()) {
       return o.wait().unwrap();
     }
 
@@ -196,11 +196,17 @@ impl<'a> BatchSlot<'a> {
         page.copy_from(self.block.load_page().as_slice(), 0);
 
         let mut slot = RefedSlot::new(self.block.get_pointer(), page);
-        // SAFETY: Since `BatchFn` is pinned and its address does not change,
-        // it can be accessed safely.
-        unsafe { self.batch.flush_with(&mut slot) };
+        for mut task in self.batch.drain_tasks() {
+          // SAFETY: Since `BatchFn` is pinned and its address does not change,
+          // it can be accessed safely.
+          unsafe { task.call_with(&mut slot) };
 
-        latch.apply(slot.into_inner());
+          let mut replacement = self.page_pool.acquire();
+          replacement.copy_from(slot.as_ref().as_slice(), 0);
+          latch.apply(replacement);
+
+          unsafe { task.complete() };
+        }
       }
 
       if self.batch.try_release() {
