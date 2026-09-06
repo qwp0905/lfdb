@@ -213,8 +213,11 @@ impl WriteAheadLog {
       return Ok(());
     }
 
-    let done = buffer.flush_block_with(ticket, &self.page_pool);
-    if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
+    if let Err(err) = buffer
+      .flush_block_with(ticket, &self.page_pool)
+      .wait()
+      .and_then(|_| buffer.wait_prev_blocks())
+    {
       return Err(self.failover(err.kind()));
     }
     self.wait_sync(buffer, token)
@@ -223,11 +226,9 @@ impl WriteAheadLog {
   fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> Result {
     let done = buffer.sync_segment();
     drop(token);
-
-    self
-      .sync_completion
-      .wait_until(buffer.get_generation())
-      .and_then(|_| done.wait())
+    done
+      .wait()
+      .and_then(|_| self.sync_completion.wait_until(buffer.get_generation()))
       .map_err(|err| self.failover(err.kind()))
   }
 
@@ -272,9 +273,11 @@ impl WriteAheadLog {
     }
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
-    let done = new_buffer.flush_block_with(overflow, &self.page_pool);
-
-    if let Err(err) = new_buffer.wait_prev_blocks().and_then(|_| done.wait()) {
+    if let Err(err) = new_buffer
+      .flush_block_with(overflow, &self.page_pool)
+      .wait()
+      .and_then(|_| new_buffer.wait_prev_blocks())
+    {
       return Err(self.failover(err.kind()));
     };
 
@@ -307,16 +310,16 @@ impl WriteAheadLog {
       .store(Owned::init(replacement), Ordering::Release);
     unsafe { guard.defer_destroy(buffer_ptr) };
 
-    let done = buffer.flush_block_with(ticket, &self.page_pool);
-    if let Err(err) = buffer.wait_prev_blocks().and_then(|_| done.wait()) {
+    if let Err(err) = buffer
+      .flush_block_with(ticket, &self.page_pool)
+      .wait()
+      .and_then(|_| buffer.wait_prev_blocks())
+    {
       return Err(self.failover(err.kind()));
     };
 
-    loop {
-      match token.try_upgrade() {
-        Ok(t) => break forget(t),
-        Err(t) => token = t,
-      };
+    while let Err(err) = token.try_upgrade().map(forget) {
+      token = err;
       backoff.snooze();
     }
 
