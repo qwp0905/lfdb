@@ -188,7 +188,7 @@ LFDB provides **Snapshot Isolation**. Each transaction reads from a consistent s
 - A transaction started before a commit will never see that commit's writes — even if the commit completes before the transaction ends
 
 **Write conflicts:**
-A `WriteConflict` is returned immediately whenever two concurrent transactions race on the same resource. It applies uniformly to every mutating operation:
+A `WriteConflict` is returned whenever two concurrent transactions race on the same resource. It applies uniformly to every mutating operation:
 
 - **Row writes** — two transactions inserting or removing the same key
 - **Table creation** — two transactions calling `open_table` with the same name on a table that does not yet exist
