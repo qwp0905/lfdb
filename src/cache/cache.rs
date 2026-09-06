@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks,
-  DirtyTables, EvictionGuard, MappingTable, PendingFlush, RefedSlot,
+  Acquired, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables,
+  EvictionGuard, MappingTable, PendingFlush,
 };
 use crate::{
   background::{Close, ThreadBuilder, ThreadPool},
@@ -184,7 +184,6 @@ impl Core {
 pub struct BlockCache {
   table: MappingTable,
   core: Arc<Core>,
-  batch_handles: Box<[BatchHandle<RefedSlot>]>,
   page_pool: PagePool<PAGE_SIZE>,
   flush_executor: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
@@ -198,10 +197,6 @@ impl BlockCache {
 
     let mut pins = Vec::with_capacity(config.capacity);
     pins.resize_with(config.capacity, ExclusivePin::new);
-
-    let mut batch_handles = Vec::with_capacity(config.capacity);
-    batch_handles.resize_with(config.capacity, BatchHandle::new);
-    let batch_handles = batch_handles.into_boxed_slice();
 
     let core = Arc::new(Core::new(
       blocks.into_boxed_slice(),
@@ -218,7 +213,6 @@ impl BlockCache {
     Ok(Self {
       table: MappingTable::new(config.shard_count, config.capacity),
       core,
-      batch_handles,
       page_pool,
       flush_executor,
       metrics,
@@ -230,7 +224,6 @@ impl BlockCache {
     CachedSlot::new(
       self.core.get_block_cell(id).get(),
       self.core.get_dirty_blocks(),
-      &self.batch_handles[id],
       id,
       token,
       &self.page_pool,
