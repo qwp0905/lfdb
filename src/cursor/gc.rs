@@ -225,32 +225,27 @@ impl GcWorker {
         continue;
       }
 
-      self
-        .block_cache
-        .read(ptr, table)?
-        .for_batch()
-        .mutate(|slot| {
-          let mut entry: DataEntry = slot.as_ref().deserialize()?;
-          let mut new_versions = VecDeque::new();
+      let mut slot = self.block_cache.read(ptr, table)?.for_write();
+      let mut entry: DataEntry = slot.as_ref().deserialize()?;
+      let mut new_versions = VecDeque::new();
 
-          for record in entry.take_versions() {
-            let version = record.version;
-            new_versions.push_back(record);
-            if version >= min_version {
-              continue;
-            }
-            max_found = Some(version);
-            break;
-          }
+      for record in entry.take_versions() {
+        let version = record.version;
+        new_versions.push_back(record);
+        if version >= min_version {
+          continue;
+        }
+        max_found = Some(version);
+        break;
+      }
 
-          if max_found.is_none() {
-            return Ok(());
-          }
+      if max_found.is_none() {
+        continue;
+      }
 
-          entry.set_versions(new_versions);
-          entry.clear_next();
-          self.serialize_and_log(slot, &entry, table_id)
-        })?;
+      entry.set_versions(new_versions);
+      entry.clear_next();
+      self.serialize_and_log(&mut slot, &entry, table_id)?;
     }
 
     Ok(EntryRelease {
@@ -337,42 +332,38 @@ impl GcWorker {
     let min_version = self.version_visibility.min_version();
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
-      let targets = self
-        .block_cache
-        .read(ptr, table)?
-        .for_batch()
-        .mutate(|slot| {
-          let mut targets = Vec::new();
-          let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
-          let leaf = node.as_leaf_mut()?;
+      let mut slot = self.block_cache.read(ptr, table)?.for_write();
+      let mut targets = Vec::new();
+      let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+      let leaf = node.as_leaf_mut()?;
 
-          for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
-            let Some(ptr) = entry.next else {
-              continue;
-            };
+      for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
+        let Some(ptr) = entry.next else {
+          continue;
+        };
 
-            if table.is_reserved(&entry.key)
-              || entry.record.version >= min_version
-              || self.version_visibility.is_aborted(&entry.record.owner)
-            {
-              let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
-              task_queue.push(task);
-              continue;
-            }
+        if table.is_reserved(&entry.key)
+          || entry.record.version >= min_version
+          || self.version_visibility.is_aborted(&entry.record.owner)
+        {
+          let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
+          task_queue.push(task);
+          continue;
+        }
 
-            targets.push(ptr);
-            entry.next = None;
-          }
+        targets.push(ptr);
+        entry.next = None;
+      }
 
-          if !candidates.is_empty() {
-            next = leaf.get_next();
-          }
+      if !candidates.is_empty() {
+        next = leaf.get_next();
+      }
 
-          if !targets.is_empty() {
-            self.serialize_and_log(slot, &node, table.get_id())?;
-          }
-          Ok(targets)
-        })?;
+      if !targets.is_empty() {
+        self.serialize_and_log(&mut slot, &node, table.get_id())?;
+      }
+      drop(slot);
+
       for ptr in targets {
         let task = GcTask::new(TaskType::ReleaseEntry(ptr), table.clone());
         task_queue.push(task);

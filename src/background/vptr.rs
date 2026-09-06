@@ -2,40 +2,30 @@ use std::ptr::NonNull;
 
 use super::Pair;
 
-unsafe fn drop_pair<T, VTable>(ptr: NonNull<Header<VTable>>) {
-  let _ = Pair::from_raw(ptr.as_ptr() as *mut VObject<T, VTable>);
-}
 struct Header<VTable: 'static> {
   vtable: &'static VTable,
-  drop: Option<unsafe fn(NonNull<Self>)>,
+  drop: unsafe fn(NonNull<Self>),
 }
 impl<VTable> Header<VTable> {
-  const fn new_empty(vtable: &'static VTable) -> Self {
-    Self { vtable, drop: None }
-  }
   const fn new_pair<T>(vtable: &'static VTable) -> Self {
     Self {
       vtable,
-      drop: Some(drop_pair::<T, VTable>),
+      drop: Self::drop_pair::<T>,
     }
+  }
+  unsafe fn drop_pair<T>(ptr: NonNull<Header<VTable>>) {
+    let _ = Pair::from_raw(ptr.as_ptr() as *mut VObject<T, VTable>);
   }
 }
 
 #[repr(C)]
-pub struct VObject<T, VTable: 'static> {
+struct VObject<T, VTable: 'static> {
   header: Header<VTable>,
   payload: T,
 }
 impl<T, VTable> VObject<T, VTable> {
   const fn construct(header: Header<VTable>, payload: T) -> Self {
     Self { header, payload }
-  }
-  pub const fn new(payload: T, vtable: &'static VTable) -> Self {
-    Self::construct(Header::new_empty(vtable), payload)
-  }
-
-  pub const fn get_ptr(&mut self) -> VPtr<VTable> {
-    VPtr(NonNull::from_mut(self).cast())
   }
 }
 
@@ -61,20 +51,12 @@ impl<VTable> VPtr<VTable> {
     let raw = ptr.cast::<VObject<T, VTable>>();
     &raw.as_ref().payload
   }
-
-  pub const unsafe fn get_mut<'a, T>(ptr: NonNull<()>) -> &'a mut T {
-    let mut raw = ptr.cast::<VObject<T, VTable>>();
-    &mut raw.as_mut().payload
-  }
 }
 impl<VTable> Drop for VPtr<VTable> {
   fn drop(&mut self) {
     let ptr = self.0;
-    unsafe {
-      if let Some(drop_fn) = self.0.as_ref().drop {
-        drop_fn(ptr);
-      };
-    };
+    let drop_fn = unsafe { self.0.as_ref().drop };
+    unsafe { drop_fn(ptr) };
   }
 }
 
