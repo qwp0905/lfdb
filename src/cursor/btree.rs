@@ -417,10 +417,10 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
     );
 
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
-    loop {
+    let (mut slot, mut node) = loop {
       let mut slot = self.0.fetch_slot(ptr, table)?.for_write();
       let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-      let mut node = match leaf.find(&key)? {
+      match leaf.find(&key)? {
         NodeFindResult::Move(next) => {
           ptr = next;
           continue;
@@ -430,49 +430,48 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
             drop(slot);
             return self.apply_version_snapshot(p, record, table);
           }
-
-          if !self.0.is_aborted(old.owner) {
-            if table.is_reserved(&key) {
-              continue;
-            }
-
+          if self.0.is_aborted(old.owner) {
             let mut node = leaf.into_owned()?;
-            let entry_ptr = self
-              .0
-              .alloc_and_log(&DataEntry::init(record, None), table)?;
-            node.alloc_entry_at(pos, entry_ptr);
-            return self
-              .0
-              .serialize_and_log(&mut slot, &node.into_node(), table);
+            node.replace_at(pos, record);
+            break (slot, node);
+          }
+          if table.is_reserved(&key) {
+            continue;
           }
 
           let mut node = leaf.into_owned()?;
-          node.replace_at(pos, record);
-          node
+          let entry_ptr = self
+            .0
+            .alloc_and_log(&DataEntry::init(record, None), table)?;
+          node.alloc_entry_at(pos, entry_ptr);
+          return self
+            .0
+            .serialize_and_log(&mut slot, &node.into_node(), table);
         }
         NodeFindResult::NotFound(pos) => {
           let mut node = leaf.into_owned()?;
           node.insert_at(pos, key.to_vec(), record);
-          node
+          break (slot, node);
         }
       };
+    };
 
-      let Some(split) = node.split_if_needed() else {
-        return self
-          .0
-          .serialize_and_log(&mut slot, &node.into_node(), table);
-      };
-
-      let mid_key = split.top().clone();
-      let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
-
-      node.set_next(mid_key.clone(), split_ptr);
-      self
+    let Some(split) = node.split_if_needed() else {
+      return self
         .0
-        .serialize_and_log(&mut slot, &node.into_node(), table)?;
-      drop(slot);
-      return self.propagate_split(mid_key, split_ptr, stack, table);
-    }
+        .serialize_and_log(&mut slot, &node.into_node(), table);
+    };
+
+    let mid_key = split.top().clone();
+    let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
+
+    node.set_next(mid_key.clone(), split_ptr);
+    self
+      .0
+      .serialize_and_log(&mut slot, &node.into_node(), table)?;
+    drop(slot);
+    self.propagate_split(mid_key, split_ptr, stack, table)?;
+    Ok(())
   }
 }
 impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
@@ -521,82 +520,77 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
     create: bool,
   ) -> Result<WriteResult> {
     let (mut ptr, stack) = self.find_leaf_stack(key, table)?;
-    loop {
-      let mut slot = self.0.fetch_slot(ptr, table)?.for_write();
+    let (mut node, mut slot, pos, found) = loop {
+      let slot = self.0.fetch_slot(ptr, table)?.for_write();
       let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-      let (mut node, pos, found) = match leaf.find(key)? {
+      match leaf.find(key)? {
         NodeFindResult::Move(i) => {
           ptr = i;
           continue;
         }
         NodeFindResult::Found(pos, old, entry_ptr) => {
           let writable = self.0.is_owned(old.owner) || self.0.is_aborted(old.owner);
+          if writable {
+            break (leaf.into_owned()?, slot, pos, true);
+          }
           let visible = self.0.is_readable(old.version) && !self.0.is_active(old.owner);
-          match (writable, visible) {
-            (true, _) => (leaf.into_owned()?, pos, true),
-            (false, false) => {
+          if !visible {
+            drop(slot);
+            if !self.handle_conflict(old.owner) {
+              continue;
+            }
+            return Err(Error::WriteConflict);
+          }
+          match table.reserve(key.to_vec(), self.0.current_owner()) {
+            Ok(g) => {
+              let old = old.into_owned_with(slot.as_ref());
               drop(slot);
-              if !self.handle_conflict(old.owner) {
+              let cmd = CopyOld::new(g, entry_ptr, old, op);
+              return self.copy_and_update(key, ptr, table, stack, cmd);
+            }
+            Err(i) => {
+              drop(slot);
+              if !self.handle_conflict(i) {
                 continue;
               }
               return Err(Error::WriteConflict);
             }
-            (false, true) => match table.reserve(key.to_vec(), self.0.current_owner()) {
-              Ok(g) => {
-                let old = old.into_owned_with(slot.as_ref());
-                drop(slot);
-                let cmd = CopyOld::new(g, entry_ptr, old, op);
-                return self.copy_and_update(key, ptr, table, stack, cmd);
-              }
-              Err(i) => {
-                drop(slot);
-                if !self.handle_conflict(i) {
-                  continue;
-                }
-                return Err(Error::WriteConflict);
-              }
-            },
           }
         }
-        NodeFindResult::NotFound(pos) => {
-          if !create {
-            return Ok(WriteResult::not_matched());
-          }
-          (leaf.into_owned()?, pos, false)
-        }
+        NodeFindResult::NotFound(_) if !create => return Ok(WriteResult::not_matched()),
+        NodeFindResult::NotFound(pos) => break (leaf.into_owned()?, slot, pos, false),
       };
+    };
 
-      let (record, _guard) = self.create_record(op)?;
-      let new_record =
-        VersionRecord::new(self.0.current_owner(), self.0.current_version(), record);
-      let mut result = if found {
-        node.replace_at(pos, new_record);
-        WriteResult::updated(false)
-      } else {
-        node.insert_at(pos, key.to_vec(), new_record);
-        WriteResult::inserted(false)
-      };
+    let (record, _guard) = self.create_record(op)?;
+    let new_record =
+      VersionRecord::new(self.0.current_owner(), self.0.current_version(), record);
+    let mut result = if found {
+      node.replace_at(pos, new_record);
+      WriteResult::updated(false)
+    } else {
+      node.insert_at(pos, key.to_vec(), new_record);
+      WriteResult::inserted(false)
+    };
 
-      let Some(split) = node.split_if_needed() else {
-        return self
-          .0
-          .serialize_and_log(&mut slot, &node.into_node(), table)
-          .map(|_| result);
-      };
-      result.splitted = true;
-
-      let mid_key = split.top().clone();
-      let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
-
-      node.set_next(mid_key.clone(), split_ptr);
-      self
-        .0
-        .serialize_and_log(&mut slot, &node.into_node(), table)?;
-      drop(slot);
+    let Some(split) = node.split_if_needed() else {
       return self
-        .propagate_split(mid_key, split_ptr, stack, table)
+        .0
+        .serialize_and_log(&mut slot, &node.into_node(), table)
         .map(|_| result);
-    }
+    };
+    result.splitted = true;
+
+    let mid_key = split.top().clone();
+    let split_ptr = self.0.alloc_and_log(&split.into_node(), table)?;
+
+    node.set_next(mid_key.clone(), split_ptr);
+    self
+      .0
+      .serialize_and_log(&mut slot, &node.into_node(), table)?;
+    drop(slot);
+    self.propagate_split(mid_key, split_ptr, stack, table)?;
+    Ok(result)
   }
 
   fn copy_and_update(
