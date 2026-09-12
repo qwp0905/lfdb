@@ -42,14 +42,14 @@ impl ActiveState {
     }
   }
   pub fn is_available(&self) -> bool {
-    self.status.load(Ordering::Acquire) == STATUS_AVAILABLE
+    self.status.load(Ordering::Relaxed) == STATUS_AVAILABLE
   }
   pub const fn get_id(&self) -> TxId {
     self.tx_id
   }
 
   pub fn try_abort(&self) -> bool {
-    let current = self.status.load(Ordering::Acquire);
+    let current = self.status.load(Ordering::Relaxed);
     if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
       return false;
     }
@@ -59,8 +59,8 @@ impl ActiveState {
       .compare_exchange(
         current,
         STATUS_ABORTED,
-        Ordering::Release,
-        Ordering::Acquire,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
       )
       .is_ok()
   }
@@ -72,8 +72,8 @@ impl ActiveState {
       .compare_exchange(
         STATUS_AVAILABLE,
         STATUS_TIMEOUT,
-        Ordering::Release,
-        Ordering::Acquire,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
       )
       .is_ok()
   }
@@ -85,15 +85,15 @@ impl ActiveState {
       .compare_exchange(
         STATUS_AVAILABLE,
         STATUS_ON_COMMIT,
-        Ordering::Release,
-        Ordering::Acquire,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
       )
       .is_ok()
   }
 
   #[inline]
   pub fn make_available(&self) {
-    self.status.store(STATUS_AVAILABLE, Ordering::Release)
+    self.status.store(STATUS_AVAILABLE, Ordering::Relaxed)
   }
 
   pub fn park(&self) {
@@ -123,7 +123,7 @@ impl ActiveSet {
     }
   }
   pub fn current_version(&self) -> TxId {
-    self.last_tx_id.load(Ordering::Acquire)
+    self.last_tx_id.load(Ordering::Relaxed)
   }
 
   /**
@@ -138,7 +138,7 @@ impl ActiveSet {
     let mut uninit = SBox::new_uninit();
     let mut inner = self.inner.wl();
 
-    let tx_id = self.last_tx_id.fetch_add(1, Ordering::Release);
+    let tx_id = self.last_tx_id.fetch_add(1, Ordering::Relaxed);
     SBox::get_mut(&mut uninit)
       .unwrap()
       .write(ActiveState::new(tx_id));

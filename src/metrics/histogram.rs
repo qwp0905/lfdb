@@ -43,7 +43,7 @@ impl AtomicF64 {
   }
   fn add(&self, value: f64) {
     let backoff = Backoff::new();
-    let mut old = self.0.load(Ordering::Acquire);
+    let mut old = self.0.load(Ordering::Relaxed);
     loop {
       let new = f64::from_bits(old) + value;
       let Err(err) = self.0.compare_exchange_weak(
@@ -60,7 +60,7 @@ impl AtomicF64 {
     }
   }
   fn load(&self) -> f64 {
-    f64::from_bits(self.0.load(Ordering::Acquire))
+    f64::from_bits(self.0.load(Ordering::Relaxed))
   }
 }
 

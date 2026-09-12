@@ -60,7 +60,7 @@ impl HandleState {
   }
 
   pub fn is_closed(&self) -> bool {
-    self.closed.load(Ordering::Acquire)
+    self.closed.load(Ordering::Relaxed)
   }
 
   pub fn try_shared(&self) -> Option<SharedToken<'_>> {
@@ -162,7 +162,7 @@ impl WriteScheduler {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Release);
+        state.closed.fetch_or(true, Ordering::Relaxed);
         return buffered
           .into_iter()
           .for_each(|(_, done)| done.fulfill(Ok(())));
@@ -212,7 +212,7 @@ impl SyncScheduler {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Release);
+        state.closed.fetch_or(true, Ordering::Relaxed);
         return buffered
           .into_iter()
           .for_each(|(_, done)| done.fulfill(Ok(())));
