@@ -22,9 +22,9 @@ use crate::{
 };
 
 use super::{
-  replay, AppendTicket, AtomicLogId, BookingResult, LogBuffer, LogCompletion, LogId,
-  LogRecordUninit, RecordEncoding, ReplayResult, SegmentPreload, SyncCompletion, TxId,
-  WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
+  replay, AppendTicket, BookingResult, LogBuffer, LogCompletion, LogId, LogRecordUninit,
+  RecordEncoding, ReplayResult, SegmentPreload, SyncCompletion, TxId, WALFormatVersion,
+  WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
@@ -84,10 +84,6 @@ const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
  */
 pub struct WriteAheadLog {
   /**
-   * last log id (LSN)
-   */
-  last_log_id: AtomicLogId,
-  /**
    * Current log buffer, managed via epoch GC. Epoch pinning guarantees the buffer
    * pointer remains valid for the duration of a guard — preventing use-after-free
    * when the buffer is rotated and the old one is deferred-destroyed.
@@ -133,7 +129,6 @@ impl WriteAheadLog {
       LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0, max_len, 0);
 
     Ok(Self {
-      last_log_id: AtomicLogId::new(0),
       preloader,
       buffer: Atomic::new(buffer),
       page_pool,
@@ -177,7 +172,6 @@ impl WriteAheadLog {
 
     Ok((
       Self {
-        last_log_id: AtomicLogId::new(replay_result.last_log_id),
         preloader,
         buffer: Atomic::new(buffer),
         page_pool,
@@ -270,8 +264,6 @@ impl WriteAheadLog {
     buffer.append_at(available, &ticket);
     buffer.flush_and_forget(&self.page_pool, ticket);
 
-    self.last_log_id.fetch_max(log_id + 1, Ordering::Relaxed);
-
     let mut new_page = self.page_pool.acquire();
     new_page.copy_from(remain, 0);
     let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
@@ -322,7 +314,6 @@ impl WriteAheadLog {
       log_id,
     );
 
-    self.last_log_id.fetch_max(log_id, Ordering::Relaxed);
     self
       .buffer
       .store(Owned::init(replacement), Ordering::Release);

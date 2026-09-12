@@ -47,7 +47,7 @@ impl<'a> TxContext<'a> {
 
   #[inline]
   pub fn is_modified(&self) -> bool {
-    self.modified.load(Ordering::Acquire)
+    self.modified.load(Ordering::Relaxed)
   }
 
   #[inline]
@@ -110,7 +110,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
       slot,
       data,
     )?;
-    self.modified.fetch_or(true, Ordering::Release);
+    self.modified.fetch_or(true, Ordering::Relaxed);
     Ok(())
   }
 

@@ -206,7 +206,7 @@ impl VersionController {
     self.aborted.insert(tx_id);
   }
   pub fn new_transaction(&self) -> Option<(TxSnapshot<'_>, TxState<'_>)> {
-    if self.closed.load(Ordering::Acquire) {
+    if self.closed.load(Ordering::Relaxed) {
       return None;
     }
     let state = self.active.new_state();
@@ -244,7 +244,7 @@ impl SharedSubscription<WALFailed> for VersionController {
    * abortable active state is moved to the aborted set and removed from active.
    */
   fn handle(&self, _: Arc<WALFailed>) {
-    if self.closed.fetch_or(true, Ordering::Release) {
+    if self.closed.fetch_or(true, Ordering::Relaxed) {
       return;
     }
     for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {

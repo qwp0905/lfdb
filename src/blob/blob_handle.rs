@@ -34,7 +34,7 @@ impl BlobHandle {
     &self.metadata
   }
   pub fn reserve(&self, size: BlobOffset) -> BlobReserved {
-    let mut offset = self.reserved.load(Ordering::Acquire);
+    let mut offset = self.reserved.load(Ordering::Relaxed);
     let backoff = Backoff::new();
     loop {
       let new = offset + size;
@@ -44,8 +44,8 @@ impl BlobHandle {
       let Err(c) = self.reserved.compare_exchange_weak(
         offset,
         new,
-        Ordering::Release,
-        Ordering::Acquire,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
       ) else {
         if new > BLOB_THRESHOLD {
           return BlobReserved::Last(offset);

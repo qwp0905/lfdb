@@ -357,7 +357,7 @@ impl Engine {
    * create transaction cursor with default timeout.
    */
   pub fn new_tx(&self) -> Result<Transaction<'_>> {
-    if !self.available.load(Ordering::Acquire) {
+    if !self.available.load(Ordering::Relaxed) {
       return Err(Error::EngineUnavailable);
     }
     let Some((state, snapshot)) = self.orchestrator.start_tx(None) else {
@@ -376,7 +376,7 @@ impl Engine {
    * create transaction cursor with specified timeout.
    */
   pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Transaction<'_>> {
-    if !self.available.load(Ordering::Acquire) {
+    if !self.available.load(Ordering::Relaxed) {
       return Err(Error::EngineUnavailable);
     }
     let Some((state, snapshot)) = self.orchestrator.start_tx(Some(timeout)) else {
@@ -398,11 +398,7 @@ impl Engine {
 
 impl Drop for Engine {
   fn drop(&mut self) {
-    if self
-      .available
-      .compare_exchange(true, false, Ordering::Release, Ordering::Acquire)
-      .is_ok()
-    {
+    if self.available.fetch_and(false, Ordering::Relaxed) {
       info!("engine shutdown");
       if let Err(err) = self.orchestrator.close() {
         error!("error occurs in close engine: {err}");
