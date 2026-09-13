@@ -146,7 +146,7 @@ impl<T> BatchHandle<T> {
     // Same lost-wakeup handoff as the IO task publisher: release ownership, check
     // for newly queued work, and either finish or reacquire ownership to keep
     // draining.
-    self.occupied.store(false, Ordering::Release);
+    self.occupied.swap(false, Ordering::Release);
     if self.queue.is_empty() {
       return true;
     }

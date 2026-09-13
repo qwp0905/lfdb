@@ -74,7 +74,7 @@ impl<T> BatchExecutor<T> {
       unsafe { handler.call(values) };
     }
 
-    queue.occupied.store(false, Ordering::Release);
+    queue.occupied.swap(false, Ordering::Release);
     if queue.buffered.is_empty() {
       return;
     }

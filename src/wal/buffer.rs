@@ -55,7 +55,7 @@ impl LogBufferBatch {
   }
 
   fn try_release(&self) -> bool {
-    self.occupied.store(false, Ordering::Release);
+    self.occupied.swap(false, Ordering::Release);
     if self.queue.is_empty() {
       return true;
     }
