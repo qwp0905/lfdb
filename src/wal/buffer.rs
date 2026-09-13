@@ -3,7 +3,7 @@ use std::{
   io,
   iter::repeat,
   mem::MaybeUninit,
-  sync::atomic::{AtomicBool, Ordering},
+  sync::atomic::{fence, AtomicBool, Ordering},
 };
 
 use crossbeam::{
@@ -47,17 +47,22 @@ impl LogBufferBatch {
 
   fn push_and_compete(&self, done: Sender<io::Result<()>>, ticket: AppendTicket) -> bool {
     self.queue.push((ticket, done));
-    !self.occupied.fetch_or(true, Ordering::Release)
+    if self.occupied.swap(true, Ordering::Relaxed) {
+      return false;
+    }
+    fence(Ordering::Acquire);
+    true
   }
 
   fn try_release(&self) -> bool {
-    self.occupied.fetch_and(false, Ordering::Release);
+    self.occupied.store(false, Ordering::Release);
     if self.queue.is_empty() {
       return true;
     }
-    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+    if self.occupied.swap(true, Ordering::Relaxed) {
       return true;
     }
+    fence(Ordering::Acquire);
     false
   }
 
