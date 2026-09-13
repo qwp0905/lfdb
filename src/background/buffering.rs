@@ -147,4 +147,4 @@ impl<T: Send, R: Send> Execute<T, R> for BufferingThread<T, R> {
 
 #[cfg(test)]
 #[path = "tests/buffering.rs"]
-mod buffering;
+mod tests;

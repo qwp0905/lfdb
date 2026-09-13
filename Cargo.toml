@@ -2,6 +2,7 @@
 name = "lfdb"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,10 +28,13 @@ rand = "0.9.4"
 members = ["bench"]
 
 [lints]
+workspace = true
+
+[workspace.lints]
 clippy.module_inception = "allow"
 clippy.too_many_arguments = "allow"
 clippy.big_endian_bytes = "forbid"
 
-[lints.rust]
+[workspace.lints.rust]
 unused = "deny"
 dead_code = "deny"
