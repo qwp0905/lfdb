@@ -40,6 +40,17 @@ impl<T> PendingIO<T> {
   pub fn wait_flatten(self) -> Result<T> {
     self.wait().map_err(Error::IO)
   }
+
+  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> std::result::Result<(), F> {
+    match self {
+      PendingIO::Fulfilled(v) => f(v),
+      PendingIO::Pending(o) => o.add_callback(f)?,
+    };
+    Ok(())
+  }
 }
 
 /**
