@@ -11,6 +11,8 @@ use crossbeam::utils::Backoff;
 
 use crate::utils::SBox;
 
+use super::CallbackSlot;
+
 #[repr(C)]
 struct PairInner<T: ?Sized> {
   dropped: AtomicBool,
@@ -167,16 +169,28 @@ impl<T> Atomic<T> {
 pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
+  callback: CallbackSlot,
 }
 impl<T> OneshotBehavior<T> {
   pub const fn new() -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
       state: Atomic::new(STATE_WAITING),
+      callback: CallbackSlot::new(),
     }
   }
 
+  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> std::result::Result<(), F> {
+    self.callback.set(f)
+  }
+
   pub unsafe fn fulfill(&self, result: T) {
+    if let Some(callback) = self.callback.take() {
+      unsafe { callback.call(&result) };
+    }
     unsafe { (*self.value.get()).write(result) };
   }
 
@@ -336,6 +350,13 @@ impl<T> Oneshot<T> {
   }
   pub fn wait(self) -> Result<T, WaitDisconnectedError> {
     self.0.wait()
+  }
+
+  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> std::result::Result<(), F> {
+    self.0.add_callback(f)
   }
 }
 impl<T> Drop for Oneshot<T> {

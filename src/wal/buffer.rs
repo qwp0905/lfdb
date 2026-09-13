@@ -3,51 +3,46 @@ use std::{
   io,
   iter::repeat,
   mem::MaybeUninit,
-  sync::atomic::{AtomicBool, Ordering},
+  sync::atomic::{fence, AtomicBool, Ordering},
 };
 
-use crossbeam::{
-  channel::{bounded, unbounded, Receiver, Sender},
-  queue::SegQueue,
-  select,
-};
+use crossbeam::queue::SegQueue;
 
 use super::{
   AppendCompletion, AppendTicket, BookingResult, FsyncResult, LogId, OffsetBooking,
   SegmentGeneration, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
 };
 use crate::{
-  disk::{Page, PagePool, PageRef, PendingIO, Pointer},
+  background::{oneshot, Oneshot, OneshotFulfill},
+  disk::{Page, PagePool, PageRef, Pointer},
   utils::{create_static_ref, ExclusivePin, SBox, SharedToken},
 };
 
-type PendingBatch = (
-  PendingIO,
-  PageRef<WAL_BLOCK_SIZE>,
-  Vec<Sender<io::Result<()>>>,
-);
 struct LogBufferBatch {
   occupied: AtomicBool,
-  queue: SegQueue<(AppendTicket, Sender<io::Result<()>>)>,
-  pending_recv: Receiver<PendingBatch>,
-  pending_send: Sender<PendingBatch>,
+  queue: SegQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
   max_offset: Cell<usize>,
 }
 impl LogBufferBatch {
   fn new() -> Self {
-    let (t, r) = unbounded();
     Self {
       occupied: AtomicBool::new(false),
       queue: SegQueue::new(),
-      pending_recv: r,
-      pending_send: t,
       max_offset: Cell::new(0),
     }
   }
 
-  fn push_and_compete(&self, done: Sender<io::Result<()>>, ticket: AppendTicket) -> bool {
+  fn push_and_compete(
+    &self,
+    done: OneshotFulfill<io::Result<()>>,
+    ticket: AppendTicket,
+  ) -> bool {
     self.queue.push((ticket, done));
-    !self.occupied.fetch_or(true, Ordering::Release)
+    if self.occupied.fetch_or(true, Ordering::Relaxed) {
+      return false;
+    }
+    fence(Ordering::Acquire);
+    true
   }
 
   fn try_release(&self) -> bool {
@@ -55,23 +50,16 @@ impl LogBufferBatch {
     if self.queue.is_empty() {
       return true;
     }
-    if self.occupied.fetch_or(true, Ordering::AcqRel) {
+    if self.occupied.fetch_or(true, Ordering::Relaxed) {
       return true;
     }
+    fence(Ordering::Acquire);
     false
-  }
-
-  fn append_batch(&self, task: PendingBatch) {
-    self.pending_send.send(task).unwrap();
-  }
-
-  fn get_pending(&self) -> Receiver<PendingBatch> {
-    self.pending_recv.clone()
   }
 
   fn drain_all(
     &self,
-  ) -> impl Iterator<Item = (AppendTicket, Sender<io::Result<()>>)> + '_ {
+  ) -> impl Iterator<Item = (AppendTicket, OneshotFulfill<io::Result<()>>)> + '_ {
     repeat(()).map_while(|_| self.queue.pop())
   }
 
@@ -84,37 +72,15 @@ impl LogBufferBatch {
 }
 
 pub struct BatchedWrite {
-  current: Receiver<io::Result<()>>,
-  pending: Receiver<PendingBatch>,
+  current: Oneshot<io::Result<()>>,
 }
 impl BatchedWrite {
-  const fn new(
-    current: Receiver<io::Result<()>>,
-    pending: Receiver<PendingBatch>,
-  ) -> Self {
-    Self { current, pending }
-  }
-
-  fn handle_pending(&self, (pending, page, waiting): PendingBatch) {
-    let result = pending.wait().map_err(|err| err.kind());
-    let _ = page;
-    for done in waiting {
-      let _ = done.send(result.map_err(io::Error::from));
-    }
+  const fn new(current: Oneshot<io::Result<()>>) -> Self {
+    Self { current }
   }
 
   pub fn wait(self) -> io::Result<()> {
-    loop {
-      select! {
-        recv(self.current) -> v => return v.unwrap(),
-        recv(self.pending) -> p => {
-          let Ok(pending) = p else {
-            return self.current.recv().unwrap();
-          };
-          self.handle_pending(pending);
-        },
-      }
-    }
+    self.current.wait().unwrap()
   }
 }
 
@@ -290,10 +256,10 @@ impl LogBuffer {
   ) -> BatchedWrite {
     debug_assert!(!self.segment_state.taken.get());
 
-    let (t, r) = bounded(1);
-    let batched = BatchedWrite::new(r, self.batch.get_pending());
+    let (o, f) = oneshot();
+    let batched = BatchedWrite::new(o);
 
-    if !self.batch.push_and_compete(t, ticket) {
+    if !self.batch.push_and_compete(f, ticket) {
       return batched;
     };
 
@@ -313,8 +279,10 @@ impl LogBuffer {
       let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
       let pending = unsafe { self.segment_state.segment.assume_init_ref() }
         .write_async(self.segment_ptr, static_ref);
+      if let Err(callback) = pending.add_callback(create_cb(waiting, page)) {
+        callback(&pending.wait());
+      }
 
-      self.batch.append_batch((pending, page, waiting));
       if self.batch.try_release() {
         break;
       }
@@ -355,6 +323,19 @@ impl LogBuffer {
 
   pub const fn get_log_id_offset(&self) -> LogId {
     self.log_id_offset
+  }
+}
+
+const fn create_cb(
+  waiting: Vec<OneshotFulfill<io::Result<()>>>,
+  page: PageRef<WAL_BLOCK_SIZE>,
+) -> impl FnOnce(&io::Result<()>) {
+  move |result| {
+    let _page = page;
+    let result = result.as_ref().map_err(|err| err.kind()).copied();
+    for done in waiting {
+      done.fulfill(result.map_err(io::Error::from));
+    }
   }
 }
 
