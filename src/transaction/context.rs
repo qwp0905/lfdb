@@ -110,7 +110,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
       slot,
       data,
     )?;
-    self.modified.fetch_or(true, Ordering::Relaxed);
+    self.modified.store(true, Ordering::Relaxed);
     Ok(())
   }
 

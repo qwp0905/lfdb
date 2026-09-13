@@ -131,7 +131,7 @@ impl<T> BatchHandle<T> {
 
   pub fn register(&self, handler: BatchTask<T>) -> bool {
     self.queue.push(handler);
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
+    if self.occupied.swap(true, Ordering::Relaxed) {
       return false;
     }
     fence(Ordering::Acquire);
@@ -146,11 +146,11 @@ impl<T> BatchHandle<T> {
     // Same lost-wakeup handoff as the IO task publisher: release ownership, check
     // for newly queued work, and either finish or reacquire ownership to keep
     // draining.
-    self.occupied.fetch_and(false, Ordering::Release);
+    self.occupied.store(false, Ordering::Release);
     if self.queue.is_empty() {
       return true;
     }
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
+    if self.occupied.swap(true, Ordering::Relaxed) {
       return true;
     }
     fence(Ordering::Acquire);

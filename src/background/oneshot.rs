@@ -49,7 +49,7 @@ impl<T: ?Sized> Drop for Pair<T> {
   fn drop(&mut self) {
     if !unsafe { self.0.as_ref() }
       .dropped
-      .fetch_or(true, Ordering::Release)
+      .swap(true, Ordering::Release)
     {
       return;
     }

@@ -398,7 +398,7 @@ impl Engine {
 
 impl Drop for Engine {
   fn drop(&mut self) {
-    if self.available.fetch_and(false, Ordering::Relaxed) {
+    if self.available.swap(false, Ordering::Relaxed) {
       info!("engine shutdown");
       if let Err(err) = self.orchestrator.close() {
         error!("error occurs in close engine: {err}");

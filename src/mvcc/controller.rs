@@ -244,7 +244,7 @@ impl SharedSubscription<WALFailed> for VersionController {
    * abortable active state is moved to the aborted set and removed from active.
    */
   fn handle(&self, _: Arc<WALFailed>) {
-    if self.closed.fetch_or(true, Ordering::Relaxed) {
+    if self.closed.swap(true, Ordering::Relaxed) {
       return;
     }
     for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {

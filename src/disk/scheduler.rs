@@ -162,7 +162,7 @@ impl WriteScheduler {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Relaxed);
+        state.closed.store(true, Ordering::Relaxed);
         return buffered
           .into_iter()
           .for_each(|(_, done)| done.fulfill(Ok(())));
@@ -212,7 +212,7 @@ impl SyncScheduler {
         // If truncate/remove owns the handle exclusively, this request no longer has a
         // meaningful file to operate on. Mark the handle closed and complete queued
         // waiters as successful no-ops.
-        state.closed.fetch_or(true, Ordering::Relaxed);
+        state.closed.store(true, Ordering::Relaxed);
         return buffered
           .into_iter()
           .for_each(|(_, done)| done.fulfill(Ok(())));

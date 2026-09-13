@@ -43,7 +43,7 @@ impl<T> BatchExecutor<T> {
     T: Send + 'static,
   {
     self.queue.buffered.push(value);
-    if self.queue.occupied.fetch_or(true, Ordering::Relaxed) {
+    if self.queue.occupied.swap(true, Ordering::Relaxed) {
       return;
     }
 
@@ -74,11 +74,11 @@ impl<T> BatchExecutor<T> {
       unsafe { handler.call(values) };
     }
 
-    queue.occupied.fetch_and(false, Ordering::Release);
+    queue.occupied.store(false, Ordering::Release);
     if queue.buffered.is_empty() {
       return;
     }
-    if queue.occupied.fetch_or(true, Ordering::Relaxed) {
+    if queue.occupied.swap(true, Ordering::Relaxed) {
       return;
     }
 
