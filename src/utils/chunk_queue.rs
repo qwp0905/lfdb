@@ -110,6 +110,11 @@ impl<T> ChunkQueue<T> {
     None
   }
 }
+impl<T> Default for ChunkQueue<T> {
+  fn default() -> Self {
+    Self::new()
+  }
+}
 impl<T> Drop for ChunkQueue<T> {
   fn drop(&mut self) {
     let mut ptr = self.head;
@@ -120,6 +125,24 @@ impl<T> Drop for ChunkQueue<T> {
 }
 unsafe impl<T: Send> Send for ChunkQueue<T> {}
 unsafe impl<T: Sync> Sync for ChunkQueue<T> {}
+
+pub struct IntoIter<T>(ChunkQueue<T>);
+impl<T> Iterator for IntoIter<T> {
+  type Item = T;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.0.pop()
+  }
+}
+impl<T> IntoIterator for ChunkQueue<T> {
+  type Item = T;
+
+  type IntoIter = IntoIter<T>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    IntoIter(self)
+  }
+}
 
 #[cfg(test)]
 #[path = "tests/chunk_queue.rs"]

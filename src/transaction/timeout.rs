@@ -14,6 +14,7 @@ use crate::{
   background::{ThreadSlot, UnwindSpawner},
   debug,
   mvcc::VersionController,
+  utils::ChunkQueue,
   wal::TxId,
   warn,
 };
@@ -65,7 +66,7 @@ impl<T> Task<T> {
   }
 }
 
-type Bucket<T> = Vec<Task<T>>;
+type Bucket<T> = ChunkQueue<Task<T>>;
 
 struct BucketLayer<T> {
   buckets: [Option<Bucket<T>>; LAYER_PER_BUCKET],
@@ -168,10 +169,11 @@ where
 
     for current in replace(&mut self.current, now)..now {
       for (i, layer) in self.layers.iter_mut().enumerate().rev() {
-        match (layer.is_empty(), dropdown.take()) {
-          (true, None) => continue,
-          (_, Some(tasks)) => tasks.into_iter().for_each(|task| layer.insert(task)),
-          _ => {}
+        if let Some(tasks) = dropdown.take() {
+          tasks.into_iter().for_each(|task| layer.insert(task));
+        }
+        if layer.is_empty() {
+          continue;
         }
 
         let index =
@@ -230,25 +232,42 @@ const fn handle_thread(
     });
     let ticker = tick(TICK_SIZE);
 
-    while let Ok(ctx) = receiver.recv() {
-      match ctx {
-        Msg::Register(id, timeout) => wheel.register(id, timeout),
-        Msg::Term => return,
+    let mut available = true;
+    while available {
+      if !wheel.is_empty() {
+        available = select_msg(&ticker, &receiver, &mut wheel);
+        continue;
       }
-      debug!("timeout thread wake up.");
 
-      while !wheel.is_empty() {
-        select! {
-          recv(ticker) -> _ => wheel.tick(),
-          recv(receiver) -> msg => match msg {
-            Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
-            Err(_) | Ok(Msg::Term) => return,
-          }
-        }
-      }
       debug!("timeout thread switches to idle.");
+      let Ok(msg) = receiver.recv() else {
+        return;
+      };
+      available = run_msg(msg, &mut wheel);
+      debug!("timeout thread wake up.");
     }
   }
+}
+fn run_msg<F: Fn(TxId)>(msg: Msg, wheel: &mut TimingWheel<TxId, F>) -> bool {
+  match msg {
+    Msg::Register(id, timeout) => wheel.register(id, timeout),
+    Msg::Term => return false,
+  };
+  true
+}
+fn select_msg<F: Fn(TxId)>(
+  ticker: &Receiver<Instant>,
+  receiver: &Receiver<Msg>,
+  wheel: &mut TimingWheel<TxId, F>,
+) -> bool {
+  select! {
+    recv(ticker) -> _ => wheel.tick(),
+    recv(receiver) -> msg => match msg {
+      Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
+      Err(_) | Ok(Msg::Term) => return false,
+    }
+  };
+  true
 }
 
 /**
@@ -279,9 +298,10 @@ impl TimeoutThread {
   }
 
   pub fn close(&self) {
-    if let Some(th) = self.slot.close() {
-      self.channel.send(Msg::Term).unwrap();
-      th.join().unwrap();
-    }
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.channel.send(Msg::Term).unwrap();
+    handle.join().unwrap();
   }
 }
