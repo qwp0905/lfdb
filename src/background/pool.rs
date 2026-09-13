@@ -5,7 +5,7 @@ use std::{
 
 use crossbeam::{
   atomic::AtomicCell,
-  deque::{Injector, Stealer, Worker},
+  deque::{Injector, Steal, Stealer, Worker},
   queue::SegQueue,
   utils::Backoff,
 };
@@ -52,12 +52,9 @@ const fn worker_loop(
 ) -> impl FnOnce() {
   move || {
     let backoff = Backoff::new();
-    let size = core.size() - 1;
-    let mut cycle = core.create_cycle(id);
-
     loop {
       while !backoff.is_completed() {
-        let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
+        let Some(ctx) = core.pop_or_steal(&local, id) else {
           backoff.snooze();
           continue;
         };
@@ -71,7 +68,7 @@ const fn worker_loop(
 
       backoff.reset();
       core.try_enqueue_idle(id);
-      let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
+      let Some(ctx) = core.pop_or_steal(&local, id) else {
         core.try_park(id);
         continue;
       };
@@ -123,16 +120,6 @@ impl<A> Core<A> {
 
     None
   }
-  const fn size(&self) -> usize {
-    self.stealers.len()
-  }
-
-  fn create_cycle(&self, id: ThreadId) -> impl Iterator<Item = &'_ Stealer<A>> {
-    (0..self.size())
-      .filter(move |i| *i != id)
-      .map(|i| &self.stealers[i])
-      .cycle()
-  }
 
   fn drain_task(&self, local: &Worker<A>) {
     while let Some(ctx) = local.pop() {
@@ -159,28 +146,36 @@ impl<A> Core<A> {
     }
   }
 
+  fn steal(&self, id: ThreadId) -> Steal<A> {
+    (0..self.stealers.len())
+      .filter(move |&i| i != id)
+      .map(|i| self.stealers[i].steal())
+      .collect()
+  }
+
   /*
    * Standard work-stealing priority:
    * 1. run local work first,
    * 2. pull a batch from the global injector,
    * 3. steal from other workers as a fallback.
    */
-  fn pop_or_steal<'a>(
-    &self,
-    local: &Worker<A>,
-    mut stealers: impl Iterator<Item = &'a Stealer<A>>,
-  ) -> Option<A>
+  fn pop_or_steal<'a>(&self, local: &Worker<A>, id: ThreadId) -> Option<A>
   where
     A: 'a,
   {
     if let Some(task) = local.pop() {
       return Some(task);
     }
-    if let Some(task) = self.global.steal_batch_and_pop(local).success() {
-      return Some(task);
-    }
 
-    stealers.find_map(|stealer| stealer.steal().success())
+    loop {
+      let steal = self
+        .global
+        .steal_batch_and_pop(local)
+        .or_else(|| self.steal(id));
+      if !steal.is_retry() {
+        return steal.success();
+      }
+    }
   }
 
   fn push_global(&self, value: A) {
