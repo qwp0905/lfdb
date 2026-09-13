@@ -1,98 +1,65 @@
-use std::{thread::Builder, time::Duration};
-
-use super::{
-  oneshot, Close, Dispatch, ExecutableContext, Execute, SingleFn, ThreadSlot,
-  UnwindSpawner,
+use std::{
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+  thread::{park_timeout, Builder},
+  time::Duration,
 };
-use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 
-const fn worker_loop<T, R>(
-  receiver: Receiver<ExecutableContext<T, R>>,
-  mut work: SingleFn<'static, Option<T>, R>,
+use super::{Close, SingleFn, ThreadSlot, UnwindSpawner};
+
+const fn worker_loop(
+  closed: Arc<AtomicBool>,
+  mut work: SingleFn<'static, (), ()>,
   timeout: Duration,
-) -> impl FnOnce()
-where
-  T: Send,
-  R: Send,
-{
+) -> impl FnOnce() {
   move || loop {
-    match receiver.recv_timeout(timeout) {
-      Ok(ExecutableContext::Work(v, done)) => done.fulfill(work.call(Some(v))),
-      Ok(ExecutableContext::Dispatch(v)) => {
-        let _ = work.call(Some(v));
-      }
-      Err(RecvTimeoutError::Timeout) => {
-        let _ = work.call(None);
-      }
-      Ok(ExecutableContext::Term) | Err(RecvTimeoutError::Disconnected) => return,
+    park_timeout(timeout);
+    if closed.load(Ordering::Acquire) {
+      return;
+    }
+    work.call(());
+    if closed.load(Ordering::Acquire) {
+      return;
     }
   }
 }
 
 /**
  * Single-worker runtime with idle-time ticks.
- *
- * Explicit submissions are delivered to the handler as `Some(T)`. If no
- * submission arrives before the timeout, the handler is called with `None`,
- * which represents an idle tick.
- *
- * The timeout is not a precise periodic schedule. A tick means "no message has
- * arrived for at least this duration", so continuous explicit work can delay
- * ticks. This makes the runtime suitable for maintenance work that should run
- * during idle gaps.
- *
- * This is a single-threaded runtime: it uses `SingleFn`, so explicit work and
- * idle ticks are serialized through one worker thread.
  */
-pub struct IntervalWorkThread<T, R = ()> {
-  channel: Sender<ExecutableContext<T, R>>,
+pub struct IntervalWorkThread {
+  closed: Arc<AtomicBool>,
   slot: ThreadSlot,
 }
-impl<T, R> IntervalWorkThread<T, R> {
+impl IntervalWorkThread {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
     timeout: Duration,
-    work: SingleFn<'static, Option<T>, R>,
-  ) -> Self
-  where
-    T: Send + 'static,
-    R: Send + 'static,
-  {
-    let (channel, receiver) = unbounded();
+    work: SingleFn<'static, (), ()>,
+  ) -> Self {
+    let closed = Arc::new(AtomicBool::new(false));
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn_unwind(worker_loop(receiver, work, timeout));
+      .spawn_unwind(worker_loop(closed.clone(), work, timeout));
     Self {
-      channel,
+      closed,
       slot: ThreadSlot::new(handle),
     }
   }
-
-  fn register(&self, ctx: ExecutableContext<T, R>) {
-    self.channel.send(ctx).unwrap()
-  }
 }
 
-impl<T: Send, R: Send> Close for IntervalWorkThread<T, R> {
+impl Close for IntervalWorkThread {
   fn close(&self) {
-    if let Some(v) = self.slot.close() {
-      self.channel.send(ExecutableContext::Term).unwrap();
-      v.join().unwrap();
-    }
-  }
-}
-impl<T: Send, R: Send> Dispatch<T> for IntervalWorkThread<T, R> {
-  fn dispatch(&self, value: T) {
-    self.register(ExecutableContext::Dispatch(value));
-  }
-}
-impl<T: Send, R: Send> Execute<T, R> for IntervalWorkThread<T, R> {
-  fn execute(&self, value: T) -> super::Oneshot<R> {
-    let (o, f) = oneshot();
-    self.register(ExecutableContext::Work(value, f));
-    o
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.closed.store(true, Ordering::Release);
+    handle.thread().unpark();
+    handle.join().unwrap();
   }
 }
 
