@@ -7,8 +7,9 @@ use crossbeam::{
   atomic::AtomicCell,
   deque::{Injector, Stealer, Worker},
   queue::SegQueue,
-  utils::Backoff,
 };
+
+use crate::utils::SpinBackoff;
 
 use super::{
   into_task, Close, PendingTask, SharedFn, TaskRef, ThreadSlot, UnwindSpawner,
@@ -45,28 +46,34 @@ enum State {
   Parked,
 }
 
+fn run_task(ctx: Context) -> bool {
+  match ctx {
+    Context::Task(task_ref) => task_ref.run(),
+    Context::Term => return false,
+  };
+  true
+}
+
 const fn worker_loop(
   local: Worker<Context>,
   core: Arc<Core<Context>>,
   id: ThreadId,
 ) -> impl FnOnce() {
   move || {
-    let backoff = Backoff::new();
+    let backoff = SpinBackoff::new();
     let size = core.size() - 1;
     let mut cycle = core.create_cycle(id);
 
-    loop {
-      while !backoff.is_completed() {
+    let mut available = true;
+    while available {
+      if !backoff.is_completed() {
         let Some(ctx) = core.pop_or_steal(&local, (&mut cycle).take(size)) else {
-          backoff.snooze();
+          backoff.spin();
           continue;
         };
-
-        match ctx {
-          Context::Task(task_ref) => task_ref.run(),
-          Context::Term => return core.drain_task(&local),
-        }
+        available = run_task(ctx);
         backoff.reset();
+        continue;
       }
 
       backoff.reset();
@@ -75,13 +82,10 @@ const fn worker_loop(
         core.try_park(id);
         continue;
       };
-
       // enqueued but tasks are left. state will be changed by producer.
-      match ctx {
-        Context::Task(task_ref) => task_ref.run(),
-        Context::Term => return core.drain_task(&local),
-      }
+      available = run_task(ctx);
     }
+    core.drain_task(&local);
   }
 }
 
@@ -130,8 +134,8 @@ impl<A> Core<A> {
   fn create_cycle(&self, id: ThreadId) -> impl Iterator<Item = &'_ Stealer<A>> {
     (0..self.size())
       .filter(move |i| *i != id)
-      .map(|i| &self.stealers[i])
       .cycle()
+      .map(|i| &self.stealers[i])
   }
 
   fn drain_task(&self, local: &Worker<A>) {
@@ -299,9 +303,7 @@ impl Close for ThreadPool {
     }
 
     while let Some(ctx) = self.core.pop_global() {
-      if let Context::Task(task) = ctx {
-        task.run();
-      }
+      run_task(ctx);
     }
   }
 }

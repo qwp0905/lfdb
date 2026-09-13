@@ -6,7 +6,7 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::queue::SegQueue;
 
 use super::{ThreadSlot, UnwindSpawner};
 
@@ -300,34 +300,25 @@ enum EventMsg {
 const fn handle_thread(queue: Arc<SegQueue<EventMsg>>) -> impl FnOnce() {
   move || {
     let mut router = EventRouter::new();
-    let backoff = Backoff::new();
-
     loop {
-      while !backoff.is_completed() {
-        let Some(msg) = queue.pop() else {
-          backoff.snooze();
-          continue;
-        };
-
-        match msg {
-          EventMsg::Publish(event) => router.route(event),
-          EventMsg::SubOwned(id, handler) => {
-            if !router.register_owned(id, handler) {
-              panic!("error to register {:?} as owned event subscriber", id);
-            };
-          }
-          EventMsg::SubShared(id, handler) => {
-            if !router.register_shared(id, handler) {
-              panic!("error to register {:?} as owned event subscriber", id);
-            };
-          }
-          EventMsg::Terminate => return,
+      let Some(msg) = queue.pop() else {
+        park();
+        continue;
+      };
+      match msg {
+        EventMsg::Publish(event) => router.route(event),
+        EventMsg::SubOwned(id, handler) => {
+          if !router.register_owned(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
         }
-        backoff.reset();
+        EventMsg::SubShared(id, handler) => {
+          if !router.register_shared(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
+        }
+        EventMsg::Terminate => return,
       }
-
-      park();
-      backoff.reset();
     }
   }
 }
@@ -404,11 +395,12 @@ impl EventBus {
   }
 
   pub fn close(&self) {
-    if let Some(handle) = self.slot.close() {
-      self.queue.push(EventMsg::Terminate);
-      self.waker.unpark();
-      handle.join().unwrap();
-    }
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.queue.push(EventMsg::Terminate);
+    self.waker.unpark();
+    handle.join().unwrap();
   }
 }
 

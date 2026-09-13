@@ -32,3 +32,6 @@ pub use semaphore::*;
 
 mod lifetime;
 pub use lifetime::*;
+
+mod spin;
+pub use spin::*;

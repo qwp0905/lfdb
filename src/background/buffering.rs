@@ -8,7 +8,7 @@ use super::{
   ThreadSlot, UnwindSpawner,
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::queue::SegQueue;
 
 type Buffered<T, R> = Vec<(T, Option<OneshotFulfill<R>>)>;
 
@@ -41,6 +41,18 @@ where
   }
 }
 
+fn run_task<T, R>(
+  ctx: ExecutableContext<T, R>,
+  buffered: &mut Vec<(T, Option<OneshotFulfill<R>>)>,
+) -> bool {
+  match ctx {
+    ExecutableContext::Work(v, done) => buffered.push((v, Some(done))),
+    ExecutableContext::Dispatch(v) => buffered.push((v, None)),
+    ExecutableContext::Term => return false,
+  };
+  true
+}
+
 const fn worker_loop<T, R>(
   queue: Arc<SegQueue<ExecutableContext<T, R>>>,
   count: usize,
@@ -51,33 +63,25 @@ where
   R: Send + Clone,
 {
   move || {
-    let backoff = Backoff::new();
     let mut buffered = Vec::with_capacity(count);
     let mut flush = make_flush(when_buffered);
 
-    loop {
-      while !backoff.is_completed() {
-        for ctx in (0..count).map_while(|_| queue.pop()) {
-          match ctx {
-            ExecutableContext::Work(v, done) => buffered.push((v, Some(done))),
-            ExecutableContext::Dispatch(v) => buffered.push((v, None)),
-            ExecutableContext::Term => {
-              flush(&mut buffered);
-              return;
-            }
-          }
-        }
-
-        if flush(&mut buffered) {
-          backoff.reset();
-          continue;
-        };
-        backoff.snooze();
+    let mut available = true;
+    while available {
+      if buffered.len() >= count {
+        flush(&mut buffered);
+        continue;
       }
-
+      if let Some(ctx) = queue.pop() {
+        available = run_task(ctx, &mut buffered);
+        continue;
+      }
+      if flush(&mut buffered) {
+        continue;
+      }
       park();
-      backoff.reset();
     }
+    flush(&mut buffered);
   }
 }
 
@@ -125,11 +129,12 @@ impl<T, R> BufferingThread<T, R> {
 }
 impl<T: Send, R: Send> Close for BufferingThread<T, R> {
   fn close(&self) {
-    if let Some(th) = self.slot.close() {
-      self.queue.push(ExecutableContext::Term);
-      self.waker.unpark();
-      th.join().unwrap();
-    }
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.queue.push(ExecutableContext::Term);
+    self.waker.unpark();
+    handle.join().unwrap();
   }
 }
 impl<T: Send, R: Send> Dispatch<T> for BufferingThread<T, R> {
@@ -147,4 +152,4 @@ impl<T: Send, R: Send> Execute<T, R> for BufferingThread<T, R> {
 
 #[cfg(test)]
 #[path = "tests/buffering.rs"]
-mod buffering;
+mod tests;
