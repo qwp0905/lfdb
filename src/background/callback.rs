@@ -57,7 +57,7 @@ impl Callback {
     payload.function.into_inner().unwrap()
   }
 
-  unsafe fn from_raw(raw: *mut ()) -> Self {
+  const unsafe fn from_raw(raw: *mut ()) -> Self {
     Self(unsafe { VPtr::from_raw(raw) })
   }
 

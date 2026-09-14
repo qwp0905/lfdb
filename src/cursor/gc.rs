@@ -40,7 +40,7 @@ const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct GarbageCollector {
   release_queue: Arc<SegQueue<DropTableCommitted>>,
-  main: Box<IntervalWorkThread<()>>,
+  main: Box<IntervalWorkThread>,
 }
 impl GarbageCollector {
   pub fn new(
@@ -617,11 +617,11 @@ fn gc_main_loop(
   event_bus: Arc<EventBus>,
   release_queue: Arc<SegQueue<DropTableCommitted>>,
   config: GarbageCollectionConfig,
-) -> impl FnMut(Option<()>) {
+) -> impl FnMut() {
   let mut cycle = None;
   let mut steps = TableSteps::new();
 
-  move |_| {
+  move || {
     worker
       .run_tick(&mut cycle, &event_bus, config.clone())
       .and_then(|_| worker.release_tables(&release_queue, &mut steps))

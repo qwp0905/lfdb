@@ -46,17 +46,15 @@ pub struct SingleThreadBuilder {
   builder: ThreadBuilder,
 }
 impl SingleThreadBuilder {
-  pub fn interval<T, R, F>(self, timeout: Duration, f: F) -> IntervalWorkThread<T, R>
+  pub fn interval<F>(self, timeout: Duration, mut f: F) -> IntervalWorkThread
   where
-    T: Send + 'static,
-    R: Send + 'static,
-    F: FnMut(Option<T>) -> R + Send + Sync + 'static,
+    F: FnMut() + Send + Sync + 'static,
   {
     IntervalWorkThread::new(
       self.builder.name,
       self.builder.stack_size,
       timeout,
-      SingleFn::new(f),
+      SingleFn::new(move |_| f()),
     )
   }
 
