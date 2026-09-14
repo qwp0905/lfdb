@@ -92,7 +92,7 @@ impl CheckpointCycle {
 
 pub struct Checkpoint {
   incoming: Arc<SegQueue<WALSegmentRotated>>,
-  ticker: Box<IntervalWorkThread<()>>,
+  ticker: Box<IntervalWorkThread>,
   /**
    * Shared storage for the active checkpoint cycle.
    *
@@ -397,7 +397,7 @@ fn checkpoint_loop(
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
-) -> impl FnMut(Option<()>) {
+) -> impl FnMut() {
   let mut calculated = [0f64; 20];
   calculated[0] = BATCH_SIZE;
   for i in 1..calculated.len() {
@@ -413,7 +413,7 @@ fn checkpoint_loop(
     (flush_factor.powi((pressure - last) as i32) * calculated[last]) as usize
   };
 
-  move |_| {
+  move || {
     worker
       .run_tick(&incoming, &event_bus, &cycle, &metrics, &calc_batch_size)
       .unwrap()

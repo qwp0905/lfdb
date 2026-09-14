@@ -658,7 +658,7 @@ pub struct Compactor {
   incoming: Arc<SegQueue<CompactTask>>,
   in_progress: Arc<SegQueue<CompactionCycle>>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<IntervalWorkThread<()>>,
+  ticker: Box<IntervalWorkThread>,
   worker: Arc<CompactionWorker>,
 }
 impl Compactor {
@@ -819,14 +819,14 @@ fn compaction_loop(
   worker: Arc<CompactionWorker>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
-) -> impl FnMut(Option<()>) {
+) -> impl FnMut() {
   // Wait until the compaction metadata publication is globally visible.
   // `waiting_publish` holds compactions whose metadata update has committed, but
   // may still be invisible to transactions that were already active. Once the
   // commit version is below the global minimum visible version, future access can
   // observe the old/new table-segment pair from metadata.
   let mut waiting_publish = LinkedList::new();
-  move |_| {
+  move || {
     worker
       .run_tick(
         &incoming,
