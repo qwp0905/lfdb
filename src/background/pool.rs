@@ -1,4 +1,5 @@
 use std::{
+  iter::repeat_with,
   sync::Arc,
   thread::{park, Builder, Thread},
 };
@@ -146,11 +147,18 @@ impl<A> Core<A> {
     }
   }
 
-  fn steal(&self, id: ThreadId) -> Steal<A> {
+  fn steal_from_other(&self, id: ThreadId) -> Steal<A> {
     (0..self.stealers.len())
       .filter(move |&i| i != id)
       .map(|i| self.stealers[i].steal())
       .collect()
+  }
+
+  fn steal_one(&self, local: &Worker<A>, id: ThreadId) -> Steal<A> {
+    self
+      .global
+      .steal_batch_and_pop(local)
+      .or_else(|| self.steal_from_other(id))
   }
 
   /*
@@ -166,23 +174,18 @@ impl<A> Core<A> {
     if let Some(task) = local.pop() {
       return Some(task);
     }
-
-    loop {
-      let steal = self
-        .global
-        .steal_batch_and_pop(local)
-        .or_else(|| self.steal(id));
-      if !steal.is_retry() {
-        return steal.success();
-      }
-    }
+    repeat_with(|| self.steal_one(local, id))
+      .find(|steal| !steal.is_retry())
+      .and_then(|steal| steal.success())
   }
 
   fn push_global(&self, value: A) {
     self.global.push(value);
   }
   fn pop_global(&self) -> Option<A> {
-    self.global.steal().success()
+    repeat_with(|| self.global.steal())
+      .find(|steal| !steal.is_retry())
+      .and_then(|steal| steal.success())
   }
 }
 

@@ -35,13 +35,13 @@ impl<T> Pair<T> {
     (Self(ptr), Self(ptr))
   }
 
-  pub fn into_raw(this: Self) -> *mut T {
+  pub const fn into_raw(this: Self) -> *mut T {
     let ptr = unsafe { &raw mut (*this.0.as_ptr()).value };
     forget(this);
     ptr
   }
 
-  pub unsafe fn from_raw(ptr: *mut T) -> Self {
+  pub const unsafe fn from_raw(ptr: *mut T) -> Self {
     let offset = std::mem::offset_of!(PairInner<T>, value);
     let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
     Self(NonNull::new_unchecked(ptr))
@@ -115,7 +115,7 @@ impl WakerRef {
     }
   }
 
-  fn set_moved(&mut self) {
+  const fn set_moved(&mut self) {
     self.moved = true;
   }
   const fn as_ptr(&self) -> *mut ThreadWaker {
@@ -223,7 +223,7 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
-  pub fn try_wait(&self) -> std::result::Result<T, TryWaitError<()>> {
+  fn try_wait(&self) -> std::result::Result<T, TryWaitError<()>> {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -326,28 +326,13 @@ impl<T> OneshotBehavior<T> {
  * Minimal single-use completion primitive for background work.
  *
  * This is not intended to be a general-purpose channel. It exists so
- * `BackgroundThread::execute` can return a cheap handle for receiving exactly
+ * `Execute::execute` can return a cheap handle for receiving exactly
  * one result from a worker. The implementation uses a dedicated heap-allocated
  * pair shared by the waiter and fulfiller to keep the synchronization surface
  * small and predictable.
  */
 pub struct Oneshot<T>(Pair<OneshotBehavior<T>>);
 impl<T> Oneshot<T> {
-  /**
-   * Try to consume the result without blocking.
-   *
-   * `try_wait` takes ownership of the receiver because the oneshot has no valid
-   * use after a successful wait or a disconnect. If the value is not ready yet,
-   * the receiver is returned in `TryWaitError::Empty` so the caller can try again
-   * or fall back to blocking `wait`.
-   */
-  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<Self>> {
-    match self.0.try_wait() {
-      Ok(v) => Ok(v),
-      Err(TryWaitError::Empty(_)) => Err(TryWaitError::Empty(self)),
-      Err(TryWaitError::Disconnected) => Err(TryWaitError::Disconnected),
-    }
-  }
   pub fn wait(self) -> Result<T, WaitDisconnectedError> {
     self.0.wait()
   }

@@ -45,7 +45,7 @@ impl<T> SBox<T> {
     SBox::new(MaybeUninit::uninit())
   }
 
-  pub unsafe fn from_raw(raw: *mut T) -> Self {
+  pub const unsafe fn from_raw(raw: *mut T) -> Self {
     let offset = offset_of!(Inner<T>, data);
     let ptr = (raw as *mut u8).sub(offset) as *mut Inner<T>;
     Self::from_inner_ptr(ptr)
@@ -67,7 +67,7 @@ impl<T: ?Sized> SBox<T> {
     }
   }
 
-  pub fn into_raw(this: SBox<T>) -> *mut T {
+  pub const fn into_raw(this: SBox<T>) -> *mut T {
     let ptr = unsafe { &raw mut (*this.inner.as_ptr()).data };
     std::mem::forget(this);
     ptr

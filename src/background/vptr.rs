@@ -72,12 +72,12 @@ impl<VTable> VPtr<VTable> {
     unsafe { Box::from_raw(ptr).payload }
   }
 
-  pub fn into_raw(this: Self) -> *mut () {
+  pub const fn into_raw(this: Self) -> *mut () {
     let ptr = this.0.as_ptr();
     forget(this);
     ptr.cast()
   }
-  pub unsafe fn from_raw(raw: *mut ()) -> Self {
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
     let ptr = raw as *mut Header<VTable>;
     Self(unsafe { NonNull::new_unchecked(ptr) })
   }
