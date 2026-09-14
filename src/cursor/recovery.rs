@@ -7,6 +7,7 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
   },
+  thread::available_parallelism,
 };
 
 use crossbeam_skiplist::{SkipMap, SkipSet};
@@ -342,9 +343,7 @@ pub fn recovery(
   max_used: HashMap<TableId, Pointer>,
 ) -> Result {
   let open_handles = tables.get_all();
-  let count = std::thread::available_parallelism()
-    .map(|v| v.get())
-    .unwrap_or(1);
+  let count = available_parallelism().map(|v| v.get()).unwrap_or(1);
   let pool = Arc::new(
     ThreadBuilder::new()
       .name("release orphan")
@@ -365,9 +364,7 @@ pub fn recovery(
   }
 
   while let Some(task) = pending.pop() {
-    for p in task.wait().unwrap()?.flatten() {
-      pending.push(p);
-    }
+    pending.extend(task.wait().unwrap()?.flatten());
   }
 
   info!("orphaned block has released successfully.");

@@ -121,6 +121,14 @@ impl<T> Drop for ChunkQueue<T> {
 unsafe impl<T: Send> Send for ChunkQueue<T> {}
 unsafe impl<T: Sync> Sync for ChunkQueue<T> {}
 
+impl<A> Extend<A> for ChunkQueue<A> {
+  fn extend<T: IntoIterator<Item = A>>(&mut self, iter: T) {
+    for v in iter {
+      self.push(v);
+    }
+  }
+}
+
 #[cfg(test)]
 #[path = "tests/chunk_queue.rs"]
 mod tests;
