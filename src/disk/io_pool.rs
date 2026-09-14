@@ -257,7 +257,7 @@ impl IOHandle {
    * accepted as an empty range. Any non-zero short read is still reported as
    * `UnexpectedEof`.
    */
-  pub fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
+  pub unsafe fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
     match self.backend.pread(buf, offset) {
       Ok(0) => Ok(()),
       Ok(n) if n == buf.len() => Ok(()),

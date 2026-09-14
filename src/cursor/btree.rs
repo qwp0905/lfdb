@@ -292,8 +292,8 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
     }
   }
 
-  pub fn recovery_half_split(
-    &mut self,
+  pub unsafe fn recovery_half_split(
+    &self,
     mut split_key: StaticKey,
     mut split_pointer: Pointer,
     level: u16,
