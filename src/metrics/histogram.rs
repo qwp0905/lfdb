@@ -203,7 +203,7 @@ impl HistogramSnapshot {
   }
 }
 
-#[macro_export]
+#[clippy::format_args]
 macro_rules! measure {
   ($metrics:expr, $block:expr $(,)?) => {{
     let start = $metrics.start();
@@ -212,3 +212,4 @@ macro_rules! measure {
     result
   }};
 }
+pub(crate) use measure;

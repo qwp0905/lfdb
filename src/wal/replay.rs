@@ -11,10 +11,10 @@ use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
 use crate::{
   background::{Close, ThreadBuilder},
   blob::BlobMetadata,
-  debug,
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
+  utils::debug,
   Error,
 };
 

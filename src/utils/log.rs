@@ -1,4 +1,4 @@
-#[macro_export]
+#[clippy::format_args]
 macro_rules! trace {
   ($($arg:tt)+) => {
     if ::log::log_enabled!(::log::Level::Trace) {
@@ -6,8 +6,9 @@ macro_rules! trace {
     }
   };
 }
+pub(crate) use trace;
 
-#[macro_export]
+#[clippy::format_args]
 macro_rules! debug {
   ($($arg:tt)+) => {
     if ::log::log_enabled!(::log::Level::Debug) {
@@ -15,8 +16,9 @@ macro_rules! debug {
     }
   };
 }
+pub(crate) use debug;
 
-#[macro_export]
+#[clippy::format_args]
 macro_rules! info {
   ($($arg:tt)+) => {
     if ::log::log_enabled!(::log::Level::Info) {
@@ -24,17 +26,19 @@ macro_rules! info {
     }
   };
 }
+pub(crate) use info;
 
-#[macro_export]
-macro_rules! warn {
+#[clippy::format_args]
+macro_rules! warn_ {
   ($($arg:tt)+) => {
     if ::log::log_enabled!(::log::Level::Warn) {
       ::log::warn!($($arg)+);
     }
   };
 }
+pub(crate) use warn_ as warn;
 
-#[macro_export]
+#[clippy::format_args]
 macro_rules! error {
   ($($arg:tt)+) => {
     if ::log::log_enabled!(::log::Level::Error) {
@@ -42,3 +46,4 @@ macro_rules! error {
     }
   };
 }
+pub(crate) use error;
