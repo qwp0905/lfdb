@@ -19,7 +19,7 @@ use crate::{
   error,
   utils::{OffsetBitmap, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
-  warn, Result,
+  warn,
 };
 
 fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
@@ -131,7 +131,7 @@ impl VersionController {
     active_versions: Vec<TxId>,
     aborted_versions: Vec<TxId>,
     event_bus: &EventBus,
-  ) -> Result<Arc<Self>> {
+  ) -> Arc<Self> {
     let this = Arc::new(Self {
       aborted: active_versions
         .into_iter()
@@ -144,7 +144,7 @@ impl VersionController {
       closed: AtomicBool::new(false),
     });
     event_bus.register(&this);
-    Ok(this)
+    this
   }
   pub fn init(event_bus: &EventBus) -> Arc<Self> {
     let this = Arc::new(Self {
