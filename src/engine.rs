@@ -219,8 +219,7 @@ impl Engine {
         .entry(meta_table_id)
         .and_modify(|v| *v = (*v).max(*ptr))
         .or_insert(*ptr);
-      block_cache
-        .read_unchecked(*ptr, &meta_table)?
+      unsafe { block_cache.read_unchecked(*ptr, &meta_table)? }
         .for_write()
         .mutate(|slot| slot.as_mut().writer().write(data))?;
     }
@@ -247,8 +246,7 @@ impl Engine {
         .entry(*table_id)
         .and_modify(|v| *v = (*v).max(*ptr))
         .or_insert(*ptr);
-      block_cache
-        .read_unchecked(*ptr, handle)?
+      unsafe { block_cache.read_unchecked(*ptr, handle)? }
         .for_write()
         .mutate(|slot| slot.as_mut().writer().write(data))?;
     }

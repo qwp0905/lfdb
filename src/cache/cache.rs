@@ -282,7 +282,7 @@ impl BlockCache {
    * reads. Use it only while reconstructing storage state before normal cache
    * invariants are established.
    */
-  pub fn read_unchecked(
+  pub unsafe fn read_unchecked(
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
@@ -298,7 +298,7 @@ impl BlockCache {
 
     let pending = self.core.submit_eviction(&guard);
     let mut new = self.core.acquire_page();
-    handle.disk().read_unchecked(pointer, &mut new)?;
+    unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
     let new_block = CachedBlock::new(pointer, new, handle.clone());
     self.resolve_eviction(pending, guard, new_block)
   }

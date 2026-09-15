@@ -34,11 +34,13 @@ impl<const N: usize> BlockIOHandle<N> {
       .map_err(Error::IO)
   }
 
-  pub fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
-    self
-      .handle
-      .read_unchecked(page.as_mut_slice(), Self::cvt(pointer))
-      .map_err(Error::IO)
+  pub unsafe fn read_unchecked(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
+    unsafe {
+      self
+        .handle
+        .read_unchecked(page.as_mut_slice(), Self::cvt(pointer))
+        .map_err(Error::IO)
+    }
   }
 
   /**
