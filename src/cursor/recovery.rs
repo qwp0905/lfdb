@@ -7,14 +7,13 @@ use std::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
   },
-  thread::available_parallelism,
 };
 
 use crossbeam_skiplist::{SkipMap, SkipSet};
 
 use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
-  background::{Close, OnceThread, PendingTask, ThreadBuilder, ThreadPool},
+  background::{OnceThread, PendingTask, ThreadPool},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   cache::BlockCache,
   debug,
@@ -363,26 +362,20 @@ pub fn recovery(
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
   max_used: HashMap<TableId, Pointer>,
+  pool: Arc<OnceThread<ThreadPool>>,
 ) -> Result {
   let open_handles = tables.get_all();
-  let count = available_parallelism().map(|v| v.get()).unwrap_or(1);
-  let pool = Arc::new(
-    ThreadBuilder::new()
-      .name("release orphan")
-      .multi(count)
-      .into_once(),
-  );
 
   let mut pending = ChunkQueue::new();
   for table in open_handles {
-    let p = pool.spawn(create_tasks(
+    let task = pool.spawn(create_tasks(
       block_cache.clone(),
       recorder.clone(),
       pool.clone(),
       table,
       &max_used,
     ));
-    pending.push(p);
+    pending.push(task);
   }
 
   while let Some(task) = pending.pop() {
