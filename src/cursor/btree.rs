@@ -346,10 +346,47 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
     mut split_pointer: Pointer,
     mut stack: Vec<Pointer>,
     table: &TableHandleRef,
+    height: usize,
   ) -> Result {
+    struct UpdateFailed {
+      root: Pointer,
+      diff: usize,
+      split_key: StaticKey,
+      split_pointer: Pointer,
+    }
+
+    fn update_header<Policy: WritablePolicy + Sync>(
+      policy: &Policy,
+      slot: &mut RefedSlot,
+      table: &TableHandleRef,
+      split_key: StaticKey,
+      split_pointer: Pointer,
+      old_height: usize,
+    ) -> Result<Option<UpdateFailed>> {
+      let mut header: TreeHeader = slot.as_ref().deserialize()?;
+      let current_height = header.get_height() as usize;
+      let root = header.get_root();
+      if old_height != current_height {
+        return Ok(Some(UpdateFailed {
+          root,
+          diff: current_height - old_height,
+          split_key,
+          split_pointer,
+        }));
+      }
+
+      let new_root = InternalNode::initialize(split_key, root, split_pointer);
+      let new_root_ptr = policy.alloc_and_log(&new_root.into_node(), table)?;
+
+      header.set_root(new_root_ptr);
+      header.increase_height();
+      policy.serialize_and_log(slot, &header, table)?;
+      Ok(None)
+    }
+
     // CAS loop: multiple concurrent splits may race to update the root.
+    let mut old_height = height;
     loop {
-      let old_height = stack.len() as u16;
       while let Some(ptr) = stack.pop() {
         match self.apply_split(split_key, split_pointer, ptr, table)? {
           Some((k, p)) => (split_key, split_pointer) = (k, p),
@@ -357,31 +394,22 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
         }
       }
 
-      let Some((mut ptr, diff)) = self
+      let Some(failed) = self
         .0
         .fetch_slot(HEADER_POINTER, table)?
         .for_write()
-        .mutate(|header_slot| {
-        let mut header: TreeHeader = header_slot.as_ref().deserialize()?;
-        let current_height = header.get_height();
-        let ptr = header.get_root();
-        if old_height != current_height {
-          return Ok(Some((ptr, (current_height - old_height) as usize)));
-        }
-
-        let new_root = InternalNode::initialize(split_key.clone(), ptr, split_pointer);
-        let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
-
-        header.set_root(new_root_ptr);
-        header.increase_height();
-        self.0.serialize_and_log(header_slot, &header, table)?;
-        Ok(None)
-      })?
+        .mutate(|slot| {
+          update_header(&self.0, slot, table, split_key, split_pointer, old_height)
+        })?
       else {
         return Ok(());
       };
 
-      while stack.len() < diff {
+      (split_key, split_pointer) = (failed.split_key, failed.split_pointer);
+      old_height += failed.diff;
+
+      let mut ptr = failed.root;
+      while stack.len() < failed.diff {
         let slot = self.0.fetch_slot(ptr, table)?.for_read();
         let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
         match node.find(&split_key)? {
@@ -573,7 +601,7 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
       self.apply_version_snapshot(entry_ptr, record, table)?;
     }
     for (k, p) in splits {
-      self.propagate_split(k, p, stack.clone(), table)?;
+      self.propagate_split(k, p, stack.clone(), table, stack.len())?;
     }
     Ok(())
   }
@@ -770,7 +798,7 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
         match state {
           ApplyState::Ok => {}
           ApplyState::Split(k, p) => {
-            self.propagate_split(k, p, stack.clone(), table)?;
+            self.propagate_split(k, p, stack.clone(), table, stack.len())?;
             result.splitted += 1;
           }
           ApplyState::CopyOld(key, copy_old) => {
@@ -872,7 +900,8 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
         InsertState::Move(p, o) => (ptr, op) = (p, o),
         InsertState::Break => return Ok(WriteResult::new(false)),
         InsertState::Split(k, p) => {
-          self.propagate_split(k.clone(), p, stack, table)?;
+          let height = stack.len();
+          self.propagate_split(k.clone(), p, stack, table, height)?;
           return Ok(WriteResult::new(true));
         }
         InsertState::CopyOld(cmd) => {
@@ -1010,7 +1039,7 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
     drop(guards);
     let splitted_count = splits.len();
     for (k, p) in splits {
-      self.propagate_split(k, p, stack.clone(), table)?;
+      self.propagate_split(k, p, stack.clone(), table, stack.len())?;
     }
     Ok(splitted_count)
   }
