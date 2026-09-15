@@ -1,11 +1,17 @@
 use std::{
   collections::{BTreeMap, BTreeSet},
   path::PathBuf,
+  sync::Arc,
+  thread::available_parallelism,
 };
+
+use crossbeam::channel::{unbounded, Sender};
 
 use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
 use crate::{
+  background::{Close, ThreadBuilder},
   blob::BlobMetadata,
+  debug,
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
   table::TableId,
@@ -60,7 +66,7 @@ impl ReplayResult {
   }
 }
 
-pub fn replay(io_pool: &IOPool, _version: WALFormatVersion) -> Result<ReplayResult> {
+pub fn replay(io_pool: Arc<IOPool>, _version: WALFormatVersion) -> Result<ReplayResult> {
   let mut files = Vec::new();
   for file in io_pool.read_dir()? {
     let filename = PathBuf::from(file.file_name());
@@ -75,6 +81,21 @@ pub fn replay(io_pool: &IOPool, _version: WALFormatVersion) -> Result<ReplayResu
     return Ok(ReplayResult::empty());
   }
 
+  let len = files.len();
+  let count = available_parallelism()
+    .map(|v| v.get())
+    .unwrap_or(1)
+    .min(len);
+
+  debug!("trying to replay {len} segments with {count} threads.");
+
+  let (tx, rx) = unbounded();
+  let thread = ThreadBuilder::new()
+    .name("wal replay scan")
+    .multi(count)
+    .into_once();
+  let forked = thread.fork(files.into_iter(), scan_segment(io_pool, tx));
+
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
   let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
@@ -82,11 +103,79 @@ pub fn replay(io_pool: &IOPool, _version: WALFormatVersion) -> Result<ReplayResu
   let mut closed = BTreeMap::<LogId, TxId>::new();
   let mut blob_handles = BTreeMap::<LogId, BlobMetadata>::new();
   let mut last_snapshot = None;
-
-  let mut segments = Vec::new();
+  let mut segments = Vec::with_capacity(len);
 
   let mut last_checkpoint: Option<LogId> = None;
-  for path in files {
+
+  while let Ok(record) = rx.recv() {
+    tx_id = tx_id.max(record.tx_id + 1);
+
+    if last_checkpoint.is_some_and(|c| c > record.log_id) {
+      continue;
+    }
+    log_id = log_id.max(record.log_id + 1);
+
+    match record.operation {
+      Operation::Insert {
+        table_id,
+        pointer,
+        data,
+        current_version,
+        encoding,
+        original_len,
+      } => {
+        let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
+          return Err(Error::CompressionCrashed(encoding));
+        };
+        redo.insert(record.log_id, (table_id, pointer, decoded));
+        started.insert(record.log_id, record.tx_id);
+        tx_id = tx_id.max(current_version);
+      }
+      Operation::Commit => {
+        closed.insert(record.log_id, record.tx_id);
+      }
+      Operation::Checkpoint {
+        last_log_id,
+        current_version,
+        snapshot,
+      } => {
+        tx_id = tx_id.max(current_version);
+
+        redo = redo.split_off(&last_log_id);
+        started = started.split_off(&last_log_id);
+        closed = closed.split_off(&last_log_id);
+        blob_handles = blob_handles.split_off(&last_log_id);
+
+        last_checkpoint = Some(last_log_id);
+        last_snapshot = Some(snapshot);
+      }
+      Operation::BlobCreated(metadata) => {
+        blob_handles.insert(record.log_id, metadata);
+      }
+    };
+  }
+
+  for segment in forked.join() {
+    segments.push(segment?);
+  }
+
+  Ok(ReplayResult {
+    last_log_id: log_id,
+    last_tx_id: tx_id,
+    started: started.into_values().collect(),
+    closed: closed.into_values().collect(),
+    redo: redo.into_values().collect::<Vec<_>>(),
+    segments,
+    last_snapshot,
+    blob_handles: blob_handles.into_values().collect(),
+  })
+}
+
+const fn scan_segment(
+  io_pool: Arc<IOPool>,
+  channel: Sender<LogRecord>,
+) -> impl Fn(PathBuf) -> Result<ScanIOHandle> {
+  move |path| {
     let mut segment = io_pool.open_scan_io(path)?;
     let len = segment.len();
 
@@ -100,65 +189,8 @@ pub fn replay(io_pool: &IOPool, _version: WALFormatVersion) -> Result<ReplayResu
       let Some(record) = LogRecord::read_from(&buf) else {
         break;
       };
-
-      tx_id = tx_id.max(record.tx_id + 1);
-
-      if last_checkpoint.is_some_and(|c| c > record.log_id) {
-        continue;
-      }
-      log_id = log_id.max(record.log_id + 1);
-
-      match record.operation {
-        Operation::Insert {
-          table_id,
-          pointer,
-          data,
-          current_version,
-          encoding,
-          original_len,
-        } => {
-          let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
-            return Err(Error::CompressionCrashed(encoding));
-          };
-          redo.insert(record.log_id, (table_id, pointer, decoded));
-          started.insert(record.log_id, record.tx_id);
-          tx_id = tx_id.max(current_version);
-        }
-        Operation::Commit => {
-          closed.insert(record.log_id, record.tx_id);
-        }
-        Operation::Checkpoint {
-          last_log_id,
-          current_version,
-          snapshot,
-        } => {
-          tx_id = tx_id.max(current_version);
-
-          redo = redo.split_off(&last_log_id);
-          started = started.split_off(&last_log_id);
-          closed = closed.split_off(&last_log_id);
-          blob_handles = blob_handles.split_off(&last_log_id);
-
-          last_checkpoint = Some(last_log_id);
-          last_snapshot = Some(snapshot);
-        }
-        Operation::BlobCreated(metadata) => {
-          blob_handles.insert(record.log_id, metadata);
-        }
-      };
+      channel.send(record).unwrap();
     }
-
-    segments.push(segment);
+    Ok(segment)
   }
-
-  Ok(ReplayResult {
-    last_log_id: log_id,
-    last_tx_id: tx_id,
-    started: started.into_values().collect(),
-    closed: closed.into_values().collect(),
-    redo: redo.into_values().collect::<Vec<_>>(),
-    segments,
-    last_snapshot,
-    blob_handles: blob_handles.into_values().collect(),
-  })
 }
