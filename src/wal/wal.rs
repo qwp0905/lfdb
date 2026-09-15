@@ -150,7 +150,7 @@ impl WriteAheadLog {
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 
-    let replay_result = replay(&io_pool, replay_version)?;
+    let replay_result = replay(io_pool.clone(), replay_version)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} redo {} segments {} last snapshot {:?}",
