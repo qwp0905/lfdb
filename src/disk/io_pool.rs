@@ -16,9 +16,8 @@ use super::{
 };
 use crate::{
   background::{Close, Oneshot, ThreadBuilder, ThreadPool},
-  error, measure,
-  metrics::MetricsRegistry,
-  utils::{ShortenedMutex, ToArc},
+  metrics::{measure, MetricsRegistry},
+  utils::{error, ShortenedMutex, ToArc},
   Error, Result,
 };
 

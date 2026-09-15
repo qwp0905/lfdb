@@ -8,22 +8,19 @@ use super::{
 };
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
+    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
+    SharedSubscription, ThreadBuilder,
   },
-  binding_events,
   blob::BlobStorage,
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
-  error, info,
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableMapper, TableMetadata, TableName},
-  trace,
   transaction::PageRecorder,
-  utils::{ToArc, ToBox},
+  utils::{error, info, trace, warn, ToArc, ToBox},
   wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
-  warn, Error, Result,
+  Error, Result,
 };
 
 /**

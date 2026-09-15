@@ -1,6 +1,7 @@
 use super::{Error, Result};
 use std::{path::PathBuf, time::Duration};
 
+#[clippy::format_args]
 macro_rules! invalid {
   ($msg:tt) => {
     Err(Error::InvalidConfig($msg))
@@ -23,7 +24,7 @@ pub struct EngineConfig {
   pub transaction_timeout: Duration,
 }
 impl EngineConfig {
-  pub fn validate(&self) -> Result {
+  pub(crate) fn validate(&self) -> Result {
     if self.io_thread_count == 0 {
       return invalid!("io_thread_count must be greater than 0.");
     }

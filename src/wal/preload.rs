@@ -5,13 +5,11 @@ use crossbeam::queue::SegQueue;
 use super::WALSegment;
 use crate::{
   background::{
-    BufferingThread, Close, Dispatch, EventBus, Execute, Fallback, OwnedSubscription,
-    PreloadThread, ThreadBuilder,
+    binding_events, BufferingThread, Close, Dispatch, EventBus, Execute, Fallback,
+    OwnedSubscription, PreloadThread, ThreadBuilder,
   },
-  binding_events,
   disk::{IOPool, Pointer},
-  error,
-  utils::{ToArc, ToBox},
+  utils::{error, ToArc, ToBox},
   Result,
 };
 

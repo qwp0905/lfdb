@@ -11,6 +11,7 @@ mod pin;
 pub use pin::*;
 
 mod log;
+pub(crate) use log::*;
 
 mod atomic;
 pub use atomic::*;

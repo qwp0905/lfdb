@@ -4,7 +4,7 @@ use std::{
   thread::{current, Builder, JoinHandle},
 };
 
-use crate::error;
+use crate::utils::error;
 
 /**
  * Utilities for spawning background threads with fail-fast panic handling.

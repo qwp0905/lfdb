@@ -18,7 +18,6 @@ use crate::{
     CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
   },
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
-  error, info,
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,
@@ -27,7 +26,7 @@ use crate::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
     TransactionConfig, TxOrchestrator,
   },
-  utils::ToArc,
+  utils::{error, info, ToArc},
   wal::{WALConfig, WALFormatVersion, WriteAheadLog},
   Error, Result,
 };

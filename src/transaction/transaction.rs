@@ -25,7 +25,7 @@ pub struct Transaction<'a> {
   compacted_tables: Vec<(TableHandleRef, TableHandleRef, TableMetadata)>,
 }
 impl<'a> Transaction<'a> {
-  pub fn new(
+  pub(crate) fn new(
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
     snapshot: TxSnapshot<'a>,

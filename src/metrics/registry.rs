@@ -5,7 +5,7 @@ use super::{Counter, Gauge, Histogram, TimeHistogram};
 /**
  * A point-in-time snapshot of engine metrics. Obtain via Engine::metrics().
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EngineMetrics {
   /**
    * Milliseconds since the engine started.

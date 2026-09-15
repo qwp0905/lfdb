@@ -8,11 +8,11 @@ use crate::{
   cursor::{Compactor, GarbageCollector, ResolvedConflict},
   disk::{IOPool, Pointer},
   error::Result,
-  info, measure,
-  metrics::MetricsRegistry,
+  metrics::{measure, MetricsRegistry},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
+  utils::info,
   wal::{DurabilityGuard, TxId, WriteAheadLog},
 };
 

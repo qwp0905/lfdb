@@ -1,8 +1,7 @@
 use crate::{
   cache::ShrinkMap,
-  debug,
   disk::{AlignedBuf, IOPool},
-  utils::{uuid_simple, Semaphore, ShortenedRwLock},
+  utils::{debug, uuid_simple, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
   Result,
 };

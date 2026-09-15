@@ -12,10 +12,9 @@ use crossbeam::{
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
-  debug,
   mvcc::VersionController,
+  utils::{debug, warn},
   wal::TxId,
-  warn,
 };
 
 const TICK_SIZE: Duration = Duration::from_millis(1);

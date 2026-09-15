@@ -9,14 +9,12 @@ use crossbeam::{epoch::pin, queue::SegQueue};
 use super::CompactionTriggered;
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
+    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
+    SharedSubscription, ThreadBuilder,
   },
-  binding_events,
   blob::{BlobId, BlobStorage},
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
-  error,
   mvcc::VersionController,
   objects::{
     BTreeNode, BTreeNodeView, DataEntry, DataEntryView, RecordDataView, Serializable,
@@ -24,7 +22,7 @@ use crate::{
   },
   table::{TableHandleRef, TableId, TableMapper},
   transaction::PageRecorder,
-  utils::{ChunkQueue, ToArc, ToBox},
+  utils::{error, ChunkQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX},
   Result,
 };
