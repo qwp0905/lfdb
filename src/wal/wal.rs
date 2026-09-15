@@ -12,7 +12,7 @@ use crossbeam::{
 };
 
 use crate::{
-  background::EventBus,
+  background::{EventBus, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, PagePool, Pointer},
   error, info,
@@ -143,6 +143,7 @@ impl WriteAheadLog {
     config: &WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    init_thread: &ThreadPool,
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
@@ -150,7 +151,7 @@ impl WriteAheadLog {
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 
-    let replay_result = replay(io_pool.clone(), replay_version)?;
+    let replay_result = replay(io_pool.clone(), init_thread, replay_version)?;
 
     info!(
       "wal replay result: last_log_id {} last_tx_id {} redo {} segments {} last snapshot {:?}",
