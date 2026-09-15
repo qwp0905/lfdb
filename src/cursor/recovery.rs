@@ -282,7 +282,7 @@ impl TableRecovery {
     move || this.scan_entry_internal(ptr)
   }
 
-  fn complete_table_internal(&self) -> Result {
+  fn complete_table_internal(&self) -> Result<RecoveryResult> {
     let name = self.table.get_name();
     debug!("table {name} completed to collect orphaned blocks.",);
 
@@ -301,38 +301,60 @@ impl TableRecovery {
       .map(|(p, (k, l))| (p, k, l))
       .collect::<Vec<_>>();
     if half_split.is_empty() {
-      return Ok(());
+      return Ok(RecoveryResult(None));
     }
 
     info!("{} half split detected at table {name}", half_split.len());
 
+    let mut pending = Vec::with_capacity(half_split.len());
+    for (split_ptr, split_key, level) in half_split {
+      let task = self.recovery_split(split_key, split_ptr, level);
+      pending.push(self.pool.spawn(task));
+    }
+    Ok(RecoveryResult(Some(pending)))
+  }
+
+  fn recovery_split(
+    &self,
+    split_key: Option<StaticKey>,
+    split_ptr: Pointer,
+    level: u16,
+  ) -> impl FnOnce() -> Result<RecoveryResult> {
+    let this = self.clone();
+    move || {
+      this
+        .recovery_split_internal(split_key, split_ptr, level)
+        .map(|_| RecoveryResult(None))
+    }
+  }
+
+  fn recovery_split_internal(
+    &self,
+    split_key: Option<StaticKey>,
+    split_ptr: Pointer,
+    level: u16,
+  ) -> Result {
     let index = BTreeIndex::new(RecoveryPolicy {
       block_cache: &self.block_cache,
       recorder: &self.recorder,
     });
 
-    for (split_ptr, split_key, level) in half_split {
-      if self.status.is_child_reachable(&split_ptr) {
-        continue;
-      }
-      if let Some(k) = split_key {
-        unsafe { index.recovery_half_split(k, split_ptr, level, &self.table)? };
-        continue;
-      }
-
-      let slot = self.block_cache.read(split_ptr, &self.table)?.for_read();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-
-      let key = node.top()?.to_vec();
-      unsafe { index.recovery_half_split(key, split_ptr, level, &self.table)? };
+    if let Some(k) = split_key {
+      index.recovery_half_split(k, split_ptr, level, &self.table)?;
+      return Ok(());
     }
 
+    let slot = self.block_cache.read(split_ptr, &self.table)?.for_read();
+    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+
+    let key = node.top()?.to_vec();
+    index.recovery_half_split(key, split_ptr, level, &self.table)?;
     Ok(())
   }
 
   fn complete_table(&self) -> impl FnOnce() -> Result<RecoveryResult> {
     let this = self.clone();
-    move || this.complete_table_internal().map(|_| RecoveryResult(None))
+    move || this.complete_table_internal()
   }
 }
 

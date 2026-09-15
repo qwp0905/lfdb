@@ -292,25 +292,27 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
     }
   }
 
-  pub unsafe fn recovery_half_split(
+  pub fn recovery_half_split(
     &self,
-    mut split_key: StaticKey,
-    mut split_pointer: Pointer,
+    split_key: StaticKey,
+    split_pointer: Pointer,
     level: u16,
     table: &TableHandleRef,
   ) -> Result {
-    let mut header = self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?;
+    let (mut ptr, height) = {
+      let header = self
+        .0
+        .fetch_slot(HEADER_POINTER, table)?
+        .for_read()
+        .as_ref()
+        .deserialize::<TreeHeader>()?;
 
-    let mut ptr = header.get_root();
-    let height = (header.get_height() - level) as usize;
+      (header.get_root(), header.get_height() as usize)
+    };
 
+    let diff = height - level as usize;
     let mut stack = vec![];
-    while stack.len() < height {
+    while stack.len() < diff {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
       let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
       match node.find(&split_key)? {
@@ -319,25 +321,7 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
       }
     }
 
-    while let Some(ptr) = stack.pop() {
-      let Some((k, p)) = self.apply_split(split_key, split_pointer, ptr, table)? else {
-        return Ok(());
-      };
-
-      (split_key, split_pointer) = (k, p);
-    }
-
-    let new_root = InternalNode::initialize(split_key, header.get_root(), split_pointer);
-    let new_root_ptr = self.0.alloc_and_log(&new_root.into_node(), table)?;
-
-    header.set_root(new_root_ptr);
-    header.increase_height();
-    self
-      .0
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_write()
-      .mutate(|slot| self.0.serialize_and_log(slot, &header, table))?;
-    Ok(())
+    self.propagate_split(split_key, split_pointer, stack, table, height)
   }
 
   fn propagate_split(
