@@ -105,12 +105,12 @@ pub fn replay(
   let mut last_snapshot = None;
   let mut segments = Vec::with_capacity(len);
 
-  let mut last_checkpoint: Option<LogId> = None;
+  let mut last_checkpoint: Option<(LogId, LogId)> = None;
 
   while let Ok(record) = rx.recv() {
     tx_id = tx_id.max(record.tx_id + 1);
 
-    if last_checkpoint.is_some_and(|c| c > record.log_id) {
+    if last_checkpoint.is_some_and(|(_, c)| c > record.log_id) {
       continue;
     }
     log_id = log_id.max(record.log_id + 1);
@@ -139,6 +139,9 @@ pub fn replay(
         current_version,
         snapshot,
       } => {
+        if last_checkpoint.is_some_and(|(id, _)| id > record.log_id) {
+          continue;
+        };
         tx_id = tx_id.max(current_version);
 
         redo = redo.split_off(&last_log_id);
@@ -146,7 +149,7 @@ pub fn replay(
         closed = closed.split_off(&last_log_id);
         blob_handles = blob_handles.split_off(&last_log_id);
 
-        last_checkpoint = Some(last_log_id);
+        last_checkpoint = Some((record.log_id, last_log_id));
         last_snapshot = Some(snapshot);
       }
       Operation::BlobCreated(metadata) => {
