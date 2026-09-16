@@ -5,12 +5,13 @@ use std::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
+  thread::available_parallelism,
   time::{Duration, Instant},
 };
 
 use super::EngineConfig;
 use crate::{
-  background::EventBus,
+  background::{Close, EventBus, ThreadBuilder},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   cursor::{
@@ -21,7 +22,7 @@ use crate::{
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,
-  table::{TableFormatVersion, TableId, TableMapper},
+  table::{TableFormatVersion, TableHandleRef, TableId, TableMapper},
   transaction::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
     TransactionConfig, TxOrchestrator,
@@ -172,6 +173,13 @@ impl Engine {
       return Err(Error::UnsupportedPageSize);
     }
 
+    let thread_count = available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let init_thread = ThreadBuilder::new()
+      .name("bootstrap")
+      .multi(thread_count)
+      .into_once()
+      .to_arc();
+
     let tables =
       TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
 
@@ -180,6 +188,7 @@ impl Engine {
       &wal_config,
       event_bus.clone(),
       io_pool.clone(),
+      &init_thread,
       manifest.wal_version,
     )?;
     let wal = wal.to_arc();
@@ -203,25 +212,38 @@ impl Engine {
       snapshot.active_versions,
       snapshot.aborted_versions,
       &event_bus,
-    )?;
+    );
 
     let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
     let meta_table_id = meta_table.get_id();
-    for (_, ptr, data) in replay
-      .redo
-      .iter()
-      .filter(|(table_id, _, _)| *table_id == meta_table_id)
+
+    let mut stream = {
+      let block_cache = block_cache.clone();
+      init_thread.stream(
+        move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
+          unsafe { block_cache.read_unchecked(ptr, &table)? }
+            .for_write()
+            .mutate(|slot| slot.as_mut().writer().write(&data))
+        },
+      )
+    };
+
+    let mut redo = HashMap::<(TableId, Pointer), Vec<u8>>::new();
+    for (table_id, ptr, data) in replay.redo {
+      redo.insert((table_id, ptr), data);
+    }
+
+    for ((_, ptr), data) in redo.extract_if(|(table_id, _), _| *table_id == meta_table_id)
     {
       max_used
         .entry(meta_table_id)
-        .and_modify(|v| *v = (*v).max(*ptr))
-        .or_insert(*ptr);
-      unsafe { block_cache.read_unchecked(*ptr, &meta_table)? }
-        .for_write()
-        .mutate(|slot| slot.as_mut().writer().write(data))?;
+        .and_modify(|v| *v = (*v).max(ptr))
+        .or_insert(ptr);
+      stream.push((ptr, data, meta_table.clone()));
     }
+    stream.drain_all().collect::<Result>()?;
 
     let mut handles = HashMap::new();
     let found_handles = open_tables(&block_cache, &tables, &version_controller, &blob)?;
@@ -233,22 +255,17 @@ impl Engine {
       handles.insert(c_table.get_id(), (c_meta.clone(), c_table.clone()));
     }
 
-    for (table_id, ptr, data) in replay
-      .redo
-      .iter()
-      .filter(|(table_id, _, _)| *table_id != meta_table_id)
-    {
-      let Some((_, handle)) = handles.get(table_id) else {
+    for ((table_id, ptr), data) in redo {
+      let Some((_, handle)) = handles.get(&table_id) else {
         continue;
       };
       max_used
-        .entry(*table_id)
-        .and_modify(|v| *v = (*v).max(*ptr))
-        .or_insert(*ptr);
-      unsafe { block_cache.read_unchecked(*ptr, handle)? }
-        .for_write()
-        .mutate(|slot| slot.as_mut().writer().write(data))?;
+        .entry(table_id)
+        .and_modify(|v| *v = (*v).max(ptr))
+        .or_insert(ptr);
+      stream.push((ptr, data, handle.clone()));
     }
+    stream.join().collect::<Result>()?;
 
     let checkpoint = Checkpoint::initial_checkpoint(
       wal.clone(),
@@ -278,7 +295,13 @@ impl Engine {
     manifest.wal_version = WALFormatVersion::CURRENT;
     save_manifest(&io_pool, &manifest)?;
 
-    recovery(block_cache.clone(), recorder.clone(), &tables, max_used)?;
+    recovery(
+      block_cache.clone(),
+      recorder.clone(),
+      &tables,
+      max_used,
+      init_thread.clone(),
+    )?;
 
     let gc = GarbageCollector::new(
       block_cache.clone(),

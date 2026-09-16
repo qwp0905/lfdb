@@ -191,7 +191,7 @@ impl<A> Core<A> {
 
 pub struct ThreadPool {
   core: Arc<Core<Context>>,
-  wakers: Box<[Thread]>,
+  wakers: Arc<[Thread]>,
   threads: Box<[ThreadSlot]>,
 }
 impl ThreadPool {
@@ -213,9 +213,22 @@ impl ThreadPool {
 
     Self {
       core,
-      wakers: wakers.into_boxed_slice(),
+      wakers: Arc::from(wakers.into_boxed_slice()),
       threads: threads.into_boxed_slice(),
     }
+  }
+
+  fn spawn_internal<F, T>(core: &Core<Context>, wakers: &[Thread], f: F) -> PendingTask<T>
+  where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+  {
+    let (task, pending) = into_task(f);
+    core.push_global(Context::Task(task));
+    if let Some(id) = core.wake_one() {
+      wakers[id].unpark();
+    };
+    pending
   }
 
   pub fn spawn<F, T>(&self, f: F) -> PendingTask<T>
@@ -223,9 +236,7 @@ impl ThreadPool {
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
-    let (task, pending) = into_task(f);
-    self.register_task(task);
-    pending
+    Self::spawn_internal(&self.core, &self.wakers, f)
   }
 
   pub fn fork<T, R, F, I>(&self, input: I, handler: F) -> ForkJoin<R>
@@ -252,23 +263,22 @@ impl ThreadPool {
     ForkJoin::new(pending)
   }
 
-  fn typed_executor<T, R, F>(self: &Arc<Self>, handler: F) -> TypedExecutor<T, R>
+  fn typed_executor<T, R, F>(&self, handler: F) -> TypedExecutor<T, R>
   where
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    TypedExecutor::new(self.clone(), SharedFn::new(handler))
+    TypedExecutor::new(
+      self.core.clone(),
+      self.wakers.clone(),
+      SharedFn::new(handler),
+    )
   }
 
-  pub fn stream<T, R, F>(self: &Arc<Self>, handler: F) -> ForkStream<T, R>
+  pub fn stream<T, R, F>(&self, handler: F) -> ForkStream<T, R>
   where
     F: Fn(T) -> R + Send + Sync + 'static,
   {
     ForkStream::new(self.typed_executor(handler))
-  }
-
-  fn register_task(&self, task: TaskRef) {
-    self.core.push_global(Context::Task(task));
-    self.wake_one();
   }
 
   fn wake_one(&self) {
@@ -291,9 +301,9 @@ impl Close for ThreadPool {
     for _ in 0..threads.len() {
       self.core.push_global(Context::Term);
     }
-    for th in threads {
-      th.thread().unpark();
-      th.join().unwrap();
+    for handle in threads {
+      handle.thread().unpark();
+      handle.join().unwrap();
     }
 
     while let Some(ctx) = self.core.pop_global() {
@@ -305,12 +315,21 @@ impl Close for ThreadPool {
 }
 
 struct TypedExecutor<T, R> {
-  pool: Arc<ThreadPool>,
+  core: Arc<Core<Context>>,
+  wakers: Arc<[Thread]>,
   handler: SharedFn<'static, T, R>,
 }
 impl<T, R> TypedExecutor<T, R> {
-  const fn new(pool: Arc<ThreadPool>, handler: SharedFn<'static, T, R>) -> Self {
-    Self { pool, handler }
+  const fn new(
+    core: Arc<Core<Context>>,
+    wakers: Arc<[Thread]>,
+    handler: SharedFn<'static, T, R>,
+  ) -> Self {
+    Self {
+      core,
+      wakers,
+      handler,
+    }
   }
   fn execute(&self, input: T) -> PendingTask<R>
   where
@@ -318,7 +337,7 @@ impl<T, R> TypedExecutor<T, R> {
     R: Send + 'static,
   {
     let handler = self.handler.clone();
-    self.pool.spawn(move || handler.call(input))
+    ThreadPool::spawn_internal(&self.core, &self.wakers, move || handler.call(input))
   }
 }
 
@@ -346,6 +365,10 @@ impl<T, R> ForkStream<T, R> {
   pub fn join(self) -> impl Iterator<Item = R> {
     self.inner.join()
   }
+
+  pub fn drain_all(&mut self) -> impl Iterator<Item = R> + '_ {
+    self.inner.drain()
+  }
 }
 
 pub struct ForkJoin<T> {
@@ -361,10 +384,11 @@ impl<T> ForkJoin<T> {
   }
 
   pub fn join(self) -> impl Iterator<Item = T> {
-    self
-      .pending
-      .into_iter()
-      .map(move |recv| recv.wait().unwrap())
+    self.pending.into_iter().map(|recv| recv.wait().unwrap())
+  }
+
+  fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+    self.pending.drain(..).map(|recv| recv.wait().unwrap())
   }
 }
 

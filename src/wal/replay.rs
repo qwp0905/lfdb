@@ -9,7 +9,7 @@ use crossbeam::channel::{unbounded, Sender};
 
 use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
 use crate::{
-  background::{Close, ThreadBuilder},
+  background::ThreadPool,
   blob::BlobMetadata,
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
@@ -66,7 +66,11 @@ impl ReplayResult {
   }
 }
 
-pub fn replay(io_pool: Arc<IOPool>, _version: WALFormatVersion) -> Result<ReplayResult> {
+pub fn replay(
+  io_pool: Arc<IOPool>,
+  init_thread: &ThreadPool,
+  _version: WALFormatVersion,
+) -> Result<ReplayResult> {
   let mut files = Vec::new();
   for file in io_pool.read_dir()? {
     let filename = PathBuf::from(file.file_name());
@@ -90,11 +94,7 @@ pub fn replay(io_pool: Arc<IOPool>, _version: WALFormatVersion) -> Result<Replay
   debug!("trying to replay {len} segments with {count} threads.");
 
   let (tx, rx) = unbounded();
-  let thread = ThreadBuilder::new()
-    .name("wal replay scan")
-    .multi(count)
-    .into_once();
-  let forked = thread.fork(files.into_iter(), scan_segment(io_pool, tx));
+  let forked = init_thread.fork(files.into_iter(), scan_segment(io_pool, tx));
 
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;
