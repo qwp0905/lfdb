@@ -10,19 +10,15 @@ use super::CheckpointSnapshot;
 
 use crate::{
   background::{
-    Close, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
+    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
+    SharedSubscription, ThreadBuilder,
   },
-  binding_events,
   blob::BlobStorage,
   cache::{BlockCache, CacheFlusher},
-  debug,
   disk::{IOPool, PAGE_SIZE},
-  error, info,
   metrics::MetricsRegistry,
   mvcc::VersionController,
-  trace,
-  utils::{uuid_simple, ToArc, ToBox},
+  utils::{debug, error, info, trace, uuid_simple, ToArc, ToBox},
   wal::{
     LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog,
   },

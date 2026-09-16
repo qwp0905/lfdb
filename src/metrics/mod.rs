@@ -1,5 +1,5 @@
 mod histogram;
-use histogram::*;
+pub use histogram::*;
 
 mod counter;
 use counter::*;

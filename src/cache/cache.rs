@@ -11,10 +11,9 @@ use super::{
 use crate::{
   background::{Close, ThreadBuilder, ThreadPool},
   disk::{PagePool, PageRef, Pointer, PAGE_SIZE},
-  error, measure,
-  metrics::MetricsRegistry,
+  metrics::{measure, MetricsRegistry},
   table::TableHandleRef,
-  utils::{ExclusivePin, SharedToken, ToArc},
+  utils::{error, ExclusivePin, SharedToken, ToArc},
   Result,
 };
 

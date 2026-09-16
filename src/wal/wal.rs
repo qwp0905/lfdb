@@ -15,9 +15,8 @@ use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, PagePool, Pointer},
-  error, info,
   table::TableId,
-  utils::SharedToken,
+  utils::{error, info, SharedToken},
   Error, Result,
 };
 

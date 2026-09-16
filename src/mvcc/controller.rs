@@ -12,14 +12,11 @@ use crossbeam_skiplist::SkipSet;
 use super::{ActiveSet, ActiveState};
 
 use crate::{
-  background::{EventBus, SharedSubscription},
-  binding_events,
+  background::{binding_events, EventBus, SharedSubscription},
   cache::ShrinkMap,
   cursor::ResolvedConflict,
-  error,
-  utils::{OffsetBitmap, SBox, ShortenedMutex},
+  utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
-  warn,
 };
 
 fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {

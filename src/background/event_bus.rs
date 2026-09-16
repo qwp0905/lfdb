@@ -250,46 +250,48 @@ pub trait EventBindings {
   type Shared: SharedEventList<Self>;
 }
 
-#[macro_export]
+#[allow(unused)]
 macro_rules! binding_events {
   (@list) => { () };
 
   (@list $head:ty $(, $tail:ty)*) => {
-    ($head, $crate::binding_events!(@list $($tail),*))
+    ($head, $crate::background::binding_events!(@list $($tail),*))
   };
 
   ($subscriber:ty {
     shared: [$($shared:ty),* $(,)?],
     owned: [$($owned:ty),* $(,)?] $(,)?
   }) => {
-    $crate::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
+    $crate::background::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
   };
   ($subscriber:ty {
     owned: [$($owned:ty),* $(,)?],
     shared: [$($shared:ty),* $(,)?] $(,)?
   }) => {
-    $crate::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
+    $crate::background::binding_events!(@impl $subscriber, [$($shared),*], [$($owned),*]);
   };
 
   ($subscriber:ty {
     shared: [$($shared:ty),* $(,)?] $(,)?
   }) => {
-    $crate::binding_events!(@impl $subscriber, [$($shared),*], []);
+    $crate::background::binding_events!(@impl $subscriber, [$($shared),*], []);
   };
 
   ($subscriber:ty {
     owned: [$($owned:ty),* $(,)?] $(,)?
   }) => {
-    $crate::binding_events!(@impl $subscriber, [], [$($owned),*]);
+    $crate::background::binding_events!(@impl $subscriber, [], [$($owned),*]);
   };
 
   (@impl $subscriber:ty, [$($shared:ty),*], [$($owned:ty),*]) => {
     impl $crate::background::EventBindings for $subscriber {
-      type Shared = $crate::binding_events!(@list $($shared),*);
-      type Owned = $crate::binding_events!(@list $($owned),*);
+      type Shared = $crate::background::binding_events!(@list $($shared),*);
+      type Owned = $crate::background::binding_events!(@list $($owned),*);
     }
   };
 }
+pub(crate) use binding_events;
+
 enum EventMsg {
   Publish(OwnedEvent),
   SubShared(TypeId, Box<dyn SharedEventAdapter + Send + Sync>),

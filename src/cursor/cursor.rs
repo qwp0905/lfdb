@@ -13,8 +13,7 @@ use super::{
   MergeSorted, SortDirection, VecRef, WriteOp, WriteResult,
 };
 use crate::{
-  measure,
-  metrics::MetricsRegistry,
+  metrics::{measure, MetricsRegistry},
   objects::{StaticKey, StaticKeyRef, MAX_KEY, MAX_VALUE},
   table::TableHandleRef,
   transaction::TxContext,
@@ -32,7 +31,7 @@ pub struct Cursor<'a> {
   metrics: &'a MetricsRegistry,
 }
 impl<'a> Cursor<'a> {
-  pub fn initialize(
+  pub(crate) fn initialize(
     table: TableHandleRef,
     context: &'a TxContext<'a>,
     metrics: &'a MetricsRegistry,
@@ -43,7 +42,7 @@ impl<'a> Cursor<'a> {
     Ok(cursor)
   }
 
-  pub const fn new(
+  pub(crate) const fn new(
     table: TableHandleRef,
     compaction: Option<TableHandleRef>,
     context: &'a TxContext<'a>,

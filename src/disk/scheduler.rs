@@ -10,8 +10,7 @@ use std::{
 use super::{max_iov, IOBackend};
 use crate::{
   background::{oneshot, BatchExecutor, Oneshot, OneshotFulfill, ThreadPool},
-  measure,
-  metrics::MetricsRegistry,
+  metrics::{measure, MetricsRegistry},
   utils::{ExclusivePin, ExclusiveToken, SharedToken},
 };
 
