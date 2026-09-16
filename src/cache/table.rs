@@ -208,7 +208,7 @@ impl MappingTable {
     loop {
       let mut guard = selected.shard.l();
       debug_assert!(guard.eviction.get(selected.hash, &key).is_none());
-      let Ok(reserved) = guard.node.reserve(hasher, try_evict) else {
+      let Ok(reserved) = guard.node.evict_one(hasher, try_evict) else {
         drop(guard);
         backoff.snooze();
         continue;
@@ -256,7 +256,7 @@ impl MappingTable {
 
       let Ok(result) = guard
         .node
-        .get_or_reserve(&key, selected.hash, hasher, try_evict)
+        .get_or_evict(&key, selected.hash, hasher, try_evict)
       else {
         drop(guard);
         backoff.snooze();
@@ -300,7 +300,7 @@ impl MappingTable {
       // eviction/load work, so keep the old key blocked during the transition.
       guard
         .node
-        .insert_to(&key, selected.hash, bid, &self.hasher, toward);
+        .insert_to(key, selected.hash, bid, &self.hasher, toward);
       guard.eviction.insert_unchecked(
         evicted,
         OnceCell::new(),
@@ -329,7 +329,7 @@ impl MappingTable {
     });
     guard
       .node
-      .insert_to(&key, selected.hash, bid, &self.hasher, toward);
+      .insert_to(key, selected.hash, bid, &self.hasher, toward);
 
     let Some((evicted, evicted_hash)) = evicted else {
       let token = try_evict(&bid).unwrap();
