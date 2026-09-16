@@ -12,11 +12,11 @@ fn never_fail<V>(_: &V) -> Option<()> {
 
 fn insert(node: &mut CacheNode<usize, usize>, hasher: &RandomState, k: usize, v: usize) {
   let h = h(hasher, k);
-  let reserved = node.get_or_reserve(&k, h, hasher, never_fail).unwrap();
+  let reserved = node.get_or_evict(&k, h, hasher, never_fail).unwrap();
   match reserved {
     GetOrEvicted::Hit(_) => panic!("must reserved"),
     GetOrEvicted::Evicted(evicted) => {
-      node.insert_to(&k, h, v, hasher, evicted.toward);
+      node.insert_to(k, h, v, hasher, evicted.toward);
     }
   }
 }
@@ -26,7 +26,7 @@ fn get<'a>(
   k: usize,
 ) -> GetOrEvicted<'a, usize, usize, ()> {
   node
-    .get_or_reserve(&k, h(hasher, k), hasher, never_fail)
+    .get_or_evict(&k, h(hasher, k), hasher, never_fail)
     .unwrap()
 }
 
