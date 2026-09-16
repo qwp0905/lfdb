@@ -1,8 +1,7 @@
 use std::{
-  collections::{vec_deque, VecDeque},
+  collections::VecDeque,
   hash::{BuildHasher, Hash, RandomState},
   mem::replace,
-  ops::RangeBounds,
 };
 
 use hashbrown::{hash_table, Equivalent, HashTable};
@@ -61,10 +60,6 @@ impl<T> ShrinkTable<T> {
     }
     self.0.shrink_to(cap >> 1, hasher);
     Some(v)
-  }
-
-  pub fn drain(&mut self) -> hash_table::Drain<'_, T> {
-    self.0.drain()
   }
 
   fn entry(
@@ -207,6 +202,9 @@ impl<T> ShrinkQueue<T> {
   pub const fn new() -> Self {
     Self(VecDeque::new())
   }
+  pub fn with_capacity(capacity: usize) -> Self {
+    Self(VecDeque::with_capacity(capacity))
+  }
   pub fn push(&mut self, v: T) {
     self.0.push_back(v);
   }
@@ -220,8 +218,5 @@ impl<T> ShrinkQueue<T> {
     }
     self.0.shrink_to(cap >> 1);
     Some(v)
-  }
-  pub fn drain<R: RangeBounds<usize>>(&mut self, range: R) -> vec_deque::Drain<'_, T> {
-    self.0.drain(range)
   }
 }
