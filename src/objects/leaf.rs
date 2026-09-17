@@ -375,12 +375,6 @@ impl<'a> LeafNodeView<'a> {
     };
     Some((*p, self.page.range(range.clone())))
   }
-  pub fn get_next_key(&self) -> Option<StaticKeyRef<'_>> {
-    let Some((_, range)) = &self.next else {
-      return None;
-    };
-    Some(self.page.range(range.clone()))
-  }
 }
 
 pub struct LeafEntryView {
