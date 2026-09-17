@@ -18,3 +18,6 @@ pub use checkpoint::*;
 
 mod snapshot;
 pub use snapshot::*;
+
+mod cursor;
+pub use cursor::*;

@@ -1,9 +1,10 @@
 mod wal;
 
 mod transaction;
-pub use transaction::Transaction;
+pub use transaction::{Bulk, Cursor, CursorIter, Transaction};
 
 mod cache;
+pub use cache::VecRef;
 
 mod background;
 
@@ -12,9 +13,6 @@ pub use engine::*;
 
 mod builder;
 pub use builder::*;
-
-mod cursor;
-pub use cursor::{Bulk, Cursor, CursorIter, VecRef};
 
 mod error;
 pub use error::*;
@@ -39,3 +37,7 @@ mod blob;
 mod manifest;
 
 mod mvcc;
+
+mod btree;
+
+mod maintenance;

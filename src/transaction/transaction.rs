@@ -1,14 +1,15 @@
 use std::time::Instant;
 
-use super::{TxContext, TxOrchestrator};
 use crate::{
   background::EventBus,
-  cursor::{CompactionCommitted, Cursor, DropTableCommitted},
+  maintenance::{CompactionCommitted, DropTableCommitted},
   metrics::MetricsRegistry,
   mvcc::{TxSnapshot, TxState},
   table::{TableHandleRef, TableMetadata, TableName},
   Error, Result,
 };
+
+use super::{Cursor, TxContext, TxOrchestrator};
 
 /**
  * A handle for a single transaction, providing table operations.
