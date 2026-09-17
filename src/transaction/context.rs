@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
+  btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
   cache::RefedSlot,
-  cursor::{CreatablePolicy, ReadonlyPolicy, WritablePolicy},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState},
   objects::Serializable,
@@ -132,7 +132,7 @@ impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
-  fn resolve_conflict(&self, owner: TxId) -> crate::cursor::ResolvedConflict {
+  fn resolve_conflict(&self, owner: TxId) -> ResolvedConflict {
     self
       .orchestrator
       .resolve_conflict(owner, self.state.get_id())

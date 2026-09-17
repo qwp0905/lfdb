@@ -4,10 +4,11 @@ use super::{Checkpoint, PageRecorder, TimeoutThread};
 
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
+  btree::ResolvedConflict,
   cache::{BlockCache, CachedSlot, RefedSlot},
-  cursor::{Compactor, GarbageCollector, ResolvedConflict},
   disk::{IOPool, Pointer},
   error::Result,
+  maintenance::{Compactor, GarbageCollector},
   metrics::{measure, MetricsRegistry},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,

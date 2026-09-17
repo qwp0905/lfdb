@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 
-use super::VecRef;
-use crate::Result;
+use crate::{Result, VecRef};
 
 pub enum ScannedItem {
   Present(VecRef),

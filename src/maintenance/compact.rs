@@ -2,16 +2,17 @@ use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
 use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
-use super::{
-  BTreeIndex, CreatablePolicy, DropTableCommitted, GetResult, ReadonlyPolicy,
-  Snapshotter, WritablePolicy, WriteOp,
-};
+use super::DropTableCommitted;
 use crate::{
   background::{
     binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
     SharedSubscription, ThreadBuilder,
   },
   blob::BlobStorage,
+  btree::{
+    BTreeIndex, CreatablePolicy, GetResult, ReadonlyPolicy, ResolvedConflict,
+    Snapshotter, WritablePolicy,
+  },
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState, VersionController},
@@ -173,8 +174,8 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
    * Since the MiniTx is a background transaction,
    * it treats conflicts as deadlocks and immediately terminates the insert operation.
    */
-  fn resolve_conflict(&self, _: TxId) -> super::ResolvedConflict {
-    super::ResolvedConflict::DeadLock
+  fn resolve_conflict(&self, _: TxId) -> ResolvedConflict {
+    ResolvedConflict::DeadLock
   }
 }
 
@@ -438,7 +439,7 @@ impl CompactionWorker {
 
     if let Err(err) = index.insert_if_matched(
       table_name.as_bytes(),
-      WriteOp::Insert(table_metadata.to_vec()),
+      table_metadata.to_vec(),
       &self.meta_table,
     ) {
       if matches!(err, Error::WriteConflict) {
@@ -493,11 +494,9 @@ impl CompactionWorker {
     let table_meta = self.tables.create_metadata(table_name);
     metadata.set_compaction(&table_meta);
 
-    if let Err(err) = index.insert_if_matched(
-      table_name.as_bytes(),
-      WriteOp::Insert(metadata.to_vec()),
-      &self.meta_table,
-    ) {
+    if let Err(err) =
+      index.insert_if_matched(table_name.as_bytes(), metadata.to_vec(), &self.meta_table)
+    {
       if matches!(err, Error::WriteConflict) {
         info!("table {table_name} already set compaction state");
         return Ok(None);

@@ -3,7 +3,9 @@ use std::{
   ops::{Deref, Range},
 };
 
-use crate::{cache::ReadonlySlot, disk::AlignedBuf, utils::SBox};
+use crate::{disk::AlignedBuf, utils::SBox};
+
+use super::ReadonlySlot;
 
 enum Type {
   Refed(ReadonlySlot, Range<usize>),
@@ -23,10 +25,10 @@ enum Type {
  */
 pub struct VecRef(Type);
 impl VecRef {
-  pub const fn refed(page: ReadonlySlot, range: Range<usize>) -> Self {
+  pub(crate) const fn refed(page: ReadonlySlot, range: Range<usize>) -> Self {
     Self(Type::Refed(page, range))
   }
-  pub fn copied(data: AlignedBuf) -> Self {
+  pub(crate) fn copied(data: AlignedBuf) -> Self {
     Self(Type::Copied(SBox::new(data)))
   }
   pub fn as_slice(&self) -> &[u8] {

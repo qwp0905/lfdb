@@ -14,11 +14,11 @@ use crate::{
   background::{Close, EventBus, ThreadBuilder},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
-  cursor::{
+  disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
+  maintenance::{
     initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
     CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
   },
-  disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,

@@ -11,10 +11,10 @@ use std::{
 
 use crossbeam_skiplist::{SkipMap, SkipSet};
 
-use super::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy};
 use crate::{
   background::{OnceThread, PendingTask, ThreadPool},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
+  btree::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy},
   cache::BlockCache,
   disk::{AlignedBuf, AtomicDiskPointer, Pointer},
   mvcc::VersionController,

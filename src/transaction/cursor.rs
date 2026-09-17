@@ -8,17 +8,19 @@
  */
 use std::ops::{Bound, RangeBounds};
 
-use super::{
-  BTreeIndex, BTreeIter, BTreeRevIter, BulkOp, GetResult, LookupResult, MergeSortable,
-  MergeSorted, SortDirection, VecRef, WriteOp, WriteResult,
-};
 use crate::{
+  btree::{
+    BTreeIndex, BTreeIter, BTreeRevIter, BulkOp, GetResult, LookupResult, MergeSortable,
+    MergeSorted, SortDirection, WriteResult,
+  },
+  cache::VecRef,
   metrics::{measure, MetricsRegistry},
   objects::{StaticKey, StaticKeyRef, MAX_KEY, MAX_VALUE},
   table::TableHandleRef,
-  transaction::TxContext,
   Error, Result,
 };
+
+use super::TxContext;
 
 /**
  * A handle for a single table, providing read and write operations.
@@ -134,11 +136,9 @@ impl<'a> Cursor<'a> {
    */
   fn __remove(&self, key: StaticKeyRef) -> Result<WriteResult> {
     if let Some(table) = self.compaction.as_ref() {
-      return self
-        .index
-        .insert_record(key.to_vec(), WriteOp::Remove, table);
+      return self.index.remove(key, table);
     }
-    self.index.remove(key, &self.table)
+    self.index.remove_if_matched(key, &self.table)
   }
   pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
     if !self.context.is_available() {
@@ -292,12 +292,12 @@ impl<'a> Bulk<'a> {
   }
 
   pub fn insert(&mut self, key: StaticKey, value: Vec<u8>) -> &mut Self {
-    self.inner.append(key, WriteOp::Insert(value), true);
+    self.inner.append_insert(key, value, true);
     self
   }
 
   pub fn remove(&mut self, key: StaticKey) -> &mut Self {
-    self.inner.append(key, WriteOp::Remove, self.in_compaction);
+    self.inner.append_remove(key, self.in_compaction);
     self
   }
 

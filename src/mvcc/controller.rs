@@ -13,8 +13,8 @@ use super::{ActiveSet, ActiveState};
 
 use crate::{
   background::{binding_events, EventBus, SharedSubscription},
+  btree::ResolvedConflict,
   cache::ShrinkMap,
-  cursor::ResolvedConflict,
   utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
 };
