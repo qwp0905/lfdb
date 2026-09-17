@@ -111,12 +111,16 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
     let state = policy.fetch_slot(ptr, table)?.for_write().mutate(|slot| {
       let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
       let leaf = node.as_leaf_mut()?;
+      let mut modified = false;
       match apply_snapshot_once(policy, leaf, &key, ptr, record, table)? {
         ApplySnapshotOnce::Move(ptr, record) => {
           return Result::Ok(Err((key, ptr, record)))
         }
-        ApplySnapshotOnce::Break => {}
-        ApplySnapshotOnce::Split(k, p) => splitted.push((k, p)),
+        ApplySnapshotOnce::Break => modified = true,
+        ApplySnapshotOnce::Split(k, p) => {
+          splitted.push((k, p));
+          modified = true;
+        }
         ApplySnapshotOnce::Apply(p, record) => apply.push((p, record)),
       };
 
@@ -126,15 +130,22 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
         let (key, record) = into_record(snapshot);
         match apply_snapshot_once(policy, leaf, &key, ptr, record, table)? {
           ApplySnapshotOnce::Move(p, r) => {
-            policy.serialize_and_log(slot, &node, table)?;
+            if modified {
+              policy.serialize_and_log(slot, &node, table)?;
+            }
             return Ok(Err((key, p, r)));
           }
-          ApplySnapshotOnce::Break => {}
-          ApplySnapshotOnce::Split(k, p) => splitted.push((k, p)),
+          ApplySnapshotOnce::Break => modified = true,
+          ApplySnapshotOnce::Split(k, p) => {
+            splitted.push((k, p));
+            modified = true;
+          }
           ApplySnapshotOnce::Apply(p, record) => apply.push((p, record)),
         };
       }
-      policy.serialize_and_log(slot, &node, table)?;
+      if modified {
+        policy.serialize_and_log(slot, &node, table)?;
+      }
       Ok(Ok(()))
     })?;
 
