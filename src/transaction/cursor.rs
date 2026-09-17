@@ -215,7 +215,7 @@ pub struct CursorIter<'a, Iter> {
   iter: MergeSorted<Iter>,
 }
 impl<'a> CursorIter<'a, BTreeIter<&'a &'a TxContext<'a>>> {
-  pub fn new(
+  pub(crate) fn new(
     context: &'a TxContext,
     table: &'a TableHandleRef,
     compaction: Option<&'a TableHandleRef>,
@@ -237,7 +237,7 @@ impl<'a> CursorIter<'a, BTreeIter<&'a &'a TxContext<'a>>> {
   }
 }
 impl<'a> CursorIter<'a, BTreeRevIter<&'a &'a TxContext<'a>>> {
-  pub fn new_rev(
+  pub(crate) fn new_rev(
     context: &'a TxContext,
     table: &'a TableHandleRef,
     compaction: Option<&'a TableHandleRef>,
