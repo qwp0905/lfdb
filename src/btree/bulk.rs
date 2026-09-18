@@ -64,8 +64,8 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
         splitted: s,
         ..
       } => {
-        copy_old.extend(c);
-        splitted.extend(s);
+        copy_old.extend(c.into_iter().flatten());
+        splitted.extend(s.into_iter().flatten());
         resolve_conflict(policy, owner)?;
         must_apply = resume;
       }
@@ -74,8 +74,8 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
         splitted: s,
         ..
       } => {
-        copy_old.extend(c);
-        splitted.extend(s);
+        copy_old.extend(c.into_iter().flatten());
+        splitted.extend(s.into_iter().flatten());
         break;
       }
     };

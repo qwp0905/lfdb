@@ -31,6 +31,14 @@ impl<Policy> BTreeIndex<Policy> {
   pub const fn new(policy: Policy) -> Self {
     Self(policy)
   }
+
+  pub fn bulk_executor(
+    &self,
+    bulk: BulkOp,
+    table: &TableHandleRef,
+  ) -> BulkExecutor<'_, Policy> {
+    BulkExecutor::new(&self.0, bulk.drain_all(), table.clone())
+  }
 }
 impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   pub fn get(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<GetResult> {
@@ -306,16 +314,19 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
           pair = resume;
         }
         AppendOrReserve::Done {
-          mut copy_old,
-          mut splitted,
-          ..
+          copy_old, splitted, ..
         } => {
-          debug_assert!(copy_old.len() + splitted.len() <= 1);
-          if let Some(cmd) = copy_old.pop() {
+          debug_assert!({
+            let c = copy_old.as_ref().map(|c| c.len()).unwrap_or(0);
+            let s = splitted.as_ref().map(|s| s.len()).unwrap_or(0);
+            c + s <= 1
+          });
+
+          if let Some(cmd) = copy_old.into_iter().flatten().next() {
             return copy_and_update(&self.0, ptr, table, stack, vec![cmd])
               .map(|c| WriteResult::new(c > 0));
           }
-          if let Some((k, p)) = splitted.pop() {
+          if let Some((k, p)) = splitted.into_iter().flatten().next() {
             let height = stack.len();
             propagate_split(&self.0, k, p, stack, table, height)?;
             return Ok(WriteResult::new(true));
@@ -361,14 +372,6 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
     table: &TableHandleRef,
   ) -> Result<WriteResult> {
     self.insert_internal(key.to_vec(), WriteOp::Insert(data), table, false)
-  }
-
-  pub fn bulk_executor(
-    &self,
-    bulk: BulkOp,
-    table: &TableHandleRef,
-  ) -> BulkExecutor<'_, Policy> {
-    BulkExecutor::new(&self.0, bulk.drain_all(), table.clone())
   }
 }
 

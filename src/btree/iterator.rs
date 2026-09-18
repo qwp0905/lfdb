@@ -152,7 +152,7 @@ where
           Bound::Unbounded => ptr = node.first_child()?,
         },
         BTreeNodeView::Leaf(node) => {
-          let mut iter = node.range_entries(start, end);
+          let mut iter = node.range_entries(start, end)?;
           while let Some(e) = iter.try_next()? {
             if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push_back((
@@ -201,7 +201,7 @@ where
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
 
-    let mut iter = node.range_entries(&Bound::Unbounded, &self.end);
+    let mut iter = node.range_entries(&Bound::Unbounded, &self.end)?;
     while let Some(e) = iter.try_next()? {
       if self.policy.is_visible(e.record.owner, e.record.version) {
         self.buffered.push_back((
@@ -353,7 +353,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
             upper = Some(top.to_vec());
           }
 
-          let mut iter = node.range_entries(start, end);
+          let mut iter = node.range_entries(start, end)?;
           while let Some(e) = iter.try_next()? {
             if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push((
