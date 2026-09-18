@@ -232,7 +232,7 @@ impl TableRecovery {
           pendings.push(self.fetch_job(self.scan_node(p, level)));
           self.status.set_half_split(p, None, level);
         }
-        let mut iter = node.get_entries();
+        let mut iter = node.get_entries()?;
         while let Some(e) = iter.try_next()? {
           if let Some(p) = e.next {
             pendings.push(self.fetch_job(self.scan_entry(p)));

@@ -431,7 +431,7 @@ impl GcWorker {
           .read(inner.pointer, table.handle())?
           .for_read();
         let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-        let mut iter = node.get_entries();
+        let mut iter = node.get_entries()?;
         while let Some(e) = iter.try_next()? {
           current.min_version = current.min_version.min(e.record.version);
           inner.total += 1;

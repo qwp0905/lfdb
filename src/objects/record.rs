@@ -136,6 +136,15 @@ impl RecordDataView {
     matches!(self, RecordDataView::Tombstone)
   }
 }
+impl Clone for RecordDataView {
+  fn clone(&self) -> Self {
+    match self {
+      Self::Data(range) => Self::Data(range.clone()),
+      Self::Blob(i, o, l) => Self::Blob(*i, *o, *l),
+      Self::Tombstone => Self::Tombstone,
+    }
+  }
+}
 
 /**
  * Zero-copy view of a serialized `VersionRecord`.
@@ -190,5 +199,14 @@ impl VersionRecordView {
       _ => return Err(Error::InvalidFormat("invalid type for data version record")),
     };
     Ok(Self::new(owner, version, data))
+  }
+}
+impl Clone for VersionRecordView {
+  fn clone(&self) -> Self {
+    Self {
+      owner: self.owner,
+      version: self.version,
+      data: self.data.clone(),
+    }
   }
 }
