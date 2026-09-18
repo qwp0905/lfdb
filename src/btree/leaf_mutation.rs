@@ -368,18 +368,18 @@ pub enum AppendOrReserve<'a> {
   Conflict {
     owner: TxId,
     resume: KeyPair,
-    copy_old: Vec<(StaticKey, CopyOld<'a>)>,
-    splitted: Vec<(StaticKey, Pointer)>,
-    _guards: Vec<MaybeBlobGuard<'a>>,
+    copy_old: Option<Vec<(StaticKey, CopyOld<'a>)>>,
+    splitted: Option<Vec<(StaticKey, Pointer)>>,
+    _guards: Option<Vec<MaybeBlobGuard<'a>>>,
   },
   Done {
-    copy_old: Vec<(StaticKey, CopyOld<'a>)>,
-    splitted: Vec<(StaticKey, Pointer)>,
-    _guards: Vec<MaybeBlobGuard<'a>>,
+    copy_old: Option<Vec<(StaticKey, CopyOld<'a>)>>,
+    splitted: Option<Vec<(StaticKey, Pointer)>>,
+    _guards: Option<Vec<MaybeBlobGuard<'a>>>,
   },
 }
 
-enum TryAppendAtLeafInit<'a, 'b> {
+enum TryAppendAtLeafBorrowed<'a, 'b> {
   NotFound(LeafNodeView<'b>),
   Move(Pointer, WriteOp),
   Conflict(TxId, WriteOp),
@@ -394,41 +394,97 @@ enum TryAppendAtLeafInit<'a, 'b> {
   Split(StaticKey, Pointer, MaybeBlobGuard<'a>, LeafNode),
 }
 
-fn try_append_at_leaf_init<'a, 'b, Policy: CreatablePolicy + Sync>(
+fn try_append_at_leaf_borrowed<'a, 'b, Policy: CreatablePolicy + Sync>(
   policy: &'a Policy,
   leaf: LeafNodeView<'b>,
   table: &'a TableHandleRef,
   key: StaticKeyRef,
   op: WriteOp,
   create: bool,
-) -> Result<TryAppendAtLeafInit<'a, 'b>> {
+) -> Result<TryAppendAtLeafBorrowed<'a, 'b>> {
   let (mut leaf, pos, found) = match leaf.find(key)? {
-    NodeFindResult::Move(p) => return Ok(TryAppendAtLeafInit::Move(p, op)),
+    NodeFindResult::Move(p) => return Ok(TryAppendAtLeafBorrowed::Move(p, op)),
     NodeFindResult::Found(pos, old, entry_ptr) => {
       let writable = policy.is_owned(old.owner) || policy.is_aborted(old.owner);
       let visible = policy.is_readable(old.version) && !policy.is_active(old.owner);
       match (writable, visible) {
         (true, _) => (leaf.into_owned()?, pos, true),
-        (false, false) => return Ok(TryAppendAtLeafInit::Conflict(old.owner, op)),
+        (false, false) => return Ok(TryAppendAtLeafBorrowed::Conflict(old.owner, op)),
         (false, true) => {
           return Ok(match table.reserve(key.to_vec(), policy.current_owner()) {
-            Ok(g) => TryAppendAtLeafInit::CopyOld(g, entry_ptr, old, leaf, op),
-            Err(i) => TryAppendAtLeafInit::Conflict(i, op),
+            Ok(g) => TryAppendAtLeafBorrowed::CopyOld(g, entry_ptr, old, leaf, op),
+            Err(i) => TryAppendAtLeafBorrowed::Conflict(i, op),
           })
         }
       }
     }
     NodeFindResult::NotFound(pos) => {
       if !create {
-        return Ok(TryAppendAtLeafInit::NotFound(leaf));
+        return Ok(TryAppendAtLeafBorrowed::NotFound(leaf));
       }
       (leaf.into_owned()?, pos, false)
     }
   };
 
   match apply_operation(policy, &mut leaf, key, op, table, pos, found)? {
-    (None, g) => Ok(TryAppendAtLeafInit::Break(g, leaf)),
-    (Some((k, p)), g) => Ok(TryAppendAtLeafInit::Split(k, p, g, leaf)),
+    (None, g) => Ok(TryAppendAtLeafBorrowed::Break(g, leaf)),
+    (Some((k, p)), g) => Ok(TryAppendAtLeafBorrowed::Split(k, p, g, leaf)),
+  }
+}
+
+fn try_append_at_leaf_owned<'a, Policy: CreatablePolicy + Sync>(
+  policy: &'a Policy,
+  slot: &mut RefedSlot,
+  mut leaf: LeafNode,
+  table: &'a TableHandleRef,
+  others: &mut KeyPairList,
+  mut state: AppendOrReserveState<'a>,
+) -> Result<AppendOrReserve<'a>> {
+  while let Some(KeyPair(key, op, create)) =
+    others.pop_if(|k| leaf.get_next_key().is_none_or(|r| k < r))
+  {
+    match try_append_at_leaf_once(policy, &mut leaf, table, &key, op, create)? {
+      TryAppendAtLeaf::NotFound => {}
+      TryAppendAtLeaf::Break(g) => state.guards.get_or_insert_default().push(g),
+      TryAppendAtLeaf::Conflict(i, op) => {
+        policy.serialize_and_log(slot, &leaf.into_node(), table)?;
+        return Ok(AppendOrReserve::Conflict {
+          owner: i,
+          resume: KeyPair(key, op, create),
+          copy_old: state.copy_old,
+          splitted: state.splitted,
+          _guards: state.guards,
+        });
+      }
+      TryAppendAtLeaf::Split(k, p, g) => {
+        state.splitted.get_or_insert_default().push((k, p));
+        state.guards.get_or_insert_default().push(g);
+      }
+      TryAppendAtLeaf::CopyOld(cmd) => {
+        state.copy_old.get_or_insert_default().push((key, cmd))
+      }
+    };
+  }
+  policy.serialize_and_log(slot, &leaf.into_node(), table)?;
+  Ok(AppendOrReserve::Done {
+    copy_old: state.copy_old,
+    splitted: state.splitted,
+    _guards: state.guards,
+  })
+}
+
+struct AppendOrReserveState<'a> {
+  splitted: Option<Vec<(StaticKey, Pointer)>>,
+  copy_old: Option<Vec<(StaticKey, CopyOld<'a>)>>,
+  guards: Option<Vec<MaybeBlobGuard<'a>>>,
+}
+impl<'a> AppendOrReserveState<'a> {
+  const fn new() -> Self {
+    Self {
+      splitted: None,
+      copy_old: None,
+      guards: None,
+    }
   }
 }
 
@@ -443,94 +499,101 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
     Owned(LeafNode),
     Borrowed(LeafNodeView<'a>),
   }
-  let mut splitted = Vec::new();
-  let mut copy_old = Vec::new();
-  let mut guards = Vec::new();
-
+  let mut state = AppendOrReserveState::new();
   let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
   let KeyPair(key, op, create) = must_apply;
 
-  let maybe_owned = match try_append_at_leaf_init(policy, leaf, table, &key, op, create)?
-  {
-    TryAppendAtLeafInit::NotFound(l) => MaybeOwned::Borrowed(l),
-    TryAppendAtLeafInit::Move(p, op) => {
-      return Ok(AppendOrReserve::Move(p, KeyPair(key, op, create)))
-    }
-    TryAppendAtLeafInit::Conflict(i, op) => {
-      return Ok(AppendOrReserve::Conflict {
-        owner: i,
-        resume: KeyPair(key, op, create),
-        copy_old,
-        splitted,
-        _guards: guards,
-      })
-    }
-    TryAppendAtLeafInit::CopyOld(g, ep, old, l, op) => {
-      let cmd = CopyOld::new(g, ep, old.into_owned_with(slot.as_ref()), op);
-      copy_old.push((key, cmd));
-      MaybeOwned::Borrowed(l)
-    }
-    TryAppendAtLeafInit::Break(g, l) => {
-      guards.push(g);
-      MaybeOwned::Owned(l)
-    }
-    TryAppendAtLeafInit::Split(k, p, g, l) => {
-      splitted.push((k, p));
-      guards.push(g);
-      MaybeOwned::Owned(l)
-    }
-  };
+  let maybe_owned =
+    match try_append_at_leaf_borrowed(policy, leaf, table, &key, op, create)? {
+      TryAppendAtLeafBorrowed::NotFound(l) => MaybeOwned::Borrowed(l),
+      TryAppendAtLeafBorrowed::Move(p, op) => {
+        return Ok(AppendOrReserve::Move(p, KeyPair(key, op, create)))
+      }
+      TryAppendAtLeafBorrowed::Conflict(i, op) => {
+        return Ok(AppendOrReserve::Conflict {
+          owner: i,
+          resume: KeyPair(key, op, create),
+          copy_old: state.copy_old,
+          splitted: state.splitted,
+          _guards: state.guards,
+        })
+      }
+      TryAppendAtLeafBorrowed::CopyOld(g, ep, old, l, op) => {
+        let cmd = CopyOld::new(g, ep, old.into_owned_with(slot.as_ref()), op);
+        state.copy_old.get_or_insert_default().push((key, cmd));
+        MaybeOwned::Borrowed(l)
+      }
+      TryAppendAtLeafBorrowed::Break(g, l) => {
+        state.guards.get_or_insert_default().push(g);
+        MaybeOwned::Owned(l)
+      }
+      TryAppendAtLeafBorrowed::Split(k, p, g, l) => {
+        state.splitted.get_or_insert_default().push((k, p));
+        state.guards.get_or_insert_default().push(g);
+        MaybeOwned::Owned(l)
+      }
+    };
   let Some(others) = others else {
     if let MaybeOwned::Owned(leaf) = maybe_owned {
       policy.serialize_and_log(slot, &leaf.into_node(), table)?;
     }
     return Ok(AppendOrReserve::Done {
-      copy_old,
-      splitted,
-      _guards: guards,
+      copy_old: state.copy_old,
+      splitted: state.splitted,
+      _guards: state.guards,
     });
   };
 
-  let (mut leaf, mut modified) = match maybe_owned {
-    MaybeOwned::Owned(v) => (v, true),
-    MaybeOwned::Borrowed(v) => (v.into_owned()?, false),
+  let mut leaf = match maybe_owned {
+    MaybeOwned::Owned(leaf) => {
+      return try_append_at_leaf_owned(policy, slot, leaf, table, others, state)
+    }
+    MaybeOwned::Borrowed(leaf) => leaf,
   };
+
   while let Some(KeyPair(key, op, create)) =
     others.pop_if(|k| leaf.get_next_key().is_none_or(|r| k < r))
   {
-    match try_append_at_leaf_once(policy, &mut leaf, table, &key, op, create)? {
-      TryAppendAtLeaf::NotFound => {}
-      TryAppendAtLeaf::Break(g) => {
-        guards.push(g);
-        modified = true;
+    let owned = match try_append_at_leaf_borrowed(policy, leaf, table, &key, op, create)?
+    {
+      TryAppendAtLeafBorrowed::NotFound(l) => {
+        leaf = l;
+        continue;
       }
-      TryAppendAtLeaf::Conflict(i, op) => {
-        if modified {
-          policy.serialize_and_log(slot, &leaf.into_node(), table)?;
-        }
+      TryAppendAtLeafBorrowed::Move(_, _) => unreachable!(),
+      TryAppendAtLeafBorrowed::Conflict(i, op) => {
         return Ok(AppendOrReserve::Conflict {
           owner: i,
           resume: KeyPair(key, op, create),
-          copy_old,
-          splitted,
-          _guards: guards,
-        });
+          copy_old: state.copy_old,
+          splitted: state.splitted,
+          _guards: state.guards,
+        })
       }
-      TryAppendAtLeaf::Split(k, p, g) => {
-        splitted.push((k, p));
-        guards.push(g);
-        modified = true;
+      TryAppendAtLeafBorrowed::CopyOld(g, ep, old, l, op) => {
+        let cmd = CopyOld::new(g, ep, old.into_owned_with(slot.as_ref()), op);
+        state.copy_old.get_or_insert_default().push((key, cmd));
+        leaf = l;
+        continue;
       }
-      TryAppendAtLeaf::CopyOld(cmd) => copy_old.push((key, cmd)),
+      TryAppendAtLeafBorrowed::Break(g, owned) => {
+        state.guards.get_or_insert_default().push(g);
+        owned
+      }
+      TryAppendAtLeafBorrowed::Split(k, p, g, owned) => {
+        state.splitted.get_or_insert_default().push((k, p));
+        state.guards.get_or_insert_default().push(g);
+        owned
+      }
     };
+
+    return try_append_at_leaf_owned(policy, slot, owned, table, others, state);
   }
-  if modified {
-    policy.serialize_and_log(slot, &leaf.into_node(), table)?;
-  }
+
   Ok(AppendOrReserve::Done {
-    copy_old,
-    splitted,
-    _guards: guards,
+    copy_old: state.copy_old,
+    splitted: state.splitted,
+    _guards: state.guards,
   })
 }
 
