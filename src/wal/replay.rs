@@ -2,7 +2,6 @@ use std::{
   collections::{BTreeMap, BTreeSet},
   path::PathBuf,
   sync::Arc,
-  thread::available_parallelism,
 };
 
 use crossbeam::channel::{unbounded, Sender};
@@ -86,12 +85,7 @@ pub fn replay(
   }
 
   let len = files.len();
-  let count = available_parallelism()
-    .map(|v| v.get())
-    .unwrap_or(1)
-    .min(len);
-
-  debug!("trying to replay {len} segments with {count} threads.");
+  debug!("trying to replay {len} segments.");
 
   let (tx, rx) = unbounded();
   let forked = init_thread.fork(files.into_iter(), scan_segment(io_pool, tx));
