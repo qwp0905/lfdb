@@ -54,7 +54,20 @@ fn test_serialize_leaf() {
 
   assert_eq!(d.top().unwrap(), &[49, 50, 51]);
 
-  let mut iter = d.get_entries();
+  let mut iter = d.get_entries().unwrap();
+  let mut i = 0;
+  while let Some(e) = iter.try_next().unwrap() {
+    let (k, (o, v, d), _) = &entries[i];
+    i += 1;
+    assert_eq!(page.range(e.range), k);
+    assert_eq!(e.record.owner, *o);
+    assert_eq!(e.record.version, *v);
+    assert!(matches!(
+      e.record.data,
+      RecordDataView::Data(range) if d == page.range(range.clone())
+    ))
+  }
+
   let mut i = 0;
   while let Some(e) = iter.try_next().unwrap() {
     let (k, (o, v, d), _) = &entries[i];

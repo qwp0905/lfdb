@@ -1,4 +1,5 @@
 use std::{
+  cell::RefCell,
   mem::replace,
   ops::{Bound, Range},
 };
@@ -245,6 +246,20 @@ pub enum NodeFindResult {
   NotFound(usize),
 }
 
+#[derive(Debug)]
+struct ParsedState {
+  offset: usize,
+  entries: Option<Vec<LeafEntryView>>,
+}
+impl ParsedState {
+  const fn new(offset: usize) -> Self {
+    Self {
+      offset,
+      entries: None,
+    }
+  }
+}
+
 /**
  * Zero-copy view of a serialized leaf node.
  *
@@ -255,10 +270,10 @@ pub enum NodeFindResult {
 #[derive(Debug)]
 pub struct LeafNodeView<'a> {
   page: &'a Page,
-  offset: usize,
   len: usize,
   bias: SplitBias,
   next: Option<(Pointer, Range<usize>)>,
+  state: RefCell<ParsedState>,
 }
 impl<'a> LeafNodeView<'a> {
   const fn new(
@@ -270,10 +285,10 @@ impl<'a> LeafNodeView<'a> {
   ) -> Self {
     Self {
       page,
-      offset,
       len,
       next,
       bias,
+      state: RefCell::new(ParsedState::new(offset)),
     }
   }
   pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
@@ -291,24 +306,44 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn find(&self, key: StaticKeyRef) -> Result<NodeFindResult> {
-    if let Some((next, range)) = &self.next {
-      if self.page.range(range.clone()) <= key {
-        return Ok(NodeFindResult::Move(*next));
+    if let Some((next, k)) = self.get_next_with_key() {
+      if k <= key {
+        return Ok(NodeFindResult::Move(next));
       }
     }
 
-    let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
+    let mut start = 0;
+    let mut state = self.state.borrow_mut();
+    if let Some(parsed) = state.entries.as_ref() {
+      match parsed.binary_search_by(|e| self.page.range(e.range.clone()).cmp(key)) {
+        Ok(i) => {
+          let e = &parsed[i];
+          return Ok(NodeFindResult::Found(i, e.record.clone(), e.next));
+        }
+        Err(i) if i < parsed.len() => return Ok(NodeFindResult::NotFound(i)),
+        Err(i) if parsed.len() == self.len => return Ok(NodeFindResult::NotFound(i)),
+        Err(i) => start = i,
+      };
+    }
 
-    for i in 0..self.len {
+    let mut scanner = self.page.scanner();
+    scanner.advance(state.offset).unwrap();
+
+    for i in start..self.len {
       let e = LeafEntryView::deserialize_from(&mut scanner)?;
-      let k = self.page.range(e.range);
+      state.offset = scanner.advance(0).unwrap();
+
+      let parsed = state.entries.get_or_insert_default();
+      parsed.push(e);
+
+      let e = &parsed[i];
+      let k = self.page.range(e.range.clone());
       if k < key {
         continue;
       } else if k > key {
         return Ok(NodeFindResult::NotFound(i));
       } else {
-        return Ok(NodeFindResult::Found(i, e.record, e.next));
+        return Ok(NodeFindResult::Found(i, e.record.clone(), e.next));
       }
     }
     Ok(NodeFindResult::NotFound(self.len))
@@ -319,11 +354,21 @@ impl<'a> LeafNodeView<'a> {
       .next
       .map(|(ptr, range)| (ptr, self.page.copy_range(range)));
 
+    let state = self.state.into_inner();
     let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
+    scanner.advance(state.offset).unwrap();
 
     let mut entries = Vec::with_capacity(self.len + 1);
-    for _ in 0..self.len {
+    let mut start = 0;
+    for e in state.entries.into_iter().flatten() {
+      let key = self.page.copy_range(e.range);
+      let record = e.record.into_owned_with(self.page);
+      let next = e.next;
+      entries.push(LeafEntry::new(key, record, next));
+      start += 1;
+    }
+
+    for _ in start..self.len {
       let l = scanner.read_u16()? as usize;
       let key = scanner.read_n(l)?.to_vec();
       let record = VersionRecord::deserialize_from(&mut scanner)?;
@@ -334,14 +379,18 @@ impl<'a> LeafNodeView<'a> {
   }
 
   pub fn top(&self) -> Result<StaticKeyRef<'_>> {
+    let state = self.state.borrow();
+    if let Some(parsed) = state.entries.as_ref() {
+      return Ok(self.page.range(parsed[0].range.clone()));
+    }
     let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
+    scanner.advance(state.offset).unwrap();
     let len = scanner.read_u16()? as usize;
     let offset = scanner.advance(len)?;
     Ok(self.page.range(offset..offset + len))
   }
 
-  pub fn get_entries(&self) -> LeafNodeIter<'_> {
+  pub fn get_entries(&'a self) -> Result<LeafNodeIter<'a>> {
     self.range_entries(&Bound::Unbounded, &Bound::Unbounded)
   }
 
@@ -349,18 +398,27 @@ impl<'a> LeafNodeView<'a> {
     &'a self,
     start: &'a Bound<StaticKey>,
     end: &'a Bound<StaticKey>,
-  ) -> LeafNodeIter<'a> {
-    let mut scanner = self.page.scanner();
-    scanner.advance(self.offset).unwrap();
-    LeafNodeIter {
-      scanner,
-      page: self.page,
-      start,
+  ) -> Result<LeafNodeIter<'a>> {
+    let (pos, closed) = match start {
+      Bound::Included(k) => match self.find(k)? {
+        NodeFindResult::Found(i, _, _) => (i, false),
+        NodeFindResult::Move(_) => (self.len, true),
+        NodeFindResult::NotFound(i) => (i, false),
+      },
+      Bound::Excluded(k) => match self.find(k)? {
+        NodeFindResult::Found(i, _, _) => (i + 1, false),
+        NodeFindResult::Move(_) => (self.len, true),
+        NodeFindResult::NotFound(i) => (i, false),
+      },
+      Bound::Unbounded => (0, false),
+    };
+
+    Ok(LeafNodeIter {
+      node: self,
       end,
-      pos: 0,
-      len: self.len,
-      closed: false,
-    }
+      pos,
+      closed,
+    })
   }
 
   pub const fn get_next(&self) -> Option<Pointer> {
@@ -375,8 +433,37 @@ impl<'a> LeafNodeView<'a> {
     };
     Some((*p, self.page.range(range.clone())))
   }
+  pub fn get_next_key(&self) -> Option<StaticKeyRef<'_>> {
+    let Some((_, range)) = &self.next else {
+      return None;
+    };
+    Some(self.page.range(range.clone()))
+  }
+
+  fn at(&self, index: usize) -> Result<LeafEntryView> {
+    let mut state = self.state.borrow_mut();
+    let mut start = 0;
+    if let Some(parsed) = state.entries.as_ref() {
+      if index < parsed.len() {
+        return Ok(parsed[index].clone());
+      }
+      start = parsed.len();
+    };
+
+    let mut scanner = self.page.scanner();
+    scanner.advance(state.offset).unwrap();
+    for _ in start..=index {
+      let e = LeafEntryView::deserialize_from(&mut scanner)?;
+      state.offset = scanner.advance(0).unwrap();
+      let parsed = state.entries.get_or_insert_default();
+      parsed.push(e);
+    }
+
+    Ok(state.entries.as_ref().unwrap()[index].clone())
+  }
 }
 
+#[derive(Debug)]
 pub struct LeafEntryView {
   pub range: Range<usize>,
   pub record: VersionRecordView,
@@ -395,6 +482,15 @@ impl LeafEntryView {
     })
   }
 }
+impl Clone for LeafEntryView {
+  fn clone(&self) -> Self {
+    Self {
+      range: self.range.clone(),
+      record: self.record.clone(),
+      next: self.next,
+    }
+  }
+}
 
 /**
  * Sequential iterator over entries in a serialized leaf node.
@@ -405,12 +501,9 @@ impl LeafEntryView {
  * the caller should copy or borrow the key bytes.
  */
 pub struct LeafNodeIter<'a> {
-  scanner: PageScanner<'a>,
-  page: &'a Page,
-  start: &'a Bound<StaticKey>,
+  node: &'a LeafNodeView<'a>,
   end: &'a Bound<StaticKey>,
   pos: usize,
-  len: usize,
   /**
    * Set after the iterator reaches the end or passes the upper bound.
    */
@@ -418,7 +511,7 @@ pub struct LeafNodeIter<'a> {
 }
 impl<'a> LeafNodeIter<'a> {
   pub const fn is_completed(&self) -> bool {
-    self.pos == self.len
+    self.pos == self.node.len
   }
 
   /**
@@ -427,56 +520,33 @@ impl<'a> LeafNodeIter<'a> {
    * The returned `(start, end)` is the key byte range in `page`.
    */
   pub fn try_next(&mut self) -> Result<Option<LeafEntryView>> {
-    loop {
-      if self.closed {
-        return Ok(None);
+    if self.closed {
+      return Ok(None);
+    }
+    if self.is_completed() {
+      self.closed = true;
+      return Ok(None);
+    }
+
+    let e = self.node.at(self.pos)?;
+    let key = self.node.page.range(e.range.clone());
+
+    match self.end {
+      Bound::Included(k) if k.as_slice() >= key => {
+        self.pos += 1;
+        Ok(Some(e))
       }
-      if self.is_completed() {
+      Bound::Excluded(k) if k.as_slice() > key => {
+        self.pos += 1;
+        Ok(Some(e))
+      }
+      Bound::Unbounded => {
+        self.pos += 1;
+        Ok(Some(e))
+      }
+      _ => {
         self.closed = true;
-        return Ok(None);
-      }
-
-      let l = self.scanner.read_u16()? as usize;
-      let offset = self.scanner.advance(l)?;
-      let record = VersionRecordView::deserialize_from(&mut self.scanner)?;
-      let ptr = self.scanner.read_u64()?;
-
-      let key = self.page.range(offset..offset + l);
-      match self.start {
-        Bound::Included(k) if k.as_slice() > key => {
-          self.pos += 1;
-          continue;
-        }
-        Bound::Excluded(k) if k.as_slice() >= key => {
-          self.pos += 1;
-          continue;
-        }
-        _ => {}
-      }
-
-      let e = LeafEntryView {
-        range: offset..(offset + l),
-        record,
-        next: (ptr != 0).then_some(ptr),
-      };
-
-      match self.end {
-        Bound::Included(k) if k.as_slice() >= key => {
-          self.pos += 1;
-          return Ok(Some(e));
-        }
-        Bound::Excluded(k) if k.as_slice() > key => {
-          self.pos += 1;
-          return Ok(Some(e));
-        }
-        Bound::Unbounded => {
-          self.pos += 1;
-          return Ok(Some(e));
-        }
-        _ => {
-          self.closed = true;
-          return Ok(None);
-        }
+        Ok(None)
       }
     }
   }
