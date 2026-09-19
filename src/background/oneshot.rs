@@ -3,15 +3,18 @@ use std::{
   mem::{forget, MaybeUninit},
   ops::Deref,
   ptr::{without_provenance_mut, NonNull},
-  sync::atomic::{fence, AtomicBool, AtomicPtr, Ordering},
-  thread::{current, park, yield_now, Thread},
+  sync::{
+    atomic::{fence, AtomicBool, AtomicPtr, Ordering},
+    Arc,
+  },
+  thread::{current, park, Thread},
 };
 
 use crossbeam::utils::Backoff;
 
 use crate::utils::SBox;
 
-use super::CallbackSlot;
+use super::{CallbackSlot, WaitHistory};
 
 #[repr(C)]
 struct PairInner<T: ?Sized> {
@@ -75,16 +78,6 @@ pub enum TryWaitError<T> {
 }
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
-
-/**
- * Creates a single-use channel pair (Oneshot, OneshotFulfill).
- * State transitions: Waiting → Fulfilled → Disconnected.
- * The receiver parks until the sender fulfills the value or disconnects.
- */
-pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = Pair::new(OneshotBehavior::new());
-  (Oneshot(inner.0), OneshotFulfill(inner.1))
-}
 
 #[repr(align(4))]
 struct ThreadWaker(Thread);
@@ -170,13 +163,15 @@ pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
   callback: CallbackSlot,
+  history: Arc<WaitHistory>,
 }
 impl<T> OneshotBehavior<T> {
-  pub const fn new() -> Self {
+  const fn new(history: Arc<WaitHistory>) -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
       state: Atomic::new(STATE_WAITING),
       callback: CallbackSlot::new(),
+      history,
     }
   }
 
@@ -273,15 +268,15 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
-  const MAX_YIELD: u8 = 10;
   pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
     let mut waker = WakerRef::new();
+    let backoff = self.history.current();
     loop {
-      for _ in 0..Self::MAX_YIELD {
+      while !backoff.is_completed() {
         match self.try_wait() {
           Ok(v) => return Ok(v),
           Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-          Err(TryWaitError::Empty(_)) => yield_now(),
+          Err(TryWaitError::Empty(_)) => backoff.snooze(),
         };
       }
       if !self.try_park_with(&mut waker)? {
@@ -321,6 +316,9 @@ impl<T> OneshotBehavior<T> {
     }
   }
 }
+
+unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
+unsafe impl<T: Send> Send for OneshotBehavior<T> {}
 
 /**
  * Minimal single-use completion primitive for background work.
@@ -362,8 +360,37 @@ impl<T> Drop for OneshotFulfill<T> {
   }
 }
 
-unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
-unsafe impl<T: Send> Send for OneshotBehavior<T> {}
+pub struct OneshotGroup {
+  history: Arc<WaitHistory>,
+}
+impl OneshotGroup {
+  pub fn new() -> Self {
+    Self {
+      history: Arc::new(WaitHistory::new()),
+    }
+  }
+
+  pub fn create_behavior<T>(&self) -> OneshotBehavior<T> {
+    OneshotBehavior::new(self.history.clone())
+  }
+
+  /**
+   * Creates a single-use channel pair (Oneshot, OneshotFulfill).
+   * State transitions: Waiting → Fulfilled → Disconnected.
+   * The receiver parks until the sender fulfills the value or disconnects.
+   */
+  pub fn create_pair<T>(&self) -> (Oneshot<T>, OneshotFulfill<T>) {
+    let (p1, p2) = Pair::new(self.create_behavior());
+    (Oneshot(p1), OneshotFulfill(p2))
+  }
+}
+impl Clone for OneshotGroup {
+  fn clone(&self) -> Self {
+    Self {
+      history: Arc::clone(&self.history),
+    }
+  }
+}
 
 #[cfg(test)]
 #[path = "tests/oneshot.rs"]
