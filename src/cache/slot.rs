@@ -1,6 +1,6 @@
 use std::{pin::pin, ptr::NonNull};
 
-use super::{BatchFn, BatchHandle, BlockId, CachedBlock, DirtyBlocks};
+use super::{BatchGroup, BatchHandle, BlockId, CachedBlock, DirtyBlocks};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{SBox, SharedToken},
@@ -70,6 +70,7 @@ pub struct CachedSlot<'a> {
   block_id: BlockId,
   token: Option<SharedToken<'a>>,
   page_pool: &'a PagePool<PAGE_SIZE>,
+  batch_group: &'a BatchGroup,
 }
 impl<'a> CachedSlot<'a> {
   pub fn new(
@@ -79,6 +80,7 @@ impl<'a> CachedSlot<'a> {
     block_id: BlockId,
     token: Option<SharedToken<'a>>,
     page_pool: &'a PagePool<PAGE_SIZE>,
+    batch_group: &'a BatchGroup,
   ) -> Self {
     Self {
       block,
@@ -87,6 +89,7 @@ impl<'a> CachedSlot<'a> {
       block_id,
       token,
       page_pool,
+      batch_group,
     }
   }
 
@@ -105,6 +108,7 @@ impl<'a> CachedSlot<'a> {
       page_pool: self.page_pool,
       dirty: self.dirty,
       block_id: self.block_id,
+      group: self.batch_group,
       _token: self.token,
     }
   }
@@ -138,6 +142,7 @@ pub struct WritableSlot<'a> {
   batch: &'a BatchHandle<RefedSlot>,
   page_pool: &'a PagePool<PAGE_SIZE>,
   dirty: &'a DirtyBlocks,
+  group: &'a BatchGroup,
   block_id: BlockId,
   _token: Option<SharedToken<'a>>,
 }
@@ -147,7 +152,7 @@ impl<'a> WritableSlot<'a> {
     T: Send,
     F: FnOnce(&mut RefedSlot) -> T + Unpin + Send,
   {
-    let mut pinned = pin!(BatchFn::new(|slot| handler(slot)));
+    let mut pinned = pin!(self.group.create_fn(|slot| handler(slot)));
     if !self.batch.register(pinned.as_mut().task()) {
       return pinned.wait();
     }

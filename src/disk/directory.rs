@@ -6,7 +6,10 @@ use std::{
 };
 
 use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncScheduler};
-use crate::{background::ThreadPool, metrics::MetricsRegistry};
+use crate::{
+  background::{OneshotGroup, ThreadPool},
+  metrics::MetricsRegistry,
+};
 
 /**
  * Base-directory-bound disk backend.
@@ -19,6 +22,7 @@ pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
   sync_handle: SyncScheduler,
+  group: OneshotGroup,
   state: Arc<HandleState>,
   path: PathBuf,
 }
@@ -42,6 +46,7 @@ impl DirHandle {
       io_backend: file,
       disk_backend,
       sync_handle,
+      group: OneshotGroup::new(),
       state,
       path,
     })
@@ -50,7 +55,9 @@ impl DirHandle {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_handle.schedule())
+    let (o, f) = self.group.create_pair();
+    self.sync_handle.schedule(f);
+    PendingIO::Pending(o)
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()

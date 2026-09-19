@@ -1,6 +1,8 @@
 use crate::background::SingleFn;
 
-use super::{oneshot, Close, Execute, ExecuteOnlyContext, ThreadSlot, UnwindSpawner};
+use super::{
+  Close, Execute, ExecuteOnlyContext, OneshotGroup, ThreadSlot, UnwindSpawner,
+};
 use std::{thread::Builder, time::Duration};
 
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
@@ -53,6 +55,7 @@ where
  */
 pub struct PreloadThread<T> {
   channel: Sender<ExecuteOnlyContext<(), T>>,
+  group: OneshotGroup,
   slot: ThreadSlot,
 }
 impl<T> PreloadThread<T> {
@@ -74,6 +77,7 @@ impl<T> PreloadThread<T> {
 
     Self {
       channel: tx,
+      group: OneshotGroup::new(),
       slot: ThreadSlot::new(handle),
     }
   }
@@ -92,7 +96,7 @@ impl<T: Send> Close for PreloadThread<T> {
 }
 impl<T: Send> Execute<(), T> for PreloadThread<T> {
   fn execute(&self, _: ()) -> super::Oneshot<T> {
-    let (o, f) = oneshot();
+    let (o, f) = self.group.create_pair();
     self.register(ExecuteOnlyContext::Work((), f));
     o
   }

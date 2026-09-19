@@ -32,8 +32,8 @@ mod panic;
 pub use panic::*;
 
 mod task;
-pub use task::PendingTask;
 use task::*;
+pub use task::{PendingTask, TaskGroup};
 
 mod pool;
 pub use pool::*;
@@ -46,3 +46,6 @@ pub use vptr::*;
 
 mod callback;
 use callback::*;
+
+mod history;
+pub use history::*;

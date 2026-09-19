@@ -12,7 +12,7 @@ use crossbeam::{
 };
 
 use crate::{
-  background::{EventBus, ThreadPool},
+  background::{EventBus, OneshotGroup, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, PagePool, Pointer},
   table::TableId,
@@ -113,6 +113,8 @@ pub struct WriteAheadLog {
   page_pool: PagePool<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
+
+  flush_group: OneshotGroup,
 }
 impl WriteAheadLog {
   pub fn init(
@@ -136,6 +138,7 @@ impl WriteAheadLog {
       state: AtomicCell::new(State::Available),
       max_len,
       event_bus,
+      flush_group: OneshotGroup::new(),
     })
   }
   pub fn replay(
@@ -180,6 +183,7 @@ impl WriteAheadLog {
         state: AtomicCell::new(State::Available),
         max_len,
         event_bus,
+        flush_group: OneshotGroup::new(),
       },
       replay_result,
     ))
@@ -226,7 +230,9 @@ impl WriteAheadLog {
     if !flush {
       return Ok(log_id);
     }
-    buffer.flush_block_with(ticket, &self.page_pool).wait()?;
+    buffer
+      .flush_block_with(ticket, &self.page_pool, &self.flush_group)
+      .wait()?;
     buffer.wait_prev_blocks()?;
     self.wait_sync(buffer, token)?;
     Ok(log_id)
@@ -275,7 +281,7 @@ impl WriteAheadLog {
     unsafe { guard.defer_destroy(buffer_ptr) };
 
     buffer.append_at(available, &ticket);
-    buffer.flush_and_forget(&self.page_pool, ticket);
+    buffer.flush_and_forget(ticket, &self.page_pool, &self.flush_group);
 
     if !flush {
       return Ok(log_id);
@@ -283,7 +289,7 @@ impl WriteAheadLog {
 
     let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
     new_buffer
-      .flush_block_with(overflow, &self.page_pool)
+      .flush_block_with(overflow, &self.page_pool, &self.flush_group)
       .wait()?;
     new_buffer.wait_prev_blocks()?;
     self.wait_sync(buffer, token)?;
@@ -320,7 +326,7 @@ impl WriteAheadLog {
     unsafe { guard.defer_destroy(buffer_ptr) };
 
     if let Err(err) = buffer
-      .flush_block_with(ticket, &self.page_pool)
+      .flush_block_with(ticket, &self.page_pool, &self.flush_group)
       .wait()
       .and_then(|_| buffer.wait_prev_blocks())
     {

@@ -7,7 +7,7 @@ use super::*;
 
 #[test]
 fn test_fulfill() {
-  let (a, b) = oneshot::<usize>();
+  let (a, b) = OneshotGroup::new().create_pair::<usize>();
   let v = 100;
 
   spawn(move || {
@@ -19,21 +19,21 @@ fn test_fulfill() {
 
 #[test]
 fn test_fulfill_before_wait() {
-  let (rx, tx) = oneshot::<usize>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<usize>();
   tx.fulfill(42);
   assert_eq!(rx.wait().expect("should be fulfilled"), 42);
 }
 
 #[test]
 fn test_disconnected_on_fulfill_drop() {
-  let (rx, tx) = oneshot::<usize>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<usize>();
   drop(tx);
   assert!(matches!(rx.wait(), Err(WaitDisconnectedError)));
 }
 
 #[test]
 fn test_disconnected_on_fulfill_drop_async() {
-  let (rx, tx) = oneshot::<usize>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<usize>();
   spawn(move || {
     sleep(Duration::from_millis(100));
     drop(tx);
@@ -55,7 +55,7 @@ fn test_no_leak_on_rx_drop_after_fulfill() {
   }
 
   DROP_COUNT.store(0, Ordering::SeqCst);
-  let (rx, tx) = oneshot::<Tracked>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<Tracked>();
   tx.fulfill(Tracked);
   drop(rx);
   assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
@@ -75,7 +75,7 @@ fn test_no_leak_on_fulfill_then_wait() {
   }
 
   DROP_COUNT.store(0, Ordering::SeqCst);
-  let (rx, tx) = oneshot::<Tracked>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<Tracked>();
   tx.fulfill(Tracked);
   let _val = rx.wait().expect("should be fulfilled");
   drop(_val);
@@ -96,7 +96,7 @@ fn test_no_leak_on_fulfill_after_rx_drop() {
   }
 
   DROP_COUNT.store(0, Ordering::SeqCst);
-  let (rx, tx) = oneshot::<Tracked>();
+  let (rx, tx) = OneshotGroup::new().create_pair::<Tracked>();
   drop(rx);
   tx.fulfill(Tracked);
   assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);

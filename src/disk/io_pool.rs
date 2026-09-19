@@ -15,7 +15,7 @@ use super::{
   ScanIOHandle, SyncScheduler, WriteScheduler,
 };
 use crate::{
-  background::{Close, Oneshot, ThreadBuilder, ThreadPool},
+  background::{Close, Oneshot, OneshotGroup, ThreadBuilder, ThreadPool},
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex, ToArc},
   Error, Result,
@@ -64,6 +64,8 @@ pub struct IOPool {
   thread: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
+  write_group: OneshotGroup,
+  sync_group: OneshotGroup,
 }
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
@@ -94,6 +96,8 @@ impl IOPool {
           thread,
           metrics,
           base_dir,
+          write_group: OneshotGroup::new(),
+          sync_group: OneshotGroup::new(),
         });
       }
 
@@ -177,7 +181,9 @@ impl IOPool {
     IOHandle {
       backend,
       write_scheduler: write_handle,
+      write_group: self.write_group.clone(),
       sync_scheduler: sync_handle,
+      sync_group: self.sync_group.clone(),
       state,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
@@ -233,7 +239,9 @@ impl Drop for IOPool {
 pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
   write_scheduler: WriteScheduler,
+  write_group: OneshotGroup,
   sync_scheduler: SyncScheduler,
+  sync_group: OneshotGroup,
   state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
@@ -269,14 +277,18 @@ impl IOHandle {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.write_scheduler.schedule(buf, offset))
+    let (o, f) = self.write_group.create_pair();
+    self.write_scheduler.schedule(buf, offset, f);
+    PendingIO::Pending(o)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_scheduler.schedule())
+    let (o, f) = self.sync_group.create_pair();
+    self.sync_scheduler.schedule(f);
+    PendingIO::Pending(o)
   }
 
   pub fn fsync(&self) -> IOResult<()> {

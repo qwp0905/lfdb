@@ -13,7 +13,7 @@ use super::{
   SegmentGeneration, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
 };
 use crate::{
-  background::{oneshot, Oneshot, OneshotFulfill},
+  background::{Oneshot, OneshotFulfill, OneshotGroup},
   disk::{Page, PagePool, PageRef, Pointer},
   utils::{create_static_ref, ExclusivePin, SBox, SharedToken},
 };
@@ -238,11 +238,12 @@ impl LogBuffer {
 
   pub fn flush_and_forget(
     &self,
-    page_pool: &PagePool<WAL_BLOCK_SIZE>,
     ticket: AppendTicket,
+    page_pool: &PagePool<WAL_BLOCK_SIZE>,
+    group: &OneshotGroup,
   ) {
     debug_assert_eq!(ticket.get_offset() + ticket.get_len(), WAL_BLOCK_SIZE);
-    let batch = self.flush_block_with(ticket, page_pool);
+    let batch = self.flush_block_with(ticket, page_pool, group);
     self
       .segment_state
       .write_completion
@@ -253,10 +254,11 @@ impl LogBuffer {
     &self,
     ticket: AppendTicket,
     page_pool: &PagePool<WAL_BLOCK_SIZE>,
+    group: &OneshotGroup,
   ) -> BatchedWrite {
     debug_assert!(!self.segment_state.taken.get());
 
-    let (o, f) = oneshot();
+    let (o, f) = group.create_pair();
     let batched = BatchedWrite::new(o);
 
     if !self.batch.push_and_compete(f, ticket) {
