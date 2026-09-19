@@ -261,9 +261,6 @@ impl WriteAheadLog {
     debug_assert_eq!(available.len(), ticket.get_len());
     debug_assert_eq!(remain.len(), overflow.get_len());
 
-    buffer.append_at(available, &ticket);
-    buffer.flush_and_forget(&self.page_pool, ticket);
-
     let mut new_page = self.page_pool.acquire();
     new_page.copy_from(remain, 0);
     let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
@@ -275,8 +272,11 @@ impl WriteAheadLog {
     ) else {
       unreachable!()
     };
-
     unsafe { guard.defer_destroy(buffer_ptr) };
+
+    buffer.append_at(available, &ticket);
+    buffer.flush_and_forget(&self.page_pool, ticket);
+
     if !flush {
       return Ok(log_id);
     }
