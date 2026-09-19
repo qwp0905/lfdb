@@ -11,7 +11,7 @@ use std::{
 
 use super::EngineConfig;
 use crate::{
-  background::{Close, EventBus, ThreadBuilder},
+  background::{Close, EventBus, TaskGroup, ThreadBuilder},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
@@ -214,6 +214,7 @@ impl Engine {
       &event_bus,
     );
 
+    let redo_history = TaskGroup::new();
     let mut max_used = HashMap::<TableId, Pointer>::new();
     // To recover table information, first replay the metadata table
     let meta_table = tables.meta_table();
@@ -221,7 +222,8 @@ impl Engine {
 
     let mut stream = {
       let block_cache = block_cache.clone();
-      init_thread.stream(
+      init_thread.stream_with(
+        &redo_history,
         move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
           unsafe { block_cache.read_unchecked(ptr, &table)? }
             .for_write()

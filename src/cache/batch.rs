@@ -9,7 +9,7 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 
-use crate::background::{OneshotBehavior, VObject, VPtr as VPtrRaw};
+use crate::background::{OneshotBehavior, OneshotGroup, VObject, VPtr as VPtrRaw};
 
 const MAX_BATCH_SIZE: usize = 32;
 
@@ -40,10 +40,10 @@ struct BatchPayload<T, R, F> {
   _marker: PhantomData<fn(&mut T)>,
 }
 impl<T, R, F> BatchPayload<T, R, F> {
-  const fn new(handler: F) -> Self {
+  const fn new(handler: F, behavior: OneshotBehavior<R>) -> Self {
     Self {
       handler: UnsafeCell::new(ManuallyDrop::new(handler)),
-      behavior: OneshotBehavior::new(),
+      behavior,
       _marker: PhantomData,
     }
   }
@@ -61,7 +61,6 @@ impl<T, R, F> BatchPayload<T, R, F> {
   }
 }
 
-#[repr(C)]
 pub struct BatchFn<T, R, F>(VObject<BatchPayload<T, R, F>, VTable>);
 impl<T, R, F> BatchFn<T, R, F>
 where
@@ -72,8 +71,11 @@ where
     complete: complete::<T, R, F>,
   };
 
-  pub const fn new(handler: F) -> Self {
-    Self(VObject::new(BatchPayload::new(handler), &Self::VTABLE))
+  const fn new(handler: F, behavior: OneshotBehavior<R>) -> Self {
+    Self(VObject::new(
+      BatchPayload::new(handler, behavior),
+      &Self::VTABLE,
+    ))
   }
   pub fn task(self: Pin<&mut Self>) -> BatchTask<T> {
     // SAFETY: Only take the pinned object's address; no field is moved.
@@ -106,6 +108,20 @@ impl<T> BatchTask<T> {
     let ptr = self.ptr.erased();
     drop(self); // must drop before call handler because of vobject's lifetime
     (vtable.complete)(ptr);
+  }
+}
+
+pub struct BatchGroup(OneshotGroup);
+impl BatchGroup {
+  pub fn new() -> Self {
+    Self(OneshotGroup::new())
+  }
+
+  pub fn create_fn<T, R, F>(&self, f: F) -> BatchFn<T, R, F>
+  where
+    F: FnOnce(&mut T) -> R + Send,
+  {
+    BatchFn::new(f, self.0.create_behavior())
   }
 }
 

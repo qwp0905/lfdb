@@ -9,7 +9,7 @@ use std::{
 
 use super::{max_iov, IOBackend};
 use crate::{
-  background::{oneshot, BatchExecutor, Oneshot, OneshotFulfill, ThreadPool},
+  background::{BatchExecutor, OneshotFulfill, ThreadPool},
   metrics::{measure, MetricsRegistry},
   utils::{ExclusivePin, ExclusiveToken, SharedToken},
 };
@@ -144,10 +144,8 @@ impl WriteScheduler {
     Self(executor)
   }
 
-  pub fn schedule(&self, buf: &'static [u8], offset: u64) -> Oneshot<Result<()>> {
-    let (o, f) = oneshot();
+  pub fn schedule(&self, buf: &'static [u8], offset: u64, f: OneshotFulfill<Result<()>>) {
     self.0.dispatch(((offset, IoSlice::new(buf)), f));
-    o
   }
 
   const fn handle(
@@ -195,10 +193,8 @@ impl SyncScheduler {
     Self(executor)
   }
 
-  pub fn schedule(&self) -> Oneshot<Result<()>> {
-    let (o, f) = oneshot();
+  pub fn schedule(&self, f: OneshotFulfill<Result<()>>) {
     self.0.dispatch(((), f));
-    o
   }
 
   const fn handle(

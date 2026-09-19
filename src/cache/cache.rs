@@ -5,11 +5,11 @@ use std::{
 };
 
 use super::{
-  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks,
-  DirtyTables, EvictionGuard, MappingTable, PendingFlush, RefedSlot,
+  Acquired, BatchGroup, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot,
+  DirtyBlocks, DirtyTables, EvictionGuard, MappingTable, PendingFlush, RefedSlot,
 };
 use crate::{
-  background::{Close, ThreadBuilder, ThreadPool},
+  background::{Close, TaskGroup, ThreadBuilder, ThreadPool},
   disk::{PagePool, PageRef, Pointer, PAGE_SIZE},
   metrics::{measure, MetricsRegistry},
   table::TableHandleRef,
@@ -36,9 +36,11 @@ struct Core {
   dirty_tables: DirtyTables,
   batch_handles: Box<[BatchHandle<RefedSlot>]>,
   page_pool: PagePool<PAGE_SIZE>,
+  batch_group: BatchGroup,
+  flush_group: TaskGroup,
 }
 impl Core {
-  const fn new(
+  fn new(
     cached_blocks: Box<[BlockCell]>,
     pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
@@ -53,6 +55,8 @@ impl Core {
       dirty_tables,
       batch_handles,
       page_pool,
+      batch_group: BatchGroup::new(),
+      flush_group: TaskGroup::new(),
     }
   }
 
@@ -130,7 +134,7 @@ impl Core {
   }
 
   fn flush_tables_with(&self, executor: &Arc<ThreadPool>) -> Result {
-    let mut stream = executor.stream(handle_flush_table);
+    let mut stream = executor.stream_with(&self.flush_group, handle_flush_table);
     for table in self.dirty_tables.drain() {
       stream.push(table);
     }
@@ -189,6 +193,7 @@ impl Core {
       id,
       token,
       &self.page_pool,
+      &self.batch_group,
     )
   }
 

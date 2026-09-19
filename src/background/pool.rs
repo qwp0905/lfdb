@@ -12,7 +12,7 @@ use crossbeam::{
 };
 
 use super::{
-  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadSlot, UnwindSpawner,
+  Close, PendingTask, SharedFn, TaskGroup, TaskRef, ThreadSlot, UnwindSpawner,
 };
 
 type ThreadId = usize;
@@ -193,6 +193,7 @@ pub struct ThreadPool {
   core: Arc<Core<Context>>,
   wakers: Arc<[Thread]>,
   threads: Box<[ThreadSlot]>,
+  default_group: TaskGroup,
 }
 impl ThreadPool {
   pub fn new<S: ToString>(name: S, size: usize, count: usize) -> Self {
@@ -215,15 +216,21 @@ impl ThreadPool {
       core,
       wakers: Arc::from(wakers.into_boxed_slice()),
       threads: threads.into_boxed_slice(),
+      default_group: TaskGroup::new(),
     }
   }
 
-  fn spawn_internal<F, T>(core: &Core<Context>, wakers: &[Thread], f: F) -> PendingTask<T>
+  fn spawn_internal<F, T>(
+    core: &Core<Context>,
+    wakers: &[Thread],
+    group: &TaskGroup,
+    f: F,
+  ) -> PendingTask<T>
   where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
-    let (task, pending) = into_task(f);
+    let (task, pending) = group.create_task(f);
     core.push_global(Context::Task(task));
     if let Some(id) = core.wake_one() {
       wakers[id].unpark();
@@ -236,10 +243,31 @@ impl ThreadPool {
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
-    Self::spawn_internal(&self.core, &self.wakers, f)
+    self.spawn_with(&self.default_group, f)
+  }
+  fn spawn_with<F, T>(&self, group: &TaskGroup, f: F) -> PendingTask<T>
+  where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+  {
+    Self::spawn_internal(&self.core, &self.wakers, group, f)
   }
 
   pub fn fork<T, R, F, I>(&self, input: I, handler: F) -> ForkJoin<R>
+  where
+    I: ExactSizeIterator<Item = T>,
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> R + Send + Sync + 'static,
+  {
+    self.fork_with(input, &self.default_group, handler)
+  }
+  pub fn fork_with<T, R, F, I>(
+    &self,
+    input: I,
+    group: &TaskGroup,
+    handler: F,
+  ) -> ForkJoin<R>
   where
     I: ExactSizeIterator<Item = T>,
     T: Send + 'static,
@@ -251,7 +279,7 @@ impl ThreadPool {
     let handler = SharedFn::new(handler);
     for value in input {
       let handler = handler.clone();
-      let (r, p) = into_task(move || handler.call(value));
+      let (r, p) = group.create_task(move || handler.call(value));
       self.core.push_global(Context::Task(r));
       pending.push(p);
     }
@@ -274,11 +302,15 @@ impl ThreadPool {
     )
   }
 
-  pub fn stream<T, R, F>(&self, handler: F) -> ForkStream<T, R>
+  pub fn stream_with<'a, T, R, F>(
+    &self,
+    group: &'a TaskGroup,
+    handler: F,
+  ) -> ForkStream<'a, T, R>
   where
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    ForkStream::new(self.typed_executor(handler))
+    ForkStream::new(self.typed_executor(handler), group)
   }
 
   fn wake_one(&self) {
@@ -331,25 +363,29 @@ impl<T, R> TypedExecutor<T, R> {
       handler,
     }
   }
-  fn execute(&self, input: T) -> PendingTask<R>
+  fn execute(&self, input: T, group: &TaskGroup) -> PendingTask<R>
   where
     T: Send + 'static,
     R: Send + 'static,
   {
     let handler = self.handler.clone();
-    ThreadPool::spawn_internal(&self.core, &self.wakers, move || handler.call(input))
+    ThreadPool::spawn_internal(&self.core, &self.wakers, group, move || {
+      handler.call(input)
+    })
   }
 }
 
-pub struct ForkStream<T, R> {
+pub struct ForkStream<'a, T, R> {
   executor: TypedExecutor<T, R>,
   inner: ForkJoin<R>,
+  group: &'a TaskGroup,
 }
-impl<T, R> ForkStream<T, R> {
-  const fn new(executor: TypedExecutor<T, R>) -> Self {
+impl<'a, T, R> ForkStream<'a, T, R> {
+  const fn new(executor: TypedExecutor<T, R>, group: &'a TaskGroup) -> Self {
     Self {
       executor,
       inner: ForkJoin::new(Vec::new()),
+      group,
     }
   }
 
@@ -358,7 +394,7 @@ impl<T, R> ForkStream<T, R> {
     T: Send + 'static,
     R: Send + 'static,
   {
-    let pending = self.executor.execute(input);
+    let pending = self.executor.execute(input, self.group);
     self.inner.push(pending);
   }
 

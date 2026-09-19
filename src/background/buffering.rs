@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-  oneshot, Close, Dispatch, ExecutableContext, Execute, OneshotFulfill, SingleFn,
+  Close, Dispatch, ExecutableContext, Execute, OneshotFulfill, OneshotGroup, SingleFn,
   ThreadSlot, UnwindSpawner,
 };
 
@@ -92,6 +92,7 @@ where
 pub struct BufferingThread<T, R> {
   queue: Arc<SegQueue<ExecutableContext<T, R>>>,
   waker: Thread,
+  group: OneshotGroup,
   slot: ThreadSlot,
 }
 impl<T, R> BufferingThread<T, R> {
@@ -115,6 +116,7 @@ impl<T, R> BufferingThread<T, R> {
       queue,
       waker,
       slot: ThreadSlot::new(handle),
+      group: OneshotGroup::new(),
     }
   }
 
@@ -139,7 +141,7 @@ impl<T: Send, R: Send> Dispatch<T> for BufferingThread<T, R> {
 }
 impl<T: Send, R: Send> Execute<T, R> for BufferingThread<T, R> {
   fn execute(&self, value: T) -> super::Oneshot<R> {
-    let (o, f) = oneshot();
+    let (o, f) = self.group.create_pair();
     self.register(ExecutableContext::Work(value, f));
     o
   }

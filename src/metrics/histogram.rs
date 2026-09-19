@@ -56,7 +56,7 @@ impl AtomicF64 {
       };
 
       old = err;
-      backoff.snooze();
+      backoff.spin();
     }
   }
   fn load(&self) -> f64 {

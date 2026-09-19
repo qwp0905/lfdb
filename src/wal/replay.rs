@@ -8,7 +8,7 @@ use crossbeam::channel::{unbounded, Sender};
 
 use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
 use crate::{
-  background::ThreadPool,
+  background::{TaskGroup, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, Pointer, ScanIOHandle},
   error::Result,
@@ -87,8 +87,10 @@ pub fn replay(
   let len = files.len();
   debug!("trying to replay {len} segments.");
 
+  let group = TaskGroup::new();
   let (tx, rx) = unbounded();
-  let forked = init_thread.fork(files.into_iter(), scan_segment(io_pool, tx));
+  let forked =
+    init_thread.fork_with(files.into_iter(), &group, scan_segment(io_pool, tx));
 
   let mut tx_id = RESERVED_TX;
   let mut log_id = 0;

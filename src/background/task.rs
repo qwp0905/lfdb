@@ -1,6 +1,6 @@
 use std::{cell::UnsafeCell, marker::PhantomData, mem::MaybeUninit, ptr::NonNull};
 
-use super::{OneshotBehavior, VPtr as VPtrRaw, WaitDisconnectedError};
+use super::{OneshotBehavior, OneshotGroup, VPtr as VPtrRaw, WaitDisconnectedError};
 
 type WaitResult<T> = std::result::Result<T, WaitDisconnectedError>;
 
@@ -50,10 +50,10 @@ where
     drop_receiver: drop_receiver::<F, R>,
   };
 
-  const fn new(function: F) -> Self {
+  const fn new(function: F, behavior: OneshotBehavior<R>) -> Self {
     Self {
       function: UnsafeCell::new(Some(function)),
-      behavior: OneshotBehavior::new(),
+      behavior,
     }
   }
 
@@ -75,14 +75,21 @@ impl<F, R> TaskPayload<F, R> {
   }
 }
 
-pub fn into_task<F, R>(function: F) -> (TaskRef, PendingTask<R>)
-where
-  F: FnOnce() -> R + Send + 'static,
-  R: Send + 'static,
-{
-  let task = TaskPayload::new(function);
-  let (p1, p2) = VPtr::new_pair(task, &TaskPayload::<F, R>::VTABLE);
-  (TaskRef::new(p1), PendingTask::new(p2))
+pub struct TaskGroup(OneshotGroup);
+impl TaskGroup {
+  pub fn new() -> Self {
+    Self(OneshotGroup::new())
+  }
+
+  pub fn create_task<F, R>(&self, function: F) -> (TaskRef, PendingTask<R>)
+  where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+  {
+    let task = TaskPayload::new(function, self.0.create_behavior());
+    let (p1, p2) = VPtr::new_pair(task, &TaskPayload::<F, R>::VTABLE);
+    (TaskRef::new(p1), PendingTask::new(p2))
+  }
 }
 
 pub struct TaskRef(VPtr);
