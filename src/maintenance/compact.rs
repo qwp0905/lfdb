@@ -1,4 +1,9 @@
-use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
+use std::{
+  cell::{Cell, RefCell},
+  collections::LinkedList,
+  sync::Arc,
+  time::Duration,
+};
 
 use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
 
@@ -14,7 +19,7 @@ use crate::{
     Snapshotter, WritablePolicy,
   },
   cache::{BlockCache, RefedSlot},
-  disk::Pointer,
+  disk::{PendingIO, Pointer},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableMapper, TableMetadata, TableName},
@@ -41,6 +46,7 @@ struct MiniTx<'a> {
   recorder: &'a PageRecorder,
   wal: &'a WriteAheadLog,
   blob: &'a BlobStorage,
+  blob_sync: RefCell<Option<Vec<PendingIO>>>,
   committed: Cell<bool>,
   modified: Cell<bool>,
 }
@@ -63,6 +69,7 @@ impl<'a> MiniTx<'a> {
       version_controller,
       wal,
       blob,
+      blob_sync: RefCell::new(None),
       committed: Cell::new(false),
       modified: Cell::new(false),
     })
@@ -87,6 +94,13 @@ impl<'a> MiniTx<'a> {
     }
     let mut _guard = None;
     if self.modified.get() {
+      self
+        .blob_sync
+        .borrow_mut()
+        .take()
+        .into_iter()
+        .flatten()
+        .try_for_each(|p| p.wait_flatten())?;
       _guard = Some(self.wal.commit_and_flush(self.state.get_id())?);
     }
     self.state.deactive();
@@ -160,7 +174,9 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     self.block_cache.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
-    self.blob.append(data)
+    let (g, p) = self.blob.append(data)?;
+    self.blob_sync.borrow_mut().get_or_insert_default().push(p);
+    Ok(g)
   }
 }
 impl<'a> CreatablePolicy for MiniTx<'a> {
