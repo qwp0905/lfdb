@@ -95,3 +95,7 @@ impl hash::Hash for VecRef {
     self.as_slice().hash(state)
   }
 }
+
+#[cfg(test)]
+#[path = "tests/vec_ref.rs"]
+mod tests;
