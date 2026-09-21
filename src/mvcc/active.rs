@@ -99,6 +99,18 @@ impl ActiveState {
     self.status.store(STATUS_UNAVAILABLE, Ordering::Relaxed)
   }
 
+  pub fn try_unavailable(&self) -> bool {
+    self
+      .status
+      .compare_exchange(
+        STATUS_AVAILABLE,
+        STATUS_UNAVAILABLE,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      )
+      .is_ok()
+  }
+
   pub fn park(&self) {
     self.parker.park();
   }

@@ -19,13 +19,6 @@ use crate::{
   wal::{TxId, WALFailed, RESERVED_TX},
 };
 
-fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
-  let Some(state) = active.remove(tx_id) else {
-    return;
-  };
-  state.wake_all();
-}
-
 pub struct TxState<'a> {
   state: SBox<ActiveState>,
   set: &'a ActiveSet,
@@ -35,7 +28,10 @@ impl<'a> TxState<'a> {
     Self { state, set }
   }
   pub fn deactive(&self) {
-    remove_and_wake(self.set, &self.state.get_id());
+    let Some(state) = self.set.remove(&self.state.get_id()) else {
+      return;
+    };
+    state.wake_all();
   }
   pub fn current_version(&self) -> TxId {
     self.set.current_version()
@@ -244,11 +240,10 @@ impl SharedSubscription<WALFailed> for VersionController {
     if self.closed.fetch_or(true, Ordering::Relaxed) {
       return;
     }
-    for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
-      self.aborted.insert(state.get_id());
-      remove_and_wake(&self.active, &state.get_id());
+    for state in self.active.get_all() {
+      state.try_unavailable();
     }
-    error!("all versions transit to abort since wal failure detected.");
+    error!("all versions transit to unavailable since wal failure detected.");
   }
 }
 binding_events!(VersionController {
