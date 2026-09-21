@@ -289,7 +289,7 @@ impl GcWorker {
     cycle
   }
   fn finalize_cycle(&self, cycle: &mut GcCycle) -> Result {
-    self.version_controller.remove_aborted(&cycle.min_version);
+    self.version_controller.remove_aborted(cycle.min_version);
     for &id in cycle
       .exists_blobs
       .iter()
@@ -352,7 +352,7 @@ impl GcWorker {
 
             if table.is_reserved(&entry.key)
               || entry.record.version >= min_version
-              || self.version_controller.is_aborted(&entry.record.owner)
+              || self.version_controller.is_aborted(entry.record.owner)
             {
               let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
               task_queue.push(task);
@@ -436,7 +436,7 @@ impl GcWorker {
           current.min_version = current.min_version.min(e.record.version);
           inner.total += 1;
 
-          if self.version_controller.is_aborted(&e.record.owner) {
+          if self.version_controller.is_aborted(e.record.owner) {
             inner.dead += 1;
             if let Some(p) = e.next {
               let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
@@ -508,7 +508,7 @@ impl GcWorker {
     steps.ingest(release_queue);
 
     let min_version = self.version_controller.min_version();
-    steps.move_unreachable(min_version, |tx_id| {
+    steps.move_unreachable(min_version, |&tx_id| {
       self.version_controller.is_aborted(tx_id)
     });
     for table in steps.extract_unpinned() {

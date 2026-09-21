@@ -110,7 +110,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.snapshot.is_aborted(&owner)
+    self.snapshot.is_aborted(owner)
   }
   fn is_owned(&self, owner: TxId) -> bool {
     self.state.get_id() == owner
@@ -192,7 +192,7 @@ struct CompactionReadPolicy {
 }
 impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.version_controller.is_aborted(&owner)
+    self.version_controller.is_aborted(owner)
   }
   fn is_owned(&self, _: TxId) -> bool {
     false
@@ -240,7 +240,7 @@ impl ReadonlyPolicy for CompactionWritePolicy {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.version_controller.is_aborted(&owner)
+    self.version_controller.is_aborted(owner)
   }
   fn is_owned(&self, _: TxId) -> bool {
     false
