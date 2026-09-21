@@ -21,3 +21,7 @@ impl Gauge {
     self.0.fetch_sub(1, Ordering::Relaxed);
   }
 }
+
+#[cfg(test)]
+#[path = "tests/gauge.rs"]
+mod tests;
