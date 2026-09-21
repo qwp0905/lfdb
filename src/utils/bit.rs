@@ -126,10 +126,9 @@ impl OffsetBitmap {
 
   #[inline]
   pub fn insert(&mut self, n: u64) -> bool {
-    if n < self.offset {
+    let Some(diff) = n.checked_sub(self.offset) else {
       return false;
-    }
-    let diff = n - self.offset;
+    };
 
     let i = (diff >> SHIFT) as usize;
     if i >= self.bits.len() {
@@ -142,10 +141,9 @@ impl OffsetBitmap {
 
   #[inline]
   pub fn contains(&self, n: u64) -> bool {
-    if n < self.offset {
+    let Some(diff) = n.checked_sub(self.offset) else {
       return false;
-    }
-    let diff = n - self.offset;
+    };
 
     let i = (diff >> SHIFT) as usize;
     if i >= self.bits.len() {
@@ -156,6 +154,44 @@ impl OffsetBitmap {
 
   pub fn iter(&self) -> BitmapIter<impl Iterator<Item = u64> + '_> {
     BitmapIter::new(self.bits.iter().copied(), self.offset)
+  }
+
+  pub fn ensure_capacity(&mut self, max: u64) {
+    if self.bits.is_empty() {
+      self.bits.push(0);
+      self.offset = max;
+      return;
+    }
+
+    while ((self.bits.len() as u64) << SHIFT) + self.offset <= max {
+      self.bits.push(0);
+    }
+  }
+
+  pub fn advance_offset(&mut self, n: u64) {
+    if self.bits.is_empty() {
+      return;
+    }
+    let Some(diff) = n.checked_sub(self.offset) else {
+      return;
+    };
+
+    let move_count = (diff >> SHIFT) as usize;
+    if move_count >= self.bits.len() {
+      self.bits.clear();
+      return;
+    }
+    if move_count > 0 {
+      self.bits.copy_within(move_count.., 0);
+      self.bits.truncate(self.bits.len() - move_count);
+      if self.bits.capacity() >> 2 > self.bits.len() {
+        self.bits.shrink_to(self.bits.len() << 1);
+      }
+      self.offset += (move_count as u64) << SHIFT;
+    }
+
+    debug_assert!(n - self.offset < u64::BITS.into());
+    self.bits[0] &= u64::MAX << (n - self.offset);
   }
 }
 
