@@ -154,7 +154,7 @@ mod tests {
 
   use tempfile::TempDir;
 
-  use crate::{metrics::MetricsRegistry, table::TableName, DefaultDiskBackend};
+  use crate::{metrics::MetricsRegistry, table::TableNameRef, DefaultDiskBackend};
 
   use super::*;
 
@@ -167,7 +167,7 @@ mod tests {
 
     let page_size = 123;
     let tid = 1;
-    let name = TableName::from_str("name").unwrap();
+    let name = TableNameRef::from_str("name").unwrap().into_owned();
     let filename = PathBuf::from("filename".to_string());
     let metadata = TableMetadata::new(tid, name.clone(), filename.clone());
     let sversion = SnapshotFormatVersion::CURRENT;
@@ -179,7 +179,7 @@ mod tests {
     let parsed = load_manifest(&io_pool).unwrap().unwrap();
 
     assert_eq!(parsed.page_size, page_size);
-    assert_eq!(parsed.metadata_table.get_name(), &name);
+    assert_eq!(parsed.metadata_table.get_name(), name.get_ref());
     assert_eq!(parsed.metadata_table.get_filename(), filename);
     assert_eq!(parsed.metadata_table.get_id(), tid);
 

@@ -6,11 +6,50 @@ use std::{
 use crate::{Error, Result};
 
 const MAX_TABLE_NAME_LEN: usize = 256usize;
-pub const META_TABLE: &str = "__meta__";
+pub const META_TABLE: TableNameRef = TableNameRef("__meta__");
 
 pub struct TableName(String);
 impl TableName {
-  pub fn from_str(name: &str) -> Result<Self> {
+  pub const fn get_ref(&self) -> TableNameRef<'_> {
+    unsafe { TableNameRef::from_str_unchecked(self.0.as_str()) }
+  }
+}
+
+impl Deref for TableName {
+  type Target = str;
+
+  fn deref(&self) -> &Self::Target {
+    self.0.as_str()
+  }
+}
+
+impl Clone for TableName {
+  fn clone(&self) -> Self {
+    Self(self.0.clone())
+  }
+}
+
+impl Display for TableName {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    Display::fmt(self.deref(), f)
+  }
+}
+impl Debug for TableName {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    Debug::fmt(self.deref(), f)
+  }
+}
+impl PartialEq for TableName {
+  fn eq(&self, other: &Self) -> bool {
+    self.0 == other.0
+  }
+}
+impl Eq for TableName {}
+
+#[derive(Clone, Copy)]
+pub struct TableNameRef<'a>(&'a str);
+impl<'a> TableNameRef<'a> {
+  pub fn from_str(name: &'a str) -> Result<Self> {
     if name.is_empty() {
       return Err(Error::TableNameEmpty);
     }
@@ -34,40 +73,38 @@ impl TableName {
    * This is an unsafe-equivalent constructor: callers must guarantee the same
    * invariants enforced by `from_str`.
    */
-  pub unsafe fn from_str_unchecked(name: &str) -> Self {
-    Self(name.to_string())
+  pub const unsafe fn from_str_unchecked(name: &'a str) -> Self {
+    Self(name)
+  }
+  pub fn into_owned(self) -> TableName {
+    TableName(self.0.to_string())
   }
 }
 
-impl Clone for TableName {
-  fn clone(&self) -> Self {
-    Self(self.0.clone())
-  }
-}
-impl Deref for TableName {
+impl<'a> Deref for TableNameRef<'a> {
   type Target = str;
 
   fn deref(&self) -> &Self::Target {
-    self.0.as_str()
+    self.0
   }
 }
 
-impl Display for TableName {
+impl<'a> Display for TableNameRef<'a> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     Display::fmt(self.deref(), f)
   }
 }
-impl Debug for TableName {
+impl<'a> Debug for TableNameRef<'a> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     Debug::fmt(self.deref(), f)
   }
 }
-impl PartialEq for TableName {
+impl<'a> PartialEq for TableNameRef<'a> {
   fn eq(&self, other: &Self) -> bool {
     self.0 == other.0
   }
 }
-impl Eq for TableName {}
+impl<'a> Eq for TableNameRef<'a> {}
 
 #[cfg(test)]
 #[path = "tests/table_name.rs"]

@@ -7,6 +7,7 @@ use std::{
 
 use super::TableName;
 use crate::{
+  table::TableNameRef,
   utils::{OffsetReader, OffsetWriter},
   Error, Result,
 };
@@ -64,29 +65,6 @@ impl SegmentSpec {
       filename,
       version,
     }
-  }
-  fn read_from(reader: &mut OffsetReader) -> Result<Self> {
-    let Some(id) = reader.read_array().map(TableId::from_le_bytes) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let Some(v) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let Some(version) = TableFormatVersion::from_u16(v) else {
-      return Err(Error::UnsupportedVersion);
-    };
-    let Some(len) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let Some(bytes) = reader.read(len as usize) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let filename = unsafe { OsStr::from_encoded_bytes_unchecked(bytes) };
-    Ok(Self {
-      id,
-      filename: PathBuf::from(filename),
-      version,
-    })
   }
   fn write_to(&self, writer: &mut OffsetWriter) {
     writer.write(&self.id.to_le_bytes());
@@ -148,12 +126,6 @@ impl TableMetadata {
     self.compaction = Some(metadata.spec.clone());
   }
 
-  pub const fn get_compaction_id(&self) -> Option<TableId> {
-    match &self.compaction {
-      Some(spec) => Some(spec.id),
-      None => None,
-    }
-  }
   /**
    * Return metadata for the table produced by compaction.
    *
@@ -203,26 +175,8 @@ impl TableMetadata {
   }
 
   pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-    let mut reader = OffsetReader::new(bytes);
-    let compaction = match reader.read_byte() {
-      Some(0) => None,
-      Some(1) => Some(SegmentSpec::read_from(&mut reader)?),
-      _ => return Err(Error::InvalidFormat("metadata crashed.")),
-    };
-
-    let Some(name_len) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let Some(name) = reader.read(name_len as usize) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
-    };
-    let name = unsafe { TableName::from_str_unchecked(str::from_utf8_unchecked(name)) };
-    let spec = SegmentSpec::read_from(&mut reader)?;
-    Ok(Self {
-      name,
-      spec,
-      compaction,
-    })
+    let view = TableMetadataView::from_bytes(bytes)?;
+    Ok(view.into_owned())
   }
 
   #[inline]
@@ -234,11 +188,97 @@ impl TableMetadata {
     &self.spec.filename
   }
   #[inline]
-  pub const fn get_name(&self) -> &TableName {
-    &self.name
+  pub const fn get_name(&self) -> TableNameRef<'_> {
+    self.name.get_ref()
   }
   pub const fn get_version(&self) -> TableFormatVersion {
     self.spec.version
+  }
+}
+
+pub struct TableMetadataView<'a> {
+  name: TableNameRef<'a>,
+  spec: SegmentSpecView<'a>,
+  compaction: Option<SegmentSpecView<'a>>,
+}
+impl<'a> TableMetadataView<'a> {
+  pub fn from_bytes(bytes: &'a [u8]) -> Result<Self> {
+    let mut reader = OffsetReader::new(bytes);
+    let compaction = match reader.read_byte() {
+      Some(0) => None,
+      Some(1) => Some(SegmentSpecView::read_from(&mut reader)?),
+      _ => return Err(Error::InvalidFormat("metadata crashed.")),
+    };
+
+    let Some(name_len) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(name) = reader.read(name_len as usize) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let name =
+      unsafe { TableNameRef::from_str_unchecked(str::from_utf8_unchecked(name)) };
+    let spec = SegmentSpecView::read_from(&mut reader)?;
+    Ok(Self {
+      name,
+      spec,
+      compaction,
+    })
+  }
+
+  pub fn into_owned(self) -> TableMetadata {
+    TableMetadata {
+      name: self.name.into_owned(),
+      spec: self.spec.into_owned(),
+      compaction: self.compaction.map(|s| s.into_owned()),
+    }
+  }
+
+  #[inline]
+  pub const fn get_id(&self) -> TableId {
+    self.spec.id
+  }
+
+  pub const fn get_compaction_id(&self) -> Option<TableId> {
+    match &self.compaction {
+      Some(spec) => Some(spec.id),
+      None => None,
+    }
+  }
+}
+
+struct SegmentSpecView<'a> {
+  id: TableId,
+  filename: &'a Path,
+  version: TableFormatVersion,
+}
+impl<'a> SegmentSpecView<'a> {
+  fn read_from(reader: &mut OffsetReader<'a>) -> Result<Self> {
+    let Some(id) = reader.read_array().map(TableId::from_le_bytes) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(v) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(version) = TableFormatVersion::from_u16(v) else {
+      return Err(Error::UnsupportedVersion);
+    };
+    let Some(len) = reader.read_u16() else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let Some(bytes) = reader.read(len as usize) else {
+      return Err(Error::InvalidFormat("metadata crashed."));
+    };
+    let filename = unsafe { OsStr::from_encoded_bytes_unchecked(bytes) };
+    Ok(Self {
+      id,
+      filename: Path::new(filename),
+      version,
+    })
+  }
+
+  fn into_owned(self) -> SegmentSpec {
+    SegmentSpec::new(self.id, self.filename.to_path_buf(), self.version)
   }
 }
 

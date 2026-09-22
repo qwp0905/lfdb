@@ -12,7 +12,7 @@ use crate::{
   metrics::{measure, MetricsRegistry},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
-  table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableName},
+  table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableNameRef},
   utils::info,
   wal::{DurabilityGuard, TxId, WriteAheadLog},
 };
@@ -146,7 +146,7 @@ impl TxOrchestrator {
     self.tables.create_handle(table_meta)
   }
   #[inline]
-  pub fn create_table_metadata(&self, name: &TableName) -> TableMetadata {
+  pub fn create_table_metadata(&self, name: TableNameRef) -> TableMetadata {
     self.tables.create_metadata(name)
   }
 
