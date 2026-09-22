@@ -1,6 +1,10 @@
-use std::{pin::pin, ptr::NonNull};
+use std::{
+  mem::ManuallyDrop,
+  ops::{Deref, DerefMut},
+  ptr::NonNull,
+};
 
-use super::{BatchFn, BatchHandle, BlockId, CachedBlock, DirtyBlocks};
+use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{SBox, SharedToken},
@@ -37,6 +41,13 @@ impl RefedSlot {
   pub const fn get_pointer(&self) -> Pointer {
     self.pointer
   }
+  fn into_inner(self) -> PageRef<PAGE_SIZE> {
+    self.page
+  }
+
+  const fn is_modified(&self) -> bool {
+    self.modified
+  }
 }
 impl AsRef<Page> for RefedSlot {
   fn as_ref(&self) -> &Page {
@@ -66,24 +77,21 @@ unsafe impl Sync for RefedSlot {}
 pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
   dirty: &'a DirtyBlocks,
-  batch_handle: &'a BatchHandle<RefedSlot>,
   block_id: BlockId,
-  token: Option<SharedToken<'a>>,
+  token: SharedToken<'a>,
   page_pool: &'a PagePool<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
   pub fn new(
     block: &'a CachedBlock,
     dirty: &'a DirtyBlocks,
-    batch_handle: &'a BatchHandle<RefedSlot>,
     block_id: BlockId,
-    token: Option<SharedToken<'a>>,
+    token: SharedToken<'a>,
     page_pool: &'a PagePool<PAGE_SIZE>,
   ) -> Self {
     Self {
       block,
       dirty,
-      batch_handle,
       block_id,
       token,
       page_pool,
@@ -99,12 +107,15 @@ impl<'a> CachedSlot<'a> {
   where
     'a: 'b,
   {
+    let mut shadow = self.page_pool.acquire();
+    let latch = self.block.latch();
+    shadow.copy_from(self.block.load_page().as_slice(), 0);
+    let slot =
+      RefedSlot::new(self.block.get_pointer(), shadow, self.dirty, self.block_id);
+
     WritableSlot {
-      block: self.block,
-      batch: self.batch_handle,
-      page_pool: self.page_pool,
-      dirty: self.dirty,
-      block_id: self.block_id,
+      shadow: ManuallyDrop::new(slot),
+      latch,
       _token: self.token,
     }
   }
@@ -132,50 +143,29 @@ impl Clone for ReadonlySlot {
     }
   }
 }
-
 pub struct WritableSlot<'a> {
-  block: &'a CachedBlock,
-  batch: &'a BatchHandle<RefedSlot>,
-  page_pool: &'a PagePool<PAGE_SIZE>,
-  dirty: &'a DirtyBlocks,
-  block_id: BlockId,
-  _token: Option<SharedToken<'a>>,
+  shadow: ManuallyDrop<RefedSlot>,
+  latch: BlockLatch<'a>,
+  _token: SharedToken<'a>,
 }
-impl<'a> WritableSlot<'a> {
-  pub fn mutate<T, F>(self, handler: F) -> T
-  where
-    T: Send,
-    F: FnOnce(&mut RefedSlot) -> T + Unpin + Send,
-  {
-    let mut pinned = pin!(BatchFn::new(|slot| handler(slot)));
-    if !self.batch.register(pinned.as_mut().task()) {
-      return pinned.wait();
+
+impl<'a> Deref for WritableSlot<'a> {
+  type Target = RefedSlot;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shadow
+  }
+}
+impl<'a> DerefMut for WritableSlot<'a> {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.shadow
+  }
+}
+impl<'a> Drop for WritableSlot<'a> {
+  fn drop(&mut self) {
+    let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
+    if shadow.is_modified() {
+      self.latch.apply(shadow.into_inner());
     }
-
-    loop {
-      let mut page = self.page_pool.acquire();
-      page.copy_from(self.block.load_page().as_slice(), 0);
-
-      let mut slot =
-        RefedSlot::new(self.block.get_pointer(), page, self.dirty, self.block_id);
-      for mut task in self.batch.drain_tasks() {
-        // SAFETY: Since `BatchFn` is pinned and its address does not change,
-        // it can be accessed safely.
-        unsafe { task.call_with(&mut slot) };
-        if slot.modified {
-          let mut replacement = self.page_pool.acquire();
-          replacement.copy_from(slot.as_ref().as_slice(), 0);
-          unsafe { self.block.advance_epoch(replacement) };
-          slot.modified = false;
-        }
-        unsafe { task.complete() };
-      }
-
-      if self.batch.try_release() {
-        break;
-      }
-    }
-
-    pinned.wait()
   }
 }
