@@ -1,4 +1,4 @@
-use std::{io::Result as IOResult, path::PathBuf};
+use std::path::PathBuf;
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
@@ -49,9 +49,9 @@ impl WALSegment {
    * Repurposes this segment for a new generation by renaming it in place.
    * Much faster than creating a new file — avoids the fallocate + metadata sync cost.
    */
-  pub fn reuse(&self) -> IOResult<()> {
+  pub fn reuse(&self) -> Result {
     let new_path = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    self.handle.rename(new_path)
+    self.handle.rename(new_path).map_err(Error::IO)
   }
 
   #[inline]

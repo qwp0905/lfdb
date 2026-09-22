@@ -1,4 +1,5 @@
 use std::{
+  mem::take,
   path::PathBuf,
   sync::Arc,
   time::{Duration, Instant},
@@ -19,9 +20,7 @@ use crate::{
   metrics::MetricsRegistry,
   mvcc::VersionController,
   utils::{debug, error, info, trace, uuid_simple, ToArc, ToBox},
-  wal::{
-    LogId, SegmentReuseable, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog,
-  },
+  wal::{LogId, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog},
   Result,
 };
 
@@ -60,14 +59,14 @@ impl CheckpointCycle {
   fn flush_done(&self) -> bool {
     self.flusher.is_done()
   }
-  fn truncate_all(mut self) -> Result {
-    for segment in self.drain_all() {
+  fn truncate_all(self) -> Result {
+    for segment in self.segments {
       segment.truncate()?;
     }
     Ok(())
   }
-  fn drain_all(&mut self) -> impl Iterator<Item = WALSegment> + '_ {
-    self.segments.drain(..)
+  fn take_segments(&mut self) -> Vec<WALSegment> {
+    take(&mut self.segments)
   }
   const fn get_log_id(&self) -> LogId {
     self.log_id
@@ -117,7 +116,6 @@ impl Checkpoint {
         checkpoint_loop(
           incoming.clone(),
           worker.clone(),
-          event_bus.clone(),
           cycle.clone(),
           metrics,
           flush_factor,
@@ -324,7 +322,6 @@ impl CheckpointWorker {
   fn run_tick<F: Fn(usize) -> usize>(
     &self,
     incoming: &SegQueue<WALSegmentRotated>,
-    event_bus: &EventBus,
     cycle: &AtomicCell<Option<CheckpointCycle>>,
     metrics: &MetricsRegistry,
     calc_batch_size: &F,
@@ -374,8 +371,7 @@ impl CheckpointWorker {
     metrics.checkpoint_cycle.record(current.take_start());
     info!("checkpoint complete id {}", current.get_log_id());
 
-    let events = current.drain_all().map(SegmentReuseable::new);
-    event_bus.batch_publish(events);
+    self.wal.reuse_segments(current.take_segments())?;
     *cycle = None;
     Ok(())
   }
@@ -389,7 +385,6 @@ impl CheckpointWorker {
 fn checkpoint_loop(
   incoming: Arc<SegQueue<WALSegmentRotated>>,
   worker: Arc<CheckpointWorker>,
-  event_bus: Arc<EventBus>,
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,
   flush_factor: f64,
@@ -411,7 +406,7 @@ fn checkpoint_loop(
 
   move || {
     worker
-      .run_tick(&incoming, &event_bus, &cycle, &metrics, &calc_batch_size)
+      .run_tick(&incoming, &cycle, &metrics, &calc_batch_size)
       .unwrap()
   }
 }

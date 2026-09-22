@@ -1,27 +1,14 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  background::{
-    binding_events, BufferingThread, Close, Dispatch, EventBus, Execute, Fallback,
-    OwnedSubscription, PreloadThread, ThreadBuilder,
-  },
+  background::{Close, Execute, PreloadThread, ThreadBuilder},
   disk::{IOPool, Pointer},
-  utils::{error, ToArc, ToBox},
+  utils::{ToArc, ToBox},
   Result,
 };
-
-const SEGMENT_MAX_LIFE: Duration = Duration::from_secs(5);
-const SEGMENT_MAX_BATCH: usize = 10;
-
-pub struct SegmentReuseable(WALSegment);
-impl SegmentReuseable {
-  pub const fn new(segment: WALSegment) -> Self {
-    Self(segment)
-  }
-}
 
 /**
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
@@ -32,38 +19,26 @@ impl SegmentReuseable {
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  reuse: Arc<BufferingThread<WALSegment, ()>>,
   preload: Box<PreloadThread<Result<WALSegment>>>,
+  io_pool: Arc<IOPool>,
   ready: Arc<SegQueue<WALSegment>>,
 }
 impl SegmentPreload {
-  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>, event_bus: &EventBus) -> Arc<Self> {
+  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>) -> Self {
     let ready = SegQueue::new().to_arc();
-    let reuse = ThreadBuilder::new()
-      .name("wal segment reuse")
-      .single()
-      .buffering(
-        SEGMENT_MAX_BATCH,
-        handle_reuse(ready.clone(), io_pool.clone()),
-      )
-      .to_arc();
     let preload = ThreadBuilder::new()
       .name("wal segment preload")
       .single()
       .preload(
-        SEGMENT_MAX_LIFE,
-        handle_preload(ready.clone(), io_pool, max_len),
+        handle_preload(ready.clone(), io_pool.clone(), max_len),
         handle_fallback(),
       )
       .to_box();
-    let this = Arc::new(Self {
-      reuse,
+    Self {
       preload,
       ready,
-    });
-
-    event_bus.register(&this);
-    this
+      io_pool,
+    }
   }
 
   pub fn load(&self) -> Result<WALSegment> {
@@ -78,7 +53,6 @@ impl SegmentPreload {
    * cleanup truncates, but failover must not depend on more disk operations.
    */
   pub fn failover(&self) {
-    self.reuse.close();
     self.preload.close();
     while self.ready.pop().is_some() {}
   }
@@ -87,54 +61,21 @@ impl SegmentPreload {
    * must call after close segment rotate thread
    */
   pub fn close(&self) {
-    self.reuse.close();
     self.preload.close();
     while let Some(segment) = self.ready.pop() {
       let _ = segment.truncate();
     }
   }
 
-  pub fn reuse(&self, segment: WALSegment) {
-    self.reuse.dispatch(segment);
-  }
-}
-
-impl OwnedSubscription<SegmentReuseable> for SegmentPreload {
-  fn handle(&self, event: SegmentReuseable) {
-    self.reuse(event.0);
-  }
-}
-binding_events!(SegmentPreload {
-  owned: [SegmentReuseable],
-});
-
-fn handle_reuse(
-  ready: Arc<SegQueue<WALSegment>>,
-  io_pool: Arc<IOPool>,
-) -> impl FnMut(Vec<WALSegment>) {
-  let mut succeed = Vec::with_capacity(SEGMENT_MAX_BATCH);
-  let mut failed = Vec::with_capacity(SEGMENT_MAX_BATCH);
-  move |reused| {
+  pub fn reuse(&self, reused: Vec<WALSegment>) -> Result {
+    for segment in reused.iter() {
+      segment.reuse()?;
+    }
+    self.io_pool.sync_dir()?;
     for segment in reused {
-      if let Err(err) = segment.reuse() {
-        error!("error occurs in segment reuse: {err}");
-        failed.push(segment);
-        continue;
-      };
-      succeed.push(segment);
+      self.ready.push(segment);
     }
-    if let Err(err) = io_pool.sync_dir() {
-      error!("error occurs in basedir sync: {err}");
-      succeed.drain(..).for_each(|s| failed.push(s));
-    }
-
-    for segment in succeed.drain(..) {
-      ready.push(segment);
-    }
-
-    for segment in failed.drain(..) {
-      let _ = segment.truncate();
-    }
+    Ok(())
   }
 }
 
@@ -160,9 +101,9 @@ const fn handle_preload(
  * the idle window. That implies low WAL write pressure, so keeping preallocated
  * disk space is unnecessary; the segment is truncated instead.
  */
-const fn handle_fallback() -> impl FnMut(Fallback<Result<WALSegment>>) {
+const fn handle_fallback() -> impl FnMut(Result<WALSegment>) {
   move |finalize| {
-    if let Fallback::Terminated(Ok(segment)) = finalize {
+    if let Ok(segment) = finalize {
       let _ = segment.truncate();
     };
   }
