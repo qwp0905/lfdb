@@ -1,4 +1,4 @@
-use super::{EventBindings, Oneshot, OwnedSubscription};
+use super::Oneshot;
 
 /**
  * Stop the runtime and join its worker thread(s).
@@ -53,26 +53,4 @@ pub trait Execute<T, R>: Close {
  */
 pub trait Dispatch<T>: Close {
   fn dispatch(&self, value: T);
-}
-
-/**
- * Allow a background runtime to be registered directly as an event subscriber.
- *
- * Event bus deliveries do not expect a response, so owned events are forwarded
- * through `dispatch`. This implementation is the bridge used by the
- * `binding_events!` macro: a background thread can act as the runtime for an
- * event subscription without exposing its concrete runtime type.
- */
-impl<T> OwnedSubscription<T> for dyn Dispatch<T> {
-  fn handle(&self, event: T) {
-    self.dispatch(event);
-  }
-}
-impl<T> EventBindings for dyn Dispatch<T>
-where
-  T: Send + Sync + 'static,
-{
-  type Owned = (T, ());
-
-  type Shared = ();
 }

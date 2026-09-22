@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, BatchHandle, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks,
-  DirtyTables, EvictionGuard, MappingTable, PendingFlush, RefedSlot,
+  Acquired, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables,
+  EvictionGuard, MappingTable, PendingFlush,
 };
 use crate::{
   background::{Close, ThreadBuilder, ThreadPool},
@@ -34,7 +34,6 @@ struct Core {
    */
   dirty_blocks: DirtyBlocks,
   dirty_tables: DirtyTables,
-  batch_handles: Box<[BatchHandle<RefedSlot>]>,
   page_pool: PagePool<PAGE_SIZE>,
 }
 impl Core {
@@ -43,7 +42,6 @@ impl Core {
     pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
-    batch_handles: Box<[BatchHandle<RefedSlot>]>,
     page_pool: PagePool<PAGE_SIZE>,
   ) -> Self {
     Self {
@@ -51,7 +49,6 @@ impl Core {
       pins,
       dirty_blocks,
       dirty_tables,
-      batch_handles,
       page_pool,
     }
   }
@@ -105,15 +102,12 @@ impl Core {
     };
 
     let block = self.cached_blocks[id].get();
-    let pending = self.create_slot(id, None).for_write().mutate(|_| {
+    let (pending, epoch) = {
+      let latch = block.latch();
       if !self.dirty_blocks.remove(id) {
-        return None;
+        return Ok(());
       }
-      let epoch = unsafe { block.get_epoch() };
-      Some((block.flusher().submit(), epoch))
-    });
-    let Some((pending, epoch)) = pending else {
-      return Ok(());
+      (block.flusher().submit(), latch.epoch())
     };
 
     let Err(err) = pending.finalize() else {
@@ -121,11 +115,10 @@ impl Core {
       return Ok(());
     };
 
-    self.create_slot(id, None).for_write().mutate(|_| {
-      if unsafe { block.get_epoch() } == epoch {
-        self.dirty_blocks.insert(id);
-      };
-    });
+    let latch = block.latch();
+    if latch.epoch() == epoch {
+      self.dirty_blocks.insert(id);
+    };
     Err(err)
   }
 
@@ -177,15 +170,10 @@ impl Core {
     dirty
   }
 
-  fn create_slot<'a>(
-    &'a self,
-    id: BlockId,
-    token: Option<SharedToken<'a>>,
-  ) -> CachedSlot<'a> {
+  fn create_slot<'a>(&'a self, id: BlockId, token: SharedToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
       self.get_block_cell(id).get(),
       &self.dirty_blocks,
-      &self.batch_handles[id],
       id,
       token,
       &self.page_pool,
@@ -223,15 +211,11 @@ impl BlockCache {
     let mut pins = Vec::with_capacity(config.capacity);
     pins.resize_with(config.capacity, ExclusivePin::new);
 
-    let mut batch_handles = Vec::with_capacity(config.capacity);
-    batch_handles.resize_with(config.capacity, BatchHandle::new);
-
     let core = Arc::new(Core::new(
       blocks.into_boxed_slice(),
       pins.into_boxed_slice(),
       DirtyBlocks::new(config.capacity),
       DirtyTables::new(),
-      batch_handles.into_boxed_slice(),
       page_pool,
     ));
 
@@ -250,7 +234,7 @@ impl BlockCache {
 
   #[inline]
   fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
-    self.core.create_slot(id, Some(token))
+    self.core.create_slot(id, token)
   }
 
   /**

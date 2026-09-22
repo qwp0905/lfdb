@@ -5,7 +5,6 @@ use std::{
 
 use crate::{
   blob::BlobAppendGuard,
-  cache::RefedSlot,
   disk::Pointer,
   objects::{
     BTreeNode, BTreeNodeView, DataEntry, FindSlotResult, LeafNode, LeafNodeView,
@@ -33,22 +32,18 @@ fn copy_old_record<Policy: WritablePolicy + Sync>(
   old: VersionRecord,
   table: &TableHandleRef,
 ) -> Result {
-  policy
-    .fetch_slot(entry_ptr, table)?
-    .for_write()
-    .mutate(|slot| {
-      let mut entry = slot.as_ref().deserialize::<DataEntry>()?;
-      if entry.is_available(&old) {
-        entry.attach_front(old);
-        policy.serialize_and_log(slot, &entry, table)?;
-        return Ok(());
-      }
+  let mut slot = policy.fetch_slot(entry_ptr, table)?.for_write();
+  let mut entry = slot.as_ref().deserialize::<DataEntry>()?;
+  if entry.is_available(&old) {
+    entry.attach_front(old);
+    policy.serialize_and_log(&mut slot, &entry, table)?;
+    return Ok(());
+  }
 
-      let new_entry_ptr = policy.alloc_and_log(&entry, table)?;
-      let new_entry = DataEntry::init(old, Some(new_entry_ptr));
-      policy.serialize_and_log(slot, &new_entry, table)?;
-      Ok(())
-    })
+  let new_entry_ptr = policy.alloc_and_log(&entry, table)?;
+  let new_entry = DataEntry::init(old, Some(new_entry_ptr));
+  policy.serialize_and_log(&mut slot, &new_entry, table)?;
+  Ok(())
 }
 
 /**
@@ -138,14 +133,9 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
   must_apply: LeafCompletion,
   buffered: &mut VecDeque<LeafCompletion>,
 ) -> Result<(Vec<(StaticKey, Pointer)>, Pointer)> {
-  enum State<'a> {
-    Break,
-    Move(Pointer, ReserveGuard<'a>, WriteOp),
-  }
-
   let mut splitted = Vec::new();
   let LeafCompletion {
-    mut insert_guard,
+    insert_guard,
     entry_ptr,
     key,
     mut operation,
@@ -153,46 +143,41 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
 
   loop {
     let mut guards = Vec::new();
-    let state = policy
-      .fetch_slot(leaf_ptr, table)?
-      .for_write()
-      .mutate(|slot| {
-        let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
-        let leaf = node.as_leaf_mut()?;
-        match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
-          CompleteLeafOnce::Move(p, op) => return Ok(State::Move(p, insert_guard, op)),
-          CompleteLeafOnce::Break(guard) => guards.push((insert_guard, guard)),
-          CompleteLeafOnce::Split(k, p, guard) => {
-            guards.push((insert_guard, guard));
-            splitted.push((k, p));
-          }
-        };
+    let mut slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
+    let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+    let leaf = node.as_leaf_mut()?;
+    match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
+      CompleteLeafOnce::Move(p, op) => {
+        (leaf_ptr, operation) = (p, op);
+        continue;
+      }
+      CompleteLeafOnce::Break(guard) => guards.push((insert_guard, guard)),
+      CompleteLeafOnce::Split(k, p, guard) => {
+        guards.push((insert_guard, guard));
+        splitted.push((k, p));
+      }
+    };
 
-        while let Some(completion) =
-          buffered.pop_front_if(|c| leaf.get_next_key().is_none_or(|r| &*c.key < r))
-        {
-          let LeafCompletion {
-            insert_guard,
-            entry_ptr,
-            key,
-            operation,
-          } = completion;
-          match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
-            CompleteLeafOnce::Move(_, _) => unreachable!(),
-            CompleteLeafOnce::Break(guard) => guards.push((insert_guard, guard)),
-            CompleteLeafOnce::Split(k, p, guard) => {
-              guards.push((insert_guard, guard));
-              splitted.push((k, p));
-            }
-          };
+    while let Some(completion) =
+      buffered.pop_front_if(|c| leaf.get_next_key().is_none_or(|r| &*c.key < r))
+    {
+      let LeafCompletion {
+        insert_guard,
+        entry_ptr,
+        key,
+        operation,
+      } = completion;
+      match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
+        CompleteLeafOnce::Move(_, _) => unreachable!(),
+        CompleteLeafOnce::Break(guard) => guards.push((insert_guard, guard)),
+        CompleteLeafOnce::Split(k, p, guard) => {
+          guards.push((insert_guard, guard));
+          splitted.push((k, p));
         }
-        policy.serialize_and_log(slot, &node, table)?;
-        Ok(State::Break)
-      })?;
-    match state {
-      State::Break => return Ok((splitted, leaf_ptr)),
-      State::Move(p, ig, op) => (leaf_ptr, insert_guard, operation) = (p, ig, op),
+      };
     }
+    policy.serialize_and_log(&mut slot, &node, table)?;
+    return Ok((splitted, leaf_ptr));
   }
 }
 
@@ -434,7 +419,7 @@ fn try_append_at_leaf_init<'a, 'b, Policy: CreatablePolicy + Sync>(
 
 pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   policy: &'a Policy,
-  slot: &mut RefedSlot,
+  leaf_ptr: Pointer,
   must_apply: KeyPair,
   table: &'a TableHandleRef,
   others: Option<&mut KeyPairList>,
@@ -447,6 +432,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   let mut copy_old = Vec::new();
   let mut guards = Vec::new();
 
+  let mut slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
   let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
   let KeyPair(key, op, create) = must_apply;
 
@@ -482,7 +468,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   };
   let Some(others) = others else {
     if let MaybeOwned::Owned(leaf) = maybe_owned {
-      policy.serialize_and_log(slot, &leaf.into_node(), table)?;
+      policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
     }
     return Ok(AppendOrReserve::Done {
       copy_old,
@@ -506,7 +492,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       }
       TryAppendAtLeaf::Conflict(i, op) => {
         if modified {
-          policy.serialize_and_log(slot, &leaf.into_node(), table)?;
+          policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
         }
         return Ok(AppendOrReserve::Conflict {
           owner: i,
@@ -525,7 +511,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
     };
   }
   if modified {
-    policy.serialize_and_log(slot, &leaf.into_node(), table)?;
+    policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
   }
   Ok(AppendOrReserve::Done {
     copy_old,

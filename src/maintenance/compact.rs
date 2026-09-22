@@ -22,7 +22,7 @@ use crate::{
   disk::{PendingIO, Pointer},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
-  table::{TableHandleRef, TableMapper, TableMetadata, TableName},
+  table::{TableHandleRef, TableMapper, TableMetadata, TableMetadataView, TableNameRef},
   transaction::PageRecorder,
   utils::{error, info, trace, warn, ToArc, ToBox},
   wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
@@ -124,7 +124,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.snapshot.is_aborted(&owner)
+    self.snapshot.is_aborted(owner)
   }
   fn is_owned(&self, owner: TxId) -> bool {
     self.state.get_id() == owner
@@ -208,7 +208,7 @@ struct CompactionReadPolicy {
 }
 impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.version_controller.is_aborted(&owner)
+    self.version_controller.is_aborted(owner)
   }
   fn is_owned(&self, _: TxId) -> bool {
     false
@@ -256,7 +256,7 @@ impl ReadonlyPolicy for CompactionWritePolicy {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.version_controller.is_aborted(&owner)
+    self.version_controller.is_aborted(owner)
   }
   fn is_owned(&self, _: TxId) -> bool {
     false
@@ -476,7 +476,7 @@ impl CompactionWorker {
    * the logical table is still present in metadata; if it has been removed, the
    * in-progress compaction can be abandoned.
    */
-  fn check_compaction(&self, table_name: &TableName) -> Result<bool> {
+  fn check_compaction(&self, table_name: TableNameRef) -> Result<bool> {
     let tx = self.create_tx()?;
     BTreeIndex::new(&tx).contains(table_name.as_bytes(), &self.meta_table)
   }
@@ -490,7 +490,7 @@ impl CompactionWorker {
    */
   fn create_compaction(
     &self,
-    table_name: &TableName,
+    table_name: TableNameRef,
   ) -> Result<Option<(TableHandleRef, TxId, TableMetadata)>> {
     let mut tx = self.create_tx()?;
     let index = BTreeIndex::new(&tx);
@@ -500,7 +500,7 @@ impl CompactionWorker {
       return Ok(None);
     };
 
-    let mut metadata = TableMetadata::from_bytes(&bytes)?;
+    let metadata = TableMetadataView::from_bytes(&bytes)?;
     if metadata.get_compaction_id().is_some() {
       trace!("table {table_name} compacting skipped since already compacted.");
       return Ok(None);
@@ -508,6 +508,7 @@ impl CompactionWorker {
 
     info!("table {table_name} compacting triggered.");
     let table_meta = self.tables.create_metadata(table_name);
+    let mut metadata = metadata.into_owned();
     metadata.set_compaction(&table_meta);
 
     if let Err(err) =

@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{
-  AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata, TableName,
+  AtomicTableId, TableHandle, TableHandleRef, TableId, TableMetadata, TableNameRef,
   META_TABLE,
 };
 use crate::{
@@ -19,7 +19,7 @@ const FILE_EXT: &str = "db";
 
 pub const META_TABLE_ID: TableId = 0;
 
-fn to_path(table_name: &TableName) -> PathBuf {
+fn to_path(table_name: TableNameRef) -> PathBuf {
   // Keep the logical table name in the filename for readability, but use a UUID
   // for uniqueness because one logical table may produce multiple backing files.
   PathBuf::from(format!("{table_name}_{}", uuid_simple())).with_extension(FILE_EXT)
@@ -41,9 +41,9 @@ pub struct TableMapper {
 }
 impl TableMapper {
   pub fn open_new(io_pool: Arc<IOPool>) -> Result<(Self, TableMetadata)> {
-    let name = unsafe { TableName::from_str_unchecked(META_TABLE) };
-    let filename = to_path(&name);
-    let init = TableMetadata::new(META_TABLE_ID, name, filename.clone());
+    let filename = to_path(META_TABLE);
+    let init =
+      TableMetadata::new(META_TABLE_ID, META_TABLE.into_owned(), filename.clone());
     let disk = BlockIOHandle::new(io_pool.open_dynamic_sized(filename)?);
     let metadata = TableHandle::new(&init, disk);
     Ok((
@@ -131,9 +131,10 @@ impl TableMapper {
    * This atomically reserves the next table id and pairs it with a newly generated
    * backing filename. Persisting the metadata is the caller's responsibility.
    */
-  pub fn create_metadata(&self, name: &TableName) -> TableMetadata {
+  pub fn create_metadata(&self, name: TableNameRef) -> TableMetadata {
     let id = self.last_table_id.fetch_add(1, Ordering::Relaxed);
-    TableMetadata::new(id, name.clone(), to_path(name))
+    let path = to_path(name);
+    TableMetadata::new(id, name.into_owned(), path)
   }
 
   pub fn meta_table(&self) -> TableHandleRef {

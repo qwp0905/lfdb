@@ -52,10 +52,7 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
   let mut splitted = Vec::new();
   let mut ptr = leaf_ptr;
   loop {
-    let state = policy.fetch_slot(ptr, table)?.for_write().mutate(|slot| {
-      append_or_reserve_at_leaf(policy, slot, must_apply, table, Some(bulk))
-    })?;
-    match state {
+    match append_or_reserve_at_leaf(policy, ptr, must_apply, table, Some(bulk))? {
       AppendOrReserve::Move(p, kp) => (ptr, must_apply) = (p, kp),
       AppendOrReserve::Conflict {
         owner,

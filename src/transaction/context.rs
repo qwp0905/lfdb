@@ -75,7 +75,7 @@ impl<'a> TxContext<'a> {
 
 impl<'a> ReadonlyPolicy for TxContext<'a> {
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.snapshot.is_aborted(&owner)
+    self.snapshot.is_aborted(owner)
   }
   fn is_owned(&self, owner: TxId) -> bool {
     self.state.get_id() == owner

@@ -14,3 +14,7 @@ impl Counter {
     self.0.fetch_add(1, Ordering::Relaxed);
   }
 }
+
+#[cfg(test)]
+#[path = "tests/counter.rs"]
+mod tests;

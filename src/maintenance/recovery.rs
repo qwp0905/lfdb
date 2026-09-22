@@ -34,7 +34,7 @@ struct TableOpenPolicy<'a, R> {
 }
 impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.version_controller.is_aborted(&owner)
+    self.version_controller.is_aborted(owner)
   }
   fn is_owned(&self, _: TxId) -> bool {
     false

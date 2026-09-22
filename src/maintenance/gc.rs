@@ -224,32 +224,27 @@ impl GcWorker {
         continue;
       }
 
-      self
-        .block_cache
-        .read(ptr, table)?
-        .for_write()
-        .mutate(|slot| {
-          let mut entry: DataEntry = slot.as_ref().deserialize()?;
-          let mut new_versions = VecDeque::new();
+      let mut slot = self.block_cache.read(ptr, table)?.for_write();
+      let mut entry: DataEntry = slot.as_ref().deserialize()?;
+      let mut new_versions = VecDeque::new();
 
-          for record in entry.take_versions() {
-            let version = record.version;
-            new_versions.push_back(record);
-            if version >= min_version {
-              continue;
-            }
-            max_found = Some(version);
-            break;
-          }
+      for record in entry.take_versions() {
+        let version = record.version;
+        new_versions.push_back(record);
+        if version >= min_version {
+          continue;
+        }
+        max_found = Some(version);
+        break;
+      }
 
-          if max_found.is_none() {
-            return Ok(());
-          }
+      if max_found.is_none() {
+        continue;
+      }
 
-          entry.set_versions(new_versions);
-          entry.clear_next();
-          self.serialize_and_log(slot, &entry, table_id)
-        })?;
+      entry.set_versions(new_versions);
+      entry.clear_next();
+      self.serialize_and_log(&mut slot, &entry, table_id)?;
     }
 
     Ok(EntryRelease {
@@ -289,7 +284,7 @@ impl GcWorker {
     cycle
   }
   fn finalize_cycle(&self, cycle: &mut GcCycle) -> Result {
-    self.version_controller.remove_aborted(&cycle.min_version);
+    self.version_controller.remove_aborted(cycle.min_version);
     for &id in cycle
       .exists_blobs
       .iter()
@@ -336,42 +331,39 @@ impl GcWorker {
     let min_version = self.version_controller.min_version();
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
-      let targets = self
-        .block_cache
-        .read(ptr, table)?
-        .for_write()
-        .mutate(|slot| {
-          let mut targets = Vec::new();
-          let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
-          let leaf = node.as_leaf_mut()?;
+      let mut targets = Vec::new();
+      {
+        let mut slot = self.block_cache.read(ptr, table)?.for_write();
 
-          for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
-            let Some(ptr) = entry.next else {
-              continue;
-            };
+        let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+        let leaf = node.as_leaf_mut()?;
 
-            if table.is_reserved(&entry.key)
-              || entry.record.version >= min_version
-              || self.version_controller.is_aborted(&entry.record.owner)
-            {
-              let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
-              task_queue.push(task);
-              continue;
-            }
+        for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
+          let Some(ptr) = entry.next else {
+            continue;
+          };
 
-            targets.push(ptr);
-            entry.next = None;
+          if table.is_reserved(&entry.key)
+            || entry.record.version >= min_version
+            || self.version_controller.is_aborted(entry.record.owner)
+          {
+            let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
+            task_queue.push(task);
+            continue;
           }
 
-          if !candidates.is_empty() {
-            next = leaf.get_next();
-          }
+          targets.push(ptr);
+          entry.next = None;
+        }
 
-          if !targets.is_empty() {
-            self.serialize_and_log(slot, &node, table.get_id())?;
-          }
-          Ok(targets)
-        })?;
+        if !candidates.is_empty() {
+          next = leaf.get_next();
+        }
+
+        if !targets.is_empty() {
+          self.serialize_and_log(&mut slot, &node, table.get_id())?;
+        }
+      };
       for ptr in targets {
         let task = GcTask::new(TaskType::ReleaseEntry(ptr), table.clone());
         task_queue.push(task);
@@ -436,7 +428,7 @@ impl GcWorker {
           current.min_version = current.min_version.min(e.record.version);
           inner.total += 1;
 
-          if self.version_controller.is_aborted(&e.record.owner) {
+          if self.version_controller.is_aborted(e.record.owner) {
             inner.dead += 1;
             if let Some(p) = e.next {
               let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
@@ -508,7 +500,7 @@ impl GcWorker {
     steps.ingest(release_queue);
 
     let min_version = self.version_controller.min_version();
-    steps.move_unreachable(min_version, |tx_id| {
+    steps.move_unreachable(min_version, |&tx_id| {
       self.version_controller.is_aborted(tx_id)
     });
     for table in steps.extract_unpinned() {

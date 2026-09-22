@@ -7,9 +7,7 @@ use std::{
   },
 };
 
-use crossbeam_skiplist::SkipSet;
-
-use super::{ActiveSet, ActiveState};
+use super::{AbortedSet, ActiveSet, ActiveState};
 
 use crate::{
   background::{binding_events, EventBus, SharedSubscription},
@@ -55,10 +53,10 @@ impl<'a> Deref for TxState<'a> {
  */
 pub struct TxSnapshot<'a> {
   active: OffsetBitmap,
-  aborted: &'a SkipSet<TxId>,
+  aborted: &'a AbortedSet,
 }
 impl<'a> TxSnapshot<'a> {
-  fn new(active: OffsetBitmap, aborted: &'a SkipSet<TxId>) -> Self {
+  fn new(active: OffsetBitmap, aborted: &'a AbortedSet) -> Self {
     Self { active, aborted }
   }
 
@@ -66,7 +64,7 @@ impl<'a> TxSnapshot<'a> {
   pub fn is_active(&self, &tx_id: &TxId) -> bool {
     self.active.contains(tx_id)
   }
-  pub fn is_aborted(&self, tx_id: &TxId) -> bool {
+  pub fn is_aborted(&self, tx_id: TxId) -> bool {
     self.aborted.contains(tx_id)
   }
 }
@@ -103,7 +101,7 @@ impl WaitGraph {
  * tracked explicitly — committing simply removes the tx from active.
  */
 pub struct VersionController {
-  aborted: SkipSet<TxId>,
+  aborted: AbortedSet,
   active: ActiveSet,
   wait_graph: WaitGraph,
   closed: AtomicBool,
@@ -126,12 +124,14 @@ impl VersionController {
     event_bus: &EventBus,
   ) -> Arc<Self> {
     let this = Arc::new(Self {
-      aborted: active_versions
-        .into_iter()
-        .chain(started)
-        .chain(aborted_versions)
-        .filter(|c| !closed.contains(c))
-        .collect(),
+      aborted: AbortedSet::from_exists(
+        active_versions
+          .into_iter()
+          .chain(started)
+          .chain(aborted_versions)
+          .filter(|c| !closed.contains(c))
+          .collect(),
+      ),
       active: ActiveSet::new(last_tx_id),
       wait_graph: WaitGraph::new(),
       closed: AtomicBool::new(false),
@@ -141,7 +141,7 @@ impl VersionController {
   }
   pub fn init(event_bus: &EventBus) -> Arc<Self> {
     let this = Arc::new(Self {
-      aborted: Default::default(),
+      aborted: AbortedSet::empty(),
       active: ActiveSet::new(RESERVED_TX + 1),
       wait_graph: WaitGraph::new(),
       closed: AtomicBool::new(false),
@@ -156,17 +156,12 @@ impl VersionController {
    * Abort markers below `version` are removed. Safety of that boundary is supplied
    * by the caller.
    */
-  pub fn remove_aborted(&self, version: &TxId) {
-    while let Some(v) = self.aborted.front() {
-      if v.value() >= version {
-        return;
-      }
-      v.remove();
-    }
+  pub fn remove_aborted(&self, version: TxId) {
+    self.aborted.remove_until(version);
   }
 
   #[inline]
-  pub fn is_aborted(&self, tx_id: &TxId) -> bool {
+  pub fn is_aborted(&self, tx_id: TxId) -> bool {
     self.aborted.contains(tx_id)
   }
 
@@ -225,7 +220,7 @@ impl VersionController {
     (
       tx_id,
       self.active.snapshot_until(tx_id).iter().collect(),
-      self.aborted.range(..tx_id).map(|e| *e.value()).collect(),
+      self.aborted.snapshot_until(tx_id),
     )
   }
 }

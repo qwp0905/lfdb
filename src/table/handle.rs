@@ -5,6 +5,7 @@ use crossbeam_skiplist::{map::Entry, SkipMap};
 use super::{TableFormatVersion, TableId, TableMetadata, TableName};
 use crate::{
   disk::{BlockIOHandle, FreeList, PAGE_SIZE},
+  table::TableNameRef,
   utils::{ExclusivePin, SharedToken},
   wal::TxId,
   Result,
@@ -39,7 +40,7 @@ impl TableHandle {
   pub fn new(metadata: &TableMetadata, disk: BlockIOHandle<PAGE_SIZE>) -> Self {
     Self {
       id: metadata.get_id(),
-      name: metadata.get_name().clone(),
+      name: metadata.get_name().into_owned(),
       version: metadata.get_version(),
       disk,
       free_list: FreeList::new(),
@@ -48,8 +49,8 @@ impl TableHandle {
     }
   }
 
-  pub const fn get_name(&self) -> &TableName {
-    &self.name
+  pub const fn get_name(&self) -> TableNameRef<'_> {
+    self.name.get_ref()
   }
   pub const fn get_id(&self) -> TableId {
     self.id

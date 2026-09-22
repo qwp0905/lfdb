@@ -86,3 +86,20 @@ fn test_offset_iter() {
   assert_eq!(iter.next(), Some(231));
   assert_eq!(iter.next(), None);
 }
+
+#[test]
+fn test_offset_bitmap_dynamic() {
+  let mut bits = OffsetBitmap::new(0, 0);
+  bits.ensure_capacity(100);
+  assert!(bits.insert(100));
+
+  bits.ensure_capacity(983);
+  for i in 101..983 {
+    assert!(bits.insert(i));
+  }
+
+  bits.advance_offset(333);
+  for i in 100..333 {
+    assert!(!bits.contains(i))
+  }
+}
