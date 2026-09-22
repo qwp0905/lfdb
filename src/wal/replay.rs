@@ -50,20 +50,6 @@ pub struct ReplayResult {
   pub last_snapshot: Option<PathBuf>,
   pub blob_handles: Vec<BlobMetadata>,
 }
-impl ReplayResult {
-  const fn empty() -> Self {
-    Self {
-      last_log_id: 0,
-      last_tx_id: RESERVED_TX + 1,
-      started: BTreeSet::new(),
-      closed: BTreeSet::new(),
-      redo: Vec::new(),
-      segments: Vec::new(),
-      last_snapshot: None,
-      blob_handles: Vec::new(),
-    }
-  }
-}
 
 pub fn replay(
   io_pool: Arc<IOPool>,
@@ -78,10 +64,6 @@ pub fn replay(
     }
 
     files.push(filename)
-  }
-
-  if files.is_empty() {
-    return Ok(ReplayResult::empty());
   }
 
   let len = files.len();
