@@ -198,15 +198,10 @@ impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
 impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
   pub fn initialize(&self, table: &TableHandleRef) -> Result {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
+    let mut slot = self.0.alloc_slot(HEADER_POINTER, table)?.for_write();
     self
       .0
-      .alloc_slot(HEADER_POINTER, table)?
-      .for_write()
-      .mutate(|slot| {
-        self
-          .0
-          .serialize_and_log(slot, &TreeHeader::new(root), table)
-      })?;
+      .serialize_and_log(&mut slot, &TreeHeader::new(root), table)?;
     Ok(())
   }
 
@@ -294,12 +289,7 @@ impl<Policy: CreatablePolicy + Sync> BTreeIndex<Policy> {
     let (mut ptr, stack) = self.find_leaf_stack(&key, table)?;
     let mut pair = KeyPair(key, op, create);
     loop {
-      let state = self
-        .0
-        .fetch_slot(ptr, table)?
-        .for_write()
-        .mutate(|slot| append_or_reserve_at_leaf(&self.0, slot, pair, table, None))?;
-      match state {
+      match append_or_reserve_at_leaf(&self.0, ptr, pair, table, None)? {
         AppendOrReserve::Move(p, kp) => (ptr, pair) = (p, kp),
         AppendOrReserve::Conflict { owner, resume, .. } => {
           resolve_conflict(&self.0, owner)?;
