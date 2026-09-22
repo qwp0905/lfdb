@@ -16,9 +16,6 @@ use dirty::*;
 mod node;
 use node::*;
 
-mod batch;
-pub use batch::*;
-
 mod shrink;
 pub use shrink::*;
 
