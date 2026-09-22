@@ -195,13 +195,6 @@ impl<'a, const T: usize> PageWriter<'a, T> {
       false => Err(EOF),
     }
   }
-  #[inline(always)]
-  pub const fn write_u8(&mut self, value: u8) -> Result {
-    match self.0.write_u8(value) {
-      true => Ok(()),
-      false => Err(EOF),
-    }
-  }
 
   #[inline(always)]
   pub const fn finalize(self) -> usize {
