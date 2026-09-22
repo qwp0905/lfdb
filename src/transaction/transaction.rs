@@ -5,7 +5,7 @@ use crate::{
   maintenance::{CompactionCommitted, DropTableCommitted},
   metrics::MetricsRegistry,
   mvcc::{TxSnapshot, TxState},
-  table::{TableHandleRef, TableMetadata, TableName},
+  table::{TableHandleRef, TableMetadata, TableMetadataView, TableNameRef},
   Error, Result,
 };
 
@@ -60,11 +60,11 @@ impl<'a> Transaction<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableName::from_str(name)?;
+    let name = TableNameRef::from_str(name)?;
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
     if let Some(bytes) = cursor.get(&name.as_bytes())? {
-      let metadata = TableMetadata::from_bytes(&bytes)?;
+      let metadata = TableMetadataView::from_bytes(&bytes)?;
       if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
         return Ok(
           self.open_cursor(
@@ -86,11 +86,11 @@ impl<'a> Transaction<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableName::from_str(name)?;
+    let name = TableNameRef::from_str(name)?;
 
     let meta_cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
     if let Some(bytes) = meta_cursor.get(&name.as_bytes())? {
-      let metadata = TableMetadata::from_bytes(&bytes)?;
+      let metadata = TableMetadataView::from_bytes(&bytes)?;
       if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
         return Ok(
           self.open_cursor(
@@ -105,7 +105,7 @@ impl<'a> Transaction<'a> {
       unreachable!("get table must have opened table handle.")
     }
 
-    let table_meta = self.orchestrator.create_table_metadata(&name);
+    let table_meta = self.orchestrator.create_table_metadata(name);
     meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
 
     let table = self.orchestrator.open_table(&table_meta)?;
@@ -120,14 +120,14 @@ impl<'a> Transaction<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableName::from_str(name)?;
+    let name = TableNameRef::from_str(name)?;
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
     let Some(bytes) = cursor.get(&name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
-    let metadata = TableMetadata::from_bytes(&bytes)?;
+    let metadata = TableMetadataView::from_bytes(&bytes)?;
     cursor.remove(&name.as_bytes())?;
 
     if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
@@ -152,14 +152,14 @@ impl<'a> Transaction<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableName::from_str(name)?;
+    let name = TableNameRef::from_str(name)?;
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
 
     let Some(bytes) = cursor.get(&name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
-    let mut metadata = TableMetadata::from_bytes(&bytes)?;
+    let metadata = TableMetadataView::from_bytes(&bytes)?;
     if metadata.get_compaction_id().is_some() {
       return Ok(());
     }
@@ -168,7 +168,8 @@ impl<'a> Transaction<'a> {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
-    let table_meta = self.orchestrator.create_table_metadata(&name);
+    let mut metadata = metadata.into_owned();
+    let table_meta = self.orchestrator.create_table_metadata(name);
     metadata.set_compaction(&table_meta);
 
     if let Err(err) = cursor.insert(name.as_bytes().to_vec(), metadata.to_vec()) {
@@ -191,15 +192,15 @@ impl<'a> Transaction<'a> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableName::from_str(name)?;
+    let name = TableNameRef::from_str(name)?;
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
 
     let Some(bytes) = cursor.get(&name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
-    let old = TableMetadata::from_bytes(&bytes)?;
-    let new = self.orchestrator.create_table_metadata(&name);
+    let old = TableMetadataView::from_bytes(&bytes)?;
+    let new = self.orchestrator.create_table_metadata(name);
     cursor.insert(name.as_bytes().to_vec(), new.to_vec())?;
 
     let table = self.orchestrator.open_table(&new)?;
