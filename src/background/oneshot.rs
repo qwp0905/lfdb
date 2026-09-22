@@ -1,6 +1,6 @@
 use std::{
   cell::{OnceCell, UnsafeCell},
-  mem::{forget, MaybeUninit},
+  mem::{forget, offset_of, MaybeUninit},
   ops::Deref,
   ptr::{without_provenance_mut, NonNull},
   sync::atomic::{fence, AtomicBool, AtomicPtr, Ordering},
@@ -42,7 +42,7 @@ impl<T> Pair<T> {
   }
 
   pub const unsafe fn from_raw(ptr: *mut T) -> Self {
-    let offset = std::mem::offset_of!(PairInner<T>, value);
+    let offset = offset_of!(PairInner<T>, value);
     let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
     Self(NonNull::new_unchecked(ptr))
   }
