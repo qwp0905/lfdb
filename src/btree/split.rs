@@ -1,7 +1,6 @@
 use std::mem::replace;
 
 use crate::{
-  cache::RefedSlot,
   disk::Pointer,
   objects::{
     BTreeNode, BTreeNodeView, InternalNode, StaticKey, TreeHeader, HEADER_POINTER,
@@ -27,28 +26,24 @@ fn apply_split<Policy: WritablePolicy + Sync>(
 ) -> Result<Option<(StaticKey, Pointer)>> {
   let mut ptr = current;
   loop {
-    let state = policy.fetch_slot(ptr, table)?.for_write().mutate(|slot| {
-      let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
-      let internal = node.as_internal_mut()?;
-      if let Err(p) = internal.insert_or_next(&evicted_key, evicted_ptr) {
-        return Ok(Err(p));
-      };
+    let mut slot = policy.fetch_slot(ptr, table)?.for_write();
+    let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+    let internal = node.as_internal_mut()?;
+    if let Err(p) = internal.insert_or_next(&evicted_key, evicted_ptr) {
+      ptr = p;
+      continue;
+    };
 
-      let Some((split_node, split_key)) = internal.split_if_needed() else {
-        policy.serialize_and_log(slot, &node, table)?;
-        return Ok(Ok(None));
-      };
+    let Some((split_node, split_key)) = internal.split_if_needed() else {
+      policy.serialize_and_log(&mut slot, &node, table)?;
+      return Ok(None);
+    };
 
-      let split_ptr = policy.alloc_and_log(&split_node.into_node(), table)?;
-      internal.set_right(&split_key, split_ptr);
-      policy.serialize_and_log(slot, &node, table)?;
+    let split_ptr = policy.alloc_and_log(&split_node.into_node(), table)?;
+    internal.set_right(&split_key, split_ptr);
+    policy.serialize_and_log(&mut slot, &node, table)?;
 
-      Ok(Ok(Some((split_key, split_ptr))))
-    })?;
-    match state {
-      Ok(v) => return Ok(v),
-      Err(p) => ptr = p,
-    }
+    return Ok(Some((split_key, split_ptr)));
   }
 }
 
@@ -61,12 +56,12 @@ struct UpdateFailed {
 
 fn update_header<Policy: WritablePolicy + Sync>(
   policy: &Policy,
-  slot: &mut RefedSlot,
   table: &TableHandleRef,
   split_key: StaticKey,
   split_pointer: Pointer,
   old_height: usize,
 ) -> Result<Option<UpdateFailed>> {
+  let mut slot = policy.fetch_slot(HEADER_POINTER, table)?.for_write();
   let mut header: TreeHeader = slot.as_ref().deserialize()?;
   let current_height = header.get_height() as usize;
   let root = header.get_root();
@@ -84,7 +79,7 @@ fn update_header<Policy: WritablePolicy + Sync>(
 
   header.set_root(new_root_ptr);
   header.increase_height();
-  policy.serialize_and_log(slot, &header, table)?;
+  policy.serialize_and_log(&mut slot, &header, table)?;
   Ok(None)
 }
 
@@ -105,12 +100,8 @@ pub fn propagate_split<Policy: WritablePolicy + Sync>(
       }
     }
 
-    let Some(failed) = policy
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_write()
-      .mutate(|slot| {
-        update_header(policy, slot, table, split_key, split_pointer, old_height)
-      })?
+    let Some(failed) =
+      update_header(policy, table, split_key, split_pointer, old_height)?
     else {
       return Ok(());
     };

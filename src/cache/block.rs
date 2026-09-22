@@ -1,11 +1,30 @@
-use std::cell::Cell;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{create_static_ref, AtomicSBox, SBox},
+  utils::{create_static_ref, AtomicSBox, SBox, ShortenedMutex},
   Result,
 };
+
+/**
+ * Exclusive update guard for a cached block.
+ *
+ * Applying a page installs the new page pointer and advances the block epoch.
+ */
+pub struct BlockLatch<'a> {
+  pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
+  guard: MutexGuard<'a, u64>,
+}
+impl<'a> BlockLatch<'a> {
+  pub fn apply(&mut self, page: PageRef<PAGE_SIZE>) {
+    self.pages.store(page);
+    *self.guard += 1;
+  }
+  pub fn epoch(&self) -> u64 {
+    *self.guard
+  }
+}
 
 pub struct BlockFlusher<'a> {
   pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
@@ -69,7 +88,7 @@ pub struct CachedBlock {
   page: AtomicSBox<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
   handle: TableHandleRef,
-  epoch: Cell<u64>,
+  latch: Mutex<u64>,
 }
 impl CachedBlock {
   #[inline]
@@ -78,17 +97,16 @@ impl CachedBlock {
       page: AtomicSBox::new(page),
       pointer,
       handle,
-      epoch: Cell::new(0),
+      latch: Mutex::new(0),
     }
   }
 
-  pub unsafe fn advance_epoch(&self, page: PageRef<PAGE_SIZE>) {
-    self.page.store(page);
-    self.epoch.set(self.epoch.get() + 1);
-  }
-
-  pub const unsafe fn get_epoch(&self) -> u64 {
-    self.epoch.get()
+  #[inline]
+  pub fn latch(&self) -> BlockLatch<'_> {
+    BlockLatch {
+      pages: &self.page,
+      guard: self.latch.l(),
+    }
   }
 
   #[inline]

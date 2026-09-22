@@ -109,15 +109,13 @@ pub trait WritablePolicy: ReadonlyPolicy {
   where
     Self: Sync,
   {
-    match table.free().alloc() {
+    let mut slot = match table.free().alloc() {
       FreePointer::Reuse(ptr) => self.fetch_slot(ptr, table),
       FreePointer::Alloc(ptr) => self.alloc_slot(ptr, table),
     }?
-    .for_write()
-    .mutate(|slot| {
-      self.serialize_and_log(slot, data, table)?;
-      Ok(slot.get_pointer())
-    })
+    .for_write();
+    self.serialize_and_log(&mut slot, data, table)?;
+    Ok(slot.get_pointer())
   }
 }
 impl<Policy: WritablePolicy> WritablePolicy for &Policy {

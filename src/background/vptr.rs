@@ -13,9 +13,6 @@ struct Header<VTable: 'static> {
   drop: Option<unsafe fn(NonNull<Self>)>,
 }
 impl<VTable> Header<VTable> {
-  const fn new_empty(vtable: &'static VTable) -> Self {
-    Self { vtable, drop: None }
-  }
   const fn new_pair<T>(vtable: &'static VTable) -> Self {
     Self {
       vtable,
@@ -31,23 +28,13 @@ impl<VTable> Header<VTable> {
 }
 
 #[repr(C)]
-pub struct VObject<T, VTable: 'static> {
+struct VObject<T, VTable: 'static> {
   header: Header<VTable>,
   payload: T,
 }
 impl<T, VTable> VObject<T, VTable> {
   const fn construct(header: Header<VTable>, payload: T) -> Self {
     Self { header, payload }
-  }
-  pub const fn new(payload: T, vtable: &'static VTable) -> Self {
-    Self::construct(Header::new_empty(vtable), payload)
-  }
-
-  pub const fn get_ptr(&mut self) -> VPtr<VTable> {
-    VPtr(NonNull::from_mut(self).cast())
-  }
-  pub const fn as_inner(&self) -> &T {
-    &self.payload
   }
 }
 
@@ -92,11 +79,6 @@ impl<VTable> VPtr<VTable> {
   pub const unsafe fn get_ref<'a, T>(ptr: NonNull<()>) -> &'a T {
     let raw = ptr.cast::<VObject<T, VTable>>();
     &raw.as_ref().payload
-  }
-
-  pub const unsafe fn get_raw<T>(ptr: NonNull<()>) -> *const T {
-    let raw = ptr.cast::<VObject<T, VTable>>();
-    &raw const (*raw.as_ptr()).payload
   }
 }
 impl<VTable> Drop for VPtr<VTable> {
