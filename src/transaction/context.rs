@@ -52,7 +52,7 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
       .is_some_and(|s| s.get_id() == owner)
   }
   fn is_readable(&self, version: TxId) -> bool {
-    version <= self.state.get_upper_bound()
+    version < self.state.get_upper_bound()
   }
   fn is_active(&self, owner: TxId) -> bool {
     self.state.is_active(&owner)
