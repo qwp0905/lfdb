@@ -91,11 +91,12 @@ impl ActiveSet {
   }
   pub fn new_readonly(&self) -> ReadonlyState {
     let mut readonly = self.readonly.wl();
+    let writable = self.writable.rl();
+
     let upper_bound = self.last_tx_id.load(Ordering::Relaxed);
     *readonly.entry(upper_bound).or_insert(0) += 1;
     drop(readonly);
 
-    let writable = self.writable.rl();
     let Some((&offset, _)) = writable.first_key_value() else {
       return ReadonlyState::new(upper_bound, OffsetBitmap::new(0, 0));
     };
