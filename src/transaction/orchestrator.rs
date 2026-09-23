@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use super::{Checkpoint, PageRecorder, TimeoutThread};
+use super::{Checkpoint, PageRecorder};
 
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
@@ -10,17 +10,12 @@ use crate::{
   error::Result,
   maintenance::{Compactor, GarbageCollector},
   metrics::{measure, MetricsRegistry},
-  mvcc::{TxSnapshot, TxState, VersionController},
+  mvcc::{TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableNameRef},
   utils::info,
   wal::{DurabilityGuard, TxId, WriteAheadLog},
 };
-
-pub struct TransactionConfig {
-  pub timeout: Duration,
-  pub checkpoint_flush_factor: f64,
-}
 
 /**
  * Composes WAL, block cache, GC, version visibility into a
@@ -38,13 +33,10 @@ pub struct TxOrchestrator {
   compactor: Arc<Compactor>,
   io_pool: Arc<IOPool>,
   blob: Arc<BlobStorage>,
-  timeout_thread: TimeoutThread,
-  tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
 }
 impl TxOrchestrator {
-  pub fn new(
-    config: TransactionConfig,
+  pub const fn new(
     wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
@@ -57,7 +49,6 @@ impl TxOrchestrator {
     checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
-    let timeout_thread = TimeoutThread::new(version_controller.clone());
     Self {
       wal,
       tables,
@@ -67,10 +58,8 @@ impl TxOrchestrator {
       gc,
       recorder,
       compactor,
-      timeout_thread,
       io_pool,
       blob,
-      tx_timeout: config.timeout,
       metrics,
     }
   }
@@ -110,15 +99,8 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn start_tx(
-    &self,
-    timeout: Option<Duration>,
-  ) -> Option<(TxState<'_>, TxSnapshot<'_>)> {
-    let (snapshot, state) = self.version_controller.new_transaction()?;
-    self
-      .timeout_thread
-      .register(state.get_id(), timeout.unwrap_or(self.tx_timeout));
-    Some((state, snapshot))
+  pub fn start_tx(&self) -> Option<TxState<'_>> {
+    self.version_controller.new_transaction()
   }
 
   #[inline]
@@ -177,7 +159,6 @@ impl TxOrchestrator {
     self.compactor.close()?;
     self.gc.close();
     info!("gc closed.");
-    self.timeout_thread.close();
     self.checkpoint.close()?;
 
     self.block_cache.close();

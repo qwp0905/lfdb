@@ -1,75 +1,115 @@
 use std::{
   collections::BTreeSet,
-  ops::Deref,
   sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, Mutex, OnceLock,
   },
 };
 
-use super::{AbortedSet, ActiveSet, ActiveState};
+use super::{AbortedSet, ActiveSet, ReadonlyState, WritableState};
 
 use crate::{
   background::{binding_events, EventBus, SharedSubscription},
   btree::ResolvedConflict,
   cache::ShrinkMap,
-  utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
+  utils::{error, warn, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
 };
 
-fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
-  let Some(state) = active.remove(tx_id) else {
-    return;
-  };
-  state.wake_all();
-}
+const STATUS_AVAILABLE: u8 = 0;
+const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
+const STATUS_ABORTED: u8 = 2;
 
 pub struct TxState<'a> {
-  state: SBox<ActiveState>,
-  set: &'a ActiveSet,
+  status: AtomicU8,
+  readonly: ReadonlyState,
+  writable: OnceLock<SBox<WritableState>>,
+  controller: &'a VersionController,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: SBox<ActiveState>, set: &'a ActiveSet) -> Self {
-    Self { state, set }
+  const fn new(readonly: ReadonlyState, controller: &'a VersionController) -> Self {
+    Self {
+      status: AtomicU8::new(STATUS_AVAILABLE),
+      readonly,
+      writable: OnceLock::new(),
+      controller,
+    }
   }
-  pub fn deactive(&self) {
-    remove_and_wake(self.set, &self.state.get_id());
-  }
-  pub fn current_version(&self) -> TxId {
-    self.set.current_version()
-  }
-}
-impl<'a> Deref for TxState<'a> {
-  type Target = ActiveState;
 
-  fn deref(&self) -> &Self::Target {
-    &self.state
+  pub fn is_available(&self) -> bool {
+    !self.controller.is_closed()
+      && self.status.load(Ordering::Relaxed) == STATUS_AVAILABLE
   }
-}
 
-/**
- * Transaction snapshot used for visibility checks.
- *
- * The active set is captured at transaction start to provide snapshot isolation.
- * The aborted set is referenced live instead of copied: transactions added there
- * were not readable to this snapshot anyway, so observing later abort markings
- * does not expand visibility.
- */
-pub struct TxSnapshot<'a> {
-  active: OffsetBitmap,
-  aborted: &'a AbortedSet,
-}
-impl<'a> TxSnapshot<'a> {
-  fn new(active: OffsetBitmap, aborted: &'a AbortedSet) -> Self {
-    Self { active, aborted }
+  pub fn try_abort(&self) -> bool {
+    self
+      .status
+      .compare_exchange(
+        STATUS_AVAILABLE,
+        STATUS_ABORTED,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      )
+      .is_ok()
+  }
+
+  #[inline]
+  pub fn try_commit(&self) -> bool {
+    !self.controller.is_closed()
+      && self
+        .status
+        .compare_exchange(
+          STATUS_AVAILABLE,
+          STATUS_ON_COMMIT,
+          Ordering::Relaxed,
+          Ordering::Relaxed,
+        )
+        .is_ok()
+  }
+
+  #[inline]
+  pub fn make_available(&self) {
+    self.status.store(STATUS_AVAILABLE, Ordering::Relaxed)
   }
 
   #[inline]
   pub fn is_active(&self, &tx_id: &TxId) -> bool {
-    self.active.contains(tx_id)
+    self.readonly.contains_in_snapshot(tx_id)
   }
   pub fn is_aborted(&self, tx_id: TxId) -> bool {
-    self.aborted.contains(tx_id)
+    self.controller.aborted.contains(tx_id)
+  }
+
+  pub fn deactive(&self) {
+    let Some(writable) = self.writable.get() else {
+      return;
+    };
+    self.controller.remove_and_wake(writable.get_id());
+  }
+
+  pub const fn get_upper_bound(&self) -> TxId {
+    self.readonly.get_upper_bound()
+  }
+
+  pub fn get_writable(&self) -> Option<&WritableState> {
+    self.writable.get().map(|v| &**v)
+  }
+  pub fn ensure_writable(&self) -> &WritableState {
+    self
+      .writable
+      .get_or_init(|| self.controller.active.new_writable())
+  }
+
+  pub fn current_version(&self) -> TxId {
+    self.controller.active.current_version()
+  }
+}
+impl<'a> Drop for TxState<'a> {
+  fn drop(&mut self) {
+    self
+      .controller
+      .active
+      .remove_readonly(self.readonly.get_upper_bound());
   }
 }
 
@@ -170,7 +210,7 @@ impl VersionController {
   }
 
   pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
-    let Some(state) = self.active.get(&owner) else {
+    let Some(state) = self.active.get_writable(&owner) else {
       return ResolvedConflict::Closed;
     };
     if !self.wait_graph.get_or_insert(current, owner) {
@@ -188,31 +228,29 @@ impl VersionController {
    * are not visible to any active reader and can be collected.
    */
   pub fn min_version(&self) -> TxId {
-    self
-      .active
-      .min_version()
-      .unwrap_or_else(|| self.active.current_version())
+    self.active.min_version()
   }
   #[inline]
   pub fn set_abort(&self, tx_id: TxId) {
     self.aborted.insert(tx_id);
   }
-  pub fn new_transaction(&self) -> Option<(TxSnapshot<'_>, TxState<'_>)> {
-    if self.closed.load(Ordering::Relaxed) {
+  pub fn new_transaction(&self) -> Option<TxState<'_>> {
+    if self.is_closed() {
       return None;
     }
-    let state = self.active.new_state();
-    Some((
-      TxSnapshot::new(self.active.snapshot_until(state.get_id()), &self.aborted),
-      TxState::new(state, &self.active),
-    ))
+    let state = self.active.new_readonly();
+    Some(TxState::new(state, self))
   }
-  #[inline]
-  pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
-    self
-      .active
-      .get(&tx_id)
-      .map(|state| TxState::new(state, &self.active))
+
+  fn is_closed(&self) -> bool {
+    self.closed.load(Ordering::Relaxed)
+  }
+
+  fn remove_and_wake(&self, tx_id: TxId) {
+    let Some(state) = self.active.remove_writable(tx_id) else {
+      return;
+    };
+    state.wake_all();
   }
 
   /**
@@ -220,12 +258,8 @@ impl VersionController {
    * boundary.
    */
   pub fn snapshot(&self) -> (TxId, Vec<TxId>, Vec<TxId>) {
-    let tx_id = self.active.current_version();
-    (
-      tx_id,
-      self.active.snapshot_until(tx_id).iter().collect(),
-      self.aborted.snapshot_until(tx_id),
-    )
+    let (tx_id, active) = self.active.snapshot_until();
+    (tx_id, active, self.aborted.snapshot_until(tx_id))
   }
 }
 impl SharedSubscription<WALFailed> for VersionController {
@@ -239,11 +273,7 @@ impl SharedSubscription<WALFailed> for VersionController {
     if self.closed.fetch_or(true, Ordering::Relaxed) {
       return;
     }
-    for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
-      self.aborted.insert(state.get_id());
-      remove_and_wake(&self.active, &state.get_id());
-    }
-    error!("all versions transit to abort since wal failure detected.");
+    error!("version controller transit to closed since wal failure detected.");
   }
 }
 binding_events!(VersionController {

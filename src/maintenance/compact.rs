@@ -15,7 +15,7 @@ use crate::{
   },
   cache::{BlockCache, RefedSlot},
   disk::Pointer,
-  mvcc::{TxSnapshot, TxState, VersionController},
+  mvcc::{TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableMapper, TableMetadata, TableMetadataView, TableNameRef},
   transaction::PageRecorder,
@@ -35,14 +35,12 @@ use crate::{
  */
 struct MiniTx<'a> {
   state: TxState<'a>,
-  snapshot: TxSnapshot<'a>,
   block_cache: &'a BlockCache,
   version_controller: &'a VersionController,
   recorder: &'a PageRecorder,
   wal: &'a WriteAheadLog,
   blob: &'a BlobStorage,
   committed: Cell<bool>,
-  modified: Cell<bool>,
 }
 impl<'a> MiniTx<'a> {
   fn start(
@@ -52,51 +50,53 @@ impl<'a> MiniTx<'a> {
     recorder: &'a PageRecorder,
     blob: &'a BlobStorage,
   ) -> Result<Self> {
-    let Some((snapshot, state)) = version_controller.new_transaction() else {
+    let Some(state) = version_controller.new_transaction() else {
       return Err(Error::EngineUnavailable);
     };
     Ok(Self {
       state,
-      snapshot,
       block_cache,
       recorder,
       version_controller,
       wal,
       blob,
       committed: Cell::new(false),
-      modified: Cell::new(false),
     })
   }
 
-  fn abort(&mut self) -> Result {
+  fn abort(&mut self) {
     if self.committed.get() {
-      return Ok(());
-    }
-
-    if self.modified.get() {
-      self.version_controller.set_abort(self.state.get_id());
+      return;
     }
     self.committed.set(true);
+    let Some(writable) = self.state.get_writable() else {
+      return;
+    };
+
+    self.version_controller.set_abort(writable.get_id());
     self.state.deactive();
-    Ok(())
   }
 
-  fn commit(&mut self) -> Result {
+  fn commit(&mut self) -> Result<Option<TxId>> {
     if self.committed.get() {
-      return Ok(());
+      return Ok(None);
     }
-    let mut _guard = None;
-    if self.modified.get() {
-      _guard = Some(self.wal.commit_and_flush(self.state.get_id())?);
-    }
-    self.state.deactive();
     self.committed.set(true);
-    Ok(())
+    let Some(writable) = self.state.get_writable() else {
+      return Ok(None);
+    };
+    let _guard = self.wal.commit_and_flush(writable.get_id())?;
+    self.state.deactive();
+    Ok(Some(writable.get_id()))
+  }
+
+  fn begin_write(&self) {
+    self.state.ensure_writable();
   }
 }
 impl<'a> Drop for MiniTx<'a> {
   fn drop(&mut self) {
-    let _ = self.abort();
+    self.abort();
   }
 }
 unsafe impl<'a> Sync for MiniTx<'a> {}
@@ -110,16 +110,19 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.snapshot.is_aborted(owner)
+    self.state.is_aborted(owner)
   }
   fn is_owned(&self, owner: TxId) -> bool {
-    self.state.get_id() == owner
+    self
+      .state
+      .get_writable()
+      .is_some_and(|s| s.get_id() == owner)
   }
   fn is_readable(&self, version: TxId) -> bool {
-    version <= self.state.get_id()
+    version <= self.state.get_upper_bound()
   }
   fn is_active(&self, owner: TxId) -> bool {
-    self.snapshot.is_active(&owner)
+    self.state.is_active(&owner)
   }
   fn read_blob(
     &self,
@@ -142,14 +145,12 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     table: &TableHandleRef,
   ) -> Result {
     self.recorder.serialize_and_log(
-      self.state.get_id(),
+      self.state.ensure_writable().get_id(),
       table.get_id(),
       self.current_version(),
       slot,
       data,
-    )?;
-    self.modified.set(true);
-    Ok(())
+    )
   }
 
   fn alloc_slot(
@@ -165,7 +166,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
 }
 impl<'a> CreatablePolicy for MiniTx<'a> {
   fn current_owner(&self) -> TxId {
-    self.state.get_id()
+    self.state.ensure_writable().get_id()
   }
   fn current_version(&self) -> TxId {
     self.state.current_version()
@@ -437,6 +438,7 @@ impl CompactionWorker {
       return Ok(None);
     }
 
+    tx.begin_write();
     if let Err(err) = index.insert_if_matched(
       table_name.as_bytes(),
       table_metadata.to_vec(),
@@ -449,8 +451,8 @@ impl CompactionWorker {
       return Err(err);
     };
 
-    tx.commit()?;
-    Ok(Some((tx.state.get_id(), tx.current_version())))
+    let id = tx.commit()?.unwrap_or_else(|| unreachable!());
+    Ok(Some((id, tx.current_version())))
   }
 
   /**
@@ -495,6 +497,7 @@ impl CompactionWorker {
     let mut metadata = metadata.into_owned();
     metadata.set_compaction(&table_meta);
 
+    tx.begin_write();
     if let Err(err) =
       index.insert_if_matched(table_name.as_bytes(), metadata.to_vec(), &self.meta_table)
     {
@@ -628,7 +631,7 @@ impl CompactionWorker {
 
     let min_version = self.version_controller.min_version();
     for (old, new, metadata, _) in
-      waiting_publish.extract_if(|(_, _, _, v)| min_version >= *v)
+      waiting_publish.extract_if(|(_, _, _, v)| min_version > *v)
     {
       in_progress.push(CompactionCycle::new(old, new, metadata));
     }

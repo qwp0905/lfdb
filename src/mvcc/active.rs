@@ -1,9 +1,6 @@
 use std::{
-  collections::BTreeMap,
-  sync::{
-    atomic::{AtomicU8, Ordering},
-    RwLock,
-  },
+  collections::{btree_map::Entry, BTreeMap},
+  sync::{atomic::Ordering, RwLock},
 };
 
 use crate::{
@@ -12,95 +9,44 @@ use crate::{
   wal::{AtomicTxId, TxId},
 };
 
-const STATUS_AVAILABLE: u8 = 0;
-const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
-const STATUS_ABORTED: u8 = 2;
-const STATUS_TIMEOUT: u8 = 3;
-
-/**
- * Active transaction status transitions.
- *
- * Every transaction starts as `AVAILABLE`.
- * - commit path:  `AVAILABLE -> ON_COMMIT`
- * - timeout path: `AVAILABLE -> TIMEOUT`
- * - abort path:   `AVAILABLE | TIMEOUT -> ABORTED`
- *
- * `ON_COMMIT` is terminal for timeout/abort ownership: once commit owns the
- * transaction, timeout code cannot abort it.
- */
-pub struct ActiveState {
-  tx_id: TxId,
-  status: AtomicU8,
+pub struct WritableState {
+  id: TxId,
   parker: OnceParker,
 }
-impl ActiveState {
-  pub const fn new(tx_id: TxId) -> Self {
+impl WritableState {
+  const fn new(id: TxId) -> Self {
     Self {
-      tx_id,
-      status: AtomicU8::new(STATUS_AVAILABLE),
+      id,
       parker: OnceParker::new(),
     }
   }
-  pub fn is_available(&self) -> bool {
-    self.status.load(Ordering::Relaxed) == STATUS_AVAILABLE
-  }
   pub const fn get_id(&self) -> TxId {
-    self.tx_id
+    self.id
   }
-
-  pub fn try_abort(&self) -> bool {
-    let current = self.status.load(Ordering::Relaxed);
-    if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
-      return false;
-    }
-
-    self
-      .status
-      .compare_exchange(
-        current,
-        STATUS_ABORTED,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn try_timeout(&self) -> bool {
-    self
-      .status
-      .compare_exchange(
-        STATUS_AVAILABLE,
-        STATUS_TIMEOUT,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn try_commit(&self) -> bool {
-    self
-      .status
-      .compare_exchange(
-        STATUS_AVAILABLE,
-        STATUS_ON_COMMIT,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn make_available(&self) {
-    self.status.store(STATUS_AVAILABLE, Ordering::Relaxed)
-  }
-
   pub fn park(&self) {
     self.parker.park();
   }
   pub fn wake_all(&self) {
     self.parker.wake_all();
+  }
+}
+pub struct ReadonlyState {
+  upper_bound: TxId,
+  snapshot: OffsetBitmap,
+}
+impl ReadonlyState {
+  const fn new(upper_bound: TxId, snapshot: OffsetBitmap) -> Self {
+    Self {
+      upper_bound,
+      snapshot,
+    }
+  }
+  pub const fn get_upper_bound(&self) -> TxId {
+    self.upper_bound
+  }
+
+  pub fn contains_in_snapshot(&self, tx_id: TxId) -> bool {
+    self.snapshot.contains(tx_id)
   }
 }
 
@@ -112,13 +58,15 @@ impl ActiveState {
  * state is removed.
  */
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
+  readonly: RwLock<BTreeMap<TxId, usize>>,
+  writable: RwLock<BTreeMap<TxId, SBox<WritableState>>>,
   last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
   pub const fn new(last_tx_id: TxId) -> Self {
     Self {
-      inner: RwLock::new(BTreeMap::new()),
+      readonly: RwLock::new(BTreeMap::new()),
+      writable: RwLock::new(BTreeMap::new()),
       last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
@@ -126,56 +74,72 @@ impl ActiveSet {
     self.last_tx_id.load(Ordering::Relaxed)
   }
 
-  /**
-   * Allocate and publish a new active transaction under one write lock.
-   *
-   * A transaction id becomes externally observable only when its state is inserted
-   * into the active map. Keeping id allocation and insertion in the same critical
-   * section prevents a newly issued transaction from being missed by snapshots.
-   */
-  pub fn new_state(&self) -> SBox<ActiveState> {
-    // heap allocation first without mutex
+  pub fn new_writable(&self) -> SBox<WritableState> {
     let mut uninit = SBox::new_uninit();
-    let mut inner = self.inner.wl();
+    let mut writable = self.writable.wl();
 
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Relaxed);
     SBox::get_mut(&mut uninit)
-      .unwrap()
-      .write(ActiveState::new(tx_id));
+      .unwrap_or_else(|| unreachable!())
+      .write(WritableState::new(tx_id));
 
-    inner
+    writable
       .entry(tx_id)
       .and_modify(|_| unreachable!())
       .or_insert(unsafe { uninit.assume_init() })
       .clone()
   }
-  /**
-   * Build a bitmap snapshot of active transaction ids below `max`.
-   *
-   * The snapshot is offset-based so visibility checks can test active ids without
-   * storing every possible transaction id up to `max`.
-   */
-  pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
-    let inner = self.inner.rl();
-    let Some((&offset, _)) = inner.first_key_value() else {
-      return OffsetBitmap::new(0, 0);
+  pub fn new_readonly(&self) -> ReadonlyState {
+    let mut readonly = self.readonly.wl();
+    let writable = self.writable.rl();
+
+    let upper_bound = self.last_tx_id.load(Ordering::Relaxed);
+    *readonly.entry(upper_bound).or_insert(0) += 1;
+    drop(readonly);
+
+    let Some((&offset, _)) = writable.first_key_value() else {
+      return ReadonlyState::new(upper_bound, OffsetBitmap::new(0, 0));
     };
-    let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
-    for (id, _) in inner.range(..max) {
+    let mut snapshot = OffsetBitmap::new(offset, upper_bound - offset + 1);
+    for (id, _) in writable.range(..upper_bound) {
       snapshot.insert(*id);
     }
-    snapshot
+    ReadonlyState::new(upper_bound, snapshot)
   }
-  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.wl().remove(tx_id)
+
+  pub fn snapshot_until(&self) -> (TxId, Vec<TxId>) {
+    let writable = self.writable.rl();
+    let max = self.current_version();
+    let mut snapshot = Vec::new();
+    for (id, _) in writable.range(..max) {
+      snapshot.push(*id);
+    }
+    (max, snapshot)
   }
-  pub fn min_version(&self) -> Option<TxId> {
-    self.inner.rl().first_key_value().map(|(k, _)| *k)
+
+  pub fn remove_readonly(&self, tx_id: TxId) {
+    let mut readonly = self.readonly.wl();
+    let Entry::Occupied(mut entry) = readonly.entry(tx_id) else {
+      return;
+    };
+    let count = *entry.get();
+    if count > 1 {
+      entry.insert(count - 1);
+      return;
+    }
+    entry.remove();
   }
-  pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.rl().get(tx_id).cloned()
+  pub fn remove_writable(&self, tx_id: TxId) -> Option<SBox<WritableState>> {
+    self.writable.wl().remove(&tx_id)
   }
-  pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
-    self.inner.rl().values().cloned().collect()
+  pub fn min_version(&self) -> TxId {
+    let readonly = self.readonly.rl();
+    if let Some((id, _)) = readonly.first_key_value() {
+      return *id;
+    }
+    self.current_version()
+  }
+  pub fn get_writable(&self, tx_id: &TxId) -> Option<SBox<WritableState>> {
+    self.writable.rl().get(tx_id).cloned()
   }
 }

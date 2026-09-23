@@ -6,7 +6,7 @@ use std::{
     Arc,
   },
   thread::available_parallelism,
-  time::{Duration, Instant},
+  time::Instant,
 };
 
 use super::EngineConfig;
@@ -24,8 +24,8 @@ use crate::{
   mvcc::VersionController,
   table::{TableFormatVersion, TableHandleRef, TableId, TableMapper},
   transaction::{
-    Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,
-    TransactionConfig, TxOrchestrator,
+    Checkpoint, CheckpointConfig, CheckpointSnapshot, PageRecorder,
+    SnapshotFormatVersion, Transaction, TxOrchestrator,
   },
   utils::{error, info, ToArc},
   wal::{WALConfig, WALFormatVersion, WriteAheadLog},
@@ -83,9 +83,8 @@ impl Engine {
     let compaction_config = CompactionConfig {
       batch_size: config.compaction_batch_size,
     };
-    let tx_config = TransactionConfig {
-      timeout: config.transaction_timeout,
-      checkpoint_flush_factor: config.checkpoint_flush_factor,
+    let checkpoint_config = CheckpointConfig {
+      flush_factor: config.checkpoint_flush_factor,
     };
 
     let block_cache =
@@ -121,7 +120,7 @@ impl Engine {
         blob.clone(),
         event_bus.clone(),
         metrics_registry.clone(),
-        config.checkpoint_flush_factor,
+        checkpoint_config,
       );
 
       let gc = GarbageCollector::new(
@@ -146,7 +145,6 @@ impl Engine {
       );
 
       let orchestrator = TxOrchestrator::new(
-        tx_config,
         wal,
         block_cache,
         tables,
@@ -277,7 +275,7 @@ impl Engine {
       blob.clone(),
       event_bus.clone(),
       metrics_registry.clone(),
-      config.checkpoint_flush_factor,
+      checkpoint_config,
     )?;
 
     tables.replay(handles.into_values(), &manifest.metadata_table)?;
@@ -352,7 +350,6 @@ impl Engine {
       .try_for_each(|seg| seg.truncate())?;
 
     let orchestrator = TxOrchestrator::new(
-      tx_config,
       wal,
       block_cache,
       tables,
@@ -376,38 +373,18 @@ impl Engine {
   }
 
   /**
-   * create transaction cursor with default timeout.
+   * create transaction cursor.
    */
   pub fn new_tx(&self) -> Result<Transaction<'_>> {
     if !self.available.load(Ordering::Relaxed) {
       return Err(Error::EngineUnavailable);
     }
-    let Some((state, snapshot)) = self.orchestrator.start_tx(None) else {
+    let Some(state) = self.orchestrator.start_tx() else {
       return Err(Error::EngineUnavailable);
     };
     Ok(Transaction::new(
       &self.orchestrator,
       state,
-      snapshot,
-      &self.event_bus,
-      &self.metrics_registry,
-    ))
-  }
-
-  /**
-   * create transaction cursor with specified timeout.
-   */
-  pub fn new_tx_timeout(&self, timeout: Duration) -> Result<Transaction<'_>> {
-    if !self.available.load(Ordering::Relaxed) {
-      return Err(Error::EngineUnavailable);
-    }
-    let Some((state, snapshot)) = self.orchestrator.start_tx(Some(timeout)) else {
-      return Err(Error::EngineUnavailable);
-    };
-    Ok(Transaction::new(
-      &self.orchestrator,
-      state,
-      snapshot,
       &self.event_bus,
       &self.metrics_registry,
     ))

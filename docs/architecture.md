@@ -16,7 +16,6 @@ LFDB is a high-performance storage engine designed for high-concurrency workload
 - Fast performance and durability through a fully lock-free WAL
 - High-performance S3-FIFO-based cache with Direct I/O for consistent performance across different operating systems and disks
 - Online compaction to minimize disk fragmentation without interruption
-- Runtime-overhead-free timeout management built on a high-performance timing wheel timer
 
 
 ### ACID Capabilities
@@ -66,10 +65,6 @@ All write operations in LFDB never block reads and are performed using copy-on-w
 LFDB uses a high-performance block cache based on a modern algorithm to reduce I/O costs. It is built on the S3-FIFO algorithm, enabling efficient cache slot management. By default, the cache is sharded into 64 shards, configurable, to distribute mutex contention. Cache block replacement operations that involve I/O, such as eviction, are performed without holding the mutex for the cache shard, and are designed to be serialized at the individual cache-block level.
 
 - [[S3 FIFO Algorithm]](https://s3fifo.com/)
-
-> Transaction timeout
-
-LFDB uses a timing-wheel-based timer to manage a very large number of transaction timeouts without runtime overhead. Transaction timeouts can be configured at 1 ms granularity and are registered with the timer when a transaction starts. Timeout handling is performed by a separate timer thread, so it has no impact on runtime performance.
 
 > Zero copy read
 

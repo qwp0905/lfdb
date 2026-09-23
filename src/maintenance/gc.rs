@@ -592,7 +592,7 @@ impl TableSteps {
   fn move_unreachable(&mut self, min_version: TxId, is_aborted: impl Fn(&TxId) -> bool) {
     for (table, _, _) in self
       .incoming
-      .extract_if(|(_, tx_id, version)| is_aborted(tx_id) || min_version >= *version)
+      .extract_if(|(_, tx_id, version)| is_aborted(tx_id) || min_version > *version)
     {
       self.unreachable.push_back(table)
     }
