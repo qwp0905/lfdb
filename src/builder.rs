@@ -1,7 +1,4 @@
-use std::{
-  path::{Path, PathBuf},
-  time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 use super::{Engine, EngineConfig, Result};
 use crate::disk::{DefaultDiskBackend, DiskBackend};
@@ -26,7 +23,6 @@ impl EngineBuilder {
       block_cache_shard_count: DEFAULT_BLOCK_CACHE_SHARD_COUNT,
       block_cache_memory_capacity: DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY,
       block_cache_buffer_size: DEFAULT_BLOCK_CACHE_BUFFER_SIZE,
-      transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
     })
   }
 
@@ -102,14 +98,6 @@ impl EngineBuilder {
   }
 
   /**
-   * Maximum lifetime of a transaction before it is automatically aborted.
-   */
-  pub const fn transaction_timeout(mut self, timeout: Duration) -> Self {
-    self.0.transaction_timeout = timeout;
-    self
-  }
-
-  /**
    * Threshold which trigger auto compaction. To disable auto compaction, then set 1.0.
    */
   pub const fn compaction_threshold(mut self, threshold: f64) -> Self {
@@ -154,7 +142,6 @@ const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mib
 const DEFAULT_BLOCK_CACHE_BUFFER_SIZE: usize = 4 << 20; // 4 mib
-const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_IO_THREAD_COUNT: usize = 16;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20; // 512 mib

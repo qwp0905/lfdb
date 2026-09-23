@@ -1,5 +1,5 @@
 use super::{Error, Result};
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 #[clippy::format_args]
 macro_rules! invalid {
@@ -21,7 +21,6 @@ pub struct EngineConfig {
   pub block_cache_shard_count: usize,
   pub block_cache_memory_capacity: usize,
   pub block_cache_buffer_size: usize,
-  pub transaction_timeout: Duration,
 }
 impl EngineConfig {
   pub(crate) fn validate(&self) -> Result {
@@ -55,10 +54,6 @@ impl EngineConfig {
 
     if self.gc_batch_size == 0 {
       return invalid!("gc_batch_size must be greater than 0.");
-    }
-
-    if self.transaction_timeout == Duration::ZERO {
-      return invalid!("transaction_timeout must be greater than 0.");
     }
 
     if self.compaction_threshold > 1.0 {
@@ -95,7 +90,6 @@ impl Clone for EngineConfig {
       block_cache_shard_count: self.block_cache_shard_count,
       block_cache_memory_capacity: self.block_cache_memory_capacity,
       block_cache_buffer_size: self.block_cache_buffer_size,
-      transaction_timeout: self.transaction_timeout,
     }
   }
 }
