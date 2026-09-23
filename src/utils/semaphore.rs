@@ -43,7 +43,7 @@ mod fallback {
 
 #[cfg(target_os = "linux")]
 mod futex {
-  use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+  use std::sync::atomic::{fence, AtomicU32, AtomicUsize, Ordering};
 
   fn wait(futex: &AtomicU32, expected: u32) {
     unsafe {
@@ -92,28 +92,27 @@ mod futex {
     }
 
     fn try_acquire(&self) -> bool {
-      let n = self.permits.load(Ordering::Acquire);
-      if n == 0 {
-        return false;
+      let mut n = self.permits.load(Ordering::Relaxed);
+      loop {
+        if n == 0 {
+          return false;
+        }
+        let Err(err) = self.permits.compare_exchange_weak(
+          n,
+          n - 1,
+          Ordering::Acquire,
+          Ordering::Relaxed,
+        ) else {
+          return true;
+        };
+        n = err;
       }
-      if self
-        .permits
-        .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-      {
-        return false;
-      }
-
-      true
     }
 
     pub fn acquire(&self) {
-      loop {
-        if self.try_acquire() {
-          return;
-        }
-
+      while !self.try_acquire() {
         self.waiting.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
         while self.permits.load(Ordering::Acquire) == 0 {
           wait(&self.permits, 0);
         }
@@ -123,6 +122,7 @@ mod futex {
 
     pub fn release(&self) {
       self.permits.fetch_add(1, Ordering::Release);
+      fence(Ordering::SeqCst);
       if self.waiting.load(Ordering::Acquire) > 0 {
         wake_one(&self.permits);
       }

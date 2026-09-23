@@ -231,11 +231,16 @@ impl<'a> Transaction<'a> {
       return Ok(());
     }
 
+    if let Err(err) = self.context.resolve_blob_sync() {
+      state.make_unavailable();
+      return Err(err);
+    }
+
     let id = state.get_id();
     match self.orchestrator.commit_tx(id) {
       Ok(_guard) => state.deactive(),
       Err(err) => {
-        state.make_available();
+        state.make_unavailable();
         return Err(err);
       }
     }
