@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use super::{
-  BufferingThread, Fallback, IntervalWorkThread, PreloadThread, SingleFn, ThreadPool,
-};
+use super::{IntervalWorkThread, PreloadThread, SingleFn, ThreadPool};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -58,35 +56,15 @@ impl SingleThreadBuilder {
     )
   }
 
-  pub fn buffering<F, T, R>(self, count: usize, when_buffered: F) -> BufferingThread<T, R>
-  where
-    T: Send + 'static,
-    R: Send + Clone + 'static,
-    F: FnMut(Vec<T>) -> R + Send + Sync + 'static,
-  {
-    BufferingThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      count,
-      SingleFn::new(when_buffered),
-    )
-  }
-
-  pub fn preload<T, F, G>(
-    self,
-    timeout: Duration,
-    preload: F,
-    fallback: G,
-  ) -> PreloadThread<T>
+  pub fn preload<T, F, G>(self, preload: F, fallback: G) -> PreloadThread<T>
   where
     T: Send + 'static,
     F: FnMut(()) -> T + Send + 'static,
-    G: FnMut(Fallback<T>) + Send + 'static,
+    G: FnMut(T) + Send + 'static,
   {
     PreloadThread::new(
       self.builder.name,
       self.builder.stack_size,
-      timeout,
       SingleFn::new(preload),
       SingleFn::new(fallback),
     )
