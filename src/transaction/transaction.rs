@@ -4,7 +4,7 @@ use crate::{
   background::EventBus,
   maintenance::{CompactionCommitted, DropTableCommitted},
   metrics::MetricsRegistry,
-  mvcc::{TxSnapshot, TxState},
+  mvcc::TxState,
   table::{TableHandleRef, TableMetadata, TableMetadataView, TableNameRef},
   Error, Result,
 };
@@ -29,12 +29,11 @@ impl<'a> Transaction<'a> {
   pub(crate) fn new(
     orchestrator: &'a TxOrchestrator,
     state: TxState<'a>,
-    snapshot: TxSnapshot<'a>,
     event_bus: &'a EventBus,
     metrics: &'a MetricsRegistry,
   ) -> Self {
     let tx_start = metrics.transaction_start.start();
-    let context = TxContext::new(orchestrator, state, snapshot);
+    let context = TxContext::new(orchestrator, state);
     Self {
       orchestrator,
       context,
@@ -226,12 +225,11 @@ impl<'a> Transaction<'a> {
     if !state.try_commit() {
       return Err(Error::TransactionClosed);
     }
-    if !self.context.is_modified() {
-      state.deactive();
-      return Ok(());
-    }
 
-    let id = state.get_id();
+    let Some(writable) = state.get_writable() else {
+      return Ok(());
+    };
+    let id = writable.get_id();
     match self.orchestrator.commit_tx(id) {
       Ok(_guard) => state.deactive(),
       Err(err) => {
@@ -239,8 +237,8 @@ impl<'a> Transaction<'a> {
         return Err(err);
       }
     }
-    let version = self.context.state().current_version();
 
+    let version = state.current_version();
     let events = self
       .dropped_tables
       .drain(..)
@@ -262,12 +260,12 @@ impl<'a> Transaction<'a> {
     if !state.try_abort() {
       return Err(Error::TransactionClosed);
     }
-    if !self.context.is_modified() {
-      state.deactive();
-      return Ok(());
-    }
 
-    let id = state.get_id();
+    let Some(writable) = state.get_writable() else {
+      return Ok(());
+    };
+
+    let id = writable.get_id();
     self.orchestrator.abort_tx(id);
     state.deactive();
 
@@ -281,7 +279,11 @@ impl<'a> Transaction<'a> {
    * This method drains its buffers, so repeated calls are idempotent.
    */
   fn clear(&mut self) {
-    let id = self.context.state().get_id();
+    let Some(writable) = self.context.state().get_writable() else {
+      return;
+    };
+
+    let id = writable.get_id();
     let version = self.context.state().current_version();
 
     let events = self
