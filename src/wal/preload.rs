@@ -6,7 +6,7 @@ use super::WALSegment;
 use crate::{
   background::{Close, Execute, PreloadThread, ThreadBuilder},
   disk::{IOPool, Pointer},
-  utils::{ToArc, ToBox},
+  utils::ToBox,
   Result,
 };
 
@@ -21,18 +21,15 @@ use crate::{
 pub struct SegmentPreload {
   preload: Box<PreloadThread<Result<WALSegment>>>,
   io_pool: Arc<IOPool>,
-  ready: Arc<SegQueue<WALSegment>>,
+  ready: SegQueue<WALSegment>,
 }
 impl SegmentPreload {
   pub fn new(max_len: Pointer, io_pool: Arc<IOPool>) -> Self {
-    let ready = SegQueue::new().to_arc();
+    let ready = SegQueue::new();
     let preload = ThreadBuilder::new()
       .name("wal segment preload")
       .single()
-      .preload(
-        handle_preload(ready.clone(), io_pool.clone(), max_len),
-        handle_fallback(),
-      )
+      .preload(handle_preload(io_pool.clone(), max_len), handle_fallback())
       .to_box();
     Self {
       preload,
@@ -42,6 +39,9 @@ impl SegmentPreload {
   }
 
   pub fn load(&self) -> Result<WALSegment> {
+    if let Some(segment) = self.ready.pop() {
+      return Ok(segment);
+    }
     self.preload.execute(()).wait().unwrap()
   }
 
@@ -68,9 +68,7 @@ impl SegmentPreload {
   }
 
   pub fn reuse(&self, reused: Vec<WALSegment>) -> Result {
-    for segment in reused.iter() {
-      segment.reuse()?;
-    }
+    reused.iter().try_for_each(|seg| seg.reuse())?;
     self.io_pool.sync_dir()?;
     for segment in reused {
       self.ready.push(segment);
@@ -80,14 +78,10 @@ impl SegmentPreload {
 }
 
 const fn handle_preload(
-  ready: Arc<SegQueue<WALSegment>>,
   io_pool: Arc<IOPool>,
   max_len: Pointer,
 ) -> impl FnMut(()) -> Result<WALSegment> {
   move |_| {
-    if let Some(segment) = ready.pop() {
-      return Ok(segment);
-    }
     let segment = WALSegment::open(max_len, &io_pool)?;
     io_pool.sync_dir()?;
     Ok(segment)
