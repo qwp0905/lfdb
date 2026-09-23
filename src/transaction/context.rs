@@ -1,10 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use crate::{
   btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
   cache::RefedSlot,
   disk::Pointer,
-  mvcc::{TxSnapshot, TxState},
+  mvcc::TxState,
   objects::Serializable,
   table::TableHandleRef,
   wal::TxId,
@@ -22,32 +20,19 @@ use super::TxOrchestrator;
 pub struct TxContext<'a> {
   orchestrator: &'a TxOrchestrator,
   state: TxState<'a>,
-  snapshot: TxSnapshot<'a>,
-  modified: AtomicBool,
 }
 impl<'a> TxContext<'a> {
   #[inline]
-  pub const fn new(
-    orchestrator: &'a TxOrchestrator,
-    state: TxState<'a>,
-    snapshot: TxSnapshot<'a>,
-  ) -> Self {
+  pub const fn new(orchestrator: &'a TxOrchestrator, state: TxState<'a>) -> Self {
     Self {
       orchestrator,
       state,
-      snapshot,
-      modified: AtomicBool::new(false),
     }
   }
 
   #[inline]
   pub fn is_available(&self) -> bool {
     self.state.is_available()
-  }
-
-  #[inline]
-  pub fn is_modified(&self) -> bool {
-    self.modified.load(Ordering::Relaxed)
   }
 
   #[inline]
@@ -58,16 +43,19 @@ impl<'a> TxContext<'a> {
 
 impl<'a> ReadonlyPolicy for TxContext<'a> {
   fn is_aborted(&self, owner: TxId) -> bool {
-    self.snapshot.is_aborted(owner)
+    self.state.is_aborted(owner)
   }
   fn is_owned(&self, owner: TxId) -> bool {
-    self.state.get_id() == owner
+    self
+      .state
+      .get_writable()
+      .is_some_and(|s| s.get_id() == owner)
   }
   fn is_readable(&self, version: TxId) -> bool {
-    version <= self.state.get_id()
+    version <= self.state.get_upper_bound()
   }
   fn is_active(&self, owner: TxId) -> bool {
-    self.snapshot.is_active(&owner)
+    self.state.is_active(&owner)
   }
   fn fetch_slot(
     &self,
@@ -104,14 +92,12 @@ impl<'a> WritablePolicy for TxContext<'a> {
     table: &TableHandleRef,
   ) -> Result {
     self.orchestrator.serialize_and_log(
-      self.state.get_id(),
+      self.state.ensure_writable().get_id(),
       table.get_id(),
       self.current_version(),
       slot,
       data,
-    )?;
-    self.modified.fetch_or(true, Ordering::Relaxed);
-    Ok(())
+    )
   }
 
   fn alloc_slot(
@@ -127,14 +113,13 @@ impl<'a> WritablePolicy for TxContext<'a> {
 }
 impl<'a> CreatablePolicy for TxContext<'a> {
   fn current_owner(&self) -> TxId {
-    self.state.get_id()
+    self.state.ensure_writable().get_id()
   }
   fn current_version(&self) -> TxId {
     self.state.current_version()
   }
   fn resolve_conflict(&self, owner: TxId) -> ResolvedConflict {
-    self
-      .orchestrator
-      .resolve_conflict(owner, self.state.get_id())
+    let id = self.state.ensure_writable().get_id();
+    self.orchestrator.resolve_conflict(owner, id)
   }
 }
