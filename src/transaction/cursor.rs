@@ -105,6 +105,7 @@ impl<'a> Cursor<'a> {
   }
 
   fn __insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteResult> {
+    self.context.begin_write();
     let table = self.compaction.as_ref().unwrap_or(&self.table);
     self.index.insert(key, value, table)
   }
@@ -135,6 +136,7 @@ impl<'a> Cursor<'a> {
    * the tombstone must exist in the new segment to shadow the old value.
    */
   fn __remove(&self, key: StaticKeyRef) -> Result<WriteResult> {
+    self.context.begin_write();
     if let Some(table) = self.compaction.as_ref() {
       return self.index.remove(key, table);
     }
@@ -202,6 +204,7 @@ impl<'a> Cursor<'a> {
   }
 
   pub fn create_bulk(&self) -> Bulk<'_> {
+    self.context.begin_write();
     let (table, in_compaction) = match &self.compaction {
       Some(table) => (table, true),
       None => (&self.table, false),

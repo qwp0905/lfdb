@@ -39,6 +39,10 @@ impl<'a> TxContext<'a> {
   pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
   }
+
+  pub fn begin_write(&self) {
+    self.state.ensure_writable();
+  }
 }
 
 impl<'a> ReadonlyPolicy for TxContext<'a> {

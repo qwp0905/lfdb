@@ -89,6 +89,10 @@ impl<'a> MiniTx<'a> {
     self.state.deactive();
     Ok(Some(writable.get_id()))
   }
+
+  fn begin_write(&self) {
+    self.state.ensure_writable();
+  }
 }
 impl<'a> Drop for MiniTx<'a> {
   fn drop(&mut self) {
@@ -434,6 +438,7 @@ impl CompactionWorker {
       return Ok(None);
     }
 
+    tx.begin_write();
     if let Err(err) = index.insert_if_matched(
       table_name.as_bytes(),
       table_metadata.to_vec(),
@@ -492,6 +497,7 @@ impl CompactionWorker {
     let mut metadata = metadata.into_owned();
     metadata.set_compaction(&table_meta);
 
+    tx.begin_write();
     if let Err(err) =
       index.insert_if_matched(table_name.as_bytes(), metadata.to_vec(), &self.meta_table)
     {
