@@ -44,13 +44,3 @@ impl<T: Close> std::ops::Deref for OnceThread<T> {
 pub trait Execute<T, R>: Close {
   fn execute(&self, value: T) -> Oneshot<R>;
 }
-/**
- * Submit a fire-and-forget event.
- *
- * `dispatch` is used when the caller only needs to notify the background
- * runtime and does not need a response. In DDD terms, `execute` behaves like a
- * command with a reply, while `dispatch` behaves like an event.
- */
-pub trait Dispatch<T>: Close {
-  fn dispatch(&self, value: T);
-}

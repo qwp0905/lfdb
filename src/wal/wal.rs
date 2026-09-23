@@ -106,7 +106,7 @@ pub struct WriteAheadLog {
    *  preload wal segment
    *  reuse synced + checkpoint complete segment
    */
-  preloader: Arc<SegmentPreload>,
+  preloader: SegmentPreload,
   /**
    * preloaded data block.
    */
@@ -123,7 +123,7 @@ impl WriteAheadLog {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
     let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
-    let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
+    let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer =
       LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0, max_len, 0);
 
@@ -161,7 +161,7 @@ impl WriteAheadLog {
       replay_result.last_snapshot,
     );
 
-    let preloader = SegmentPreload::new(max_len, io_pool, &event_bus);
+    let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer = LogBuffer::init_new(
       page_pool.acquire(),
       preloader.load()?,
@@ -446,6 +446,10 @@ impl WriteAheadLog {
 
   pub fn is_available(&self) -> bool {
     self.state.load().is_available()
+  }
+
+  pub fn reuse_segments(&self, segments: Vec<WALSegment>) -> Result {
+    self.preloader.reuse(segments)
   }
 
   pub fn close(&self) {
