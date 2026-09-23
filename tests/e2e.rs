@@ -1049,35 +1049,6 @@ fn test_start_not_commit() {
   t.commit().expect("commit error")
 }
 
-// // ============================================================
-// // 18. Timeout
-// // ============================================================
-// #[test]
-// fn test_timeout() {
-//   let dir = tempdir_in(".").unwrap();
-//   let engine = default_options(&dir)
-//     .transaction_timeout(Duration::from_millis(500))
-//     .boot()
-//     .unwrap();
-//   {
-//     let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
-//     let table = tx.open_table(TEST_TABLE).unwrap();
-
-//     std::thread::sleep(Duration::from_secs(5));
-
-//     match table.get(b"123") {
-//       Err(lfdb::Error::TransactionClosed) => {}
-//       _ => panic!("must timeout"),
-//     }
-//   }
-
-//   {
-//     let mut tx = engine.new_tx_timeout(Duration::from_secs(1)).unwrap();
-//     let table = tx.open_table(TEST_TABLE).unwrap();
-//     let _ = table.get(b"123123");
-//   }
-// }
-
 // ============================================================
 // 19. Large key/value
 // ============================================================
