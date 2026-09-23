@@ -155,7 +155,6 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 | `compaction_threshold` | Dead key ratio that triggers auto compaction. Each table's fragmentation ratio is evaluated every update and a compaction is dispatched once the ratio exceeds this threshold. Lower values trigger compaction more frequently; each triggered compaction can degrade read performance while it is running. Set to `1.0` to disable auto compaction entirely. |
 | `compaction_min_size` | Minimum size requirements for auto compaction triggers. |
 | `compaction_batch_size` | Number of keys to copy per compaction tick. |
-| `transaction_timeout` | Maximum lifetime of a transaction before it is automatically aborted. |
 
 
 ## Architecture
@@ -221,8 +220,6 @@ loop {
 **Auto-abort:**
 A transaction automatically aborts on drop if `commit()` was not called. There is no need to explicitly call `abort()` on error paths.
 
-**Timeout:**
-A transaction that exceeds its configured timeout is automatically aborted. Any subsequent operation returns `TransactionClosed`.
 
 ### Crash Recovery
 
