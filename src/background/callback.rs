@@ -37,28 +37,23 @@ where
   }
 }
 
-pub struct Callback(VPtr);
-impl Callback {
-  pub fn new<F: FnOnce(&R) + Send, R>(function: F) -> Self {
+pub struct Callback<R>(VPtr, PhantomData<fn(&R)>);
+impl<R> Callback<R> {
+  pub fn new<F: FnOnce(&R) + Send + 'static>(function: F) -> Self {
     let payload = Payload::<F, R>::new(function);
     let vtable = &Payload::<F, R>::VTABLE;
     let ptr = VPtr::new_box(payload, vtable);
-    Self(ptr)
+    Self(ptr, PhantomData)
   }
 
-  pub unsafe fn call<R>(&self, value: &R) {
+  pub fn call(self, value: &R) {
     let vtable = self.0.vtable();
     let ptr = self.0.erased();
     unsafe { (vtable.call)(ptr, NonNull::from_ref(value).cast()) };
   }
 
-  unsafe fn into_inner<F, R>(self) -> F {
-    let payload = self.0.into_boxed_inner::<Payload<F, R>>();
-    payload.function.into_inner().unwrap()
-  }
-
   const unsafe fn from_raw(raw: *mut ()) -> Self {
-    Self(unsafe { VPtr::from_raw(raw) })
+    Self(unsafe { VPtr::from_raw(raw) }, PhantomData)
   }
 
   fn into_raw(this: Self) -> *mut () {
@@ -69,13 +64,13 @@ impl Callback {
 static NOTHING: u8 = 0;
 const SENTINEL: *mut () = &raw const NOTHING as *mut ();
 
-pub struct CallbackSlot(AtomicPtr<()>);
-impl CallbackSlot {
+pub struct CallbackSlot<R>(AtomicPtr<()>, PhantomData<Callback<R>>);
+impl<R> CallbackSlot<R> {
   pub const fn new() -> Self {
-    Self(AtomicPtr::new(null_mut()))
+    Self(AtomicPtr::new(null_mut()), PhantomData)
   }
 
-  pub fn take(&self) -> Option<Callback> {
+  pub fn take(&self) -> Option<Callback<R>> {
     let taken = self.0.swap(SENTINEL, Ordering::Acquire);
     if taken.is_null() || taken == SENTINEL {
       return None;
@@ -83,15 +78,12 @@ impl CallbackSlot {
     Some(unsafe { Callback::from_raw(taken) })
   }
 
-  pub fn set<F: FnOnce(&R) + Send + 'static, R>(
-    &self,
-    callback: F,
-  ) -> std::result::Result<(), F> {
-    let raw = Callback::into_raw(Callback::new(callback));
+  pub fn set(&self, callback: Callback<R>) -> std::result::Result<(), Callback<R>> {
+    let raw = Callback::into_raw(callback);
     let mut current = self.0.load(Ordering::Acquire);
     loop {
       if !current.is_null() || current == SENTINEL {
-        return Err(unsafe { Callback::from_raw(raw).into_inner::<F, R>() });
+        return Err(unsafe { Callback::from_raw(raw) });
       }
       let Err(err) =
         self
@@ -104,7 +96,7 @@ impl CallbackSlot {
     }
   }
 }
-impl Drop for CallbackSlot {
+impl<R> Drop for CallbackSlot<R> {
   fn drop(&mut self) {
     let _ = self.take();
   }

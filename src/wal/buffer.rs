@@ -280,7 +280,7 @@ impl LogBuffer {
       let pending = unsafe { self.segment_state.segment.assume_init_ref() }
         .write_async(self.segment_ptr, static_ref);
       if let Err(callback) = pending.add_callback(create_cb(waiting, page)) {
-        callback(&pending.wait());
+        callback.call(&pending.wait());
       }
 
       if self.batch.try_release() {

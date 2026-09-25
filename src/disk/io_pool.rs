@@ -15,7 +15,7 @@ use super::{
   ScanIOHandle, SyncScheduler, WriteScheduler,
 };
 use crate::{
-  background::{Close, Oneshot, ThreadBuilder, ThreadPool},
+  background::{Callback, Close, Oneshot, ThreadBuilder, ThreadPool},
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex, ToArc},
   Error, Result,
@@ -43,10 +43,10 @@ impl<T> PendingIO<T> {
   pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(
     &self,
     f: F,
-  ) -> std::result::Result<(), F> {
+  ) -> std::result::Result<(), Callback<IOResult<T>>> {
     match self {
       PendingIO::Fulfilled(v) => f(v),
-      PendingIO::Pending(o) => o.add_callback(f)?,
+      PendingIO::Pending(o) => o.add_callback(Callback::new(f))?,
     };
     Ok(())
   }

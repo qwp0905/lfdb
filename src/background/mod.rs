@@ -42,4 +42,4 @@ mod vptr;
 pub use vptr::*;
 
 mod callback;
-use callback::*;
+pub use callback::*;
