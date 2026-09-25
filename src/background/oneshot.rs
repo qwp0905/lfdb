@@ -11,7 +11,7 @@ use crossbeam::utils::Backoff;
 
 use crate::utils::SBox;
 
-use super::CallbackSlot;
+use super::{Callback, CallbackSlot};
 
 #[repr(C)]
 struct PairInner<T: ?Sized> {
@@ -169,7 +169,7 @@ impl<T> Atomic<T> {
 pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
-  callback: CallbackSlot,
+  callback: CallbackSlot<T>,
 }
 impl<T> OneshotBehavior<T> {
   pub const fn new() -> Self {
@@ -180,21 +180,18 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
-  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
-    &self,
-    f: F,
-  ) -> std::result::Result<(), F> {
+  pub fn add_callback(&self, f: Callback<T>) -> std::result::Result<(), Callback<T>> {
     self.callback.set(f)
   }
 
-  pub unsafe fn fulfill(&self, result: T) {
+  unsafe fn fulfill(&self, result: T) {
     if let Some(callback) = self.callback.take() {
-      unsafe { callback.call(&result) };
+      callback.call(&result);
     }
     unsafe { (*self.value.get()).write(result) };
   }
 
-  pub unsafe fn wake(this: *const Self) {
+  unsafe fn wake(this: *const Self) {
     let backoff = Backoff::new();
     let mut state = (*this).state.load();
     loop {
@@ -337,11 +334,11 @@ impl<T> Oneshot<T> {
     self.0.wait()
   }
 
-  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
+  pub fn add_callback(
     &self,
-    f: F,
-  ) -> std::result::Result<(), F> {
-    self.0.add_callback(f)
+    callback: Callback<T>,
+  ) -> std::result::Result<(), Callback<T>> {
+    self.0.add_callback(callback)
   }
 }
 impl<T> Drop for Oneshot<T> {
