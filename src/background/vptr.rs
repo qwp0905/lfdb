@@ -53,11 +53,6 @@ impl<VTable> VPtr<VTable> {
     let p = NonNull::from_mut(Box::leak(Box::new(inner)));
     Self(p.cast())
   }
-  pub unsafe fn into_boxed_inner<T>(self) -> T {
-    let ptr = self.0.as_ptr() as *mut VObject<T, VTable>;
-    forget(self);
-    unsafe { Box::from_raw(ptr).payload }
-  }
 
   pub const fn into_raw(this: Self) -> *mut () {
     let ptr = this.0.as_ptr();
