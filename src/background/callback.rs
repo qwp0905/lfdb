@@ -46,7 +46,7 @@ impl<R> Callback<R> {
     Self(ptr, PhantomData)
   }
 
-  pub fn call(&self, value: &R) {
+  pub fn call(self, value: &R) {
     let vtable = self.0.vtable();
     let ptr = self.0.erased();
     unsafe { (vtable.call)(ptr, NonNull::from_ref(value).cast()) };
