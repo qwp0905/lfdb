@@ -12,12 +12,12 @@ use crossbeam::utils::Backoff;
 
 use super::{
   AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend,
-  ScanIOHandle, SyncScheduler, WriteScheduler,
+  ScanIOHandle, SyncBatch, WriteBatch,
 };
 use crate::{
-  background::{Callback, Close, Oneshot, ThreadBuilder, ThreadPool},
+  background::{Callback, Oneshot},
   metrics::{measure, MetricsRegistry},
-  utils::{error, ShortenedMutex, ToArc},
+  utils::{error, ShortenedMutex},
   Error, Result,
 };
 
@@ -61,40 +61,24 @@ impl<T> PendingIO<T> {
  * inside the engine, not just a handle factory.
  */
 pub struct IOPool {
-  thread: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
 }
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
     backend: T,
-    thread_count: usize,
     base_path: &Path,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let thread = ThreadBuilder::new()
-      .name("io pool")
-      .multi(thread_count)
-      .to_arc();
-
     // The base directory lock prevents multiple engine processes from using the
     // same database directory. Retry is a courtesy delay, not a recovery protocol:
     // if another process keeps the lock, opening the pool fails.
-    let base_dir = DirHandle::ensure(
-      base_path,
-      Box::new(backend),
-      thread.clone(),
-      metrics.clone(),
-    )
-    .map_err(Error::IO)
-    .map(Arc::new)?;
+    let base_dir = DirHandle::ensure(base_path, Box::new(backend), metrics.clone())
+      .map_err(Error::IO)
+      .map(Arc::new)?;
     for _ in 0..MAX_RETRY {
       if base_dir.try_lock().map_err(Error::IO)? {
-        return Ok(Self {
-          thread,
-          metrics,
-          base_dir,
-        });
+        return Ok(Self { metrics, base_dir });
       }
 
       error!(
@@ -160,25 +144,16 @@ impl IOPool {
     alloc: Option<AllocState>,
   ) -> IOHandle {
     let state = Arc::new(HandleState::new());
-    let write_handle = WriteScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      backend.clone(),
-      self.metrics.clone(),
-      alloc,
-    );
-    let sync_handle = SyncScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      backend.clone(),
-      self.metrics.clone(),
-    );
+    let write_handle = WriteBatch::default();
+    let sync_handle = SyncBatch::default();
+    let alloc = alloc.map(Arc::new);
 
     IOHandle {
       backend,
       write_scheduler: write_handle,
       sync_scheduler: sync_handle,
       state,
+      alloc,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
       filename: Mutex::new(filename),
@@ -187,7 +162,10 @@ impl IOPool {
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
-    file.fallocate(0, size).map_err(Error::IO)?;
+    file
+      .submit_fallocate(0, size)
+      .and_then(|done| done.wait().unwrap())
+      .map_err(Error::IO)?;
     Ok(self.create_handle(file, filename, None))
   }
 
@@ -213,7 +191,7 @@ impl IOPool {
   }
 
   pub fn close(&self) {
-    self.thread.close();
+    self.base_dir.close();
   }
 }
 impl Drop for IOPool {
@@ -232,9 +210,10 @@ impl Drop for IOPool {
  */
 pub struct IOHandle {
   backend: Arc<dyn IOBackend>,
-  write_scheduler: WriteScheduler,
-  sync_scheduler: SyncScheduler,
+  write_scheduler: WriteBatch,
+  sync_scheduler: SyncBatch,
   state: Arc<HandleState>,
+  alloc: Option<Arc<AllocState>>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
   filename: Mutex<PathBuf>,
@@ -269,21 +248,36 @@ impl IOHandle {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.write_scheduler.schedule(buf, offset))
+    let done = self.write_scheduler.publish_write(
+      &self.state,
+      &self.backend,
+      &self.metrics,
+      &self.alloc,
+      buf,
+      offset,
+    );
+    PendingIO::Pending(done)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_scheduler.schedule())
+    let done =
+      self
+        .sync_scheduler
+        .publish_sync(&self.state, &self.backend, &self.metrics);
+    PendingIO::Pending(done)
   }
 
-  pub fn fsync(&self) -> IOResult<()> {
+  pub fn fsync(&self) -> PendingIO<usize> {
     let Some(_token) = self.state.try_shared() else {
-      return Ok(());
+      return PendingIO::Fulfilled(Ok(0));
     };
-    self.backend.fsync()
+    match self.backend.submit_fsync() {
+      Ok(done) => PendingIO::Pending(done),
+      Err(err) => PendingIO::Fulfilled(Err(err)),
+    }
   }
 
   /**
