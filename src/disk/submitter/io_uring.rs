@@ -114,7 +114,7 @@ const fn worker_loop(
         let user_data = cqe.user_data();
         if user_data == 0 {
           let mut buf = [0; 8];
-          waker.read_exact(&mut buf).unwrap();
+          (&*waker).read_exact(&mut buf).unwrap();
           pending = false;
           continue;
         }
@@ -196,7 +196,10 @@ impl IoSubmitter {
   pub fn new(entries: u32) -> Result<Self> {
     let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
-    let waker_fd = libc::eventfd(2);
+    let waker_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if waker_fd < 0 {
+      return Err(Error::last_os_error());
+    }
     let waker = Arc::new(unsafe { File::from_raw_fd(waker_fd) });
 
     let handle = Builder::new()
@@ -217,7 +220,7 @@ impl IoSubmitter {
   }
 
   fn wake(&self) -> Result<()> {
-    (&self.waker).write_all(&1u64.to_ne_bytes())?;
+    (&*self.waker).write_all(&1u64.to_ne_bytes())?;
     Ok(())
   }
 

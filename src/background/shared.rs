@@ -11,6 +11,7 @@ use super::{oneshot, Close, Oneshot, SharedFn, ThreadSlot, UnwindSpawner};
 
 enum Context<T, R> {
   Execute(T, OneshotFulfill<R>),
+  #[allow(unused)]
   Dispatch(T),
   Term,
 }
@@ -161,6 +162,7 @@ impl<T, R> SharedWorkThread<T, R> {
     self.register(Context::Execute(value, f));
     o
   }
+  #[allow(unused)]
   pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }

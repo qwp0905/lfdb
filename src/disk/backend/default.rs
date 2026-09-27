@@ -20,10 +20,7 @@ use std::{
 use std::os::unix::fs::OpenOptionsExt;
 
 #[cfg(unix)]
-use std::{
-  io::Error,
-  os::{fd::AsRawFd, unix::fs::FileExt},
-};
+use std::os::unix::fs::FileExt;
 
 #[cfg(windows)]
 use std::{
@@ -135,7 +132,10 @@ impl DiskBackend for DefaultDiskBackend {
   ) -> Result<Box<dyn IOBackend>> {
     // Closest default-backend approximation to Linux O_DIRECT on Windows.
     let file = options.custom_flags(libc::O_DIRECT).open(path)?;
-    Ok(Box::new(file))
+    Ok(Box::new(DefaultIOBackend::new(
+      Arc::new(file),
+      self.submitter.clone(),
+    )))
   }
   #[cfg(windows)]
   fn open_direct_io(
