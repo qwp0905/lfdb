@@ -25,6 +25,55 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
+fn to_entry(task: Task) -> squeue::Entry {
+  let fd = types::Fd(task.toward.as_raw_fd());
+  let mut entry = match task.task_type {
+    TaskType::Pwrite { offset, buf } => {
+      opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
+        .offset(offset)
+        .build()
+    }
+    TaskType::Pwritev { offset, bufs } => {
+      opcode::Writev::new(fd, bufs.as_ptr() as *const libc::iovec, bufs.len() as u32)
+        .offset(offset)
+        .build()
+    }
+    TaskType::Fsync => opcode::Fsync::new(fd).build(),
+    TaskType::Fdatasync => opcode::Fsync::new(fd)
+      .flags(types::FsyncFlags::DATASYNC)
+      .build(),
+    TaskType::Fallocate { offset, len } => {
+      opcode::Fallocate::new(fd, len).offset(offset).build()
+    }
+  };
+  entry.set_user_data(OneshotFulfill::into_raw(task.done) as u64);
+  entry
+}
+
+fn drain_completion(
+  cq: &mut CompletionQueue,
+  count: &mut usize,
+  mut maybe_waker: Option<(&File, &mut bool)>,
+) {
+  cq.sync();
+  for cqe in cq {
+    *count -= 1;
+    let ret = cqe.result();
+    let user_data = cqe.user_data();
+    if user_data == 0 {
+      if let Some((waker, pending)) = maybe_waker.as_mut() {
+        let mut buf = [0; 8];
+        waker.read_exact(&mut buf).unwrap();
+        **pending = false;
+      }
+      continue;
+    }
+    let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
+    let done = unsafe { OneshotFulfill::from_raw(ptr) };
+    done.fulfill(cvt(ret));
+  }
+}
+
 fn shutdown_gracefully(
   submitter: Submitter,
   mut sq: SubmissionQueue,
@@ -34,6 +83,7 @@ fn shutdown_gracefully(
 ) {
   loop {
     if sq.is_full() {
+      drain_completion(&mut cq, &mut submitted, None);
       match submitter.submit() {
         Ok(_) => {}
         Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
@@ -52,17 +102,7 @@ fn shutdown_gracefully(
 
   cq.sync();
   submitter.submit_and_wait(submitted).unwrap();
-  cq.sync();
-  for cqe in cq {
-    let ret = cqe.result();
-    let user_data = cqe.user_data();
-    if user_data == 0 {
-      continue;
-    }
-    let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
-    let done = unsafe { OneshotFulfill::from_raw(ptr) };
-    done.fulfill(cvt(ret));
-  }
+  drain_completion(&mut cq, &mut submitted, None);
 }
 
 const fn worker_loop(
@@ -100,21 +140,7 @@ const fn worker_loop(
         Err(err) => panic!("{err}"),
       }
 
-      cq.sync();
-      for cqe in &mut cq {
-        submitted -= 1;
-        let ret = cqe.result();
-        let user_data = cqe.user_data();
-        if user_data == 0 {
-          let mut buf = [0; 8];
-          (&*waker).read_exact(&mut buf).unwrap();
-          pending = false;
-          continue;
-        }
-        let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
-        let done = unsafe { OneshotFulfill::from_raw(ptr) };
-        done.fulfill(cvt(ret));
-      }
+      drain_completion(&mut cq, &mut submitted, Some((&waker, &mut pending)));
 
       loop {
         if sq.is_full() {
@@ -135,35 +161,12 @@ const fn worker_loop(
       }
 
       while let Some(ctx) = queue.pop() {
-        let task = match ctx {
-          Context::Task(task) => task,
+        let entry = match ctx {
+          Context::Task(task) => to_entry(task),
           Context::Term => {
             return shutdown_gracefully(submitter, sq, cq, backlog, submitted)
           }
         };
-        let fd = types::Fd(task.toward.as_raw_fd());
-        let mut entry = match task.task_type {
-          TaskType::Pwrite { offset, buf } => {
-            opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
-              .offset(offset)
-              .build()
-          }
-          TaskType::Pwritev { offset, bufs } => opcode::Writev::new(
-            fd,
-            bufs.as_ptr() as *const libc::iovec,
-            bufs.len() as u32,
-          )
-          .offset(offset)
-          .build(),
-          TaskType::Fsync => opcode::Fsync::new(fd).build(),
-          TaskType::Fdatasync => opcode::Fsync::new(fd)
-            .flags(types::FsyncFlags::DATASYNC)
-            .build(),
-          TaskType::Fallocate { offset, len } => {
-            opcode::Fallocate::new(fd, len).offset(offset).build()
-          }
-        };
-        entry.set_user_data(OneshotFulfill::into_raw(task.done) as u64);
         if unsafe { sq.push(&entry).is_err() } {
           backlog.push(entry);
           continue;
