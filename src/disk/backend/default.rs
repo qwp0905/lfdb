@@ -18,6 +18,8 @@ use std::{
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_vendor = "apple")]
+use std::{io::Error, os::fd::AsRawFd};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;

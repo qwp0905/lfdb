@@ -33,14 +33,11 @@ fn shutdown_gracefully(
   mut submitted: usize,
 ) {
   while !sq.is_empty() {
-    if sq.is_full() {
-      match submitter.submit() {
-        Ok(_) => {}
-        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
-        Err(err) => panic!("{err}"),
-      }
-    };
-
+    match submitter.submit() {
+      Ok(_) => {}
+      Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
+      Err(err) => panic!("{err}"),
+    }
     sq.sync();
     if let Some(entry) = backlog.pop() {
       let _ = unsafe { sq.push(&entry) };
@@ -61,6 +58,7 @@ fn shutdown_gracefully(
   }
 
   submitter.submit_and_wait(submitted).unwrap();
+  cq.sync();
   for cqe in cq {
     let ret = cqe.result();
     let user_data = cqe.user_data();
