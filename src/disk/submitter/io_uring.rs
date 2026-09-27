@@ -1,7 +1,7 @@
 use std::{
   fs::File,
   io::{Error, Read, Result, Write},
-  os::fd::{AsRawFd, FromRawFd, OwnedFd},
+  os::fd::{AsRawFd, FromRawFd},
   sync::Arc,
   thread::Builder,
 };
@@ -16,7 +16,7 @@ use crate::{
   utils::ChunkQueue,
 };
 
-use super::{IoTask, TaskType};
+use super::{Task, TaskType};
 
 fn cvt(ret: i32) -> Result<usize> {
   if ret < 0 {
@@ -27,9 +27,9 @@ fn cvt(ret: i32) -> Result<usize> {
 
 fn shutdown_gracefully(
   submitter: Submitter,
-  sq: SubmissionQueue,
-  cq: CompletionQueue,
-  backlog: ChunkQueue<squeue::Entry>,
+  mut sq: SubmissionQueue,
+  mut cq: CompletionQueue,
+  mut backlog: ChunkQueue<squeue::Entry>,
   mut submitted: usize,
 ) {
   while !sq.is_empty() {
@@ -47,7 +47,7 @@ fn shutdown_gracefully(
       submitted += 1;
     }
 
-    for cqe in cq {
+    for cqe in &mut cq {
       submitted -= 1;
       let ret = cqe.result();
       let user_data = cqe.user_data();
@@ -74,7 +74,7 @@ fn shutdown_gracefully(
 }
 
 const fn worker_loop(
-  ring: IoUring,
+  mut ring: IoUring,
   queue: Arc<SegQueue<Context>>,
   waker: Arc<File>,
 ) -> impl FnOnce() {
@@ -82,7 +82,7 @@ const fn worker_loop(
     let mut backlog = ChunkQueue::new();
     let mut submitted = 0;
     let (submitter, mut sq, mut cq) = ring.split();
-    let wake = opcode::PollAdd::new(waker.as_raw_fd(), libc::POLLIN as u32)
+    let wake = opcode::PollAdd::new(types::Fd(waker.as_raw_fd()), libc::POLLIN as u32)
       .build()
       .user_data(0);
     let mut pending = false;
@@ -133,7 +133,7 @@ const fn worker_loop(
         };
         sq.sync();
         match backlog.pop() {
-          Some(task) => unsafe {
+          Some(sqe) => unsafe {
             let _ = sq.push(&sqe);
             submitted += 1;
           },
@@ -148,7 +148,7 @@ const fn worker_loop(
             return shutdown_gracefully(submitter, sq, cq, backlog, submitted)
           }
         };
-        let fd = task.toward.as_raw_fd();
+        let fd = types::Fd(task.toward.as_raw_fd());
         let mut entry = match task.task_type {
           TaskType::Pwrite { offset, buf } => {
             opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
@@ -183,7 +183,7 @@ const fn worker_loop(
 }
 
 enum Context {
-  Task(IoTask),
+  Task(Task),
   Term,
 }
 
@@ -196,7 +196,7 @@ impl IoSubmitter {
   pub fn new(entries: u32) -> Result<Self> {
     let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
-    let waker_fd = libc::eventfd();
+    let waker_fd = libc::eventfd(2);
     let waker = Arc::new(unsafe { File::from_raw_fd(waker_fd) });
 
     let handle = Builder::new()
@@ -211,7 +211,7 @@ impl IoSubmitter {
     })
   }
 
-  pub fn submit(&self, task: IoTask) -> Result<()> {
+  pub fn submit(&self, task: Task) -> Result<()> {
     self.queue.push(Context::Task(task));
     self.wake()
   }
