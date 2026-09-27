@@ -186,7 +186,5 @@ mod tests {
 
     assert_eq!(parsed.snapshot_version, sversion);
     assert_eq!(parsed.wal_version, wversion);
-
-    io_pool.close();
   }
 }

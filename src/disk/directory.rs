@@ -91,8 +91,4 @@ impl DirHandle {
   pub fn unlock(&self) -> IOResult<()> {
     self.io_backend.unlock()
   }
-
-  pub fn close(&self) {
-    self.disk_backend.close();
-  }
 }

@@ -189,10 +189,6 @@ impl IOPool {
   pub fn exists(&self, filename: &Path) -> Result<bool> {
     self.base_dir.exists(filename).map_err(Error::IO)
   }
-
-  pub fn close(&self) {
-    self.base_dir.close();
-  }
 }
 impl Drop for IOPool {
   fn drop(&mut self) {

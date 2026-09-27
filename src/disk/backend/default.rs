@@ -30,6 +30,8 @@ use std::{
   ptr::copy_nonoverlapping,
 };
 
+use crate::utils::info;
+
 use super::{
   super::{IoSubmitter, Task},
   DiskBackend, IOBackend, IOTask,
@@ -167,9 +169,11 @@ impl DiskBackend for DefaultDiskBackend {
   fn ensure_dir(&self, path: &Path) -> Result<()> {
     create_dir_all(path)
   }
-
-  fn close(&self) {
+}
+impl Drop for DefaultDiskBackend {
+  fn drop(&mut self) {
     self.submitter.close();
+    info!("disk backend closed.");
   }
 }
 

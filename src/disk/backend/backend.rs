@@ -131,5 +131,4 @@ pub trait DiskBackend: Send + Sync {
   fn exists(&self, path: &Path) -> Result<bool>;
   fn rename(&self, from: &Path, to: &Path) -> Result<()>;
   fn ensure_dir(&self, path: &Path) -> Result<()>;
-  fn close(&self);
 }
