@@ -99,13 +99,14 @@ const fn worker_loop(
         pending = true;
       }
 
+      sq.sync();
       match submitter.submit_and_wait(1) {
         Ok(_) => {}
         Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {}
         Err(err) => panic!("{err}"),
       }
-      cq.sync();
 
+      cq.sync();
       for cqe in &mut cq {
         submitted -= 1;
         let ret = cqe.result();
