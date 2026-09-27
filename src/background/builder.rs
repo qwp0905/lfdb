@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use super::{IntervalWorkThread, PreloadThread, SingleFn, ThreadPool};
+use super::{
+  IntervalWorkThread, PreloadThread, SharedFn, SharedWorkThread, SingleFn, ThreadPool,
+};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -32,8 +34,11 @@ impl ThreadBuilder {
     self.stack_size = size;
     self
   }
-  pub fn multi(self, count: usize) -> ThreadPool {
-    ThreadPool::new(self.name, self.stack_size, count)
+  pub fn multi(self, count: usize) -> MultiThreadBuilder {
+    MultiThreadBuilder {
+      builder: self,
+      count,
+    }
   }
   pub const fn single(self) -> SingleThreadBuilder {
     SingleThreadBuilder { builder: self }
@@ -67,6 +72,30 @@ impl SingleThreadBuilder {
       self.builder.stack_size,
       SingleFn::new(preload),
       SingleFn::new(fallback),
+    )
+  }
+}
+
+pub struct MultiThreadBuilder {
+  builder: ThreadBuilder,
+  count: usize,
+}
+impl MultiThreadBuilder {
+  pub fn pool(self) -> ThreadPool {
+    ThreadPool::new(self.builder.name, self.builder.stack_size, self.count)
+  }
+
+  pub fn shared<T, R, F>(self, f: F) -> SharedWorkThread<T, R>
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: Fn(T) -> R + Send + Sync + 'static,
+  {
+    SharedWorkThread::new(
+      self.builder.name,
+      self.builder.stack_size,
+      self.count,
+      SharedFn::new(f),
     )
   }
 }
