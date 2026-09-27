@@ -2,7 +2,7 @@ use std::{
   cell::Cell,
   io::{Error, IoSlice, Result},
   sync::{
-    atomic::{fence, AtomicBool, AtomicU32, Ordering},
+    atomic::{fence, AtomicBool, AtomicU16, Ordering},
     Arc,
   },
 };
@@ -99,11 +99,19 @@ impl BatchQueue<WriteTask, Result<()>> {
     values: Vec<WriteTask>,
     waiting: Vec<OneshotFulfill<Result<()>>>,
   ) {
+    struct BatchResult {
+      count: AtomicU16,
+      error: AtomicBool,
+    }
+
     let mut tasks = Vec::new();
     let waiting = UnsafeVec::new(waiting);
-    let count = Arc::new(AtomicU32::new(0));
+    let result = Arc::new(BatchResult {
+      count: AtomicU16::new(0),
+      error: AtomicBool::new(false),
+    });
     for chunk in values.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
-      count.fetch_add(1, Ordering::Relaxed);
+      result.count.fetch_add(1, Ordering::Relaxed);
       let (offset, bufs): (Vec<_>, Vec<_>) = chunk.iter().map(|(o, b)| (*o, *b)).unzip();
       let offset = offset[0];
       let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
@@ -112,7 +120,6 @@ impl BatchQueue<WriteTask, Result<()>> {
       } else {
         IOTask::new_pwritev(static_ref, offset)
       };
-
       tasks.push((task, done, bufs));
     }
 
@@ -123,22 +130,36 @@ impl BatchQueue<WriteTask, Result<()>> {
       let alloc = alloc.clone();
 
       if let Err(err) = backend.submit(task) {
+        if result.error.fetch_or(true, Ordering::Relaxed) {
+          return;
+        }
+        let k = err.kind();
         for done in unsafe { waiting.take() } {
-          done.fulfill(Err(Error::from(err.kind())));
+          done.fulfill(Err(Error::from(k)));
         }
         return self.recursive_write(state, backend, metrics, alloc);
       }
-      let count = count.clone();
+
+      let result = result.clone();
       let waiting = waiting.clone();
       let queue = self.clone();
-      let callback = Callback::new(move |result: &Result<usize>| {
+      let callback = Callback::new(move |r: &Result<usize>| {
         let _bufs = bufs;
-        if count.fetch_sub(1, Ordering::Relaxed) > 1 {
+        if let Err(err) = r {
+          if result.error.fetch_or(true, Ordering::Relaxed) {
+            return;
+          }
+          let k = err.kind();
+          for done in unsafe { waiting.take() } {
+            done.fulfill(Err(Error::from(k)));
+          }
+          return queue.recursive_write(state, backend, metrics, alloc);
+        }
+        if result.count.fetch_sub(1, Ordering::Relaxed) > 1 {
           return;
         }
-        let result = result.as_ref().map(|_| ()).map_err(|err| err.kind());
         for done in unsafe { waiting.take() } {
-          done.fulfill(result.map_err(Error::from));
+          done.fulfill(Ok(()));
         }
         queue.recursive_write(state, backend, metrics, alloc);
       });
