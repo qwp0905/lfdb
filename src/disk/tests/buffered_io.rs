@@ -9,7 +9,9 @@ use tempfile::TempDir;
 fn test_scan_io() {
   let dir = TempDir::new_in(".").expect("dir failed.");
   let metrics = Arc::new(MetricsRegistry::new());
-  let io_pool = IOPool::with_backend(DefaultDiskBackend, 1, dir.path(), metrics).unwrap();
+  let io_pool =
+    IOPool::with_backend(DefaultDiskBackend::new().unwrap(), dir.path(), metrics)
+      .unwrap();
   let filename = PathBuf::from("temp");
 
   let count = 10u8;
@@ -37,6 +39,4 @@ fn test_scan_io() {
       assert_eq!(*buf, handle.read_array::<SIZE>().unwrap());
     }
   }
-
-  io_pool.close();
 }

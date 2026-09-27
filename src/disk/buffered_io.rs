@@ -1,7 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
 use super::{AlignedArray, DirHandle, IOBackend, ALIGN};
-use crate::{error::Result, Error};
+use crate::{background::Oneshot, error::Result, utils::create_static_ref, Error};
 
 /**
  * Buffered writer for direct-I/O append-style output.
@@ -15,6 +15,7 @@ pub struct AppendIOHandle {
   buffer: AlignedArray,
   buffer_offset: usize,
   file_offset: u64,
+  pending: Vec<Oneshot<io::Result<usize>>>,
 }
 impl AppendIOHandle {
   pub const fn new(file: Box<dyn IOBackend>) -> Self {
@@ -23,6 +24,7 @@ impl AppendIOHandle {
       buffer: AlignedArray::new(),
       buffer_offset: 0,
       file_offset: 0,
+      pending: Vec::new(),
     }
   }
   pub fn append(&mut self, mut buf: &[u8]) -> Result {
@@ -43,10 +45,12 @@ impl AppendIOHandle {
     Ok(())
   }
   fn flush_buf(&mut self) -> Result {
-    self
+    let static_ref = unsafe { create_static_ref::<[u8]>(&*self.buffer) };
+    let done = self
       .file
-      .pwrite_exact(&*self.buffer, self.file_offset)
+      .submit_pwrite(static_ref, self.file_offset)
       .map_err(Error::IO)?;
+    self.pending.push(done);
     Ok(())
   }
   /**
@@ -57,7 +61,11 @@ impl AppendIOHandle {
    */
   pub fn flush_all(&mut self) -> Result {
     self.flush_buf()?;
-    self.file.fsync().map_err(Error::IO)?;
+    for done in self.pending.drain(..) {
+      done.wait().unwrap().map_err(Error::IO)?;
+    }
+    let done = self.file.submit_fsync().map_err(Error::IO)?;
+    done.wait().unwrap().map_err(Error::IO)?;
     Ok(())
   }
 }

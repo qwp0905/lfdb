@@ -4,7 +4,10 @@ use std::{
 };
 
 use super::{Engine, EngineConfig, Result};
-use crate::disk::{DefaultDiskBackend, DiskBackend};
+use crate::{
+  disk::{DefaultDiskBackend, DiskBackend},
+  Error,
+};
 
 pub struct EngineBuilder(EngineConfig);
 
@@ -15,7 +18,6 @@ impl EngineBuilder {
   {
     Self(EngineConfig {
       base_path: PathBuf::from(base_path.as_ref()),
-      io_thread_count: DEFAULT_IO_THREAD_COUNT,
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
@@ -28,15 +30,6 @@ impl EngineBuilder {
       block_cache_buffer_size: DEFAULT_BLOCK_CACHE_BUFFER_SIZE,
       transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
     })
-  }
-
-  /**
-   * Number of background IO worker threads shared across tables for write batching.
-   * Each table holds at most one worker at a time.
-   */
-  pub const fn io_thread_count(mut self, count: usize) -> Self {
-    self.0.io_thread_count = count;
-    self
   }
 
   /**
@@ -134,7 +127,7 @@ impl EngineBuilder {
   }
 
   pub fn boot(&self) -> Result<Engine> {
-    Engine::bootstrap(DefaultDiskBackend, &self.0)
+    Engine::bootstrap(DefaultDiskBackend::new().map_err(Error::IO)?, &self.0)
   }
 
   pub fn with_backend<B: DiskBackend + 'static>(&self, backend: B) -> Result<Engine> {
@@ -155,7 +148,6 @@ const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mib
 const DEFAULT_BLOCK_CACHE_BUFFER_SIZE: usize = 4 << 20; // 4 mib
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
-const DEFAULT_IO_THREAD_COUNT: usize = 16;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20; // 512 mib
 const DEFAULT_COMPACTION_BATCH_SIZE: usize = 128;

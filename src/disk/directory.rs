@@ -5,8 +5,8 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncScheduler};
-use crate::{background::ThreadPool, metrics::MetricsRegistry};
+use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncBatch};
+use crate::metrics::MetricsRegistry;
 
 /**
  * Base-directory-bound disk backend.
@@ -18,15 +18,15 @@ use crate::{background::ThreadPool, metrics::MetricsRegistry};
 pub struct DirHandle {
   io_backend: Arc<dyn IOBackend>,
   disk_backend: Box<dyn DiskBackend>,
-  sync_handle: SyncScheduler,
+  sync_handle: SyncBatch,
   state: Arc<HandleState>,
+  metrics: Arc<MetricsRegistry>,
   path: PathBuf,
 }
 impl DirHandle {
   pub fn ensure(
     path: &Path,
     disk_backend: Box<dyn DiskBackend>,
-    thread: Arc<ThreadPool>,
     metrics: Arc<MetricsRegistry>,
   ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
@@ -36,13 +36,14 @@ impl DirHandle {
       .open(options.read(true), &path)
       .map(Arc::<dyn IOBackend>::from)?;
     let state = Arc::new(HandleState::new());
-    let sync_handle = SyncScheduler::new(thread, state.clone(), file.clone(), metrics);
+    let sync_handle = SyncBatch::default();
 
     Ok(Self {
       io_backend: file,
       disk_backend,
       sync_handle,
       state,
+      metrics,
       path,
     })
   }
@@ -50,7 +51,11 @@ impl DirHandle {
     if self.state.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_handle.schedule())
+    let done =
+      self
+        .sync_handle
+        .publish_sync(&self.state, &self.io_backend, &self.metrics);
+    PendingIO::Pending(done)
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
@@ -85,5 +90,9 @@ impl DirHandle {
   }
   pub fn unlock(&self) -> IOResult<()> {
     self.io_backend.unlock()
+  }
+
+  pub fn close(&self) {
+    self.disk_backend.close();
   }
 }

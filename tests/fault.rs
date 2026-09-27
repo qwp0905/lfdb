@@ -1,6 +1,6 @@
 use std::{
   fs::{Metadata, OpenOptions, ReadDir},
-  io::{Error as IoError, ErrorKind, IoSlice, Result as IoResult},
+  io::{Error as IoError, ErrorKind, Result as IoResult},
   path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,7 +9,7 @@ use std::{
   time::Duration,
 };
 
-use lfdb::{DefaultDiskBackend, DiskBackend, Engine, EngineBuilder, IOBackend};
+use lfdb::{DefaultDiskBackend, DiskBackend, Engine, EngineBuilder, IOBackend, IOTask};
 use log::Log;
 use tempfile::{tempdir_in, TempDir};
 
@@ -66,48 +66,22 @@ impl IOBackend for FaultIO {
     self.inner.pread(buf, offset)
   }
 
-  fn pwrite(&self, buf: &[u8], offset: u64) -> IoResult<usize> {
-    if self.is_wal
-      && self
-        .controller
-        .fill_wal_on_next_write
-        .swap(false, Ordering::AcqRel)
-    {
+  fn submit(&self, task: IOTask) -> IoResult<()> {
+    if !self.is_wal {
+      return self.inner.submit(task);
+    }
+    let flag = match task.task_type {
+      lfdb::TaskType::Pwrite { .. } => &self.controller.fill_wal_on_next_write,
+      lfdb::TaskType::Pwritev { .. } => &self.controller.fill_wal_on_next_write,
+      lfdb::TaskType::Fsync => return self.inner.submit(task),
+      lfdb::TaskType::Fdatasync => &self.controller.fail_next_wal_fdatasync,
+      lfdb::TaskType::Fallocate { .. } => return self.inner.submit(task),
+    };
+    if flag.swap(false, Ordering::AcqRel) {
       return Err(IoError::from(ErrorKind::StorageFull));
     }
-    self.inner.pwrite(buf, offset)
-  }
 
-  fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> IoResult<usize> {
-    if self.is_wal
-      && self
-        .controller
-        .fill_wal_on_next_write
-        .swap(false, Ordering::AcqRel)
-    {
-      return Err(IoError::from(ErrorKind::StorageFull));
-    }
-    self.inner.pwritev(bufs, offset)
-  }
-
-  fn fallocate(&self, offset: u64, len: u64) -> IoResult<()> {
-    self.inner.fallocate(offset, len)
-  }
-
-  fn fsync(&self) -> IoResult<()> {
-    self.inner.fsync()
-  }
-
-  fn fdatasync(&self) -> IoResult<()> {
-    if self.is_wal
-      && self
-        .controller
-        .fail_next_wal_fdatasync
-        .swap(false, Ordering::AcqRel)
-    {
-      return Err(IoError::other("injected WAL fdatasync failure"));
-    }
-    self.inner.fdatasync()
+    self.inner.submit(task)
   }
 
   fn metadata(&self) -> IoResult<Metadata> {
@@ -128,7 +102,7 @@ struct FaultBackend {
 impl FaultBackend {
   fn new(controller: FaultController) -> Self {
     Self {
-      inner: DefaultDiskBackend,
+      inner: DefaultDiskBackend::new().unwrap(),
       controller,
     }
   }
@@ -178,6 +152,10 @@ impl DiskBackend for FaultBackend {
 
   fn ensure_dir(&self, path: &Path) -> IoResult<()> {
     self.inner.ensure_dir(path)
+  }
+
+  fn close(&self) {
+    self.inner.close()
   }
 }
 

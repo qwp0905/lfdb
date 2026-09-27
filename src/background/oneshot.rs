@@ -36,7 +36,7 @@ impl<T> Pair<T> {
   }
 
   pub const fn into_raw(this: Self) -> *mut T {
-    let ptr = unsafe { &raw mut (*this.0.as_ptr()).value };
+    let ptr = this.as_ptr();
     forget(this);
     ptr
   }
@@ -45,6 +45,10 @@ impl<T> Pair<T> {
     let offset = offset_of!(PairInner<T>, value);
     let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
     Self(NonNull::new_unchecked(ptr))
+  }
+
+  const fn as_ptr(&self) -> *mut T {
+    unsafe { &raw mut (*self.0.as_ptr()).value }
   }
 }
 impl<T: ?Sized> Drop for Pair<T> {
@@ -350,7 +354,17 @@ impl<T> Drop for Oneshot<T> {
 pub struct OneshotFulfill<T>(Pair<OneshotBehavior<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
-    OneshotBehavior::fulfill_and_wake(&*self.0 as _, result);
+    OneshotBehavior::fulfill_and_wake(&raw const *self.0, result);
+  }
+
+  pub const fn into_raw(this: Self) -> *mut OneshotBehavior<T> {
+    let ptr = this.0.as_ptr();
+    forget(this);
+    ptr.cast()
+  }
+
+  pub const unsafe fn from_raw(raw: *mut OneshotBehavior<T>) -> Self {
+    Self(Pair::from_raw(raw))
   }
 }
 impl<T> Drop for OneshotFulfill<T> {

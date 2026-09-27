@@ -163,7 +163,8 @@ mod tests {
     let dir = TempDir::new_in(".").expect("dir failed.");
     let metrics = Arc::new(MetricsRegistry::new());
     let io_pool =
-      IOPool::with_backend(DefaultDiskBackend, 1, dir.path(), metrics).unwrap();
+      IOPool::with_backend(DefaultDiskBackend::new().unwrap(), dir.path(), metrics)
+        .unwrap();
 
     let page_size = 123;
     let tid = 1;
