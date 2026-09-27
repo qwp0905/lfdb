@@ -6,7 +6,7 @@ fn test_pread() -> Result<()> {
   let dir = tempdir_in(".")?;
   let disk = DefaultDiskBackend::new().unwrap();
   let file = disk
-    .open_direct_io(
+    .open(
       OpenOptions::new().read(true).write(true).create(true),
       &dir.path().join("test_file.txt"),
     )
@@ -53,7 +53,7 @@ fn test_pwrite() {
   let file_path = dir.path().join("test_pwrite.txt");
   let disk = DefaultDiskBackend::new().unwrap();
   let file = disk
-    .open_direct_io(
+    .open(
       OpenOptions::new().read(true).write(true).create(true),
       &file_path,
     )
@@ -95,7 +95,7 @@ fn test_allocate() -> Result<()> {
   let path = dir.path().join("fallocate.txt");
   let disk = DefaultDiskBackend::new().unwrap();
   let file = disk
-    .open_direct_io(
+    .open(
       OpenOptions::new().read(true).write(true).create(true),
       &path,
     )
