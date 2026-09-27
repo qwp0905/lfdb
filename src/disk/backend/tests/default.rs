@@ -1,21 +1,26 @@
 use super::*;
-use std::fs::File;
-use std::io::{Read, Write};
 use tempfile::tempdir_in;
 
 #[test]
 fn test_pread() -> Result<()> {
   let dir = tempdir_in(".")?;
-  let file_path = dir.path().join("test_file.txt");
+  let disk = DefaultDiskBackend::new().unwrap();
+  let file = disk
+    .open_direct_io(
+      OpenOptions::new().read(true).write(true).create(true),
+      &dir.path().join("test_file.txt"),
+    )
+    .unwrap();
   let content = b"Hello, World!";
 
   // Create a test file with content
-  let mut file = File::create(&file_path)?;
-  file.write_all(content)?;
-  file.sync_all()?;
+  let (task, done) = IOTask::new_pwrite(content, 0);
+  file.submit(task).unwrap();
+  done.wait().unwrap().unwrap();
 
-  // Open file for reading
-  let file = File::open(&file_path)?;
+  let (task, done) = IOTask::new_fsync();
+  file.submit(task).unwrap();
+  done.wait().unwrap().unwrap();
 
   // Test 1: Normal read
   let mut buf = vec![0; 5];
@@ -43,51 +48,81 @@ fn test_pread() -> Result<()> {
 }
 
 #[test]
-fn test_pwrite() -> Result<()> {
-  let dir = tempdir_in(".")?;
+fn test_pwrite() {
+  let dir = tempdir_in(".").unwrap();
   let file_path = dir.path().join("test_pwrite.txt");
-
-  // Create an empty file
-  let file = File::create(&file_path)?;
+  let disk = DefaultDiskBackend::new().unwrap();
+  let file = disk
+    .open_direct_io(
+      OpenOptions::new().read(true).write(true).create(true),
+      &file_path,
+    )
+    .unwrap();
 
   // Test 1: Write at the beginning
-  let content1 = b"Hello";
-  let bytes_written = file.pwrite(content1, 0)?;
+  let content = b"Hello";
+  let (task, done) = IOTask::new_pwrite(content, 0);
+  file.submit(task).unwrap();
+  let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 5);
 
   // Test 2: Write at specific offset
-  let content2 = b"World";
-  let bytes_written = file.pwrite(content2, 6)?;
+  let content = b"World";
+  let (task, done) = IOTask::new_pwrite(content, 6);
+  file.submit(task).unwrap();
+  let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 5);
 
   // Verify written content
-  let mut content = String::new();
-  File::open(&file_path)?.read_to_string(&mut content)?;
-  assert_eq!(content, "Hello\0World");
+  let mut content = vec![0; 11];
+  file.pread(&mut content, 0).unwrap();
+  assert_eq!(
+    unsafe { str::from_utf8_unchecked(&content) },
+    "Hello\0World"
+  );
 
   // Test 3: Write with empty buffer
   let empty_buf: &[u8] = &[];
-  let bytes_written = file.pwrite(empty_buf, 0)?;
+  let (task, done) = IOTask::new_pwrite(empty_buf, 0);
+  file.submit(task).unwrap();
+  let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 0);
-
-  Ok(())
 }
 
 #[test]
 fn test_allocate() -> Result<()> {
   let dir = tempdir_in(".")?;
-  let file = File::create(dir.path().join("fallocate.txt"))?;
+  let path = dir.path().join("fallocate.txt");
+  let disk = DefaultDiskBackend::new().unwrap();
+  let file = disk
+    .open_direct_io(
+      OpenOptions::new().read(true).write(true).create(true),
+      &path,
+    )
+    .unwrap();
 
-  assert!(file.fallocate(0, 0).is_err());
-  file.fallocate(0, 100)?;
+  let (task, done) = IOTask::new_fallocate(0, 0);
+  file.submit(task)?;
+  assert!(done.wait().unwrap().is_err());
+
+  let (task, done) = IOTask::new_fallocate(0, 100);
+  file.submit(task)?;
+  done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 100);
-  file.fallocate(100, 200)?;
+
+  let (task, done) = IOTask::new_fallocate(100, 200);
+  file.submit(task)?;
+  done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 300);
 
-  file.fallocate(500, 10)?;
+  let (task, done) = IOTask::new_fallocate(500, 10);
+  file.submit(task)?;
+  done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 510);
 
-  assert!(file.fallocate(510, 0).is_err());
+  let (task, done) = IOTask::new_fallocate(510, 0);
+  file.submit(task)?;
+  assert!(done.wait().unwrap().is_err());
 
   Ok(())
 }

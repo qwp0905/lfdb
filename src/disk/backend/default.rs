@@ -11,12 +11,11 @@ use std::{
     create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions,
     TryLockError,
   },
-  io::{IoSlice, Result},
+  io::Result,
   path::Path,
+  sync::Arc,
 };
 
-#[cfg(target_vendor = "apple")]
-use std::io::ErrorKind;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -32,135 +31,81 @@ use std::{
   ptr::copy_nonoverlapping,
 };
 
-use super::{DiskBackend, IOBackend};
+use super::{
+  super::{IoSubmitter, Task},
+  DiskBackend, IOBackend, IOTask,
+};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
  */
-pub type DefaultIOBackend = File;
+pub struct DefaultIOBackend {
+  file: Arc<File>,
+  submitter: Arc<IoSubmitter>,
+}
+impl DefaultIOBackend {
+  const fn new(file: Arc<File>, submitter: Arc<IoSubmitter>) -> Self {
+    Self { file, submitter }
+  }
+}
 impl IOBackend for DefaultIOBackend {
   #[cfg(unix)]
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-    self.read_at(buf, offset)
+    self.file.read_at(buf, offset)
   }
   #[cfg(windows)]
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
     self.seek_read(buf, offset)
   }
 
-  #[cfg(unix)]
-  fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize> {
-    self.write_at(buf, offset)
-  }
-  #[cfg(windows)]
-  fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize> {
-    self.seek_write(buf, offset)
-  }
-
-  #[cfg(unix)]
-  fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize> {
-    let ret = unsafe {
-      libc::pwritev(
-        self.as_raw_fd(),
-        bufs.as_ptr() as *const libc::iovec,
-        bufs.len() as libc::c_int,
-        offset as _,
-      )
+  fn submit(&self, task: IOTask) -> Result<()> {
+    let task = Task {
+      toward: self.file.clone(),
+      task_type: task.task_type,
+      done: task.done,
     };
-    if ret == -1 {
-      return Err(Error::last_os_error());
-    }
-
-    Ok(ret as usize)
-  }
-  #[cfg(not(unix))]
-  fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize> {
-    let total: usize = bufs.iter().map(|b| b.len()).sum();
-    let mut buf = vec![0u8; total];
-    let ptr = buf.as_mut_ptr();
-    let mut pos = 0;
-    for slice in bufs {
-      unsafe { copy_nonoverlapping(slice.as_ptr(), ptr.add(pos), slice.len()) };
-      pos += slice.len();
-    }
-    self.seek_write(&buf, offset)
+    self.submitter.submit(task)
   }
 
-  #[cfg(target_os = "linux")]
-  fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
-    let ret = unsafe {
-      libc::fallocate(
-        self.as_raw_fd(),
-        0,
-        offset as libc::off_t,
-        len as libc::off_t,
-      )
-    };
-    if ret == -1 {
-      return Err(Error::last_os_error());
-    }
-    Ok(())
-  }
-  #[cfg(target_vendor = "apple")]
-  fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
-    if len == 0 {
-      return Err(Error::from(ErrorKind::InvalidInput));
-    }
-    let eof = self.metadata()?.len();
-    if eof >= offset + len {
-      return Ok(());
-    }
-
-    let mut fstore = libc::fstore_t {
-      fst_flags: libc::F_ALLOCATEALL,
-      fst_posmode: libc::F_PEOFPOSMODE,
-      fst_offset: 0,
-      fst_length: (offset + len - eof) as libc::off_t,
-      fst_bytesalloc: 0,
-    };
-    let ret = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore) };
-    if ret == -1 {
-      return Err(Error::last_os_error());
-    }
-    self.set_len(offset + len)
-  }
-  #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
-  fn fallocate(&self, offset: u64, len: u64) -> Result<()> {
-    self.set_len(offset + len)
-  }
-
-  fn fsync(&self) -> Result<()> {
-    self.sync_all()
-  }
-  fn fdatasync(&self) -> Result<()> {
-    self.sync_data()
-  }
   fn metadata(&self) -> Result<std::fs::Metadata> {
-    DefaultIOBackend::metadata(self)
+    self.file.metadata()
   }
   fn try_flock(&self) -> Result<bool> {
-    match self.try_lock() {
+    match self.file.try_lock() {
       Ok(_) => Ok(true),
       Err(TryLockError::WouldBlock) => Ok(false),
       Err(TryLockError::Error(err)) => Err(err),
     }
   }
   fn unlock(&self) -> Result<()> {
-    DefaultIOBackend::unlock(self)
+    self.file.unlock()
   }
 }
 
 /**
  * Filesystem namespace operations implemented with the standard library.
  */
-pub struct DefaultDiskBackend;
+pub struct DefaultDiskBackend {
+  submitter: Arc<IoSubmitter>,
+}
+impl DefaultDiskBackend {
+  pub fn new() -> Result<Self> {
+    let submitter = IoSubmitter::new(512)?;
+    Ok(Self {
+      submitter: Arc::new(submitter),
+    })
+  }
+}
 impl DiskBackend for DefaultDiskBackend {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>
   where
     Self: Sized,
   {
-    let file = options.open(path)?;
-    Ok(Box::new(file))
+    let file = Arc::new(options.open(path)?);
+    Ok(Box::new(DefaultIOBackend::new(
+      file,
+      self.submitter.clone(),
+    )))
   }
 
   #[cfg(target_vendor = "apple")]
@@ -176,7 +121,10 @@ impl DiskBackend for DefaultDiskBackend {
     if ret == -1 {
       return Err(Error::last_os_error());
     }
-    Ok(Box::new(file))
+    Ok(Box::new(DefaultIOBackend::new(
+      Arc::new(file),
+      self.submitter.clone(),
+    )))
   }
 
   #[cfg(all(unix, not(target_vendor = "apple")))]
@@ -216,6 +164,10 @@ impl DiskBackend for DefaultDiskBackend {
 
   fn ensure_dir(&self, path: &Path) -> Result<()> {
     create_dir_all(path)
+  }
+
+  fn close(&self) {
+    self.submitter.close();
   }
 }
 

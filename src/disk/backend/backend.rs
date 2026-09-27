@@ -4,7 +4,44 @@ use std::{
   path::Path,
 };
 
+use crate::background::{oneshot, Oneshot, OneshotFulfill};
+
+use super::super::TaskType;
+
 const RETRY: u8 = 3;
+
+pub struct IOTask {
+  pub task_type: TaskType,
+  pub done: OneshotFulfill<Result<usize>>,
+}
+impl IOTask {
+  pub const fn new(task_type: TaskType, done: OneshotFulfill<Result<usize>>) -> Self {
+    Self { task_type, done }
+  }
+  pub fn new_pwrite(buf: &'static [u8], offset: u64) -> (Self, Oneshot<Result<usize>>) {
+    let (o, f) = oneshot();
+    (Self::new(TaskType::Pwrite { offset, buf }, f), o)
+  }
+  pub fn new_pwritev(
+    bufs: &'static [IoSlice<'static>],
+    offset: u64,
+  ) -> (Self, Oneshot<Result<usize>>) {
+    let (o, f) = oneshot();
+    (Self::new(TaskType::Pwritev { offset, bufs }, f), o)
+  }
+  pub fn new_fsync() -> (Self, Oneshot<Result<usize>>) {
+    let (o, f) = oneshot();
+    (Self::new(TaskType::Fsync, f), o)
+  }
+  pub fn new_fdatasync() -> (Self, Oneshot<Result<usize>>) {
+    let (o, f) = oneshot();
+    (Self::new(TaskType::Fdatasync, f), o)
+  }
+  pub fn new_fallocate(offset: u64, len: u64) -> (Self, Oneshot<Result<usize>>) {
+    let (o, f) = oneshot();
+    (Self::new(TaskType::Fallocate { offset, len }, f), o)
+  }
+}
 
 /**
  * Low-level operations for one opened filesystem object.
@@ -16,12 +53,8 @@ const RETRY: u8 = 3;
  * same interface to inject I/O faults.
  */
 pub trait IOBackend: Send + Sync {
+  fn submit(&self, task: IOTask) -> Result<()>;
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
-  fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
-  fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
-  fn fallocate(&self, offset: u64, len: u64) -> Result<()>;
-  fn fsync(&self) -> Result<()>;
-  fn fdatasync(&self) -> Result<()>;
   fn metadata(&self) -> Result<Metadata>;
   fn try_flock(&self) -> Result<bool>;
   fn unlock(&self) -> Result<()>;
@@ -41,38 +74,39 @@ pub trait IOBackend: Send + Sync {
     }
     Err(Error::from(ErrorKind::UnexpectedEof))
   }
-  /**
-   * Write the entire buffer or fail.
-   *
-   * This is not `write_all`: a short write is not treated as partial progress,
-   * and the helper never advances the offset to write only the remaining suffix.
-   * For block/direct-I/O paths, the submitted buffer must complete as one logical
-   * operation; otherwise the whole request is retried a small number of times and
-   * then reported as failed.
-   */
-  fn pwrite_exact(&self, buf: &[u8], offset: u64) -> Result<()> {
-    for _ in 0..RETRY {
-      if buf.len() == self.pwrite(buf, offset)? {
-        return Ok(());
-      }
-    }
-    Err(Error::from(ErrorKind::WriteZero))
+
+  fn submit_pwrite(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+  ) -> Result<Oneshot<Result<usize>>> {
+    let (task, done) = IOTask::new_pwrite(buf, offset);
+    self.submit(task)?;
+    Ok(done)
   }
-  /**
-   * Write the entire vectored batch or fail.
-   *
-   * A short vectored write is not treated as progress through the batch. The same
-   * full batch must complete as one logical operation, or the helper reports
-   * failure after a small number of retries.
-   */
-  fn pwritev_exact(&self, bufs: &[IoSlice<'_>], offset: u64) -> Result<()> {
-    let total: usize = bufs.iter().map(|b| b.len()).sum();
-    for _ in 0..RETRY {
-      if total == self.pwritev(bufs, offset)? {
-        return Ok(());
-      }
-    }
-    Err(Error::from(ErrorKind::WriteZero))
+  fn submit_pwritev(
+    &self,
+    bufs: &'static [IoSlice<'static>],
+    offset: u64,
+  ) -> Result<Oneshot<Result<usize>>> {
+    let (task, done) = IOTask::new_pwritev(bufs, offset);
+    self.submit(task)?;
+    Ok(done)
+  }
+  fn submit_fsync(&self) -> Result<Oneshot<Result<usize>>> {
+    let (task, done) = IOTask::new_fsync();
+    self.submit(task)?;
+    Ok(done)
+  }
+  fn submit_fdatasync(&self) -> Result<Oneshot<Result<usize>>> {
+    let (task, done) = IOTask::new_fdatasync();
+    self.submit(task)?;
+    Ok(done)
+  }
+  fn submit_fallocate(&self, offset: u64, len: u64) -> Result<Oneshot<Result<usize>>> {
+    let (task, done) = IOTask::new_fallocate(offset, len);
+    self.submit(task)?;
+    Ok(done)
   }
 }
 
@@ -97,4 +131,5 @@ pub trait DiskBackend: Send + Sync {
   fn exists(&self, path: &Path) -> Result<bool>;
   fn rename(&self, from: &Path, to: &Path) -> Result<()>;
   fn ensure_dir(&self, path: &Path) -> Result<()>;
+  fn close(&self);
 }
