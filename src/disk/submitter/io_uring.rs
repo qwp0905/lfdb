@@ -32,31 +32,25 @@ fn shutdown_gracefully(
   mut backlog: ChunkQueue<squeue::Entry>,
   mut submitted: usize,
 ) {
-  while !sq.is_empty() {
-    match submitter.submit() {
-      Ok(_) => {}
-      Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
-      Err(err) => panic!("{err}"),
-    }
-    sq.sync();
-    if let Some(entry) = backlog.pop() {
-      let _ = unsafe { sq.push(&entry) };
-      submitted += 1;
-    }
-
-    for cqe in &mut cq {
-      submitted -= 1;
-      let ret = cqe.result();
-      let user_data = cqe.user_data();
-      if user_data == 0 {
-        continue;
+  loop {
+    if sq.is_full() {
+      match submitter.submit() {
+        Ok(_) => {}
+        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
+        Err(err) => panic!("{err}"),
       }
-      let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
-      let done = unsafe { OneshotFulfill::from_raw(ptr) };
-      done.fulfill(cvt(ret));
+    };
+    sq.sync();
+    match backlog.pop() {
+      Some(sqe) => unsafe {
+        let _ = sq.push(&sqe);
+        submitted += 1;
+      },
+      None => break,
     }
   }
 
+  cq.sync();
   submitter.submit_and_wait(submitted).unwrap();
   cq.sync();
   for cqe in cq {
