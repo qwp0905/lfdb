@@ -211,7 +211,7 @@ impl SubmitThread {
     }
     let waker = Arc::new(unsafe { File::from_raw_fd(waker_fd) });
     let handle = Builder::new()
-      .name("io submitter".to_string())
+      .name("async io submit".to_string())
       .stack_size(64 << 10)
       .spawn_unwind(Self::worker_loop(
         ring,
@@ -277,7 +277,7 @@ impl CompleteThread {
   fn new() -> Self {
     let queue = Arc::new(SegQueue::new());
     let handle = Builder::new()
-      .name("io submitter".to_string())
+      .name("async io complete".to_string())
       .stack_size(64 << 10)
       .spawn_unwind(Self::worker_loop(queue.clone()));
     Self {
