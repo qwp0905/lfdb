@@ -166,6 +166,7 @@ impl<T, R> SharedWorkThread<T, R> {
   pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }
+  #[allow(unused)]
   pub fn batch_dispatch(&self, values: impl Iterator<Item = T>) {
     let mut count = 0;
     for value in values {

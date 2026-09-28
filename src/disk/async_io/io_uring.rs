@@ -215,6 +215,18 @@ impl AsyncIO {
     self.wake()
   }
 
+  pub fn batch_submit(&self, mut tasks: impl Iterator<Item = Task>) -> Result<()> {
+    let Some(task) = tasks.next() else {
+      return Ok(());
+    };
+    self.queue.push(Context::Task(task));
+    for task in tasks {
+      self.queue.push(Context::Task(task));
+    }
+    self.wake()?;
+    Ok(())
+  }
+
   fn wake(&self) -> Result<()> {
     (&*self.waker).write_all(&1u64.to_ne_bytes())?;
     Ok(())
