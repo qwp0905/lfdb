@@ -84,22 +84,8 @@ pub trait IOBackend: Send + Sync {
     self.submit(task)?;
     Ok(done)
   }
-  fn submit_pwritev(
-    &self,
-    bufs: &'static [IoSlice<'static>],
-    offset: u64,
-  ) -> Result<Oneshot<Result<usize>>> {
-    let (task, done) = IOTask::new_pwritev(bufs, offset);
-    self.submit(task)?;
-    Ok(done)
-  }
   fn submit_fsync(&self) -> Result<Oneshot<Result<usize>>> {
     let (task, done) = IOTask::new_fsync();
-    self.submit(task)?;
-    Ok(done)
-  }
-  fn submit_fdatasync(&self) -> Result<Oneshot<Result<usize>>> {
-    let (task, done) = IOTask::new_fdatasync();
     self.submit(task)?;
     Ok(done)
   }
