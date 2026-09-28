@@ -64,6 +64,15 @@ impl IOBackend for DefaultIOBackend {
     };
     self.async_io.submit(task)
   }
+  fn batch_submit(&self, tasks: Vec<IOTask>) -> Result<()> {
+    self
+      .async_io
+      .batch_submit(tasks.into_iter().map(|task| Task {
+        toward: self.file.clone(),
+        task_type: task.task_type,
+        done: task.done,
+      }))
+  }
 
   fn metadata(&self) -> Result<std::fs::Metadata> {
     self.file.metadata()

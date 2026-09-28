@@ -136,6 +136,10 @@ impl AsyncIO {
     self.thread.dispatch(task);
     Ok(())
   }
+  pub fn batch_submit(&self, tasks: impl Iterator<Item = Task>) -> Result<()> {
+    self.thread.batch_dispatch(tasks);
+    Ok(())
+  }
 
   pub fn close(&self) {
     self.thread.close();

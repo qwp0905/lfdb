@@ -54,6 +54,12 @@ impl IOTask {
  */
 pub trait IOBackend: Send + Sync {
   fn submit(&self, task: IOTask) -> Result<()>;
+  fn batch_submit(&self, tasks: Vec<IOTask>) -> Result<()> {
+    for task in tasks {
+      self.submit(task)?;
+    }
+    Ok(())
+  }
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
   fn metadata(&self) -> Result<Metadata>;
   fn try_flock(&self) -> Result<bool>;
