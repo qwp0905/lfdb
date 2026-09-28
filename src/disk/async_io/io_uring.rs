@@ -1,9 +1,10 @@
 use std::{
   fs::File,
   io::{Error, Read, Result, Write},
+  num::NonZero,
   os::fd::{AsRawFd, FromRawFd},
   sync::Arc,
-  thread::{park, Builder, Thread},
+  thread::{available_parallelism, Builder},
 };
 
 use crossbeam::queue::SegQueue;
@@ -12,7 +13,10 @@ use io_uring::{
 };
 
 use crate::{
-  background::{OneshotBehavior, OneshotFulfill, ThreadSlot, UnwindSpawner},
+  background::{
+    Close, OneshotBehavior, OneshotFulfill, SharedWorkThread, ThreadBuilder, ThreadSlot,
+    UnwindSpawner,
+  },
   utils::ChunkQueue,
 };
 
@@ -256,57 +260,41 @@ impl SubmitThread {
 }
 
 type Completion = (Result<usize>, OneshotFulfill<Result<usize>>);
-struct CompleteThread {
-  queue: Arc<SegQueue<Context<Completion>>>,
-  waker: Thread,
-  slot: ThreadSlot,
+enum CompleteThread {
+  Inline,
+  Threaded(SharedWorkThread<Completion, ()>),
 }
+
 impl CompleteThread {
-  const fn worker_loop(queue: Arc<SegQueue<Context<Completion>>>) -> impl FnOnce() {
-    move || loop {
-      let Some(ctx) = queue.pop() else {
-        park();
-        continue;
-      };
-      match ctx {
-        Context::Task((result, done)) => done.fulfill(result),
-        Context::Term => break,
-      }
-    }
-  }
   fn new() -> Self {
-    let queue = Arc::new(SegQueue::new());
-    let handle = Builder::new()
-      .name("async io complete".to_string())
-      .stack_size(64 << 10)
-      .spawn_unwind(Self::worker_loop(queue.clone()));
-    Self {
-      queue,
-      waker: handle.thread().clone(),
-      slot: ThreadSlot::new(handle),
+    let count = available_parallelism()
+      .unwrap_or(unsafe { NonZero::new_unchecked(1) })
+      .get();
+    if count == 1 {
+      return Self::Inline;
     }
+    let thread = ThreadBuilder::new()
+      .name("async io complete")
+      .multi(count - 1)
+      .shared(|(result, done): Completion| done.fulfill(result));
+    Self::Threaded(thread)
   }
 
   fn batch_dispatch(
     &self,
-    mut input: impl Iterator<Item = (Result<usize>, OneshotFulfill<Result<usize>>)>,
+    input: impl Iterator<Item = (Result<usize>, OneshotFulfill<Result<usize>>)>,
   ) {
-    let Some(task) = input.next() else {
-      return;
-    };
-    self.queue.push(Context::Task(task));
-    for task in input {
-      self.queue.push(Context::Task(task));
+    match self {
+      Self::Inline => input
+        .into_iter()
+        .for_each(|(result, done)| done.fulfill(result)),
+      Self::Threaded(thread) => thread.batch_dispatch(input),
     }
-    self.waker.unpark();
   }
   fn close(&self) {
-    let Some(handle) = self.slot.close() else {
-      return;
-    };
-    self.queue.push(Context::Term);
-    self.waker.unpark();
-    handle.join().unwrap();
+    if let Self::Threaded(thread) = self {
+      thread.close();
+    }
   }
 }
 
