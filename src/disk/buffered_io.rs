@@ -1,6 +1,6 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
-use super::{AlignedArray, DirHandle, IOBackend, ALIGN};
+use super::{AlignedArray, DirHandle, IOBackend, ALIGN, IO_RETRY};
 use crate::{error::Result, utils::create_static_ref, Error};
 
 /**
@@ -44,12 +44,17 @@ impl AppendIOHandle {
   }
   fn flush_buf(&mut self) -> Result {
     let static_ref = unsafe { create_static_ref::<[u8]>(&*self.buffer) };
-    self
-      .file
-      .submit_pwrite(static_ref, self.file_offset)
-      .and_then(|done| done.wait().unwrap())
-      .map_err(Error::IO)?;
-    Ok(())
+    for _ in 0..IO_RETRY {
+      let bytes = self
+        .file
+        .submit_pwrite(static_ref, self.file_offset)
+        .and_then(|done| done.wait().unwrap())
+        .map_err(Error::IO)?;
+      if bytes == self.buffer.len() {
+        return Ok(());
+      }
+    }
+    Err(Error::IO(io::Error::from(io::ErrorKind::WriteZero)))
   }
   /**
    * Flush the buffered stream, sync the file, and finish the writer.

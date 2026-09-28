@@ -8,7 +8,7 @@ use crate::background::{oneshot, Oneshot, OneshotFulfill};
 
 use super::super::TaskType;
 
-const RETRY: u8 = 3;
+pub const IO_RETRY: u8 = 3;
 
 pub struct IOTask {
   pub task_type: TaskType,
@@ -67,7 +67,7 @@ pub trait IOBackend: Send + Sync {
    * fill the buffer.
    */
   fn pread_exact(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-    for _ in 0..RETRY {
+    for _ in 0..IO_RETRY {
       if buf.len() == self.pread(buf, offset)? {
         return Ok(());
       }
