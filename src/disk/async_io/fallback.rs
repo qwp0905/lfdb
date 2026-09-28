@@ -5,7 +5,7 @@ use std::{
   thread::available_parallelism,
 };
 
-use crate::background::{Close, SharedFn, SharedWorkThread};
+use crate::background::{Close, SharedWorkThread, ThreadBuilder};
 
 use super::{Task, TaskType};
 
@@ -125,8 +125,10 @@ impl AsyncIO {
     let count = available_parallelism()
       .unwrap_or(unsafe { NonZero::new_unchecked(1) })
       .get();
-    let thread =
-      SharedWorkThread::new("io submitter", 64 << 10, count, SharedFn::new(handle_task));
+    let thread = ThreadBuilder::new()
+      .name("io submitter")
+      .multi(count)
+      .shared(handle_task);
     Ok(Self { thread })
   }
 
