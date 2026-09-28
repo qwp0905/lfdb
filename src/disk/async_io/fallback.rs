@@ -126,7 +126,7 @@ impl AsyncIO {
       .unwrap_or(unsafe { NonZero::new_unchecked(1) })
       .get();
     let thread = ThreadBuilder::new()
-      .name("io submitter")
+      .name("async io")
       .multi(count)
       .shared(handle_task);
     Ok(Self { thread })
