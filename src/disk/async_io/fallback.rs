@@ -117,10 +117,10 @@ fn handle_task(task: Task) {
   };
   task.done.fulfill(result);
 }
-pub struct IoSubmitter {
+pub struct AsyncIO {
   thread: SharedWorkThread<Task, ()>,
 }
-impl IoSubmitter {
+impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {
     let count = available_parallelism()
       .unwrap_or(unsafe { NonZero::new_unchecked(1) })

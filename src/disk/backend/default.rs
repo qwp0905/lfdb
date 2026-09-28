@@ -33,7 +33,7 @@ use std::{
 use crate::utils::info;
 
 use super::{
-  super::{IoSubmitter, Task},
+  super::{AsyncIO, Task},
   DiskBackend, IOBackend, IOTask,
 };
 
@@ -42,11 +42,11 @@ use super::{
  */
 pub struct DefaultIOBackend {
   file: Arc<File>,
-  submitter: Arc<IoSubmitter>,
+  async_io: Arc<AsyncIO>,
 }
 impl DefaultIOBackend {
-  const fn new(file: Arc<File>, submitter: Arc<IoSubmitter>) -> Self {
-    Self { file, submitter }
+  const fn new(file: Arc<File>, async_io: Arc<AsyncIO>) -> Self {
+    Self { file, async_io }
   }
 }
 impl IOBackend for DefaultIOBackend {
@@ -65,7 +65,7 @@ impl IOBackend for DefaultIOBackend {
       task_type: task.task_type,
       done: task.done,
     };
-    self.submitter.submit(task)
+    self.async_io.submit(task)
   }
 
   fn metadata(&self) -> Result<std::fs::Metadata> {
@@ -87,13 +87,13 @@ impl IOBackend for DefaultIOBackend {
  * Filesystem namespace operations implemented with the standard library.
  */
 pub struct DefaultDiskBackend {
-  submitter: Arc<IoSubmitter>,
+  async_io: Arc<AsyncIO>,
 }
 impl DefaultDiskBackend {
   pub fn new() -> Result<Self> {
-    let submitter = IoSubmitter::new(512)?;
+    let async_io = AsyncIO::new(512)?;
     Ok(Self {
-      submitter: Arc::new(submitter),
+      async_io: Arc::new(async_io),
     })
   }
 }
@@ -103,10 +103,7 @@ impl DiskBackend for DefaultDiskBackend {
     Self: Sized,
   {
     let file = Arc::new(options.open(path)?);
-    Ok(Box::new(DefaultIOBackend::new(
-      file,
-      self.submitter.clone(),
-    )))
+    Ok(Box::new(DefaultIOBackend::new(file, self.async_io.clone())))
   }
 
   #[cfg(target_vendor = "apple")]
@@ -124,7 +121,7 @@ impl DiskBackend for DefaultDiskBackend {
     }
     Ok(Box::new(DefaultIOBackend::new(
       Arc::new(file),
-      self.submitter.clone(),
+      self.async_io.clone(),
     )))
   }
 
@@ -172,7 +169,7 @@ impl DiskBackend for DefaultDiskBackend {
 }
 impl Drop for DefaultDiskBackend {
   fn drop(&mut self) {
-    self.submitter.close();
+    self.async_io.close();
     info!("disk backend closed.");
   }
 }

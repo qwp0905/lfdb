@@ -183,12 +183,12 @@ enum Context {
   Term,
 }
 
-pub struct IoSubmitter {
+pub struct AsyncIO {
   queue: Arc<SegQueue<Context>>,
   waker: Arc<File>,
   slot: ThreadSlot,
 }
-impl IoSubmitter {
+impl AsyncIO {
   pub fn new(entries: u32) -> Result<Self> {
     let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
