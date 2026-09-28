@@ -6,6 +6,7 @@ use std::{
     atomic::{fence, AtomicBool, AtomicU16, Ordering},
     Arc,
   },
+  time::Instant,
 };
 
 use crossbeam::queue::SegQueue;
@@ -130,12 +131,14 @@ impl BatchQueue<WriteTask, Result<()>> {
     let count = Arc::new(AtomicU16::new(accumulated.len() as u16));
     let mut failed = 0;
     for (task, done, offset, bufs, waiting) in accumulated {
+      let start = metrics.disk_write.start();
       if let Err(err) = backend.submit(task) {
         let kind = err.kind();
         waiting
           .into_iter()
           .for_each(|done| done.fulfill(Err(Error::from(kind))));
         failed += 1;
+        metrics.disk_write.record(start);
         continue;
       };
 
@@ -150,12 +153,13 @@ impl BatchQueue<WriteTask, Result<()>> {
         let result = match r {
           Ok(c) if *c < bytes => {
             return queue.retry_write(
-              state, backend, metrics, alloc, 1, offset, bufs, waiting, count,
+              state, backend, metrics, alloc, 1, offset, bufs, waiting, count, start,
             );
           }
           Ok(_) => Ok(()),
           Err(err) => Err(err.kind()),
         };
+        metrics.disk_write.record(start);
         for done in waiting {
           done.fulfill(result.map_err(Error::from));
         }
@@ -189,8 +193,10 @@ impl BatchQueue<WriteTask, Result<()>> {
     bufs: Vec<IoSlice<'static>>,
     waiting: Vec<OneshotFulfill<Result<()>>>,
     count: Arc<AtomicU16>,
+    start: Option<Instant>,
   ) {
     if trial >= IO_RETRY {
+      metrics.disk_write.record(start);
       let kind = ErrorKind::WriteZero;
       waiting
         .into_iter()
@@ -225,7 +231,6 @@ impl BatchQueue<WriteTask, Result<()>> {
     let metrics = metrics.clone();
     let alloc = alloc.clone();
     let callback = Callback::new(move |r: &Result<usize>| {
-      let bufs = bufs;
       let result = match r {
         Ok(c) if *c < bytes => {
           return queue.retry_write(
@@ -238,11 +243,13 @@ impl BatchQueue<WriteTask, Result<()>> {
             bufs,
             waiting,
             count,
+            start,
           );
         }
         Ok(_) => Ok(()),
         Err(err) => Err(err.kind()),
       };
+      metrics.disk_write.record(start);
       for done in waiting {
         done.fulfill(result.map_err(Error::from));
       }
