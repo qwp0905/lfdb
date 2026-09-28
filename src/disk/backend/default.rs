@@ -25,10 +25,7 @@ use std::{io::Error, os::fd::AsRawFd};
 use std::os::unix::fs::FileExt;
 
 #[cfg(windows)]
-use std::{
-  os::windows::fs::{FileExt, OpenOptionsExt},
-  ptr::copy_nonoverlapping,
-};
+use std::os::windows::fs::{FileExt, OpenOptionsExt};
 
 use crate::utils::info;
 
@@ -56,7 +53,7 @@ impl IOBackend for DefaultIOBackend {
   }
   #[cfg(windows)]
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-    self.seek_read(buf, offset)
+    self.file.seek_read(buf, offset)
   }
 
   fn submit(&self, task: IOTask) -> Result<()> {
@@ -135,7 +132,7 @@ impl DiskBackend for DefaultDiskBackend {
     let file = options.custom_flags(libc::O_DIRECT).open(path)?;
     Ok(Box::new(DefaultIOBackend::new(
       Arc::new(file),
-      self.submitter.clone(),
+      self.async_io.clone(),
     )))
   }
   #[cfg(windows)]
@@ -147,7 +144,10 @@ impl DiskBackend for DefaultDiskBackend {
     let file = options
       .custom_flags(winapi::um::winbase::FILE_FLAG_NO_BUFFERING)
       .open(path)?;
-    Ok(Box::new(file))
+    Ok(Box::new(DefaultIOBackend::new(
+      Arc::new(file),
+      self.async_io.clone(),
+    )))
   }
   fn read_dir(&self, path: &Path) -> Result<std::fs::ReadDir> {
     read_dir(path)
