@@ -169,6 +169,12 @@ fn is_ebusy<T>(result: Result<T>) -> bool {
     Err(err) => panic!("{err}"),
   }
 }
+fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
+  if sq.is_empty() {
+    return;
+  }
+  ignore_ebusy(submitter.submit());
+}
 
 enum Context<T> {
   Task(T),
@@ -223,16 +229,12 @@ impl SubmitThread {
         sq.sync();
         cq.sync();
         if completed_count > 0 || backlog_count + task_count > 0 || !backlog.is_empty() {
-          if !sq.is_empty() {
-            ignore_ebusy(submitter.submit());
-          }
+          submit_if_not_empty(&submitter, &sq);
           backoff.reset();
           continue;
         }
         if !backoff.is_completed() {
-          if !sq.is_empty() {
-            ignore_ebusy(submitter.submit());
-          }
+          submit_if_not_empty(&submitter, &sq);
           backoff.snooze();
           continue;
         }
@@ -242,11 +244,8 @@ impl SubmitThread {
         cq.sync();
         if cq.is_empty() && queue.is_empty() && idle.try_park(thread_id) {
           ignore_ebusy(submitter.submit_and_wait(1));
-          continue;
-        }
-
-        if !sq.is_empty() {
-          ignore_ebusy(submitter.submit());
+        } else {
+          submit_if_not_empty(&submitter, &sq);
         }
       }
     }
