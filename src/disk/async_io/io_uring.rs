@@ -129,6 +129,7 @@ fn shutdown_gracefully(
   mut submitted: usize,
 ) {
   while !backlog.is_empty() {
+    sq.sync();
     submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
     let (count, _) = drain_completion(&mut cq, None);
     submitted -= count;
@@ -240,14 +241,15 @@ impl AsyncIO {
           continue;
         }
 
+        parked.fetch_or(true, Ordering::AcqRel);
         backoff.reset();
         cq.sync();
-        if cq.is_empty() && queue.is_empty() && !parked.fetch_or(true, Ordering::Relaxed)
-        {
+        if cq.is_empty() && queue.is_empty() {
           ignore_ebusy(submitter.submit_and_wait(1));
         } else {
           submit_if_not_empty(&submitter, &sq);
         }
+        parked.fetch_and(false, Ordering::AcqRel);
       }
     }
   }
@@ -279,9 +281,12 @@ impl AsyncIO {
 
   fn wake(&self) -> Result<()> {
     if self.parked.swap(false, Ordering::Relaxed) {
-      (&self.waker).write_all(&1u64.to_ne_bytes())?;
+      self.wake_force()?;
     }
     Ok(())
+  }
+  fn wake_force(&self) -> Result<()> {
+    (&self.waker).write_all(&1u64.to_ne_bytes())
   }
 
   pub fn submit(&self, task: Task) -> Result<()> {
@@ -295,7 +300,7 @@ impl AsyncIO {
       return;
     };
     self.queue.push(Context::Term);
-    self.wake().unwrap();
+    self.wake_force().unwrap();
     handle.join().unwrap();
   }
 }
