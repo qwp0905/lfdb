@@ -6,7 +6,7 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{queue::SegQueue, utils::Backoff};
 use io_uring::{
   opcode, squeue, types, CompletionQueue, IoUring, SubmissionQueue, Submitter,
 };
@@ -83,21 +83,15 @@ fn drain_backlog(
 ) -> usize {
   let mut count = 0;
   loop {
-    if sq.is_full() {
-      match submitter.submit() {
-        Ok(_) => {}
-        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break,
-        Err(err) => panic!("{err}"),
-      }
+    if sq.is_full() && is_ebusy(submitter.submit()) {
+      break;
     };
     sq.sync();
-    match backlog.pop() {
-      Some(sqe) => unsafe {
-        let _ = sq.push(&sqe);
-        count += 1;
-      },
-      None => break,
-    }
+    let Some(sqe) = backlog.pop() else {
+      break;
+    };
+    let _ = unsafe { sq.push(&sqe) };
+    count += 1;
   }
   count
 }
@@ -112,11 +106,10 @@ fn drain_task(
       Context::Task(task) => to_entry(task),
       Context::Term => return (count, true),
     };
-    if unsafe { sq.push(&entry).is_err() } {
-      backlog.push(entry);
-      continue;
+    match unsafe { sq.push(&entry) } {
+      Ok(_) => count += 1,
+      Err(_) => backlog.push(entry),
     };
-    count += 1;
   }
   sq.sync();
   (count, false)
@@ -132,10 +125,16 @@ fn shutdown_gracefully(
 ) {
   while !backlog.is_empty() {
     submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
+    let (count, _) = drain_completion(&mut cq, completion, None);
+    submitted -= count;
   }
-  cq.sync();
-  submitter.submit_and_wait(submitted).unwrap();
-  drain_completion(&mut cq, completion, None);
+
+  while submitted > 0 {
+    cq.sync();
+    ignore_ebusy(submitter.submit_and_wait(submitted.min(cq.capacity())));
+    let (count, _) = drain_completion(&mut cq, completion, None);
+    submitted -= count;
+  }
 }
 
 fn register_waker(
@@ -146,15 +145,24 @@ fn register_waker(
 ) -> bool {
   if sq.is_full() {
     cq.sync();
-    match submitter.submit() {
-      Ok(_) => {}
-      Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => return false,
-      Err(err) => panic!("{err}"),
+    if is_ebusy(submitter.submit()) {
+      return false;
     }
   };
   sq.sync();
   let _ = unsafe { sq.push(wake) };
   true
+}
+
+fn ignore_ebusy<T>(result: Result<T>) {
+  is_ebusy(result);
+}
+fn is_ebusy<T>(result: Result<T>) -> bool {
+  match result {
+    Ok(_) => false,
+    Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => true,
+    Err(err) => panic!("{err}"),
+  }
 }
 
 enum Context<T> {
@@ -177,6 +185,7 @@ impl SubmitThread {
     waker: Arc<File>,
   ) -> impl FnOnce() {
     move || {
+      let backoff = Backoff::new();
       let mut backlog = ChunkQueue::new();
       let mut submitted = 0;
       let (submitter, mut sq, mut cq) = ring.split();
@@ -184,7 +193,20 @@ impl SubmitThread {
         .build()
         .user_data(POLL);
       let mut pending = false;
+
       loop {
+        let (completed_count, found) =
+          drain_completion(&mut cq, &completion, Some(&waker));
+        submitted -= completed_count;
+        pending &= !found;
+        let backlog_count = drain_backlog(&submitter, &mut sq, &mut backlog);
+        submitted += backlog_count;
+        let (task_count, terminated) = drain_task(&mut sq, &queue, &mut backlog);
+        submitted += task_count;
+        if terminated {
+          return shutdown_gracefully(submitter, sq, cq, backlog, submitted, &completion);
+        }
+
         if !pending {
           if !register_waker(&submitter, &mut sq, &mut cq, &wake) {
             continue;
@@ -194,21 +216,23 @@ impl SubmitThread {
         }
 
         sq.sync();
-        match submitter.submit_and_wait(1) {
-          Ok(_) => {}
-          Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {}
-          Err(err) => panic!("{err}"),
+        cq.sync();
+        if completed_count > 0 || backlog_count + task_count > 0 || !backlog.is_empty() {
+          if !sq.is_empty() {
+            ignore_ebusy(submitter.submit());
+          }
+          backoff.reset();
+          continue;
         }
-
-        let (count, found) = drain_completion(&mut cq, &completion, Some(&waker));
-        submitted -= count;
-        pending &= !found;
-        submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
-        let (count, terminated) = drain_task(&mut sq, &queue, &mut backlog);
-        submitted += count;
-        if terminated {
-          return shutdown_gracefully(submitter, sq, cq, backlog, submitted, &completion);
+        if !backoff.is_completed() {
+          if !sq.is_empty() {
+            ignore_ebusy(submitter.submit());
+          }
+          backoff.snooze();
+          continue;
         }
+        ignore_ebusy(submitter.submit_and_wait(1));
+        backoff.reset();
       }
     }
   }
@@ -274,14 +298,23 @@ struct CompleteThread {
 }
 impl CompleteThread {
   const fn worker_loop(queue: Arc<SegQueue<Context<Completion>>>) -> impl FnOnce() {
-    move || loop {
-      let Some(ctx) = queue.pop() else {
-        park();
-        continue;
-      };
-      match ctx {
-        Context::Task((result, done)) => done.fulfill(result),
-        Context::Term => break,
+    move || {
+      let backoff = Backoff::new();
+      loop {
+        let Some(ctx) = queue.pop() else {
+          if !backoff.is_completed() {
+            backoff.snooze();
+            continue;
+          }
+          park();
+          backoff.reset();
+          continue;
+        };
+        match ctx {
+          Context::Task((result, done)) => done.fulfill(result),
+          Context::Term => break,
+        };
+        backoff.reset();
       }
     }
   }
