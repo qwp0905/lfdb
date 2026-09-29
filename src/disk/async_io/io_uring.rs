@@ -52,26 +52,74 @@ fn to_entry(task: Task) -> squeue::Entry {
 
 fn drain_completion(
   cq: &mut CompletionQueue,
-  count: &mut usize,
-  mut maybe_waker: Option<(&File, &mut bool)>,
   completion: &CompleteThread,
-) {
+  mut maybe_waker: Option<&File>,
+) -> (usize, bool) {
   cq.sync();
+  let mut count = 0;
+  let mut found = false;
   let input =
     cq.map(|cqe| (cqe.result(), cqe.user_data()))
       .filter_map(|(ret, user_data)| {
-        *count -= 1;
-        if user_data != 0 {
+        count += 1;
+        if user_data != POLL {
           let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
           return Some((cvt(ret), unsafe { OneshotFulfill::from_raw(ptr) }));
         }
-        let (waker, pending) = maybe_waker.as_mut()?;
+        let waker = maybe_waker.as_mut()?;
         let mut buf = [0; 8];
         waker.read_exact(&mut buf).unwrap();
-        **pending = false;
+        found = true;
         None
       });
   completion.batch_dispatch(input);
+  (count, found)
+}
+
+fn drain_backlog(
+  submitter: &Submitter,
+  sq: &mut SubmissionQueue,
+  backlog: &mut ChunkQueue<squeue::Entry>,
+) -> usize {
+  let mut count = 0;
+  loop {
+    if sq.is_full() {
+      match submitter.submit() {
+        Ok(_) => {}
+        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break,
+        Err(err) => panic!("{err}"),
+      }
+    };
+    sq.sync();
+    match backlog.pop() {
+      Some(sqe) => unsafe {
+        let _ = sq.push(&sqe);
+        count += 1;
+      },
+      None => break,
+    }
+  }
+  count
+}
+fn drain_task(
+  sq: &mut SubmissionQueue,
+  input: &SegQueue<Context<Task>>,
+  backlog: &mut ChunkQueue<squeue::Entry>,
+) -> (usize, bool) {
+  let mut count = 0;
+  while let Some(ctx) = input.pop() {
+    let entry = match ctx {
+      Context::Task(task) => to_entry(task),
+      Context::Term => return (count, true),
+    };
+    if unsafe { sq.push(&entry).is_err() } {
+      backlog.push(entry);
+      continue;
+    };
+    count += 1;
+  }
+  sq.sync();
+  (count, false)
 }
 
 fn shutdown_gracefully(
@@ -82,34 +130,39 @@ fn shutdown_gracefully(
   mut submitted: usize,
   completion: &CompleteThread,
 ) {
-  loop {
-    if sq.is_full() {
-      drain_completion(&mut cq, &mut submitted, None, completion);
-      match submitter.submit() {
-        Ok(_) => {}
-        Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
-        Err(err) => panic!("{err}"),
-      }
-    };
-    sq.sync();
-    match backlog.pop() {
-      Some(sqe) => unsafe {
-        let _ = sq.push(&sqe);
-        submitted += 1;
-      },
-      None => break,
-    }
+  while !backlog.is_empty() {
+    submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
   }
-
   cq.sync();
   submitter.submit_and_wait(submitted).unwrap();
-  drain_completion(&mut cq, &mut submitted, None, completion);
+  drain_completion(&mut cq, completion, None);
+}
+
+fn register_waker(
+  submitter: &Submitter,
+  sq: &mut SubmissionQueue,
+  cq: &mut CompletionQueue,
+  wake: &squeue::Entry,
+) -> bool {
+  if sq.is_full() {
+    cq.sync();
+    match submitter.submit() {
+      Ok(_) => {}
+      Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => return false,
+      Err(err) => panic!("{err}"),
+    }
+  };
+  sq.sync();
+  let _ = unsafe { sq.push(wake) };
+  true
 }
 
 enum Context<T> {
   Task(T),
   Term,
 }
+
+const POLL: u64 = 0;
 
 struct SubmitThread {
   queue: Arc<SegQueue<Context<Task>>>,
@@ -129,19 +182,13 @@ impl SubmitThread {
       let (submitter, mut sq, mut cq) = ring.split();
       let wake = opcode::PollAdd::new(types::Fd(waker.as_raw_fd()), libc::POLLIN as u32)
         .build()
-        .user_data(0);
+        .user_data(POLL);
       let mut pending = false;
       loop {
         if !pending {
-          if sq.is_full() {
-            match submitter.submit() {
-              Ok(_) => {}
-              Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => continue,
-              Err(err) => panic!("{err}"),
-            }
-          };
-          sq.sync();
-          let _ = unsafe { sq.push(&wake) };
+          if !register_waker(&submitter, &mut sq, &mut cq, &wake) {
+            continue;
+          }
           submitted += 1;
           pending = true;
         }
@@ -152,52 +199,16 @@ impl SubmitThread {
           Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => {}
           Err(err) => panic!("{err}"),
         }
-        drain_completion(
-          &mut cq,
-          &mut submitted,
-          Some((&waker, &mut pending)),
-          &completion,
-        );
 
-        loop {
-          if sq.is_full() {
-            match submitter.submit() {
-              Ok(_) => {}
-              Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => break,
-              Err(err) => panic!("{err}"),
-            }
-          };
-          sq.sync();
-          match backlog.pop() {
-            Some(sqe) => unsafe {
-              let _ = sq.push(&sqe);
-              submitted += 1;
-            },
-            None => break,
-          }
+        let (count, found) = drain_completion(&mut cq, &completion, Some(&waker));
+        submitted -= count;
+        pending &= !found;
+        submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
+        let (count, terminated) = drain_task(&mut sq, &queue, &mut backlog);
+        submitted += count;
+        if terminated {
+          return shutdown_gracefully(submitter, sq, cq, backlog, submitted, &completion);
         }
-
-        while let Some(ctx) = queue.pop() {
-          let entry = match ctx {
-            Context::Task(task) => to_entry(task),
-            Context::Term => {
-              return shutdown_gracefully(
-                submitter,
-                sq,
-                cq,
-                backlog,
-                submitted,
-                &completion,
-              )
-            }
-          };
-          if unsafe { sq.push(&entry).is_err() } {
-            backlog.push(entry);
-            continue;
-          };
-          submitted += 1;
-        }
-        sq.sync();
       }
     }
   }
