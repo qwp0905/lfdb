@@ -1,9 +1,14 @@
 use std::{
   fs::File,
   io::{Error, Read, Result, Write},
-  os::fd::{AsRawFd, FromRawFd},
-  sync::Arc,
-  thread::{park, Builder, Thread},
+  mem::ManuallyDrop,
+  num::NonZero,
+  os::fd::{AsRawFd, FromRawFd, RawFd},
+  sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+  },
+  thread::{available_parallelism, Builder},
 };
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
@@ -52,27 +57,29 @@ fn to_entry(task: Task) -> squeue::Entry {
 
 fn drain_completion(
   cq: &mut CompletionQueue,
-  completion: &CompleteThread,
   mut maybe_waker: Option<&File>,
 ) -> (usize, bool) {
   cq.sync();
   let mut count = 0;
   let mut found = false;
-  let input =
-    cq.map(|cqe| (cqe.result(), cqe.user_data()))
-      .filter_map(|(ret, user_data)| {
-        count += 1;
-        if user_data != POLL {
-          let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
-          return Some((cvt(ret), unsafe { OneshotFulfill::from_raw(ptr) }));
-        }
-        let waker = maybe_waker.as_mut()?;
-        let mut buf = [0; 8];
-        waker.read_exact(&mut buf).unwrap();
-        found = true;
-        None
-      });
-  completion.batch_dispatch(input);
+  for cqe in cq {
+    count += 1;
+    let ret = cqe.result();
+    let user_data = cqe.user_data();
+    if user_data != POLL {
+      let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
+      let done = unsafe { OneshotFulfill::from_raw(ptr) };
+      done.fulfill(cvt(ret));
+      continue;
+    }
+    let Some(waker) = maybe_waker.as_mut() else {
+      continue;
+    };
+    let mut buf = [0; 8];
+    waker.read_exact(&mut buf).unwrap();
+    found = true;
+  }
+
   (count, found)
 }
 
@@ -121,18 +128,17 @@ fn shutdown_gracefully(
   mut cq: CompletionQueue,
   mut backlog: ChunkQueue<squeue::Entry>,
   mut submitted: usize,
-  completion: &CompleteThread,
 ) {
   while !backlog.is_empty() {
     submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
-    let (count, _) = drain_completion(&mut cq, completion, None);
+    let (count, _) = drain_completion(&mut cq, None);
     submitted -= count;
   }
 
   while submitted > 0 {
     cq.sync();
     ignore_ebusy(submitter.submit_and_wait(submitted.min(cq.capacity())));
-    let (count, _) = drain_completion(&mut cq, completion, None);
+    let (count, _) = drain_completion(&mut cq, None);
     submitted -= count;
   }
 }
@@ -174,29 +180,28 @@ const POLL: u64 = 0;
 
 struct SubmitThread {
   queue: Arc<SegQueue<Context<Task>>>,
-  waker: Arc<File>,
+  waker: File,
   slot: ThreadSlot,
 }
 impl SubmitThread {
   const fn worker_loop(
     mut ring: IoUring,
     queue: Arc<SegQueue<Context<Task>>>,
-    completion: Arc<CompleteThread>,
-    waker: Arc<File>,
+    waker_fd: RawFd,
   ) -> impl FnOnce() {
     move || {
       let backoff = Backoff::new();
       let mut backlog = ChunkQueue::new();
       let mut submitted = 0;
       let (submitter, mut sq, mut cq) = ring.split();
-      let wake = opcode::PollAdd::new(types::Fd(waker.as_raw_fd()), libc::POLLIN as u32)
+      let wake = opcode::PollAdd::new(types::Fd(waker_fd), libc::POLLIN as u32)
         .build()
         .user_data(POLL);
+      let waker = ManuallyDrop::new(unsafe { File::from_raw_fd(waker_fd) });
       let mut pending = false;
 
       loop {
-        let (completed_count, found) =
-          drain_completion(&mut cq, &completion, Some(&waker));
+        let (completed_count, found) = drain_completion(&mut cq, Some(&waker));
         submitted -= completed_count;
         pending &= !found;
         let backlog_count = drain_backlog(&submitter, &mut sq, &mut backlog);
@@ -204,7 +209,7 @@ impl SubmitThread {
         let (task_count, terminated) = drain_task(&mut sq, &queue, &mut backlog);
         submitted += task_count;
         if terminated {
-          return shutdown_gracefully(submitter, sq, cq, backlog, submitted, &completion);
+          return shutdown_gracefully(submitter, sq, cq, backlog, submitted);
         }
 
         if !pending {
@@ -237,23 +242,18 @@ impl SubmitThread {
     }
   }
 
-  fn new(entries: u32, completion: Arc<CompleteThread>) -> Result<Self> {
+  fn new(entries: u32) -> Result<Self> {
     let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
     let waker_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if waker_fd < 0 {
       return Err(Error::last_os_error());
     }
-    let waker = Arc::new(unsafe { File::from_raw_fd(waker_fd) });
+    let waker = unsafe { File::from_raw_fd(waker_fd) };
     let handle = Builder::new()
-      .name("async io submit".to_string())
+      .name("async io".to_string())
       .stack_size(64 << 10)
-      .spawn_unwind(Self::worker_loop(
-        ring,
-        queue.clone(),
-        completion,
-        waker.clone(),
-      ));
+      .spawn_unwind(Self::worker_loop(ring, queue.clone(), waker_fd));
 
     Ok(Self {
       queue,
@@ -277,7 +277,7 @@ impl SubmitThread {
     Ok(())
   }
   fn wake(&self) -> Result<()> {
-    (&*self.waker).write_all(&1u64.to_ne_bytes())?;
+    (&self.waker).write_all(&1u64.to_ne_bytes())?;
     Ok(())
   }
   fn close(&self) {
@@ -290,94 +290,40 @@ impl SubmitThread {
   }
 }
 
-type Completion = (Result<usize>, OneshotFulfill<Result<usize>>);
-struct CompleteThread {
-  queue: Arc<SegQueue<Context<Completion>>>,
-  waker: Thread,
-  slot: ThreadSlot,
-}
-impl CompleteThread {
-  const fn worker_loop(queue: Arc<SegQueue<Context<Completion>>>) -> impl FnOnce() {
-    move || {
-      let backoff = Backoff::new();
-      loop {
-        let Some(ctx) = queue.pop() else {
-          if !backoff.is_completed() {
-            backoff.snooze();
-            continue;
-          }
-          park();
-          backoff.reset();
-          continue;
-        };
-        match ctx {
-          Context::Task((result, done)) => done.fulfill(result),
-          Context::Term => break,
-        };
-        backoff.reset();
-      }
-    }
-  }
-  fn new() -> Self {
-    let queue = Arc::new(SegQueue::new());
-    let handle = Builder::new()
-      .name("async io complete".to_string())
-      .stack_size(64 << 10)
-      .spawn_unwind(Self::worker_loop(queue.clone()));
-    Self {
-      queue,
-      waker: handle.thread().clone(),
-      slot: ThreadSlot::new(handle),
-    }
-  }
-
-  fn batch_dispatch(
-    &self,
-    mut input: impl Iterator<Item = (Result<usize>, OneshotFulfill<Result<usize>>)>,
-  ) {
-    let Some(task) = input.next() else {
-      return;
-    };
-    self.queue.push(Context::Task(task));
-    for task in input {
-      self.queue.push(Context::Task(task));
-    }
-    self.waker.unpark();
-  }
-  fn close(&self) {
-    let Some(handle) = self.slot.close() else {
-      return;
-    };
-    self.queue.push(Context::Term);
-    self.waker.unpark();
-    handle.join().unwrap();
-  }
-}
-
 pub struct AsyncIO {
-  submission: SubmitThread,
-  completion: Arc<CompleteThread>,
+  threads: Box<[SubmitThread]>,
+  cursor: AtomicU8,
 }
 impl AsyncIO {
   pub fn new(entries: u32) -> Result<Self> {
-    let completion = Arc::new(CompleteThread::new());
-    let submission = SubmitThread::new(entries, completion.clone())?;
+    let count = available_parallelism()
+      .unwrap_or(unsafe { NonZero::new_unchecked(1) })
+      .get();
+    let mut threads = Vec::with_capacity(count);
+    for _ in 0..count {
+      threads.push(SubmitThread::new(entries)?);
+    }
     Ok(Self {
-      submission,
-      completion,
+      threads: threads.into_boxed_slice(),
+      cursor: AtomicU8::new(0),
     })
   }
 
   pub fn submit(&self, task: Task) -> Result<()> {
-    self.submission.submit(task)
+    let i = self.cursor.fetch_add(1, Ordering::Relaxed) as usize % self.threads.len();
+    self.threads[i].submit(task)?;
+    Ok(())
   }
 
   pub fn batch_submit(&self, tasks: impl Iterator<Item = Task>) -> Result<()> {
-    self.submission.batch_submit(tasks)
+    let i = self.cursor.fetch_add(1, Ordering::Relaxed) as usize % self.threads.len();
+    self.threads[i].batch_submit(tasks)?;
+    Ok(())
   }
 
   pub fn close(&self) {
-    self.submission.close();
-    self.completion.close();
+    for thread in self.threads.iter() {
+      thread.close();
+    }
   }
 }

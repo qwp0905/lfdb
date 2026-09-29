@@ -3,11 +3,13 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue, utils::Backoff};
+use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use crate::background::OneshotFulfill;
 
-use super::{oneshot, Close, Oneshot, SharedFn, ThreadSlot, UnwindSpawner};
+use super::{
+  oneshot, Close, IdleQueue, Oneshot, SharedFn, ThreadId, ThreadSlot, UnwindSpawner,
+};
 
 enum Context<T, R> {
   Execute(T, OneshotFulfill<R>),
@@ -16,71 +18,27 @@ enum Context<T, R> {
   Term,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-  /*
-   * The worker is not discoverable through the idle queue.
-   *
-   * Producers cannot wake this worker directly through `idle`; either it is
-   * running, or it will re-register itself before sleeping.
-   */
-  Unqueued,
-  /*
-   * The worker has published itself to the idle queue and is preparing to park.
-   *
-   * It is still checking for work. If a producer observes this state and changes
-   * it back to `Unqueued`, the worker will notice that signal and avoid parking.
-   */
-  Queued,
-  /*
-   * The worker found no work after publishing itself and has gone to sleep.
-   *
-   * A producer that takes this idle entry must unpark the corresponding thread.
-   */
-  Parked,
-}
-
-type ThreadId = usize;
 struct Inner<T, R> {
   queue: SegQueue<Context<T, R>>,
-  idle: SegQueue<ThreadId>,
-  states: Box<[AtomicCell<State>]>,
+  idle: IdleQueue,
 }
 impl<T, R> Inner<T, R> {
   fn new(count: usize) -> Self {
-    let mut states = Vec::with_capacity(count);
-    states.resize_with(count, || AtomicCell::new(State::Unqueued));
     Self {
       queue: SegQueue::new(),
-      idle: SegQueue::new(),
-      states: states.into_boxed_slice(),
+      idle: IdleQueue::new(count),
     }
   }
   fn try_park(&self, id: ThreadId) {
-    // if producer changed state, then never park.
-    if self.states[id]
-      .compare_exchange(State::Queued, State::Parked)
-      .is_ok()
-    {
+    if self.idle.try_park(id) {
       park();
     }
   }
   fn try_enqueue_idle(&self, id: ThreadId) {
-    if self.states[id]
-      .compare_exchange(State::Unqueued, State::Queued)
-      .is_ok()
-    {
-      // there are no state in idle queue.
-      self.idle.push(id);
-    }
+    self.idle.try_enqueue(id);
   }
   fn wake_one(&self) -> Option<ThreadId> {
-    let id = self.idle.pop()?;
-    // if does not matches parked, worker thread are already working.
-    if let State::Parked = self.states[id].swap(State::Unqueued) {
-      return Some(id);
-    }
-    None
+    self.idle.wake_one()
   }
 }
 pub struct SharedWorkThread<T, R> {
