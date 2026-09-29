@@ -124,17 +124,6 @@ impl<T, R> SharedWorkThread<T, R> {
   pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }
-  #[allow(unused)]
-  pub fn batch_dispatch(&self, values: impl Iterator<Item = T>) {
-    let mut count = 0;
-    for value in values {
-      self.inner.queue.push(Context::Dispatch(value));
-      count += 1;
-    }
-    for id in (0..count.min(self.wakers.len())).flat_map(|_| self.inner.wake_one()) {
-      self.wakers[id].unpark();
-    }
-  }
   fn register(&self, ctx: Context<T, R>) {
     self.inner.queue.push(ctx);
     if let Some(id) = self.inner.wake_one() {
