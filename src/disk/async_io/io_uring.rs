@@ -4,11 +4,8 @@ use std::{
   mem::ManuallyDrop,
   num::NonZero,
   os::fd::{AsRawFd, FromRawFd, RawFd},
-  sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-  },
-  thread::{available_parallelism, Builder},
+  sync::Arc,
+  thread::{available_parallelism, Builder, JoinHandle},
 };
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
@@ -17,7 +14,9 @@ use io_uring::{
 };
 
 use crate::{
-  background::{OneshotBehavior, OneshotFulfill, ThreadSlot, UnwindSpawner},
+  background::{
+    IdleQueue, OneshotBehavior, OneshotFulfill, ThreadId, ThreadSlot, UnwindSpawner,
+  },
   utils::ChunkQueue,
 };
 
@@ -179,7 +178,6 @@ enum Context<T> {
 const POLL: u64 = 0;
 
 struct SubmitThread {
-  queue: Arc<SegQueue<Context<Task>>>,
   waker: File,
   slot: ThreadSlot,
 }
@@ -187,7 +185,9 @@ impl SubmitThread {
   const fn worker_loop(
     mut ring: IoUring,
     queue: Arc<SegQueue<Context<Task>>>,
+    idle: Arc<IdleQueue>,
     waker_fd: RawFd,
+    thread_id: ThreadId,
   ) -> impl FnOnce() {
     move || {
       let backoff = Backoff::new();
@@ -236,15 +236,29 @@ impl SubmitThread {
           backoff.snooze();
           continue;
         }
-        ignore_ebusy(submitter.submit_and_wait(1));
+
         backoff.reset();
+        idle.try_enqueue(thread_id);
+        cq.sync();
+        if cq.is_empty() && queue.is_empty() && idle.try_park(thread_id) {
+          ignore_ebusy(submitter.submit_and_wait(1));
+          continue;
+        }
+
+        if !sq.is_empty() {
+          ignore_ebusy(submitter.submit());
+        }
       }
     }
   }
 
-  fn new(entries: u32) -> Result<Self> {
+  fn new(
+    entries: u32,
+    queue: Arc<SegQueue<Context<Task>>>,
+    idle: Arc<IdleQueue>,
+    id: ThreadId,
+  ) -> Result<Self> {
     let ring = IoUring::new(entries)?;
-    let queue = Arc::new(SegQueue::new());
     let waker_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if waker_fd < 0 {
       return Err(Error::last_os_error());
@@ -253,46 +267,26 @@ impl SubmitThread {
     let handle = Builder::new()
       .name("async io".to_string())
       .stack_size(64 << 10)
-      .spawn_unwind(Self::worker_loop(ring, queue.clone(), waker_fd));
+      .spawn_unwind(Self::worker_loop(ring, queue, idle, waker_fd, id));
 
     Ok(Self {
-      queue,
       waker,
       slot: ThreadSlot::new(handle),
     })
-  }
-  fn submit(&self, task: Task) -> Result<()> {
-    self.queue.push(Context::Task(task));
-    self.wake()
-  }
-  fn batch_submit(&self, mut tasks: impl Iterator<Item = Task>) -> Result<()> {
-    let Some(task) = tasks.next() else {
-      return Ok(());
-    };
-    self.queue.push(Context::Task(task));
-    for task in tasks {
-      self.queue.push(Context::Task(task));
-    }
-    self.wake()?;
-    Ok(())
   }
   fn wake(&self) -> Result<()> {
     (&self.waker).write_all(&1u64.to_ne_bytes())?;
     Ok(())
   }
-  fn close(&self) {
-    let Some(handle) = self.slot.close() else {
-      return;
-    };
-    self.queue.push(Context::Term);
-    self.wake().unwrap();
-    handle.join().unwrap();
+  fn close(&self) -> Option<JoinHandle<()>> {
+    self.slot.close()
   }
 }
 
 pub struct AsyncIO {
+  queue: Arc<SegQueue<Context<Task>>>,
+  idle: Arc<IdleQueue>,
   threads: Box<[SubmitThread]>,
-  cursor: AtomicU8,
 }
 impl AsyncIO {
   pub fn new(entries: u32) -> Result<Self> {
@@ -300,30 +294,55 @@ impl AsyncIO {
       .unwrap_or(unsafe { NonZero::new_unchecked(1) })
       .get();
     let mut threads = Vec::with_capacity(count);
-    for _ in 0..count {
-      threads.push(SubmitThread::new(entries)?);
+    let queue = Arc::new(SegQueue::new());
+    let idle = Arc::new(IdleQueue::new(count));
+    for id in 0..count {
+      threads.push(SubmitThread::new(entries, queue.clone(), idle.clone(), id)?);
     }
     Ok(Self {
+      queue,
       threads: threads.into_boxed_slice(),
-      cursor: AtomicU8::new(0),
+      idle,
     })
   }
 
   pub fn submit(&self, task: Task) -> Result<()> {
-    let i = self.cursor.fetch_add(1, Ordering::Relaxed) as usize % self.threads.len();
-    self.threads[i].submit(task)?;
+    self.queue.push(Context::Task(task));
+    if let Some(id) = self.idle.wake_one() {
+      self.threads[id].wake()?;
+    }
     Ok(())
   }
 
   pub fn batch_submit(&self, tasks: impl Iterator<Item = Task>) -> Result<()> {
-    let i = self.cursor.fetch_add(1, Ordering::Relaxed) as usize % self.threads.len();
-    self.threads[i].batch_submit(tasks)?;
+    let mut count = 0;
+    for task in tasks {
+      count += 1;
+      self.queue.push(Context::Task(task));
+    }
+    for id in (0..count.min(self.threads.len())).filter_map(|_| self.idle.wake_one()) {
+      self.threads[id].wake()?;
+    }
     Ok(())
   }
 
   pub fn close(&self) {
-    for thread in self.threads.iter() {
-      thread.close();
+    let threads = self
+      .threads
+      .iter()
+      .filter_map(|th| th.close())
+      .collect::<Vec<_>>();
+    if threads.is_empty() {
+      return;
+    }
+    for _ in 0..threads.len() {
+      self.queue.push(Context::Term);
+    }
+    for thread in &self.threads {
+      thread.wake().unwrap();
+    }
+    for handle in threads {
+      handle.join().unwrap();
     }
   }
 }
