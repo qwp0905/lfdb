@@ -290,18 +290,6 @@ impl AsyncIO {
     Ok(())
   }
 
-  pub fn batch_submit(&self, mut tasks: impl Iterator<Item = Task>) -> Result<()> {
-    let Some(task) = tasks.next() else {
-      return Ok(());
-    };
-    self.queue.push(Context::Task(task));
-    for task in tasks {
-      self.queue.push(Context::Task(task));
-    }
-    self.wake()?;
-    Ok(())
-  }
-
   pub fn close(&self) {
     let Some(handle) = self.slot.close() else {
       return;
