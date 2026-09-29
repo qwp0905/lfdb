@@ -328,9 +328,7 @@ impl BatchQueue<WriteTask, Result<()>> {
       arg.alloc.as_deref().unwrap().set(allocated);
       queue.finish_write(&arg, values, waiting);
     });
-    if let Err(err) = done.add_callback(callback) {
-      err.call(&done.wait().unwrap());
-    };
+    done.must_call(callback);
   }
 
   pub fn publish_write(

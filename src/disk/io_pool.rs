@@ -40,15 +40,11 @@ impl<T> PendingIO<T> {
     self.wait().map_err(Error::IO)
   }
 
-  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(
-    &self,
-    f: F,
-  ) -> std::result::Result<(), Callback<IOResult<T>>> {
+  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
     match self {
-      PendingIO::Fulfilled(v) => f(v),
-      PendingIO::Pending(o) => o.add_callback(Callback::new(f))?,
+      PendingIO::Fulfilled(v) => f(&v),
+      PendingIO::Pending(o) => o.must_call(Callback::new(f)),
     };
-    Ok(())
   }
 }
 
