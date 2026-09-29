@@ -344,6 +344,12 @@ impl<T> Oneshot<T> {
   ) -> std::result::Result<(), Callback<T>> {
     self.0.add_callback(callback)
   }
+
+  pub fn must_call(self, callback: Callback<T>) {
+    if let Err(err) = self.add_callback(callback) {
+      err.call(&self.wait().unwrap())
+    }
+  }
 }
 impl<T> Drop for Oneshot<T> {
   fn drop(&mut self) {

@@ -1,7 +1,6 @@
 use std::{
   cell::Cell,
   io::{Error, ErrorKind, IoSlice, Result},
-  mem::replace,
   sync::{
     atomic::{fence, AtomicBool, AtomicU16, Ordering},
     Arc,
@@ -9,7 +8,7 @@ use std::{
   time::Instant,
 };
 
-use crossbeam::queue::SegQueue;
+use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
@@ -62,8 +61,6 @@ impl<T, R> BatchQueue<T, R> {
   }
 }
 
-type WriteAcc = (IOTask, Oneshot<Result<usize>>, Callback<Result<usize>>);
-
 struct WriteBatchArg {
   state: Arc<HandleState>,
   backend: Arc<dyn IOBackend>,
@@ -81,6 +78,65 @@ impl Clone for WriteBatchArg {
   }
 }
 
+struct UnsafeVec<T> {
+  ptr: *mut T,
+  len: usize,
+  cap: usize,
+}
+impl<T> UnsafeVec<T> {
+  fn new(v: Vec<T>) -> Self {
+    let (ptr, len, cap) = Vec::into_raw_parts(v);
+    Self { ptr, len, cap }
+  }
+  unsafe fn take(&self) -> Vec<T> {
+    unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
+  }
+}
+impl<T> Clone for UnsafeVec<T> {
+  fn clone(&self) -> Self {
+    Self {
+      ptr: self.ptr,
+      len: self.len,
+      cap: self.cap,
+    }
+  }
+}
+unsafe impl<T: Send> Send for UnsafeVec<T> {}
+
+struct BatchWriteResult {
+  count: AtomicU16,
+  error: AtomicCell<Option<ErrorKind>>,
+}
+impl BatchWriteResult {
+  const fn new() -> Self {
+    Self {
+      count: AtomicU16::new(1),
+      error: AtomicCell::new(None),
+    }
+  }
+
+  #[must_use]
+  fn resolve_with(&self, waiting: UnsafeVec<OneshotFulfill<Result<()>>>) -> bool {
+    if self.count.fetch_sub(1, Ordering::AcqRel) > 1 {
+      return false;
+    }
+
+    let result = self.error.load().map(Err).unwrap_or(Ok(()));
+    for done in unsafe { waiting.take() } {
+      done.fulfill(result.map_err(Error::from));
+    }
+    true
+  }
+
+  fn set_error(&self, error: ErrorKind) {
+    let _ = self.error.compare_exchange(None, Some(error));
+  }
+
+  fn increase_count(&self) {
+    self.count.fetch_add(1, Ordering::Release);
+  }
+}
+
 impl BatchQueue<WriteTask, Result<()>> {
   fn recursive_write(self: &Arc<Self>, arg: WriteBatchArg) {
     if self.try_release() {
@@ -88,172 +144,91 @@ impl BatchQueue<WriteTask, Result<()>> {
     }
     self.drain_write(arg);
   }
-  fn accumulate_write(
-    self: &Arc<Self>,
-    arg: &WriteBatchArg,
-    buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
-  ) -> Vec<WriteAcc> {
-    let mut count = None;
-    let mut accumulated = Vec::new();
-    let mut waiting = Vec::new();
-    let mut values = Vec::new();
-    let mut start = 0;
-    let mut prev = None;
-    for ((offset, buf), done) in buffered {
-      let Some((po, len)) = prev.replace((offset, buf.len() as u64)) else {
-        start = offset;
-        waiting.push(done);
-        values.push(buf);
-        continue;
-      };
 
-      if po == offset && len == buf.len() as u64 {
-        waiting.push(done);
-        *values.last_mut().unwrap() = buf;
-        continue;
-      }
-      if po + len == offset {
-        waiting.push(done);
-        values.push(buf);
-        continue;
-      }
-
-      prev = Some((offset, buf.len() as u64));
-      let current = replace(&mut start, offset);
-      let bufs = replace(&mut values, vec![buf]);
-      let waiting = replace(&mut waiting, vec![done]);
-      let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-      let (task, done) = if bufs.len() == 1 {
-        IOTask::new_pwrite(&static_ref[0], current)
-      } else {
-        IOTask::new_pwritev(static_ref, current)
-      };
-
-      let bytes = bufs.iter().map(|v| v.len()).sum::<usize>();
-      let count = count
-        .get_or_insert_with(|| Arc::new(AtomicU16::new(0)))
-        .clone();
-      let queue = self.clone();
-      let arg = arg.clone();
-      let start = arg.metrics.disk_write.start();
-      let callback = Callback::new(move |r: &Result<usize>| {
-        let result = match r {
-          Ok(c) if *c < bytes => {
-            return queue.retry_write(arg, 1, current, bufs, waiting, Some(count), start);
-          }
-          Ok(_) => Ok(()),
-          Err(err) => Err(err.kind()),
-        };
-        arg.metrics.disk_write.record(start);
-        for done in waiting {
-          done.fulfill(result.map_err(Error::from));
-        }
-        if count.fetch_sub(1, Ordering::Relaxed) > 1 {
-          return;
-        }
-        queue.recursive_write(arg)
-      });
-      accumulated.push((task, done, callback));
-    }
-
-    let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&values) };
-    let (task, done) = if values.len() == 1 {
-      IOTask::new_pwrite(&static_ref[0], start)
-    } else {
-      IOTask::new_pwritev(static_ref, start)
-    };
-
-    let bytes = values.iter().map(|v| v.len()).sum::<usize>();
-    let queue = self.clone();
-    let arg = arg.clone();
-    let metrics_start = arg.metrics.disk_write.start();
-
-    let Some(count) = count else {
-      let bytes = values.iter().map(|v| v.len()).sum::<usize>();
-      let callback = Callback::new(move |r: &Result<usize>| {
-        let result = match r {
-          Ok(c) if *c < bytes => {
-            return queue.retry_write(
-              arg,
-              1,
-              start,
-              values,
-              waiting,
-              None,
-              metrics_start,
-            );
-          }
-          Ok(_) => Ok(()),
-          Err(err) => Err(err.kind()),
-        };
-        arg.metrics.disk_write.record(metrics_start);
-        for done in waiting {
-          done.fulfill(result.map_err(Error::from));
-        }
-        queue.recursive_write(arg)
-      });
-      accumulated.push((task, done, callback));
-      return accumulated;
-    };
-
-    count.store(accumulated.len() as u16 + 1, Ordering::Relaxed);
-    let callback = Callback::new(move |r: &Result<usize>| {
-      let result = match r {
-        Ok(c) if *c < bytes => {
-          return queue.retry_write(
-            arg,
-            1,
-            start,
-            values,
-            waiting,
-            Some(count),
-            metrics_start,
-          );
-        }
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.kind()),
-      };
-      arg.metrics.disk_write.record(metrics_start);
-      for done in waiting {
-        done.fulfill(result.map_err(Error::from));
-      }
-      if count.fetch_sub(1, Ordering::Relaxed) > 1 {
-        return;
-      }
-      queue.recursive_write(arg)
-    });
-    accumulated.push((task, done, callback));
-    accumulated
-  }
   fn finish_write(
     self: &Arc<Self>,
     arg: &WriteBatchArg,
-    buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
+    values: Vec<WriteTask>,
+    waiting: Vec<OneshotFulfill<Result<()>>>,
   ) {
-    debug_assert!(!buffered.is_empty());
-    let accumulated = self.accumulate_write(arg, buffered);
-    let len = accumulated.len();
-    debug_assert!(accumulated.len() < u16::MAX as usize);
-    let mut callbacks = Vec::with_capacity(len);
-    let mut tasks = Vec::with_capacity(len);
-    for (task, done, callback) in accumulated {
-      tasks.push(task);
-      callbacks.push((done, callback));
+    let waiting = UnsafeVec::new(waiting);
+    let mut failed: Option<Vec<_>> = None;
+    let result = Arc::new(BatchWriteResult::new());
+    for chunk in values.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
+      result.increase_count();
+      let mut bufs = Vec::with_capacity(chunk.len());
+      let (offset, _) = chunk.first().copied().unwrap();
+      for (_, buf) in chunk {
+        bufs.push(*buf);
+      }
+
+      let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&*bufs) };
+      let (task, done) = if bufs.len() == 1 {
+        IOTask::new_pwrite(&static_ref[0], offset)
+      } else {
+        IOTask::new_pwritev(static_ref, offset)
+      };
+
+      let measure = arg.metrics.disk_write.start();
+      let callback = self.create_callback(
+        arg,
+        bufs,
+        offset,
+        waiting.clone(),
+        result.clone(),
+        measure,
+        0,
+      );
+      if let Err(err) = arg.backend.submit(task) {
+        failed.get_or_insert_default().push((err, callback));
+        continue;
+      };
+      done.must_call(callback);
     }
 
-    if let Err(err) = arg.backend.batch_submit(tasks) {
-      let kind = err.kind();
-      for (_, callback) in callbacks {
-        callback.call(&Err(Error::from(kind)));
-      }
-      return;
+    for (err, callback) in failed.into_iter().flatten() {
+      callback.call(&Err(err))
     }
 
-    for (done, callback) in callbacks {
-      if let Err(err) = done.add_callback(callback) {
-        err.call(&done.wait().unwrap())
-      }
+    if result.resolve_with(waiting) {
+      self.recursive_write(arg.clone());
     }
+  }
+
+  fn create_callback(
+    self: &Arc<Self>,
+    arg: &WriteBatchArg,
+    bufs: Vec<IoSlice<'static>>,
+    offset: u64,
+    waiting: UnsafeVec<OneshotFulfill<Result<()>>>,
+    result: Arc<BatchWriteResult>,
+    measurement: Option<Instant>,
+    trial: u8,
+  ) -> Callback<Result<usize>> {
+    let bytes = bufs.iter().map(|v| v.len()).sum::<usize>();
+    let queue = self.clone();
+    let arg = arg.clone();
+    Callback::new(move |r: &Result<usize>| {
+      match r {
+        Ok(c) if *c < bytes => {
+          return queue.retry_write(
+            arg,
+            trial,
+            offset,
+            bufs,
+            waiting,
+            result,
+            measurement,
+          )
+        }
+        Ok(_) => {}
+        Err(err) => result.set_error(err.kind()),
+      };
+      arg.metrics.disk_write.record(measurement);
+      if result.resolve_with(waiting) {
+        queue.recursive_write(arg);
+      };
+    })
   }
   fn retry_write(
     self: &Arc<Self>,
@@ -261,21 +236,18 @@ impl BatchQueue<WriteTask, Result<()>> {
     trial: u8,
     offset: u64,
     bufs: Vec<IoSlice<'static>>,
-    waiting: Vec<OneshotFulfill<Result<()>>>,
-    count: Option<Arc<AtomicU16>>,
-    start: Option<Instant>,
+    waiting: UnsafeVec<OneshotFulfill<Result<()>>>,
+    result: Arc<BatchWriteResult>,
+    measurement: Option<Instant>,
   ) {
     if trial >= IO_RETRY {
-      arg.metrics.disk_write.record(start);
-      let kind = ErrorKind::WriteZero;
-      waiting
-        .into_iter()
-        .for_each(|done| done.fulfill(Err(Error::from(kind))));
-      if count.is_some_and(|c| c.fetch_sub(1, Ordering::Relaxed) > 1) {
+      arg.metrics.disk_write.record(measurement);
+      result.set_error(ErrorKind::WriteZero);
+      if !result.resolve_with(waiting) {
         return;
-      }
+      };
       return self.recursive_write(arg);
-    }
+    };
 
     let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
     let (task, done) = if bufs.len() == 1 {
@@ -283,84 +255,57 @@ impl BatchQueue<WriteTask, Result<()>> {
     } else {
       IOTask::new_pwritev(static_ref, offset)
     };
+
+    let callback =
+      self.create_callback(&arg, bufs, offset, waiting, result, measurement, trial + 1);
     if let Err(err) = arg.backend.submit(task) {
-      let kind = err.kind();
-      waiting
-        .into_iter()
-        .for_each(|done| done.fulfill(Err(Error::from(kind))));
-      if count.is_some_and(|c| c.fetch_sub(1, Ordering::Relaxed) > 1) {
-        return;
-      }
-      return self.recursive_write(arg);
+      return callback.call(&Err(err));
     }
-    let bytes = bufs.iter().map(|v| v.len()).sum::<usize>();
-    let count = count.clone();
-    let queue = self.clone();
-    let arg = arg.clone();
-    let callback = Callback::new(move |r: &Result<usize>| {
-      let result = match r {
-        Ok(c) if *c < bytes => {
-          return queue.retry_write(arg, trial + 1, offset, bufs, waiting, count, start);
-        }
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.kind()),
-      };
-      arg.metrics.disk_write.record(start);
-      for done in waiting {
-        done.fulfill(result.map_err(Error::from));
-      }
-      if count.is_some_and(|c| c.fetch_sub(1, Ordering::Relaxed) > 1) {
-        return;
-      }
-      queue.recursive_write(arg)
-    });
-    if let Err(err) = done.add_callback(callback) {
-      err.call(&done.wait().unwrap());
-    }
+    done.must_call(callback);
   }
   fn drain_write(self: &Arc<Self>, arg: WriteBatchArg) {
     let count = max_iov();
-    let mut buffered = Vec::with_capacity(count);
-    for task in (0..count).map_while(|_| self.queue.pop()) {
-      buffered.push(task);
+    let mut values = Vec::with_capacity(count);
+    let mut waiting = Vec::with_capacity(count);
+    for (task, done) in (0..count).map_while(|_| self.queue.pop()) {
+      values.push(task);
+      waiting.push(done);
     }
 
-    if buffered.is_empty() {
+    if waiting.is_empty() {
       return self.recursive_write(arg);
     }
 
     let Some(token) = arg.state.pin.try_shared() else {
       arg.state.closed.fetch_or(true, Ordering::Relaxed);
-      buffered
-        .into_iter()
-        .for_each(|(_, done)| done.fulfill(Ok(())));
+      waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
       return self.recursive_write(arg);
     };
-    arg.metrics.disk_write_batch.record(buffered.len() as f64);
+    arg.metrics.disk_write_batch.record(waiting.len() as f64);
 
-    if buffered.len() > 1 {
-      buffered.sort_by_key(|((i, _), _)| *i);
+    if values.len() > 1 {
+      values.sort_by_key(|(i, _)| *i);
+      values.reverse();
+      values.dedup_by_key(|(i, b)| (*i, b.len()));
+      values.reverse();
     }
 
     let Some(alloc) = arg.alloc.as_deref() else {
-      return self.finish_write(&arg, buffered);
+      return self.finish_write(&arg, values, waiting);
     };
 
     // Space allocation is owned by this batching layer. Since all writes for this
     // handle are flushed here, the worker can preallocate once up to the highest
     // required offset before issuing the actual writes.
-    let required = buffered
-      .last()
-      .map(|((o, b), _)| *o + b.len() as u64)
-      .unwrap();
+    let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
     let (done, allocated) = match alloc_if_needed(required, alloc, &*arg.backend) {
       Ok(Some(v)) => v,
-      Ok(None) => return self.finish_write(&arg, buffered),
+      Ok(None) => return self.finish_write(&arg, values, waiting),
       Err(err) => {
         drop(token);
-        buffered
+        waiting
           .into_iter()
-          .for_each(|(_, done)| done.fulfill(Err(Error::from(err.kind()))));
+          .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
         return self.recursive_write(arg);
       }
     };
@@ -369,21 +314,19 @@ impl BatchQueue<WriteTask, Result<()>> {
     let queue = self.clone();
     let callback = Callback::new(move |r: &Result<usize>| {
       if let Err(err) = r {
-        buffered
+        waiting
           .into_iter()
-          .for_each(|(_, done)| done.fulfill(Err(Error::from(err.kind()))));
+          .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
         return queue.recursive_write(arg);
       };
 
       let Some(_token) = arg.state.pin.try_shared() else {
         arg.state.closed.fetch_or(true, Ordering::Relaxed);
-        buffered
-          .into_iter()
-          .for_each(|(_, done)| done.fulfill(Ok(())));
+        waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
         return queue.recursive_write(arg);
       };
       arg.alloc.as_deref().unwrap().set(allocated);
-      queue.finish_write(&arg, buffered);
+      queue.finish_write(&arg, values, waiting);
     });
     if let Err(err) = done.add_callback(callback) {
       err.call(&done.wait().unwrap());
