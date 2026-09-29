@@ -45,4 +45,4 @@ mod shared;
 pub use shared::*;
 
 mod idle;
-pub use idle::*;
+use idle::*;
