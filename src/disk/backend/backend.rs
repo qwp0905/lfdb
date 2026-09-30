@@ -4,7 +4,7 @@ use std::{
   path::Path,
 };
 
-use super::super::{AsyncTask, PendingAsync, TaskType};
+use super::{AsyncTask, PendingAsync, TaskType};
 
 pub const IO_RETRY: u8 = 3;
 
