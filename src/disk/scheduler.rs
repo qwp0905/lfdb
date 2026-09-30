@@ -382,7 +382,7 @@ impl BatchQueue<(), Result<()>> {
       return self.recursive_sync(state, backend, metrics);
     }
 
-    let Some(token) = state.pin.try_shared() else {
+    let Some(_token) = state.pin.try_shared() else {
       state.closed.fetch_or(true, Ordering::Relaxed);
       waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
       return self.recursive_sync(state, backend, metrics);
@@ -392,8 +392,6 @@ impl BatchQueue<(), Result<()>> {
     let callback = self.create_sync_callback(&state, &backend, &metrics, waiting);
     let (task, _) = IOTask::new_fdatasync(Some(callback));
     backend.submit(task);
-
-    drop(token);
   }
   fn create_sync_callback(
     self: &Arc<Self>,
