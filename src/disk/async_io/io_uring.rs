@@ -1,6 +1,6 @@
 use std::{
   fs::File,
-  io::{Error, Result},
+  io::{Error, ErrorKind, Read, Result, Write},
   mem::ManuallyDrop,
   os::fd::{AsRawFd, FromRawFd, RawFd},
   sync::{
@@ -29,10 +29,33 @@ impl EventFd {
   }
 
   fn consume(&self) {
-    todo!()
+    let mut buf = [0; 8];
+    loop {
+      let Err(err) = (&self.0).read_exact(&mut buf) else {
+        return;
+      };
+      if err.is_interrupted() {
+        continue;
+      }
+      if matches!(err.kind(), ErrorKind::WouldBlock) {
+        return;
+      }
+      panic!("{err}");
+    }
   }
   fn wake(&self) {
-    todo!()
+    loop {
+      let Err(err) = (&self.0).write_all(&1u64.to_ne_bytes()) else {
+        return;
+      };
+      if err.is_interrupted() {
+        continue;
+      }
+      if matches!(err.kind(), ErrorKind::WouldBlock) {
+        return;
+      }
+      panic!("{err}");
+    }
   }
 }
 
@@ -88,7 +111,9 @@ fn drain_completion(
     let Some(waker) = maybe_waker.as_mut() else {
       continue;
     };
-    waker.consume();
+    if ret > 0 {
+      waker.consume();
+    }
     found = true;
   }
 
