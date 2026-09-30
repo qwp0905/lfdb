@@ -4,7 +4,7 @@ use crate::disk::PagePool;
 
 #[test]
 fn test_tree_header_roundtrip() {
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let height = 0u16;
   let root = 42;
@@ -19,7 +19,7 @@ fn test_tree_header_roundtrip() {
 
 #[test]
 fn test_tree_header_zero_root() {
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let height = 123u16;
   let root = 0;
@@ -34,7 +34,7 @@ fn test_tree_header_zero_root() {
 
 #[test]
 fn test_tree_header_large_root() {
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let height = u16::MAX;
   let root = Pointer::MAX;

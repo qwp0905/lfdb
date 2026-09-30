@@ -7,7 +7,7 @@ fn test_serialize_internal() {
   let keys = vec![];
   let children = vec![10];
   let next = None;
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let node = BTreeNode::Internal(InternalNode::new(
     keys.clone(),
@@ -29,7 +29,7 @@ fn test_serialize_internal() {
 
 #[test]
 fn test_serialize_leaf() {
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let mut leaf = LeafNode::empty();
 
@@ -74,7 +74,7 @@ fn test_serialize_leaf() {
 
 #[test]
 fn test_serialize_internal_with_keys_and_right() {
-  let pool = PagePool::new(0);
+  let pool = PagePool::new(1);
   let mut page = pool.acquire();
   let keys = vec![vec![1, 2], vec![3, 4]];
   let children = vec![10, 20, 30];
