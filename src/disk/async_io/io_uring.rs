@@ -292,15 +292,11 @@ impl AsyncIO {
     })
   }
 
-  fn wake(&self) {
-    if self.parked.swap(false, Ordering::Relaxed) {
-      waker.wake();
-    }
-  }
-
   pub fn submit(&self, task: Task) {
     self.queue.push(Context::Task(task));
-    self.wake();
+    if self.parked.swap(false, Ordering::Relaxed) {
+      self.waker.wake();
+    }
   }
 
   pub fn close(&self) {
@@ -308,7 +304,7 @@ impl AsyncIO {
       return;
     };
     self.queue.push(Context::Term);
-    self.wake_force().unwrap();
+    self.waker.wake();
     handle.join().unwrap();
   }
 }
