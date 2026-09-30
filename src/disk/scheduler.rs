@@ -172,7 +172,7 @@ impl BatchQueue<WriteTask, Result<()>> {
         waiting.clone(),
         result.clone(),
         measure,
-        0,
+        1,
       );
 
       let (task, _) = if static_ref.len() == 1 {

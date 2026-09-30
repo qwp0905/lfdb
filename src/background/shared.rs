@@ -120,7 +120,7 @@ impl<T, R> SharedWorkThread<T, R> {
     self.register(Context::Execute(value, f));
     o
   }
-  #[allow(unused)]
+  #[cfg(not(target_os = "linux"))]
   pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }

@@ -352,18 +352,6 @@ impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
     self.0.fulfill_and_wake(result);
   }
-
-  #[cfg(target_os = "linux")]
-  pub const fn into_raw(this: Self) -> *mut OneshotBehavior<T> {
-    let ptr = this.0.as_ptr();
-    forget(this);
-    ptr.cast()
-  }
-
-  #[cfg(target_os = "linux")]
-  pub const unsafe fn from_raw(raw: *mut OneshotBehavior<T>) -> Self {
-    Self(Pair::from_raw(raw))
-  }
 }
 impl<T> Drop for OneshotFulfill<T> {
   fn drop(&mut self) {

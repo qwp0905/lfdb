@@ -17,30 +17,36 @@ use io_uring::{
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
-  utils::ChunkQueue,
+  utils::{warn, ChunkQueue},
 };
 
-use super::{AsyncTask, Task, TaskType};
+use super::{AsyncTask, FullTask, TaskType};
 
 struct EventFd(File);
 impl EventFd {
+  fn new() -> Result<Self> {
+    let fd = cvt(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) })?;
+    Ok(unsafe { Self::from_raw_fd(fd as RawFd) })
+  }
   unsafe fn from_raw_fd(fd: RawFd) -> Self {
     Self(unsafe { File::from_raw_fd(fd) })
+  }
+
+  fn as_raw_fd(&self) -> RawFd {
+    self.0.as_raw_fd()
   }
 
   fn consume(&self) {
     let mut buf = [0; 8];
     loop {
-      let Err(err) = (&self.0).read_exact(&mut buf) else {
+      let Err(ref err) = (&self.0).read_exact(&mut buf) else {
         return;
       };
-      if err.is_interrupted() {
-        continue;
+      match err.kind() {
+        ErrorKind::Interrupted => continue,
+        ErrorKind::WouldBlock => return,
+        _ => panic!("{err}"),
       }
-      if matches!(err.kind(), ErrorKind::WouldBlock) {
-        return;
-      }
-      panic!("{err}");
     }
   }
   fn wake(&self) {
@@ -48,13 +54,11 @@ impl EventFd {
       let Err(err) = (&self.0).write_all(&1u64.to_ne_bytes()) else {
         return;
       };
-      if err.is_interrupted() {
-        continue;
+      match err.kind() {
+        ErrorKind::Interrupted => continue,
+        ErrorKind::WouldBlock => return,
+        _ => panic!("{err}"),
       }
-      if matches!(err.kind(), ErrorKind::WouldBlock) {
-        return;
-      }
-      panic!("{err}");
     }
   }
 }
@@ -66,7 +70,7 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
-fn to_entry(task: Task) -> squeue::Entry {
+fn to_entry(task: FullTask) -> squeue::Entry {
   let fd = types::Fd(task.toward.as_raw_fd());
   let mut entry = match task.task_type {
     TaskType::Pwrite { offset, buf } => {
@@ -100,20 +104,20 @@ fn drain_completion(
   let mut found = false;
   for cqe in cq {
     count += 1;
-    let ret = cqe.result();
+    let result = cvt(cqe.result());
     let user_data = cqe.user_data();
     if user_data != POLL {
-      let ptr = (user_data as usize) as *mut AsyncTask<usize>;
-      let done = unsafe { AsyncTask::from_raw(ptr) };
-      done.fulfill(cvt(ret));
+      let done = unsafe { AsyncTask::from_raw((user_data as usize) as *mut ()) };
+      done.fulfill(result);
       continue;
     }
     let Some(waker) = maybe_waker.as_mut() else {
       continue;
     };
-    if ret > 0 {
-      waker.consume();
-    }
+    match result {
+      Ok(_) => waker.consume(),
+      Err(err) => warn!("consume fd has been skipped since: {err}"),
+    };
     found = true;
   }
 
@@ -141,7 +145,7 @@ fn drain_backlog(
 }
 fn drain_task(
   sq: &mut SubmissionQueue,
-  input: &SegQueue<Context<Task>>,
+  input: &SegQueue<Context<FullTask>>,
   backlog: &mut ChunkQueue<squeue::Entry>,
 ) -> (usize, bool) {
   let mut count = 0;
@@ -223,7 +227,7 @@ enum Context<T> {
 const POLL: u64 = 0;
 
 pub struct AsyncIO {
-  queue: Arc<SegQueue<Context<Task>>>,
+  queue: Arc<SegQueue<Context<FullTask>>>,
   parked: Arc<AtomicBool>,
   waker: EventFd,
   slot: ThreadSlot,
@@ -231,7 +235,7 @@ pub struct AsyncIO {
 impl AsyncIO {
   const fn worker_loop(
     mut ring: IoUring,
-    queue: Arc<SegQueue<Context<Task>>>,
+    queue: Arc<SegQueue<Context<FullTask>>>,
     waker_fd: RawFd,
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
@@ -295,18 +299,14 @@ impl AsyncIO {
     let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
     let parked = Arc::new(AtomicBool::new(false));
-    let waker_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-    if waker_fd < 0 {
-      return Err(Error::last_os_error());
-    }
-    let waker = unsafe { EventFd::from_raw_fd(waker_fd) };
+    let waker = EventFd::new()?;
     let handle = Builder::new()
       .name("async io".to_string())
       .stack_size(64 << 10)
       .spawn_unwind(Self::worker_loop(
         ring,
         queue.clone(),
-        waker_fd,
+        waker.as_raw_fd(),
         parked.clone(),
       ));
     Ok(Self {
@@ -317,7 +317,7 @@ impl AsyncIO {
     })
   }
 
-  pub fn submit(&self, task: Task) {
+  pub fn submit(&self, task: FullTask) {
     self.queue.push(Context::Task(task));
     if self.parked.swap(false, Ordering::Relaxed) {
       self.waker.wake();
