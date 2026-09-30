@@ -124,8 +124,6 @@ impl Core {
 
   fn flush_tables(&self) -> Result {
     let mut pending = Vec::new();
-
-    // let mut stream = executor.stream(handle_flush_table);
     for table in self.dirty_tables.drain() {
       pending.push((table.disk().fsync(), table));
     }
