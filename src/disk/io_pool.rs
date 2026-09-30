@@ -1,18 +1,15 @@
 use std::{
   fs::{DirEntry, OpenOptions},
   io::{Error as IOError, ErrorKind, Result as IOResult},
-  mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
   thread::sleep,
   time::Duration,
 };
 
-use crossbeam::utils::Backoff;
-
 use super::{
-  AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend, IOTask,
-  PendingAsync, ScanIOHandle, SyncBatch, WriteBatch, NO_CALLBACK,
+  AllocState, AppendIOHandle, DirHandle, DiskBackend, IOBackend, IOScheduler, IOTask,
+  PendingAsync, ScanIOHandle, NO_CALLBACK,
 };
 use crate::{
   background::{Callback, Oneshot},
@@ -44,9 +41,9 @@ impl<T> PendingIO<T> {
 
   pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
     match self {
-      PendingIO::Fulfilled(v) => f(&v),
-      PendingIO::Scheduled(o) => o.must_call(Callback::new(f)),
-      PendingIO::Direct(o) => o.must_call(Callback::new(f)),
+      Self::Fulfilled(v) => f(&v),
+      Self::Scheduled(o) => o.must_call(Callback::new(f)),
+      Self::Direct(o) => o.must_call(Callback::new(f)),
     };
   }
 }
@@ -142,17 +139,9 @@ impl IOPool {
     filename: PathBuf,
     alloc: Option<AllocState>,
   ) -> IOHandle {
-    let state = Arc::new(HandleState::new());
-    let write_handle = WriteBatch::default();
-    let sync_handle = SyncBatch::default();
-    let alloc = alloc.map(Arc::new);
-
+    let scheduler = IOScheduler::new(backend, alloc);
     IOHandle {
-      backend,
-      write_scheduler: write_handle,
-      sync_scheduler: sync_handle,
-      state,
-      alloc,
+      scheduler,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
       filename: Mutex::new(filename),
@@ -203,11 +192,7 @@ impl Drop for IOPool {
  * broadest file-handle abstraction in the disk layer.
  */
 pub struct IOHandle {
-  backend: Arc<dyn IOBackend>,
-  write_scheduler: WriteBatch,
-  sync_scheduler: SyncBatch,
-  state: Arc<HandleState>,
-  alloc: Option<Arc<AllocState>>,
+  scheduler: IOScheduler,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
   filename: Mutex<PathBuf>,
@@ -218,7 +203,7 @@ impl IOHandle {
     // If a path for read access to the removed table is established, pin guarantees are required.
     measure!(
       self.metrics.disk_read,
-      self.backend.pread_exact(buf, offset)
+      self.scheduler.backend().pread_exact(buf, offset)
     )
   }
 
@@ -230,7 +215,7 @@ impl IOHandle {
    * `UnexpectedEof`.
    */
   pub unsafe fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
-    match self.backend.pread(buf, offset) {
+    match self.scheduler.backend().pread(buf, offset) {
       Ok(0) => Ok(()),
       Ok(n) if n == buf.len() => Ok(()),
       Ok(_) => Err(IOError::from(ErrorKind::UnexpectedEof)),
@@ -239,37 +224,27 @@ impl IOHandle {
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    let done = self.write_scheduler.publish_write(
-      &self.state,
-      &self.backend,
-      &self.metrics,
-      &self.alloc,
-      buf,
-      offset,
-    );
+    let done = self.scheduler.publish_write(buf, offset, &self.metrics);
     PendingIO::Scheduled(done)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    let done =
-      self
-        .sync_scheduler
-        .publish_sync(&self.state, &self.backend, &self.metrics);
+    let done = self.scheduler.publish_sync(&self.metrics);
     PendingIO::Scheduled(done)
   }
 
   pub fn fsync(&self) -> PendingIO<usize> {
-    let Some(_token) = self.state.try_shared() else {
+    let Some(_token) = self.scheduler.pin_state() else {
       return PendingIO::Fulfilled(Ok(0));
     };
     let (task, done) = IOTask::new_fsync(NO_CALLBACK);
-    self.backend.submit(task);
+    self.scheduler.backend().submit(task);
     PendingIO::Direct(done)
   }
 
@@ -280,11 +255,7 @@ impl IOHandle {
    * using the handle, then removes the file from the base directory.
    */
   pub fn truncate(&self) -> IOResult<()> {
-    let backoff = Backoff::new();
-    while self.state.try_exclusive().map(forget).is_none() {
-      backoff.snooze();
-    }
-
+    self.scheduler.close();
     self.base_dir.remove(&self.filename.l())
   }
 

@@ -5,7 +5,7 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncBatch};
+use super::{DiskBackend, IOBackend, PendingIO, SyncScheduler};
 use crate::metrics::MetricsRegistry;
 
 /**
@@ -16,10 +16,8 @@ use crate::metrics::MetricsRegistry;
  * lock and sync the directory itself.
  */
 pub struct DirHandle {
-  io_backend: Arc<dyn IOBackend>,
+  scheduler: SyncScheduler,
   disk_backend: Box<dyn DiskBackend>,
-  sync_handle: SyncBatch,
-  state: Arc<HandleState>,
   metrics: Arc<MetricsRegistry>,
   path: PathBuf,
 }
@@ -32,29 +30,22 @@ impl DirHandle {
     let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
     let path = path.canonicalize()?;
-    let file = disk_backend
+    let backend = disk_backend
       .open(options.read(true), &path)
       .map(Arc::<dyn IOBackend>::from)?;
-    let state = Arc::new(HandleState::new());
-    let sync_handle = SyncBatch::default();
 
     Ok(Self {
-      io_backend: file,
+      scheduler: SyncScheduler::new(backend),
       disk_backend,
-      sync_handle,
-      state,
       metrics,
       path,
     })
   }
   pub fn fdatasync(&self) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    let done =
-      self
-        .sync_handle
-        .publish_sync(&self.state, &self.io_backend, &self.metrics);
+    let done = self.scheduler.publish(&self.metrics);
     PendingIO::Scheduled(done)
   }
   pub fn get_path(&self) -> &Path {
@@ -86,9 +77,9 @@ impl DirHandle {
     self.disk_backend.open_direct_io(options, path)
   }
   pub fn try_lock(&self) -> IOResult<bool> {
-    self.io_backend.try_flock()
+    self.scheduler.backend().try_flock()
   }
   pub fn unlock(&self) -> IOResult<()> {
-    self.io_backend.unlock()
+    self.scheduler.backend().unlock()
   }
 }

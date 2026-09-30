@@ -1,6 +1,7 @@
 use std::{
   cell::Cell,
   io::{Error, ErrorKind, IoSlice, Result},
+  mem::forget,
   sync::{
     atomic::{fence, AtomicBool, Ordering},
     Arc,
@@ -8,7 +9,7 @@ use std::{
   time::Instant,
 };
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue};
+use crossbeam::{atomic::AtomicCell, queue::SegQueue, utils::Backoff};
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
@@ -19,8 +20,99 @@ use crate::{
 
 type WriteTask = (u64, IoSlice<'static>);
 
-pub type WriteBatch = Arc<BatchQueue<WriteTask, Result<()>>>;
-pub type SyncBatch = Arc<BatchQueue<(), Result<()>>>;
+type WriteBatch = Arc<BatchQueue<WriteTask, Result<()>>>;
+type SyncBatch = Arc<BatchQueue<(), Result<()>>>;
+
+pub struct SyncScheduler {
+  backend: Arc<dyn IOBackend>,
+  sync: SyncBatch,
+  state: Arc<HandleState>,
+}
+impl SyncScheduler {
+  pub fn new(backend: Arc<dyn IOBackend>) -> Self {
+    Self {
+      backend,
+      sync: SyncBatch::default(),
+      state: Arc::new(HandleState::new()),
+    }
+  }
+
+  pub fn publish(&self, metrics: &Arc<MetricsRegistry>) -> Oneshot<Result<()>> {
+    let (o, occupied) = self.sync.push_and_compete(());
+    if occupied {
+      let guard = RecursiveSync::new(
+        self.sync.clone(),
+        self.state.clone(),
+        self.backend.clone(),
+        metrics.clone(),
+      );
+      drain_sync(guard);
+    }
+    o
+  }
+
+  pub fn is_closed(&self) -> bool {
+    self.state.is_closed()
+  }
+
+  pub fn backend(&self) -> &dyn IOBackend {
+    &*self.backend
+  }
+}
+
+pub struct IOScheduler {
+  inner: SyncScheduler,
+  write: WriteBatch,
+  alloc: Option<Arc<AllocState>>,
+}
+impl IOScheduler {
+  pub fn new(backend: Arc<dyn IOBackend>, alloc: Option<AllocState>) -> Self {
+    Self {
+      inner: SyncScheduler::new(backend),
+      write: WriteBatch::default(),
+      alloc: alloc.map(Arc::new),
+    }
+  }
+  pub fn backend(&self) -> &dyn IOBackend {
+    &*self.inner.backend
+  }
+  pub fn pin_state(&self) -> Option<SharedToken<'_>> {
+    self.inner.state.try_shared()
+  }
+
+  pub fn is_closed(&self) -> bool {
+    self.inner.is_closed()
+  }
+  pub fn close(&self) {
+    let backoff = Backoff::new();
+    while self.inner.state.try_exclusive().map(forget).is_none() {
+      backoff.snooze();
+    }
+  }
+
+  pub fn publish_write(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    metrics: &Arc<MetricsRegistry>,
+  ) -> Oneshot<Result<()>> {
+    let (o, occupied) = self.write.push_and_compete((offset, IoSlice::new(buf)));
+    if occupied {
+      let guard = RecursiveWrite::new(
+        self.write.clone(),
+        self.inner.state.clone(),
+        self.inner.backend.clone(),
+        metrics.clone(),
+        self.alloc.clone(),
+      );
+      drain_write(guard);
+    };
+    o
+  }
+  pub fn publish_sync(&self, metrics: &Arc<MetricsRegistry>) -> Oneshot<Result<()>> {
+    self.inner.publish(metrics)
+  }
+}
 
 pub struct BatchQueue<T, R> {
   queue: SegQueue<(T, OneshotFulfill<R>)>,
@@ -98,18 +190,19 @@ fn drain_write(guard: RecursiveWrite) {
   // handle are flushed here, the worker can preallocate once up to the highest
   // required offset before issuing the actual writes.
   let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
-  let mut allocated = alloc.get();
+  let mut allocated = unsafe { alloc.get() };
   if allocated >= required {
     return finish_write(guard, values, waiting);
   }
 
+  let current = allocated;
   // Preallocate in coarse chunks so the filesystem can keep nearby writes in a
   // more local extent instead of allocating space block by block. 1 MiB is a
   // simple default chunk size, not a carefully tuned boundary.
   while required >= allocated {
     allocated += EXTENT_SIZE;
   }
-  let (offset, len) = (alloc.get(), allocated - alloc.get());
+  let (offset, len) = (current, allocated - current);
 
   let backend = guard.backend.clone();
   let callback = create_fallocate_callback(guard, values, waiting, allocated);
@@ -213,7 +306,7 @@ fn create_fallocate_callback(
         .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
       return;
     };
-    guard.alloc.as_deref().unwrap().set(allocated);
+    unsafe { guard.alloc.as_deref().unwrap().set(allocated) };
 
     let state = guard.state.clone();
     let Some(_token) = state.try_shared() else {
@@ -304,31 +397,6 @@ impl Drop for BatchWriteResult {
 
 const EXTENT_SIZE: u64 = 1 << 20;
 
-impl BatchQueue<WriteTask, Result<()>> {
-  pub fn publish_write(
-    self: &Arc<Self>,
-    state: &Arc<HandleState>,
-    backend: &Arc<dyn IOBackend>,
-    metrics: &Arc<MetricsRegistry>,
-    alloc: &Option<Arc<AllocState>>,
-    buf: &'static [u8],
-    offset: u64,
-  ) -> Oneshot<Result<()>> {
-    let (o, occupied) = self.push_and_compete((offset, IoSlice::new(buf)));
-    if occupied {
-      let guard = RecursiveWrite::new(
-        self.clone(),
-        state.clone(),
-        backend.clone(),
-        metrics.clone(),
-        alloc.clone(),
-      );
-      drain_write(guard);
-    }
-    o
-  }
-}
-
 struct RecursiveSync {
   queue: Arc<BatchQueue<(), Result<()>>>,
   state: Arc<HandleState>,
@@ -395,27 +463,6 @@ fn drain_sync(guard: RecursiveSync) {
   backend.submit(task);
 }
 
-impl BatchQueue<(), Result<()>> {
-  pub fn publish_sync(
-    self: &Arc<Self>,
-    state: &Arc<HandleState>,
-    backend: &Arc<dyn IOBackend>,
-    metrics: &Arc<MetricsRegistry>,
-  ) -> Oneshot<Result<()>> {
-    let (o, occupied) = self.push_and_compete(());
-    if occupied {
-      let guard = RecursiveSync::new(
-        self.clone(),
-        state.clone(),
-        backend.clone(),
-        metrics.clone(),
-      );
-      drain_sync(guard);
-    }
-    o
-  }
-}
-
 /**
  * Tracks the file size already covered by preallocation.
  *
@@ -429,17 +476,17 @@ impl AllocState {
   pub const fn new(allocated: u64) -> Self {
     Self(Cell::new(allocated))
   }
-  pub const fn get(&self) -> u64 {
+  pub const unsafe fn get(&self) -> u64 {
     self.0.get()
   }
-  pub fn set(&self, allocated: u64) {
+  pub unsafe fn set(&self, allocated: u64) {
     self.0.set(allocated);
   }
 }
 unsafe impl Send for AllocState {}
 unsafe impl Sync for AllocState {}
 
-pub struct HandleState {
+struct HandleState {
   /**
    * Pin to protect file I/O from truncate.
    */
@@ -450,21 +497,21 @@ pub struct HandleState {
   closed: AtomicBool,
 }
 impl HandleState {
-  pub const fn new() -> Self {
+  const fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),
     }
   }
 
-  pub fn is_closed(&self) -> bool {
+  fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Relaxed)
   }
 
-  pub fn try_shared(&self) -> Option<SharedToken<'_>> {
+  fn try_shared(&self) -> Option<SharedToken<'_>> {
     self.pin.try_shared()
   }
-  pub fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
+  fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
     self.pin.try_exclusive()
   }
 }
