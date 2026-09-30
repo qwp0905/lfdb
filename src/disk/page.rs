@@ -1,5 +1,4 @@
 use std::{
-  alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout},
   marker::PhantomData,
   ops::Range,
   slice::{from_raw_parts, from_raw_parts_mut},
@@ -12,8 +11,6 @@ use crate::{
 };
 
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
-
-pub const ALIGN: usize = 512;
 
 /**
  * Fixed-size disk block backed by aligned heap memory.
@@ -31,17 +28,8 @@ pub const ALIGN: usize = 512;
 pub struct Page<const T: usize = PAGE_SIZE>(*mut u8, PhantomData<[u8; T]>);
 
 impl<const T: usize> Page<T> {
-  const LAYOUT: Layout = {
-    assert!(T.is_power_of_two());
-    unsafe { Layout::from_size_align_unchecked(T, ALIGN) }
-  };
-
   #[inline]
-  pub fn new() -> Self {
-    let ptr = unsafe { alloc_zeroed(Self::LAYOUT) };
-    if ptr.is_null() {
-      handle_alloc_error(Self::LAYOUT);
-    }
+  pub fn new(ptr: *mut u8) -> Self {
     Self(ptr, PhantomData)
   }
   #[inline]
@@ -63,6 +51,9 @@ impl<const T: usize> Page<T> {
   pub const fn as_mut_slice(&mut self) -> &mut [u8] {
     unsafe { from_raw_parts_mut(self.0, T) }
   }
+  pub const fn as_ptr(&self) -> *mut u8 {
+    self.0
+  }
   #[inline]
   pub const fn scanner(&self) -> PageScanner<'_, T> {
     PageScanner::new(self.0)
@@ -77,13 +68,6 @@ impl<const T: usize> Page<T> {
   }
   pub const fn range_mut(&mut self, range: Range<usize>) -> &mut [u8] {
     unsafe { from_raw_parts_mut(self.0.add(range.start), range.end - range.start) }
-  }
-}
-
-impl<const T: usize> Drop for Page<T> {
-  #[inline(always)]
-  fn drop(&mut self) {
-    unsafe { dealloc(self.0, Self::LAYOUT) };
   }
 }
 
