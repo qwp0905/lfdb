@@ -1,10 +1,11 @@
 use super::super::*;
 use super::*;
-use crate::disk::Page;
+use crate::disk::PagePool;
 
 #[test]
 fn test_tree_header_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let height = 0u16;
   let root = 42;
   let mut header = TreeHeader::new(root);
@@ -18,7 +19,8 @@ fn test_tree_header_roundtrip() {
 
 #[test]
 fn test_tree_header_zero_root() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let height = 123u16;
   let root = 0;
   let mut header = TreeHeader::new(root);
@@ -32,7 +34,8 @@ fn test_tree_header_zero_root() {
 
 #[test]
 fn test_tree_header_large_root() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let height = u16::MAX;
   let root = Pointer::MAX;
   let mut header = TreeHeader::new(root);

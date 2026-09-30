@@ -1,8 +1,11 @@
-use crate::disk::{Page, PAGE_SIZE};
+use crate::disk::PagePool;
+
+use super::*;
 
 #[test]
 fn test_writer() {
-  let mut page = Page::<PAGE_SIZE>::new();
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   let mut wt = page.writer();
   wt.write(&[1, 2, 3, 5, 6]).unwrap();
 
@@ -21,7 +24,8 @@ fn test_writer() {
 
 #[test]
 fn test_read_write() {
-  let mut page = Page::<4>::new();
+  let pool = PagePool::<4>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4];
 
   // Write test
@@ -38,7 +42,8 @@ fn test_read_write() {
 
 #[test]
 fn test_read_n() {
-  let mut page = Page::<PAGE_SIZE>::new();
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4, 5];
 
   // Write test
@@ -54,7 +59,8 @@ fn test_read_n() {
 #[test]
 fn test_write_overflow() {
   const SMALL_SIZE: usize = 4;
-  let mut page = Page::<SMALL_SIZE>::new();
+  let pool = PagePool::<SMALL_SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4, 5, 6]; // Data larger than SMALL_SIZE
 
   let mut writer = page.writer();
@@ -64,7 +70,8 @@ fn test_write_overflow() {
 #[test]
 fn test_read_n_overflow() {
   const SMALL_SIZE: usize = 4;
-  let page = Page::<SMALL_SIZE>::new();
+  let pool = PagePool::<SMALL_SIZE>::new(0);
+  let page = pool.acquire();
   let mut scanner = page.scanner();
 
   // Request size larger than page size
@@ -73,8 +80,8 @@ fn test_read_n_overflow() {
 
 #[test]
 fn test_sequential_operations() {
-  let mut page = Page::<PAGE_SIZE>::new();
-
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   // First write operation (starts from offset 0)
   {
     let mut writer = page.writer();
@@ -98,8 +105,8 @@ fn test_sequential_operations() {
 
 #[test]
 fn test_writer_fresh_start() {
-  let mut page = Page::<PAGE_SIZE>::new();
-
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   // First write operation
   {
     let mut writer = page.writer();
@@ -120,8 +127,8 @@ fn test_writer_fresh_start() {
 
 #[test]
 fn test_scanner_fresh_start() {
-  let mut page = Page::<PAGE_SIZE>::new();
-
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   // Write data
   {
     let mut writer = page.writer();
@@ -144,7 +151,8 @@ fn test_scanner_fresh_start() {
 
 #[test]
 fn test_interleaved_operations() {
-  let mut page = Page::<PAGE_SIZE>::new();
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3];
 
   // First write
@@ -176,7 +184,8 @@ fn test_interleaved_operations() {
 
 #[test]
 fn test_page_copy() {
-  let mut page = Page::<PAGE_SIZE>::new();
+  let pool = PagePool::<PAGE_SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4, 5];
 
   // Write data to original page
@@ -200,7 +209,8 @@ fn test_page_copy() {
 
 #[test]
 fn test_read_u64() {
-  let mut page = Page::<16>::new();
+  let pool = PagePool::<16>::new(0);
+  let mut page = pool.acquire();
   let test_value = 42u64;
 
   // Write value
@@ -216,7 +226,8 @@ fn test_read_u64() {
 #[test]
 fn test_as_ref() {
   const SIZE: usize = 4;
-  let mut page = Page::<SIZE>::new();
+  let pool = PagePool::<SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4];
 
   let mut writer = page.writer();
@@ -230,7 +241,8 @@ fn test_as_ref() {
 #[test]
 fn test_as_mut() {
   const SIZE: usize = 4;
-  let mut page = Page::<SIZE>::new();
+  let pool = PagePool::<SIZE>::new(0);
+  let mut page = pool.acquire();
   let test_data = [1, 2, 3, 4];
 
   // Modify through AsMut

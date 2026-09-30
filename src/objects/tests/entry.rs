@@ -1,10 +1,11 @@
 use super::super::*;
 use super::*;
-use crate::disk::Page;
+use crate::disk::PagePool;
 
 #[test]
 fn test_entry_with_data_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let entry = DataEntry::init(
     VersionRecord::new(1, 100, RecordData::Data(vec![10, 20, 30])),
     None,
@@ -32,7 +33,8 @@ fn test_entry_with_data_roundtrip() {
 
 #[test]
 fn test_entry_with_tombstone_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let entry = DataEntry::init(VersionRecord::new(2, 200, RecordData::Tombstone), None);
   page.serialize_from(&entry).expect("serialize error");
 
@@ -53,7 +55,8 @@ fn test_entry_with_tombstone_roundtrip() {
 }
 #[test]
 fn test_entry_with_chunked_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let owner = 2;
   let entry =
     DataEntry::init(VersionRecord::new(2, 200, RecordData::Blob(1, 2, 3)), None);
@@ -82,7 +85,8 @@ fn test_entry_with_chunked_roundtrip() {
 
 #[test]
 fn test_entry_with_next_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let entry = DataEntry::init(
     VersionRecord::new(1, 10, RecordData::Data(vec![1])),
     Some(42),
@@ -95,7 +99,8 @@ fn test_entry_with_next_roundtrip() {
 
 #[test]
 fn test_entry_multiple_versions_roundtrip() {
-  let mut page = Page::new();
+  let pool = PagePool::new(0);
+  let mut page = pool.acquire();
   let mut entry =
     DataEntry::init(VersionRecord::new(3, 300, RecordData::Data(vec![3])), None);
   entry.attach_front(VersionRecord::new(2, 200, RecordData::Tombstone));
