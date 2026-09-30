@@ -2,7 +2,7 @@ use std::{
   cell::Cell,
   io::{Error, ErrorKind, IoSlice, Result},
   sync::{
-    atomic::{fence, AtomicBool, AtomicU16, Ordering},
+    atomic::{fence, AtomicBool, Ordering},
     Arc,
   },
   time::Instant,
@@ -14,7 +14,7 @@ use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
-  utils::{create_static_ref, ExclusivePin, ExclusiveToken, SharedToken},
+  utils::{create_static_ref, ExclusivePin, ExclusiveToken, SBox, SharedToken},
 };
 
 type WriteTask = (u64, IoSlice<'static>);
@@ -59,279 +59,252 @@ impl<T, R> BatchQueue<T, R> {
     fence(Ordering::Acquire);
     (o, true)
   }
+
+  fn drain_n(&self, count: usize) -> impl Iterator<Item = (T, OneshotFulfill<R>)> + '_ {
+    (0..count).map_while(|_| self.queue.pop())
+  }
 }
 
-struct WriteBatchArg {
+fn drain_write(guard: RecursiveWrite) {
+  let count = max_iov();
+  let mut values = Vec::with_capacity(count);
+  let mut waiting = Vec::with_capacity(count);
+  for (task, done) in guard.queue.drain_n(count) {
+    values.push(task);
+    waiting.push(done);
+  }
+  if waiting.is_empty() {
+    return;
+  }
+  let state = guard.state.clone();
+  let Some(_token) = state.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Relaxed);
+    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+  };
+  guard.metrics.disk_write_batch.record(waiting.len() as f64);
+
+  if values.len() > 1 {
+    values.sort_by_key(|(i, _)| *i);
+    values.reverse();
+    values.dedup_by_key(|(i, b)| (*i, b.len()));
+    values.reverse();
+  }
+
+  let Some(alloc) = guard.alloc.as_deref() else {
+    return finish_write(guard, values, waiting);
+  };
+
+  // Space allocation is owned by this batching layer. Since all writes for this
+  // handle are flushed here, the worker can preallocate once up to the highest
+  // required offset before issuing the actual writes.
+  let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
+  let mut allocated = alloc.get();
+  if allocated >= required {
+    return finish_write(guard, values, waiting);
+  }
+
+  // Preallocate in coarse chunks so the filesystem can keep nearby writes in a
+  // more local extent instead of allocating space block by block. 1 MiB is a
+  // simple default chunk size, not a carefully tuned boundary.
+  while required >= allocated {
+    allocated += EXTENT_SIZE;
+  }
+  let (offset, len) = (alloc.get(), allocated - alloc.get());
+
+  let backend = guard.backend.clone();
+  let callback = create_fallocate_callback(guard, values, waiting, allocated);
+  let (task, _) = IOTask::new_fallocate(offset, len, Some(callback));
+  backend.submit(task);
+}
+
+fn finish_write(
+  guard: RecursiveWrite,
+  values: Vec<WriteTask>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+) {
+  let mut offsets = Vec::with_capacity(values.len());
+  let mut buffers = Vec::with_capacity(values.len());
+  for (offset, buf) in values {
+    offsets.push((offset, buf.len() as u64));
+    buffers.push(buf);
+  }
+  let result = SBox::new(BatchWriteResult::new(waiting, buffers, guard));
+
+  let mut index = 0;
+  for chunk in offsets.chunk_by(|(a_o, a_l), (b_o, _)| a_o + a_l == *b_o) {
+    let (offset, _) = chunk.first().copied().unwrap();
+    let start = index;
+    let end = index + chunk.len();
+    index += chunk.len();
+
+    let static_ref =
+      unsafe { create_static_ref::<[IoSlice<'static>]>(result.range_buffer(start, end)) };
+    let measure = result.guard.metrics.disk_write.start();
+    let callback =
+      create_write_callback((start, end), offset, result.clone(), measure, 1);
+
+    let (task, _) = if static_ref.len() == 1 {
+      IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+    } else {
+      IOTask::new_pwritev(static_ref, offset, Some(callback))
+    };
+    result.guard.backend.submit(task);
+  }
+}
+
+fn create_write_callback(
+  (start, end): (usize, usize),
+  offset: u64,
+  result: SBox<BatchWriteResult>,
+  measurement: Option<Instant>,
+  trial: u8,
+) -> impl FnOnce(&Result<usize>) {
+  let bytes = result
+    .range_buffer(start, end)
+    .iter()
+    .map(|v| v.len())
+    .sum::<usize>();
+  move |r: &Result<usize>| {
+    match r {
+      Ok(c) if *c < bytes => {
+        return retry_write(trial, offset, (start, end), result, measurement)
+      }
+      Ok(_) => {}
+      Err(err) => result.set_error(err.kind()),
+    };
+    result.guard.metrics.disk_write.record(measurement);
+  }
+}
+fn retry_write(
+  trial: u8,
+  offset: u64,
+  (start, end): (usize, usize),
+  result: SBox<BatchWriteResult>,
+  measurement: Option<Instant>,
+) {
+  if trial >= IO_RETRY {
+    result.guard.metrics.disk_write.record(measurement);
+    result.set_error(ErrorKind::WriteZero);
+    return;
+  };
+
+  let static_ref =
+    unsafe { create_static_ref::<[IoSlice<'static>]>(result.range_buffer(start, end)) };
+  let callback =
+    create_write_callback((start, end), offset, result.clone(), measurement, trial + 1);
+  let (task, _) = if static_ref.len() == 1 {
+    IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+  } else {
+    IOTask::new_pwritev(static_ref, offset, Some(callback))
+  };
+  result.guard.backend.submit(task);
+}
+
+fn create_fallocate_callback(
+  guard: RecursiveWrite,
+  values: Vec<WriteTask>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+  allocated: u64,
+) -> impl FnOnce(&Result<usize>) {
+  move |result| {
+    if let Err(err) = result {
+      waiting
+        .into_iter()
+        .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
+      return;
+    };
+    guard.alloc.as_deref().unwrap().set(allocated);
+
+    let state = guard.state.clone();
+    let Some(_token) = state.try_shared() else {
+      state.closed.fetch_or(true, Ordering::Relaxed);
+      return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+    };
+
+    finish_write(guard, values, waiting);
+  }
+}
+
+struct RecursiveWrite {
+  queue: Arc<BatchQueue<WriteTask, Result<()>>>,
   state: Arc<HandleState>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
   alloc: Option<Arc<AllocState>>,
 }
-impl Clone for WriteBatchArg {
-  fn clone(&self) -> Self {
+impl RecursiveWrite {
+  const fn new(
+    queue: Arc<BatchQueue<WriteTask, Result<()>>>,
+    state: Arc<HandleState>,
+    backend: Arc<dyn IOBackend>,
+    metrics: Arc<MetricsRegistry>,
+    alloc: Option<Arc<AllocState>>,
+  ) -> Self {
     Self {
-      state: self.state.clone(),
-      backend: self.backend.clone(),
-      metrics: self.metrics.clone(),
-      alloc: self.alloc.clone(),
+      queue,
+      state,
+      backend,
+      metrics,
+      alloc,
     }
   }
 }
+impl Drop for RecursiveWrite {
+  fn drop(&mut self) {
+    if self.queue.try_release() {
+      return;
+    }
 
-struct UnsafeVec<T> {
-  ptr: *mut T,
-  len: usize,
-  cap: usize,
-}
-impl<T> UnsafeVec<T> {
-  fn new(v: Vec<T>) -> Self {
-    let (ptr, len, cap) = Vec::into_raw_parts(v);
-    Self { ptr, len, cap }
-  }
-  unsafe fn take(&self) -> Vec<T> {
-    unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
+    drain_write(Self::new(
+      self.queue.clone(),
+      self.state.clone(),
+      self.backend.clone(),
+      self.metrics.clone(),
+      self.alloc.clone(),
+    ));
   }
 }
-impl<T> Clone for UnsafeVec<T> {
-  fn clone(&self) -> Self {
-    Self {
-      ptr: self.ptr,
-      len: self.len,
-      cap: self.cap,
-    }
-  }
-}
-unsafe impl<T: Send> Send for UnsafeVec<T> {}
 
 struct BatchWriteResult {
-  count: AtomicU16,
   error: AtomicCell<Option<ErrorKind>>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+  buffers: Vec<IoSlice<'static>>,
+  guard: RecursiveWrite,
 }
 impl BatchWriteResult {
-  const fn new() -> Self {
+  const fn new(
+    waiting: Vec<OneshotFulfill<Result<()>>>,
+    buffers: Vec<IoSlice<'static>>,
+    guard: RecursiveWrite,
+  ) -> Self {
     Self {
-      count: AtomicU16::new(1),
       error: AtomicCell::new(None),
+      waiting,
+      buffers,
+      guard,
     }
   }
 
-  #[must_use]
-  fn resolve_with(&self, waiting: UnsafeVec<OneshotFulfill<Result<()>>>) -> bool {
-    if self.count.fetch_sub(1, Ordering::AcqRel) > 1 {
-      return false;
-    }
-
-    let result = self.error.load().map(Err).unwrap_or(Ok(()));
-    for done in unsafe { waiting.take() } {
-      done.fulfill(result.map_err(Error::from));
-    }
-    true
+  fn range_buffer(&self, start: usize, end: usize) -> &[IoSlice<'static>] {
+    &self.buffers[start..end]
   }
 
   fn set_error(&self, error: ErrorKind) {
     let _ = self.error.compare_exchange(None, Some(error));
   }
-
-  fn increase_count(&self) {
-    self.count.fetch_add(1, Ordering::Release);
+}
+impl Drop for BatchWriteResult {
+  fn drop(&mut self) {
+    let result = self.error.load().map(Err).unwrap_or(Ok(()));
+    for done in self.waiting.drain(..) {
+      done.fulfill(result.map_err(Error::from));
+    }
   }
 }
 
 const EXTENT_SIZE: u64 = 1 << 20;
 
 impl BatchQueue<WriteTask, Result<()>> {
-  fn recursive_write(self: &Arc<Self>, arg: WriteBatchArg) {
-    if self.try_release() {
-      return;
-    }
-    self.drain_write(arg);
-  }
-
-  fn finish_write(
-    self: &Arc<Self>,
-    arg: &WriteBatchArg,
-    values: Vec<WriteTask>,
-    waiting: Vec<OneshotFulfill<Result<()>>>,
-  ) {
-    let waiting = UnsafeVec::new(waiting);
-    let result = Arc::new(BatchWriteResult::new());
-    for chunk in values.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
-      result.increase_count();
-      let mut bufs = Vec::with_capacity(chunk.len());
-      let (offset, _) = chunk.first().copied().unwrap();
-      for (_, buf) in chunk {
-        bufs.push(*buf);
-      }
-
-      let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&*bufs) };
-      let measure = arg.metrics.disk_write.start();
-      let callback = self.create_callback(
-        arg,
-        bufs,
-        offset,
-        waiting.clone(),
-        result.clone(),
-        measure,
-        1,
-      );
-
-      let (task, _) = if static_ref.len() == 1 {
-        IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
-      } else {
-        IOTask::new_pwritev(static_ref, offset, Some(callback))
-      };
-      arg.backend.submit(task)
-    }
-
-    if result.resolve_with(waiting) {
-      self.recursive_write(arg.clone());
-    }
-  }
-
-  fn create_callback(
-    self: &Arc<Self>,
-    arg: &WriteBatchArg,
-    bufs: Vec<IoSlice<'static>>,
-    offset: u64,
-    waiting: UnsafeVec<OneshotFulfill<Result<()>>>,
-    result: Arc<BatchWriteResult>,
-    measurement: Option<Instant>,
-    trial: u8,
-  ) -> impl FnOnce(&Result<usize>) {
-    let bytes = bufs.iter().map(|v| v.len()).sum::<usize>();
-    let queue = self.clone();
-    let arg = arg.clone();
-    move |r: &Result<usize>| {
-      match r {
-        Ok(c) if *c < bytes => {
-          return queue.retry_write(
-            arg,
-            trial,
-            offset,
-            bufs,
-            waiting,
-            result,
-            measurement,
-          )
-        }
-        Ok(_) => {}
-        Err(err) => result.set_error(err.kind()),
-      };
-      arg.metrics.disk_write.record(measurement);
-      if result.resolve_with(waiting) {
-        queue.recursive_write(arg);
-      };
-    }
-  }
-  fn retry_write(
-    self: &Arc<Self>,
-    arg: WriteBatchArg,
-    trial: u8,
-    offset: u64,
-    bufs: Vec<IoSlice<'static>>,
-    waiting: UnsafeVec<OneshotFulfill<Result<()>>>,
-    result: Arc<BatchWriteResult>,
-    measurement: Option<Instant>,
-  ) {
-    if trial >= IO_RETRY {
-      arg.metrics.disk_write.record(measurement);
-      result.set_error(ErrorKind::WriteZero);
-      if !result.resolve_with(waiting) {
-        return;
-      };
-      return self.recursive_write(arg);
-    };
-
-    let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-    let callback =
-      self.create_callback(&arg, bufs, offset, waiting, result, measurement, trial + 1);
-    let (task, _) = if static_ref.len() == 1 {
-      IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
-    } else {
-      IOTask::new_pwritev(static_ref, offset, Some(callback))
-    };
-    arg.backend.submit(task);
-  }
-  fn drain_write(self: &Arc<Self>, arg: WriteBatchArg) {
-    let count = max_iov();
-    let mut values = Vec::with_capacity(count);
-    let mut waiting = Vec::with_capacity(count);
-    for (task, done) in (0..count).map_while(|_| self.queue.pop()) {
-      values.push(task);
-      waiting.push(done);
-    }
-
-    if waiting.is_empty() {
-      return self.recursive_write(arg);
-    }
-
-    let Some(_token) = arg.state.pin.try_shared() else {
-      arg.state.closed.fetch_or(true, Ordering::Relaxed);
-      waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-      return self.recursive_write(arg);
-    };
-    arg.metrics.disk_write_batch.record(waiting.len() as f64);
-
-    if values.len() > 1 {
-      values.sort_by_key(|(i, _)| *i);
-      values.reverse();
-      values.dedup_by_key(|(i, b)| (*i, b.len()));
-      values.reverse();
-    }
-
-    let Some(alloc) = arg.alloc.as_deref() else {
-      return self.finish_write(&arg, values, waiting);
-    };
-
-    // Space allocation is owned by this batching layer. Since all writes for this
-    // handle are flushed here, the worker can preallocate once up to the highest
-    // required offset before issuing the actual writes.
-    let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
-    let mut allocated = alloc.get();
-    if allocated >= required {
-      return self.finish_write(&arg, values, waiting);
-    }
-
-    // Preallocate in coarse chunks so the filesystem can keep nearby writes in a
-    // more local extent instead of allocating space block by block. 1 MiB is a
-    // simple default chunk size, not a carefully tuned boundary.
-    while required >= allocated {
-      allocated += EXTENT_SIZE;
-    }
-
-    let callback = self.create_fallocate_callback(&arg, values, waiting, allocated);
-    let (task, _) =
-      IOTask::new_fallocate(alloc.get(), allocated - alloc.get(), Some(callback));
-    arg.backend.submit(task);
-  }
-
-  fn create_fallocate_callback(
-    self: &Arc<Self>,
-    arg: &WriteBatchArg,
-    values: Vec<WriteTask>,
-    waiting: Vec<OneshotFulfill<Result<()>>>,
-    allocated: u64,
-  ) -> impl FnOnce(&Result<usize>) {
-    let queue = self.clone();
-    let arg = arg.clone();
-    move |result| {
-      if let Err(err) = result {
-        waiting
-          .into_iter()
-          .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
-        return queue.recursive_write(arg);
-      };
-
-      let Some(_token) = arg.state.pin.try_shared() else {
-        arg.state.closed.fetch_or(true, Ordering::Relaxed);
-        waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-        return queue.recursive_write(arg);
-      };
-      arg.alloc.as_deref().unwrap().set(allocated);
-      queue.finish_write(&arg, values, waiting);
-    }
-  }
-
   pub fn publish_write(
     self: &Arc<Self>,
     state: &Arc<HandleState>,
@@ -343,75 +316,86 @@ impl BatchQueue<WriteTask, Result<()>> {
   ) -> Oneshot<Result<()>> {
     let (o, occupied) = self.push_and_compete((offset, IoSlice::new(buf)));
     if occupied {
-      let arg = WriteBatchArg {
-        state: state.clone(),
-        backend: backend.clone(),
-        metrics: metrics.clone(),
-        alloc: alloc.clone(),
-      };
-      self.drain_write(arg);
+      let guard = RecursiveWrite::new(
+        self.clone(),
+        state.clone(),
+        backend.clone(),
+        metrics.clone(),
+        alloc.clone(),
+      );
+      drain_write(guard);
     }
     o
   }
 }
-impl BatchQueue<(), Result<()>> {
-  fn recursive_sync(
-    self: &Arc<Self>,
+
+struct RecursiveSync {
+  queue: Arc<BatchQueue<(), Result<()>>>,
+  state: Arc<HandleState>,
+  backend: Arc<dyn IOBackend>,
+  metrics: Arc<MetricsRegistry>,
+}
+impl RecursiveSync {
+  const fn new(
+    queue: Arc<BatchQueue<(), Result<()>>>,
     state: Arc<HandleState>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
-  ) {
-    if self.try_release() {
+  ) -> Self {
+    Self {
+      queue,
+      state,
+      backend,
+      metrics,
+    }
+  }
+}
+impl Drop for RecursiveSync {
+  fn drop(&mut self) {
+    if self.queue.try_release() {
       return;
     }
-    self.drain_sync(state, backend, metrics);
+    drain_sync(Self::new(
+      self.queue.clone(),
+      self.state.clone(),
+      self.backend.clone(),
+      self.metrics.clone(),
+    ));
   }
-  fn drain_sync(
-    self: &Arc<Self>,
-    state: Arc<HandleState>,
-    backend: Arc<dyn IOBackend>,
-    metrics: Arc<MetricsRegistry>,
-  ) {
-    const COUNT: usize = 512;
-    let mut waiting = Vec::with_capacity(COUNT);
-    for (_, done) in (0..COUNT).map_while(|_| self.queue.pop()) {
-      waiting.push(done);
-    }
+}
 
-    if waiting.is_empty() {
-      return self.recursive_sync(state, backend, metrics);
-    }
-
-    let Some(_token) = state.pin.try_shared() else {
-      state.closed.fetch_or(true, Ordering::Relaxed);
-      waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-      return self.recursive_sync(state, backend, metrics);
-    };
-
-    metrics.disk_sync_batch.record(waiting.len() as f64);
-    let callback = self.create_sync_callback(&state, &backend, &metrics, waiting);
-    let (task, _) = IOTask::new_fdatasync(Some(callback));
-    backend.submit(task);
+fn drain_sync(guard: RecursiveSync) {
+  const COUNT: usize = 512;
+  let mut waiting = Vec::with_capacity(COUNT);
+  for (_, done) in guard.queue.drain_n(COUNT) {
+    waiting.push(done);
   }
-  fn create_sync_callback(
-    self: &Arc<Self>,
-    state: &Arc<HandleState>,
-    backend: &Arc<dyn IOBackend>,
-    metrics: &Arc<MetricsRegistry>,
-    waiting: Vec<OneshotFulfill<Result<()>>>,
-  ) -> impl FnOnce(&Result<usize>) {
-    let queue = self.clone();
-    let state = state.clone();
-    let backend = backend.clone();
-    let metrics = metrics.clone();
-    move |r| {
-      let result = r.as_ref().map(|_| ()).map_err(|err| err.kind());
-      for done in waiting {
-        done.fulfill(result.map_err(Error::from));
-      }
-      queue.recursive_sync(state, backend, metrics);
-    }
+
+  if waiting.is_empty() {
+    return;
   }
+
+  let state = guard.state.clone();
+  let Some(_token) = state.pin.try_shared() else {
+    state.closed.fetch_or(true, Ordering::Relaxed);
+    waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+    return;
+  };
+
+  guard.metrics.disk_sync_batch.record(waiting.len() as f64);
+  let backend = guard.backend.clone();
+  let callback = move |r: &Result<usize>| {
+    let _guard = guard;
+    let result = r.as_ref().map(|_| ()).map_err(|err| err.kind());
+    for done in waiting {
+      done.fulfill(result.map_err(Error::from));
+    }
+  };
+  let (task, _) = IOTask::new_fdatasync(Some(callback));
+  backend.submit(task);
+}
+
+impl BatchQueue<(), Result<()>> {
   pub fn publish_sync(
     self: &Arc<Self>,
     state: &Arc<HandleState>,
@@ -420,10 +404,13 @@ impl BatchQueue<(), Result<()>> {
   ) -> Oneshot<Result<()>> {
     let (o, occupied) = self.push_and_compete(());
     if occupied {
-      let state = state.clone();
-      let backend = backend.clone();
-      let metrics = metrics.clone();
-      self.drain_sync(state, backend, metrics);
+      let guard = RecursiveSync::new(
+        self.clone(),
+        state.clone(),
+        backend.clone(),
+        metrics.clone(),
+      );
+      drain_sync(guard);
     }
     o
   }
