@@ -1,6 +1,6 @@
 use std::{
   fs::File,
-  io::{Error, Read, Result, Write},
+  io::{Error, Result},
   mem::ManuallyDrop,
   os::fd::{AsRawFd, FromRawFd, RawFd},
   sync::{
@@ -142,6 +142,7 @@ fn shutdown_gracefully(
   mut submitted: usize,
 ) {
   while !backlog.is_empty() {
+    sq.sync();
     submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
     let (count, _) = drain_completion(&mut cq, None);
     submitted -= count;
@@ -253,14 +254,15 @@ impl AsyncIO {
           continue;
         }
 
+        parked.fetch_or(true, Ordering::AcqRel);
         backoff.reset();
         cq.sync();
-        if cq.is_empty() && queue.is_empty() && !parked.fetch_or(true, Ordering::Relaxed)
-        {
+        if cq.is_empty() && queue.is_empty() {
           ignore_ebusy(submitter.submit_and_wait(1));
         } else {
           submit_if_not_empty(&submitter, &sq);
         }
+        parked.fetch_and(false, Ordering::AcqRel);
       }
     }
   }
@@ -306,7 +308,7 @@ impl AsyncIO {
       return;
     };
     self.queue.push(Context::Term);
-    self.wake().unwrap();
+    self.wake_force().unwrap();
     handle.join().unwrap();
   }
 }
