@@ -88,7 +88,7 @@ pub struct DefaultDiskBackend {
 }
 impl DefaultDiskBackend {
   pub fn new() -> Result<Self> {
-    let async_io = AsyncIO::new(1024)?;
+    let async_io = AsyncIO::new(128)?;
     Ok(Self {
       async_io: Arc::new(async_io),
     })
