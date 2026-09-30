@@ -11,8 +11,8 @@ use std::{
 use crossbeam::utils::Backoff;
 
 use super::{
-  AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend,
-  ScanIOHandle, SyncBatch, WriteBatch,
+  AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend, IOTask,
+  PendingAsync, ScanIOHandle, SyncBatch, WriteBatch, NO_CALLBACK,
 };
 use crate::{
   background::{Callback, Oneshot},
@@ -24,15 +24,17 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub enum PendingIO<T = ()> {
+pub enum PendingIO<T: 'static = ()> {
   Fulfilled(IOResult<T>),
-  Pending(Oneshot<IOResult<T>>),
+  Scheduled(Oneshot<IOResult<T>>),
+  Direct(PendingAsync<T>),
 }
 impl<T> PendingIO<T> {
   pub fn wait(self) -> IOResult<T> {
     match self {
       Self::Fulfilled(v) => v,
-      Self::Pending(o) => o.wait().unwrap(),
+      Self::Scheduled(o) => o.wait().unwrap(),
+      Self::Direct(o) => o.wait(),
     }
   }
 
@@ -43,7 +45,8 @@ impl<T> PendingIO<T> {
   pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
     match self {
       PendingIO::Fulfilled(v) => f(&v),
-      PendingIO::Pending(o) => o.must_call(Callback::new(f)),
+      PendingIO::Scheduled(o) => o.must_call(Callback::new(f)),
+      PendingIO::Direct(o) => o.must_call(Callback::new(f)),
     };
   }
 }
@@ -158,10 +161,9 @@ impl IOPool {
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
-    file
-      .submit_fallocate(0, size)
-      .and_then(|done| done.wait().unwrap())
-      .map_err(Error::IO)?;
+    let (task, done) = IOTask::new_fallocate(0, size, NO_CALLBACK);
+    file.submit(task);
+    done.wait().map_err(Error::IO)?;
     Ok(self.create_handle(file, filename, None))
   }
 
@@ -248,7 +250,7 @@ impl IOHandle {
       buf,
       offset,
     );
-    PendingIO::Pending(done)
+    PendingIO::Scheduled(done)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
@@ -259,17 +261,16 @@ impl IOHandle {
       self
         .sync_scheduler
         .publish_sync(&self.state, &self.backend, &self.metrics);
-    PendingIO::Pending(done)
+    PendingIO::Scheduled(done)
   }
 
   pub fn fsync(&self) -> PendingIO<usize> {
     let Some(_token) = self.state.try_shared() else {
       return PendingIO::Fulfilled(Ok(0));
     };
-    match self.backend.submit_fsync() {
-      Ok(done) => PendingIO::Pending(done),
-      Err(err) => PendingIO::Fulfilled(Err(err)),
-    }
+    let (task, done) = IOTask::new_fsync(NO_CALLBACK);
+    self.backend.submit(task);
+    PendingIO::Direct(done)
   }
 
   /**

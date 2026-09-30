@@ -55,9 +55,9 @@ impl<VTable> VPtr<VTable> {
   }
 
   pub const fn into_raw(this: Self) -> *mut () {
-    let ptr = this.0.as_ptr();
+    let ptr = this.erased();
     forget(this);
-    ptr.cast()
+    ptr.as_ptr()
   }
   pub const unsafe fn from_raw(raw: *mut ()) -> Self {
     let ptr = raw as *mut Header<VTable>;

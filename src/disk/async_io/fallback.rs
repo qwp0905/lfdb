@@ -7,7 +7,7 @@ use std::{
 
 use crate::background::{Close, SharedWorkThread, ThreadBuilder};
 
-use super::{Task, TaskType};
+use super::{FullTask, TaskType};
 
 #[cfg(unix)]
 use std::{
@@ -106,7 +106,7 @@ fn fallocate(file: &File, offset: u64, len: u64) -> Result<()> {
   file.set_len(offset + len)
 }
 
-fn handle_task(task: Task) {
+fn handle_task(task: FullTask) {
   let file = task.toward;
   let result = match task.task_type {
     TaskType::Pwrite { offset, buf } => pwrite(&file, buf, offset),
@@ -118,7 +118,7 @@ fn handle_task(task: Task) {
   task.done.fulfill(result);
 }
 pub struct AsyncIO {
-  thread: SharedWorkThread<Task, ()>,
+  thread: SharedWorkThread<FullTask, ()>,
 }
 impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {
@@ -132,9 +132,8 @@ impl AsyncIO {
     Ok(Self { thread })
   }
 
-  pub fn submit(&self, task: Task) -> Result<()> {
+  pub fn submit(&self, task: FullTask) {
     self.thread.dispatch(task);
-    Ok(())
   }
 
   pub fn close(&self) {

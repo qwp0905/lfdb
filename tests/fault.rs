@@ -66,7 +66,7 @@ impl IOBackend for FaultIO {
     self.inner.pread(buf, offset)
   }
 
-  fn submit(&self, task: IOTask) -> IoResult<()> {
+  fn submit(&self, task: IOTask) {
     if !self.is_wal {
       return self.inner.submit(task);
     }
@@ -78,7 +78,10 @@ impl IOBackend for FaultIO {
       lfdb::TaskType::Fallocate { .. } => return self.inner.submit(task),
     };
     if flag.swap(false, Ordering::AcqRel) {
-      return Err(IoError::from(ErrorKind::StorageFull));
+      task
+        .done
+        .fulfill(Err(IoError::from(ErrorKind::StorageFull)));
+      return;
     }
 
     self.inner.submit(task)

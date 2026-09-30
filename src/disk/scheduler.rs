@@ -12,7 +12,7 @@ use crossbeam::{atomic::AtomicCell, queue::SegQueue};
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
-  background::{oneshot, Callback, Oneshot, OneshotFulfill},
+  background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
   utils::{create_static_ref, ExclusivePin, ExclusiveToken, SharedToken},
 };
@@ -137,6 +137,8 @@ impl BatchWriteResult {
   }
 }
 
+const EXTENT_SIZE: u64 = 1 << 20;
+
 impl BatchQueue<WriteTask, Result<()>> {
   fn recursive_write(self: &Arc<Self>, arg: WriteBatchArg) {
     if self.try_release() {
@@ -152,7 +154,6 @@ impl BatchQueue<WriteTask, Result<()>> {
     waiting: Vec<OneshotFulfill<Result<()>>>,
   ) {
     let waiting = UnsafeVec::new(waiting);
-    let mut failed: Option<Vec<_>> = None;
     let result = Arc::new(BatchWriteResult::new());
     for chunk in values.chunk_by(|(a_o, a_b), (b_o, _)| a_o + a_b.len() as u64 == *b_o) {
       result.increase_count();
@@ -163,12 +164,6 @@ impl BatchQueue<WriteTask, Result<()>> {
       }
 
       let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&*bufs) };
-      let (task, done) = if bufs.len() == 1 {
-        IOTask::new_pwrite(&static_ref[0], offset)
-      } else {
-        IOTask::new_pwritev(static_ref, offset)
-      };
-
       let measure = arg.metrics.disk_write.start();
       let callback = self.create_callback(
         arg,
@@ -179,15 +174,13 @@ impl BatchQueue<WriteTask, Result<()>> {
         measure,
         0,
       );
-      if let Err(err) = arg.backend.submit(task) {
-        failed.get_or_insert_default().push((err, callback));
-        continue;
-      };
-      done.must_call(callback);
-    }
 
-    for (err, callback) in failed.into_iter().flatten() {
-      callback.call(&Err(err))
+      let (task, _) = if static_ref.len() == 1 {
+        IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+      } else {
+        IOTask::new_pwritev(static_ref, offset, Some(callback))
+      };
+      arg.backend.submit(task)
     }
 
     if result.resolve_with(waiting) {
@@ -204,11 +197,11 @@ impl BatchQueue<WriteTask, Result<()>> {
     result: Arc<BatchWriteResult>,
     measurement: Option<Instant>,
     trial: u8,
-  ) -> Callback<Result<usize>> {
+  ) -> impl FnOnce(&Result<usize>) {
     let bytes = bufs.iter().map(|v| v.len()).sum::<usize>();
     let queue = self.clone();
     let arg = arg.clone();
-    Callback::new(move |r: &Result<usize>| {
+    move |r: &Result<usize>| {
       match r {
         Ok(c) if *c < bytes => {
           return queue.retry_write(
@@ -228,7 +221,7 @@ impl BatchQueue<WriteTask, Result<()>> {
       if result.resolve_with(waiting) {
         queue.recursive_write(arg);
       };
-    })
+    }
   }
   fn retry_write(
     self: &Arc<Self>,
@@ -250,18 +243,14 @@ impl BatchQueue<WriteTask, Result<()>> {
     };
 
     let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-    let (task, done) = if bufs.len() == 1 {
-      IOTask::new_pwrite(&static_ref[0], offset)
-    } else {
-      IOTask::new_pwritev(static_ref, offset)
-    };
-
     let callback =
       self.create_callback(&arg, bufs, offset, waiting, result, measurement, trial + 1);
-    if let Err(err) = arg.backend.submit(task) {
-      return callback.call(&Err(err));
-    }
-    done.must_call(callback);
+    let (task, _) = if static_ref.len() == 1 {
+      IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+    } else {
+      IOTask::new_pwritev(static_ref, offset, Some(callback))
+    };
+    arg.backend.submit(task);
   }
   fn drain_write(self: &Arc<Self>, arg: WriteBatchArg) {
     let count = max_iov();
@@ -276,7 +265,7 @@ impl BatchQueue<WriteTask, Result<()>> {
       return self.recursive_write(arg);
     }
 
-    let Some(token) = arg.state.pin.try_shared() else {
+    let Some(_token) = arg.state.pin.try_shared() else {
       arg.state.closed.fetch_or(true, Ordering::Relaxed);
       waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
       return self.recursive_write(arg);
@@ -298,22 +287,35 @@ impl BatchQueue<WriteTask, Result<()>> {
     // handle are flushed here, the worker can preallocate once up to the highest
     // required offset before issuing the actual writes.
     let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
-    let (done, allocated) = match alloc_if_needed(required, alloc, &*arg.backend) {
-      Ok(Some(v)) => v,
-      Ok(None) => return self.finish_write(&arg, values, waiting),
-      Err(err) => {
-        drop(token);
-        waiting
-          .into_iter()
-          .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
-        return self.recursive_write(arg);
-      }
-    };
+    let mut allocated = alloc.get();
+    if allocated >= required {
+      return self.finish_write(&arg, values, waiting);
+    }
 
-    drop(token);
+    // Preallocate in coarse chunks so the filesystem can keep nearby writes in a
+    // more local extent instead of allocating space block by block. 1 MiB is a
+    // simple default chunk size, not a carefully tuned boundary.
+    while required >= allocated {
+      allocated += EXTENT_SIZE;
+    }
+
+    let callback = self.create_fallocate_callback(&arg, values, waiting, allocated);
+    let (task, _) =
+      IOTask::new_fallocate(alloc.get(), allocated - alloc.get(), Some(callback));
+    arg.backend.submit(task);
+  }
+
+  fn create_fallocate_callback(
+    self: &Arc<Self>,
+    arg: &WriteBatchArg,
+    values: Vec<WriteTask>,
+    waiting: Vec<OneshotFulfill<Result<()>>>,
+    allocated: u64,
+  ) -> impl FnOnce(&Result<usize>) {
     let queue = self.clone();
-    let callback = Callback::new(move |r: &Result<usize>| {
-      if let Err(err) = r {
+    let arg = arg.clone();
+    move |result| {
+      if let Err(err) = result {
         waiting
           .into_iter()
           .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
@@ -327,8 +329,7 @@ impl BatchQueue<WriteTask, Result<()>> {
       };
       arg.alloc.as_deref().unwrap().set(allocated);
       queue.finish_write(&arg, values, waiting);
-    });
-    done.must_call(callback);
+    }
   }
 
   pub fn publish_write(
@@ -388,27 +389,30 @@ impl BatchQueue<(), Result<()>> {
     };
 
     metrics.disk_sync_batch.record(waiting.len() as f64);
-    let (task, done) = IOTask::new_fdatasync();
-    if let Err(err) = backend.submit(task) {
-      drop(token);
-      waiting
-        .into_iter()
-        .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
-      return self.recursive_sync(state, backend, metrics);
-    }
+    let callback = self.create_sync_callback(&state, &backend, &metrics, waiting);
+    let (task, _) = IOTask::new_fdatasync(Some(callback));
+    backend.submit(task);
 
     drop(token);
+  }
+  fn create_sync_callback(
+    self: &Arc<Self>,
+    state: &Arc<HandleState>,
+    backend: &Arc<dyn IOBackend>,
+    metrics: &Arc<MetricsRegistry>,
+    waiting: Vec<OneshotFulfill<Result<()>>>,
+  ) -> impl FnOnce(&Result<usize>) {
     let queue = self.clone();
-    let callback = Callback::new(move |r: &Result<usize>| {
+    let state = state.clone();
+    let backend = backend.clone();
+    let metrics = metrics.clone();
+    move |r| {
       let result = r.as_ref().map(|_| ()).map_err(|err| err.kind());
       for done in waiting {
         done.fulfill(result.map_err(Error::from));
       }
       queue.recursive_sync(state, backend, metrics);
-    });
-    if let Err(err) = done.add_callback(callback) {
-      err.call(&done.wait().unwrap());
-    };
+    }
   }
   pub fn publish_sync(
     self: &Arc<Self>,
@@ -478,24 +482,4 @@ impl HandleState {
   pub fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
     self.pin.try_exclusive()
   }
-}
-
-// Preallocate in coarse chunks so the filesystem can keep nearby writes in a
-// more local extent instead of allocating space block by block. 1 MiB is a
-// simple default chunk size, not a carefully tuned boundary.
-const EXTENT: u64 = 1 << 20;
-fn alloc_if_needed(
-  required: u64,
-  alloc: &AllocState,
-  backend: &dyn IOBackend,
-) -> Result<Option<(Oneshot<Result<usize>>, u64)>> {
-  let mut allocated = alloc.get();
-  if allocated >= required {
-    return Ok(None);
-  }
-  while required >= allocated {
-    allocated += EXTENT;
-  }
-  let done = backend.submit_fallocate(alloc.get(), allocated - alloc.get())?;
-  Ok(Some((done, allocated)))
 }

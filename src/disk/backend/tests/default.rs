@@ -1,3 +1,5 @@
+use super::super::NO_CALLBACK;
+
 use super::*;
 use tempfile::tempdir_in;
 
@@ -14,13 +16,13 @@ fn test_pread() -> Result<()> {
   let content = b"Hello, World!";
 
   // Create a test file with content
-  let (task, done) = IOTask::new_pwrite(content, 0);
-  file.submit(task).unwrap();
-  done.wait().unwrap().unwrap();
+  let (task, done) = IOTask::new_pwrite(content, 0, NO_CALLBACK);
+  file.submit(task);
+  done.wait().unwrap();
 
-  let (task, done) = IOTask::new_fsync();
-  file.submit(task).unwrap();
-  done.wait().unwrap().unwrap();
+  let (task, done) = IOTask::new_fsync(NO_CALLBACK);
+  file.submit(task);
+  done.wait().unwrap();
 
   // Test 1: Normal read
   let mut buf = vec![0; 5];
@@ -61,16 +63,16 @@ fn test_pwrite() {
 
   // Test 1: Write at the beginning
   let content = b"Hello";
-  let (task, done) = IOTask::new_pwrite(content, 0);
-  file.submit(task).unwrap();
-  let bytes_written = done.wait().unwrap().unwrap();
+  let (task, done) = IOTask::new_pwrite(content, 0, NO_CALLBACK);
+  file.submit(task);
+  let bytes_written = done.wait().unwrap();
   assert_eq!(bytes_written, 5);
 
   // Test 2: Write at specific offset
   let content = b"World";
-  let (task, done) = IOTask::new_pwrite(content, 6);
-  file.submit(task).unwrap();
-  let bytes_written = done.wait().unwrap().unwrap();
+  let (task, done) = IOTask::new_pwrite(content, 6, NO_CALLBACK);
+  file.submit(task);
+  let bytes_written = done.wait().unwrap();
   assert_eq!(bytes_written, 5);
 
   // Verify written content
@@ -83,9 +85,9 @@ fn test_pwrite() {
 
   // Test 3: Write with empty buffer
   let empty_buf: &[u8] = &[];
-  let (task, done) = IOTask::new_pwrite(empty_buf, 0);
-  file.submit(task).unwrap();
-  let bytes_written = done.wait().unwrap().unwrap();
+  let (task, done) = IOTask::new_pwrite(empty_buf, 0, NO_CALLBACK);
+  file.submit(task);
+  let bytes_written = done.wait().unwrap();
   assert_eq!(bytes_written, 0);
 }
 
@@ -101,28 +103,28 @@ fn test_allocate() -> Result<()> {
     )
     .unwrap();
 
-  let (task, done) = IOTask::new_fallocate(0, 0);
-  file.submit(task)?;
-  assert!(done.wait().unwrap().is_err());
+  let (task, done) = IOTask::new_fallocate(0, 0, NO_CALLBACK);
+  file.submit(task);
+  assert!(done.wait().is_err());
 
-  let (task, done) = IOTask::new_fallocate(0, 100);
-  file.submit(task)?;
-  done.wait().unwrap()?;
+  let (task, done) = IOTask::new_fallocate(0, 100, NO_CALLBACK);
+  file.submit(task);
+  done.wait()?;
   assert_eq!(file.metadata()?.len(), 100);
 
-  let (task, done) = IOTask::new_fallocate(100, 200);
-  file.submit(task)?;
-  done.wait().unwrap()?;
+  let (task, done) = IOTask::new_fallocate(100, 200, NO_CALLBACK);
+  file.submit(task);
+  done.wait()?;
   assert_eq!(file.metadata()?.len(), 300);
 
-  let (task, done) = IOTask::new_fallocate(500, 10);
-  file.submit(task)?;
-  done.wait().unwrap()?;
+  let (task, done) = IOTask::new_fallocate(500, 10, NO_CALLBACK);
+  file.submit(task);
+  done.wait()?;
   assert_eq!(file.metadata()?.len(), 510);
 
-  let (task, done) = IOTask::new_fallocate(510, 0);
-  file.submit(task)?;
-  assert!(done.wait().unwrap().is_err());
+  let (task, done) = IOTask::new_fallocate(510, 0, NO_CALLBACK);
+  file.submit(task);
+  assert!(done.wait().is_err());
 
   Ok(())
 }

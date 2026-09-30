@@ -30,7 +30,7 @@ use std::os::windows::fs::{FileExt, OpenOptionsExt};
 use crate::utils::info;
 
 use super::{
-  super::{AsyncIO, Task},
+  super::{AsyncIO, FullTask},
   DiskBackend, IOBackend, IOTask,
 };
 
@@ -56,13 +56,13 @@ impl IOBackend for DefaultIOBackend {
     self.file.seek_read(buf, offset)
   }
 
-  fn submit(&self, task: IOTask) -> Result<()> {
-    let task = Task {
+  fn submit(&self, task: IOTask) {
+    let task = FullTask {
       toward: self.file.clone(),
       task_type: task.task_type,
       done: task.done,
     };
-    self.async_io.submit(task)
+    self.async_io.submit(task);
   }
 
   fn metadata(&self) -> Result<std::fs::Metadata> {

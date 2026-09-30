@@ -188,22 +188,19 @@ impl<T> OneshotBehavior<T> {
     self.callback.set(f)
   }
 
-  unsafe fn fulfill(&self, result: T) {
+  pub fn fulfill_and_wake(&self, result: T) {
     if let Some(callback) = self.callback.take() {
       callback.call(&result);
     }
     unsafe { (*self.value.get()).write(result) };
-  }
-
-  unsafe fn wake(this: *const Self) {
     let backoff = Backoff::new();
-    let mut state = (*this).state.load();
+    let mut state = self.state.load();
     loop {
       if state == STATE_DISCONNECTED {
-        return unsafe { (*this).drop_value() };
+        return unsafe { self.drop_value() };
       }
 
-      if let Err(err) = (*this).state.cas_weak(state, STATE_FULFILLED) {
+      if let Err(err) = self.state.cas_weak(state, STATE_FULFILLED) {
         backoff.spin();
         state = err;
         continue;
@@ -214,13 +211,6 @@ impl<T> OneshotBehavior<T> {
         STATE_WAITING => {}
         _ => unsafe { SBox::from_raw(state) }.wake(),
       };
-    }
-  }
-
-  pub fn fulfill_and_wake(this: *const Self, result: T) {
-    unsafe {
-      (*this).fulfill(result);
-      Self::wake(this);
     }
   }
 
@@ -360,15 +350,17 @@ impl<T> Drop for Oneshot<T> {
 pub struct OneshotFulfill<T>(Pair<OneshotBehavior<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
-    OneshotBehavior::fulfill_and_wake(&raw const *self.0, result);
+    self.0.fulfill_and_wake(result);
   }
 
+  #[cfg(target_os = "linux")]
   pub const fn into_raw(this: Self) -> *mut OneshotBehavior<T> {
     let ptr = this.0.as_ptr();
     forget(this);
     ptr.cast()
   }
 
+  #[cfg(target_os = "linux")]
   pub const unsafe fn from_raw(raw: *mut OneshotBehavior<T>) -> Self {
     Self(Pair::from_raw(raw))
   }

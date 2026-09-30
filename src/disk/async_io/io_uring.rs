@@ -16,11 +16,25 @@ use io_uring::{
 };
 
 use crate::{
-  background::{OneshotBehavior, OneshotFulfill, ThreadSlot, UnwindSpawner},
+  background::{ThreadSlot, UnwindSpawner},
   utils::ChunkQueue,
 };
 
-use super::{Task, TaskType};
+use super::{AsyncTask, Task, TaskType};
+
+struct EventFd(File);
+impl EventFd {
+  unsafe fn from_raw_fd(fd: RawFd) -> Self {
+    Self(unsafe { File::from_raw_fd(fd) })
+  }
+
+  fn consume(&self) {
+    todo!()
+  }
+  fn wake(&self) {
+    todo!()
+  }
+}
 
 fn cvt(ret: i32) -> Result<usize> {
   if ret < 0 {
@@ -50,13 +64,13 @@ fn to_entry(task: Task) -> squeue::Entry {
       opcode::Fallocate::new(fd, len).offset(offset).build()
     }
   };
-  entry.set_user_data(OneshotFulfill::into_raw(task.done) as u64);
+  entry.set_user_data(AsyncTask::into_raw(task.done) as u64);
   entry
 }
 
 fn drain_completion(
   cq: &mut CompletionQueue,
-  mut maybe_waker: Option<&File>,
+  mut maybe_waker: Option<&EventFd>,
 ) -> (usize, bool) {
   cq.sync();
   let mut count = 0;
@@ -66,16 +80,15 @@ fn drain_completion(
     let ret = cqe.result();
     let user_data = cqe.user_data();
     if user_data != POLL {
-      let ptr = (user_data as usize) as *mut OneshotBehavior<Result<usize>>;
-      let done = unsafe { OneshotFulfill::from_raw(ptr) };
+      let ptr = (user_data as usize) as *mut AsyncTask<usize>;
+      let done = unsafe { AsyncTask::from_raw(ptr) };
       done.fulfill(cvt(ret));
       continue;
     }
     let Some(waker) = maybe_waker.as_mut() else {
       continue;
     };
-    let mut buf = [0; 8];
-    waker.read_exact(&mut buf).unwrap();
+    waker.consume();
     found = true;
   }
 
@@ -186,7 +199,7 @@ const POLL: u64 = 0;
 pub struct AsyncIO {
   queue: Arc<SegQueue<Context<Task>>>,
   parked: Arc<AtomicBool>,
-  waker: File,
+  waker: EventFd,
   slot: ThreadSlot,
 }
 impl AsyncIO {
@@ -204,7 +217,7 @@ impl AsyncIO {
       let wake = opcode::PollAdd::new(types::Fd(waker_fd), libc::POLLIN as u32)
         .build()
         .user_data(POLL);
-      let waker = ManuallyDrop::new(unsafe { File::from_raw_fd(waker_fd) });
+      let waker = ManuallyDrop::new(unsafe { EventFd::from_raw_fd(waker_fd) });
       let mut pending = false;
 
       loop {
@@ -259,7 +272,7 @@ impl AsyncIO {
     if waker_fd < 0 {
       return Err(Error::last_os_error());
     }
-    let waker = unsafe { File::from_raw_fd(waker_fd) };
+    let waker = unsafe { EventFd::from_raw_fd(waker_fd) };
     let handle = Builder::new()
       .name("async io".to_string())
       .stack_size(64 << 10)
@@ -277,17 +290,15 @@ impl AsyncIO {
     })
   }
 
-  fn wake(&self) -> Result<()> {
+  fn wake(&self) {
     if self.parked.swap(false, Ordering::Relaxed) {
-      (&self.waker).write_all(&1u64.to_ne_bytes())?;
+      waker.wake();
     }
-    Ok(())
   }
 
-  pub fn submit(&self, task: Task) -> Result<()> {
+  pub fn submit(&self, task: Task) {
     self.queue.push(Context::Task(task));
-    self.wake()?;
-    Ok(())
+    self.wake();
   }
 
   pub fn close(&self) {

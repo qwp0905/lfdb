@@ -55,7 +55,7 @@ impl DirHandle {
       self
         .sync_handle
         .publish_sync(&self.state, &self.io_backend, &self.metrics);
-    PendingIO::Pending(done)
+    PendingIO::Scheduled(done)
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
