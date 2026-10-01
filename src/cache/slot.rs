@@ -121,7 +121,7 @@ impl<'a> AsMut<Page> for WritableSlot<'a> {
       dirty_blocks,
       page_pool,
       block_id,
-    } = &mut self.state
+    } = &self.state
     {
       dirty_blocks.insert(*block_id);
       let mut shadow = page_pool.acquire();
