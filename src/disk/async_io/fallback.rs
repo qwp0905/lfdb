@@ -2,7 +2,8 @@ use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{Close, SharedWorkThread, ThreadBuilder};
 
-use super::{fallocate, pwrite, pwritev, FullTask, TaskType};
+use super::super::{fallocate, pwrite, pwritev};
+use super::{FullTask, TaskType};
 
 fn handle_task(task: FullTask) {
   let file = task.toward;
