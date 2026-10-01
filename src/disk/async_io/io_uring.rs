@@ -17,7 +17,7 @@ use io_uring::{
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
-  utils::{warn, ChunkQueue},
+  utils::warn,
 };
 
 use super::{AsyncTask, FullTask, TaskType};
@@ -123,46 +123,30 @@ fn drain_completion(
     };
     found = true;
   }
-
   (count, found)
 }
 
-fn drain_backlog(
+fn drain_input(
   submitter: &Submitter,
   sq: &mut SubmissionQueue,
-  backlog: &mut ChunkQueue<squeue::Entry>,
-) -> usize {
-  let mut count = 0;
-  loop {
-    if sq.is_full() && is_ebusy(submitter.submit()) {
-      break;
-    };
-    sq.sync();
-    let Some(sqe) = backlog.pop() else {
-      break;
-    };
-    let _ = unsafe { sq.push(&sqe) };
-    count += 1;
-  }
-  count
-}
-fn drain_task(
-  sq: &mut SubmissionQueue,
-  input: &SegQueue<Context<FullTask>>,
-  backlog: &mut ChunkQueue<squeue::Entry>,
+  input: &mut InputQueue,
 ) -> (usize, bool) {
   let mut count = 0;
-  while let Some(ctx) = input.pop() {
-    let entry = match ctx {
-      Context::Task(task) => to_entry(task),
-      Context::Term => return (count, true),
+  while let Some(ctx) = input.peek() {
+    if let Context::Term = ctx {
+      return (count, true);
+    }
+    if sq.is_full() && is_ebusy(submitter.submit()) {
+      break;
+    }
+    sq.sync();
+    let Context::Task(task) = input.pop().unwrap_or_else(|| unreachable!()) else {
+      unreachable!()
     };
-    match unsafe { sq.push(&entry) } {
-      Ok(_) => count += 1,
-      Err(_) => backlog.push(entry),
-    };
+    let entry = to_entry(task);
+    let _ = unsafe { sq.push(&entry) };
+    count += 1;
   }
-  sq.sync();
   (count, false)
 }
 
@@ -170,17 +154,9 @@ fn shutdown_gracefully(
   submitter: Submitter,
   mut sq: SubmissionQueue,
   mut cq: CompletionQueue,
-  mut backlog: ChunkQueue<squeue::Entry>,
   mut submitted: usize,
 ) {
   sq.sync();
-  while !backlog.is_empty() {
-    submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
-    let (count, _) = drain_completion(&mut cq, None);
-    submitted -= count;
-    sq.sync();
-  }
-
   while submitted > 0 {
     cq.sync();
     ignore_ebusy(submitter.submit_and_wait(submitted.min(cq.capacity())));
@@ -223,6 +199,28 @@ fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
   ignore_ebusy(submitter.submit());
 }
 
+struct InputQueue {
+  queue: Arc<SegQueue<Context<FullTask>>>,
+  peeked: Option<Context<FullTask>>,
+}
+impl InputQueue {
+  const fn new(queue: Arc<SegQueue<Context<FullTask>>>) -> Self {
+    Self {
+      queue,
+      peeked: None,
+    }
+  }
+  fn peek(&mut self) -> Option<&Context<FullTask>> {
+    if self.peeked.is_none() {
+      self.peeked = self.queue.pop();
+    }
+    self.peeked.as_ref()
+  }
+  fn pop(&mut self) -> Option<Context<FullTask>> {
+    self.peeked.take().or_else(|| self.queue.pop())
+  }
+}
+
 enum Context<T> {
   Task(T),
   Term,
@@ -244,7 +242,7 @@ impl AsyncIO {
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
     move || {
-      let mut backlog = ChunkQueue::new();
+      let mut input = InputQueue::new(queue);
       let mut submitted = 0;
       let mut ring = IoUring::builder()
         .setup_coop_taskrun()
@@ -260,15 +258,13 @@ impl AsyncIO {
       let mut pending = false;
 
       loop {
-        let (completed_count, found) = drain_completion(&mut cq, Some(&waker));
-        submitted -= completed_count;
+        let (count, found) = drain_completion(&mut cq, Some(&waker));
+        submitted -= count;
         pending &= !found;
-        let backlog_count = drain_backlog(&submitter, &mut sq, &mut backlog);
-        submitted += backlog_count;
-        let (task_count, terminated) = drain_task(&mut sq, &queue, &mut backlog);
-        submitted += task_count;
+        let (count, terminated) = drain_input(&submitter, &mut sq, &mut input);
+        submitted += count;
         if terminated {
-          return shutdown_gracefully(submitter, sq, cq, backlog, submitted);
+          return shutdown_gracefully(submitter, sq, cq, submitted);
         }
 
         if !pending {
@@ -281,14 +277,14 @@ impl AsyncIO {
 
         sq.sync();
         cq.sync();
-        if !cq.is_empty() || !backlog.is_empty() || !queue.is_empty() {
+        if !cq.is_empty() || input.peek().is_some() {
           submit_if_not_empty(&submitter, &sq);
           continue;
         }
 
         parked.fetch_or(true, Ordering::AcqRel);
         cq.sync();
-        if !cq.is_empty() || !queue.is_empty() {
+        if !cq.is_empty() || input.peek().is_some() {
           parked.fetch_and(false, Ordering::AcqRel);
           submit_if_not_empty(&submitter, &sq);
           continue;
