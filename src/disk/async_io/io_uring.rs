@@ -25,7 +25,7 @@ use super::{AsyncTask, FullTask, TaskType};
 struct EventFd(File);
 impl EventFd {
   fn new() -> Result<Self> {
-    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) }?;
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if fd < 0 {
       return Err(Error::last_os_error());
     }
