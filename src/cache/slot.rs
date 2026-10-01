@@ -1,70 +1,10 @@
-use std::{
-  mem::ManuallyDrop,
-  ops::{Deref, DerefMut},
-  ptr::NonNull,
-};
+use std::mem::ManuallyDrop;
 
 use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
   utils::{SBox, SharedToken},
 };
-
-/**
- * Page reference annotated with its logical disk pointer.
- *
- * This is a thin wrapper used when code needs both the page bytes and the block
- * pointer that the cached page represents.
- */
-pub struct RefedSlot {
-  pointer: Pointer,
-  page: PageRef<PAGE_SIZE>,
-  dirty_blocks: NonNull<DirtyBlocks>,
-  block_id: BlockId,
-  modified: bool,
-}
-impl RefedSlot {
-  const fn new(
-    pointer: Pointer,
-    page: PageRef<PAGE_SIZE>,
-    dirty_blocks: &DirtyBlocks,
-    block_id: BlockId,
-  ) -> Self {
-    Self {
-      pointer,
-      page,
-      dirty_blocks: NonNull::from_ref(dirty_blocks),
-      block_id,
-      modified: false,
-    }
-  }
-  pub const fn get_pointer(&self) -> Pointer {
-    self.pointer
-  }
-  fn into_inner(self) -> PageRef<PAGE_SIZE> {
-    self.page
-  }
-
-  const fn is_modified(&self) -> bool {
-    self.modified
-  }
-}
-impl AsRef<Page> for RefedSlot {
-  fn as_ref(&self) -> &Page {
-    &self.page
-  }
-}
-impl AsMut<Page> for RefedSlot {
-  fn as_mut(&mut self) -> &mut Page {
-    if !self.modified {
-      self.modified = true;
-      unsafe { self.dirty_blocks.as_ref() }.insert(self.block_id);
-    }
-    &mut self.page
-  }
-}
-unsafe impl Send for RefedSlot {}
-unsafe impl Sync for RefedSlot {}
 
 /**
  * Access interface for one cached block.
@@ -107,14 +47,15 @@ impl<'a> CachedSlot<'a> {
   where
     'a: 'b,
   {
-    let mut shadow = self.page_pool.acquire();
     let latch = self.block.latch();
-    shadow.copy_from(self.block.load_page().as_slice(), 0);
-    let slot =
-      RefedSlot::new(self.block.get_pointer(), shadow, self.dirty, self.block_id);
-
     WritableSlot {
-      shadow: ManuallyDrop::new(slot),
+      pointer: self.block.get_pointer(),
+      state: CopiedState::Borrowed {
+        page: self.block.load_page(),
+        dirty_blocks: self.dirty,
+        page_pool: self.page_pool,
+        block_id: self.block_id,
+      },
       latch,
       _token: self.token,
     }
@@ -143,29 +84,65 @@ impl Clone for ReadonlySlot {
     }
   }
 }
+
+enum CopiedState<'a> {
+  Borrowed {
+    page: SBox<PageRef<PAGE_SIZE>>,
+    dirty_blocks: &'a DirtyBlocks,
+    page_pool: &'a PagePool<PAGE_SIZE>,
+    block_id: BlockId,
+  },
+  Copied(ManuallyDrop<PageRef<PAGE_SIZE>>),
+}
+
 pub struct WritableSlot<'a> {
-  shadow: ManuallyDrop<RefedSlot>,
+  pointer: Pointer,
+  state: CopiedState<'a>,
   latch: BlockLatch<'a>,
   _token: SharedToken<'a>,
 }
-
-impl<'a> Deref for WritableSlot<'a> {
-  type Target = RefedSlot;
-
-  fn deref(&self) -> &Self::Target {
-    &self.shadow
+impl<'a> WritableSlot<'a> {
+  pub const fn get_pointer(&self) -> Pointer {
+    self.pointer
   }
 }
-impl<'a> DerefMut for WritableSlot<'a> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.shadow
+impl<'a> AsRef<Page> for WritableSlot<'a> {
+  fn as_ref(&self) -> &Page {
+    match &self.state {
+      CopiedState::Borrowed { page, .. } => page,
+      CopiedState::Copied(shadow) => shadow,
+    }
   }
 }
+impl<'a> AsMut<Page> for WritableSlot<'a> {
+  fn as_mut(&mut self) -> &mut Page {
+    if let CopiedState::Borrowed {
+      page,
+      dirty_blocks,
+      page_pool,
+      block_id,
+    } = &mut self.state
+    {
+      dirty_blocks.insert(*block_id);
+      let mut shadow = page_pool.acquire();
+      shadow.copy_from(page.as_slice(), 0);
+      self.state = CopiedState::Copied(ManuallyDrop::new(shadow));
+    }
+    let CopiedState::Copied(page) = &mut self.state else {
+      unreachable!()
+    };
+    page
+  }
+}
+unsafe impl<'a> Send for WritableSlot<'a> {}
+unsafe impl<'a> Sync for WritableSlot<'a> {}
+
 impl<'a> Drop for WritableSlot<'a> {
   fn drop(&mut self) {
-    let shadow = unsafe { ManuallyDrop::take(&mut self.shadow) };
-    if shadow.is_modified() {
-      self.latch.apply(shadow.into_inner());
-    }
+    let shadow = match &mut self.state {
+      CopiedState::Borrowed { .. } => return,
+      CopiedState::Copied(shadow) => unsafe { ManuallyDrop::take(shadow) },
+    };
+    self.latch.apply(shadow);
   }
 }
