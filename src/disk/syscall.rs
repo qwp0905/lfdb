@@ -6,6 +6,8 @@ use std::{
 
 #[cfg(target_vendor = "apple")]
 use std::io::ErrorKind;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
 #[cfg(unix)]
@@ -24,6 +26,7 @@ pub fn pread(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
 }
 
 #[cfg(unix)]
+#[allow(unused)]
 pub fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
   file.write_at(buf, offset)
 }
@@ -33,6 +36,7 @@ pub fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
 }
 
 #[cfg(unix)]
+#[allow(unused)]
 pub fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {
   let ret = unsafe {
     libc::pwritev(
@@ -60,6 +64,7 @@ pub fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unused)]
 pub fn fallocate(file: &File, offset: u64, len: u64) -> Result<()> {
   let ret = unsafe {
     libc::fallocate(
