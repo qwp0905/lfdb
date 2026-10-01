@@ -217,7 +217,7 @@ fn is_ebusy<T>(result: Result<T>) -> bool {
   }
 }
 fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
-  if sq.is_empty() {
+  if sq.is_empty() && !sq.taskrun() {
     return;
   }
   ignore_ebusy(submitter.submit());
@@ -238,7 +238,7 @@ pub struct AsyncIO {
 }
 impl AsyncIO {
   const fn worker_loop(
-    mut ring: IoUring,
+    entries: u32,
     queue: Arc<SegQueue<Context<FullTask>>>,
     waker_fd: RawFd,
     parked: Arc<AtomicBool>,
@@ -247,6 +247,12 @@ impl AsyncIO {
       let backoff = Backoff::new();
       let mut backlog = ChunkQueue::new();
       let mut submitted = 0;
+      let mut ring = IoUring::builder()
+        .setup_coop_taskrun()
+        .setup_single_issuer()
+        .setup_taskrun_flag()
+        .build(entries)
+        .unwrap();
       let (submitter, mut sq, mut cq) = ring.split();
       let wake = opcode::PollAdd::new(types::Fd(waker_fd), libc::POLLIN as u32)
         .build()
@@ -300,7 +306,6 @@ impl AsyncIO {
     }
   }
   pub fn new(entries: u32) -> Result<Self> {
-    let ring = IoUring::new(entries)?;
     let queue = Arc::new(SegQueue::new());
     let parked = Arc::new(AtomicBool::new(false));
     let waker = EventFd::new()?;
@@ -308,7 +313,7 @@ impl AsyncIO {
       .name("async io".to_string())
       .stack_size(64 << 10)
       .spawn_unwind(Self::worker_loop(
-        ring,
+        entries,
         queue.clone(),
         waker.as_raw_fd(),
         parked.clone(),
