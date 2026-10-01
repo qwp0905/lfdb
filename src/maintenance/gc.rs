@@ -13,7 +13,7 @@ use crate::{
     SharedSubscription, ThreadBuilder,
   },
   blob::{BlobId, BlobStorage},
-  cache::{BlockCache, RefedSlot},
+  cache::{BlockCache, WritableSlot},
   disk::Pointer,
   mvcc::VersionController,
   objects::{
@@ -138,7 +138,7 @@ impl GcWorker {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table_id: TableId,
   ) -> Result {

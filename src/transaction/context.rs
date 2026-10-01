@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
-  cache::RefedSlot,
+  cache::WritableSlot,
   disk::Pointer,
   mvcc::{TxSnapshot, TxState},
   objects::Serializable,
@@ -99,7 +99,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
    */
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {

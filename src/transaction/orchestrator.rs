@@ -5,7 +5,7 @@ use super::{Checkpoint, PageRecorder, TimeoutThread};
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   btree::ResolvedConflict,
-  cache::{BlockCache, CachedSlot, RefedSlot},
+  cache::{BlockCache, CachedSlot, WritableSlot},
   disk::{IOPool, Pointer},
   error::Result,
   maintenance::{Compactor, GarbageCollector},
@@ -98,7 +98,7 @@ impl TxOrchestrator {
     tx_id: TxId,
     table_id: TableId,
     current_version: TxId,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
   ) -> Result
   where

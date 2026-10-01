@@ -13,7 +13,7 @@ use crate::{
     BTreeIndex, CreatablePolicy, GetResult, ReadonlyPolicy, ResolvedConflict,
     Snapshotter, WritablePolicy,
   },
-  cache::{BlockCache, RefedSlot},
+  cache::{BlockCache, WritableSlot},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
@@ -137,7 +137,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
 impl<'a> WritablePolicy for MiniTx<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -271,7 +271,7 @@ impl WritablePolicy for CompactionWritePolicy {
    */
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
