@@ -1,7 +1,7 @@
 use std::{
   cell::Cell,
   io::{Error, ErrorKind, IoSlice, Result},
-  mem::forget,
+  mem::{forget, replace},
   sync::{
     atomic::{fence, AtomicBool, Ordering},
     Arc,
@@ -9,7 +9,7 @@ use std::{
   time::Instant,
 };
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue, utils::Backoff};
+use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
@@ -26,14 +26,14 @@ type SyncBatch = Arc<BatchQueue<(), Result<()>>>;
 pub struct SyncScheduler {
   backend: Arc<dyn IOBackend>,
   sync: SyncBatch,
-  state: Arc<HandleState>,
+  state: Arc<State>,
 }
 impl SyncScheduler {
   pub fn new(backend: Arc<dyn IOBackend>) -> Self {
     Self {
       backend,
       sync: SyncBatch::default(),
-      state: Arc::new(HandleState::new()),
+      state: Arc::new(State::new()),
     }
   }
 
@@ -159,40 +159,38 @@ impl<T, R> BatchQueue<T, R> {
 
 fn drain_write(guard: RecursiveWrite) {
   let count = max_iov();
-  let mut values = Vec::with_capacity(count);
-  let mut waiting = Vec::with_capacity(count);
-  for (task, done) in guard.queue.drain_n(count) {
-    values.push(task);
-    waiting.push(done);
+  let mut buffered = Vec::with_capacity(count);
+  for task in guard.queue.drain_n(count) {
+    buffered.push(task);
   }
-  if waiting.is_empty() {
+  if buffered.is_empty() {
     return;
   }
   let state = guard.state.clone();
   let Some(_token) = state.try_shared() else {
     state.closed.fetch_or(true, Ordering::Relaxed);
-    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+    return buffered
+      .into_iter()
+      .for_each(|(_, done)| done.fulfill(Ok(())));
   };
-  guard.metrics.disk_write_batch.record(waiting.len() as f64);
+  guard.metrics.disk_write_batch.record(buffered.len() as f64);
 
-  if values.len() > 1 {
-    values.sort_by_key(|(i, _)| *i);
-    values.reverse();
-    values.dedup_by_key(|(i, b)| (*i, b.len()));
-    values.reverse();
-  }
+  buffered.sort_by_key(|((i, _), _)| *i);
 
   let Some(alloc) = guard.alloc.as_deref() else {
-    return finish_write(guard, values, waiting);
+    return finish_write(guard, buffered);
   };
 
   // Space allocation is owned by this batching layer. Since all writes for this
   // handle are flushed here, the worker can preallocate once up to the highest
   // required offset before issuing the actual writes.
-  let required = values.last().map(|(o, b)| *o + b.len() as u64).unwrap();
+  let required = buffered
+    .last()
+    .map(|((o, b), _)| *o + b.len() as u64)
+    .unwrap();
   let mut allocated = unsafe { alloc.get() };
   if allocated >= required {
-    return finish_write(guard, values, waiting);
+    return finish_write(guard, buffered);
   }
 
   let current = allocated;
@@ -205,122 +203,146 @@ fn drain_write(guard: RecursiveWrite) {
   let (offset, len) = (current, allocated - current);
 
   let backend = guard.backend.clone();
-  let callback = create_fallocate_callback(guard, values, waiting, allocated);
+  let callback = create_fallocate_callback(guard, buffered, allocated);
   let (task, _) = IOTask::new_fallocate(offset, len, Some(callback));
   backend.submit(task);
 }
 
 fn finish_write(
   guard: RecursiveWrite,
-  values: Vec<WriteTask>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
+  buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
 ) {
-  let mut offsets = Vec::with_capacity(values.len());
-  let mut buffers = Vec::with_capacity(values.len());
-  for (offset, buf) in values {
-    offsets.push((offset, buf.len() as u64));
-    buffers.push(buf);
-  }
-  let result = SBox::new(BatchWriteResult::new(waiting, buffers, guard));
+  debug_assert!(!buffered.is_empty());
+  let backend = guard.backend.clone();
+  let guard = SBox::new(guard);
+  let mut buffered = buffered.into_iter();
+  let ((mut start, buf), done) = buffered.next().unwrap();
+  let mut last = (start, buf.len());
+  let mut bufs = vec![buf];
+  let mut waiting = vec![done];
 
-  let mut index = 0;
-  for chunk in offsets.chunk_by(|(a_o, a_l), (b_o, _)| a_o + a_l == *b_o) {
-    let (offset, _) = chunk.first().copied().unwrap();
-    let start = index;
-    let end = index + chunk.len();
-    index += chunk.len();
+  for ((offset, buf), done) in buffered {
+    let (last_offset, last_len) = replace(&mut last, (offset, buf.len()));
+    if last_len == buf.len() && last_offset == offset {
+      let i = bufs.len() - 1;
+      bufs[i] = buf;
+      waiting.push(done);
+      continue;
+    }
+    if last_len as u64 + last_offset == offset {
+      bufs.push(buf);
+      waiting.push(done);
+      continue;
+    };
 
-    let static_ref =
-      unsafe { create_static_ref::<[IoSlice<'static>]>(result.range_buffer(start, end)) };
-    let measure = result.guard.metrics.disk_write.start();
+    let bufs = replace(&mut bufs, vec![buf]);
+    let waiting = replace(&mut waiting, vec![done]);
+    let offset = replace(&mut start, offset);
+    let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
+    let measure = guard.metrics.disk_write.start();
     let callback =
-      create_write_callback((start, end), offset, result.clone(), measure, 1);
-
+      create_write_callback(offset, guard.clone(), bufs, waiting, measure, 1);
     let (task, _) = if static_ref.len() == 1 {
       IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
     } else {
       IOTask::new_pwritev(static_ref, offset, Some(callback))
     };
-    result.guard.backend.submit(task);
+    backend.submit(task);
   }
-}
 
-fn create_write_callback(
-  (start, end): (usize, usize),
-  offset: u64,
-  result: SBox<BatchWriteResult>,
-  measurement: Option<Instant>,
-  trial: u8,
-) -> impl FnOnce(&Result<usize>) {
-  let bytes = result
-    .range_buffer(start, end)
-    .iter()
-    .map(|v| v.len())
-    .sum::<usize>();
-  move |r: &Result<usize>| {
-    match r {
-      Ok(c) if *c < bytes => {
-        return retry_write(trial, offset, (start, end), result, measurement)
-      }
-      Ok(_) => {}
-      Err(err) => result.set_error(err.kind()),
-    };
-    result.guard.metrics.disk_write.record(measurement);
-  }
-}
-fn retry_write(
-  trial: u8,
-  offset: u64,
-  (start, end): (usize, usize),
-  result: SBox<BatchWriteResult>,
-  measurement: Option<Instant>,
-) {
-  if trial >= IO_RETRY {
-    result.guard.metrics.disk_write.record(measurement);
-    result.set_error(ErrorKind::WriteZero);
-    return;
-  };
-
-  let static_ref =
-    unsafe { create_static_ref::<[IoSlice<'static>]>(result.range_buffer(start, end)) };
-  let callback =
-    create_write_callback((start, end), offset, result.clone(), measurement, trial + 1);
+  let offset = start;
+  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
+  let measure = guard.metrics.disk_write.start();
+  let callback = create_write_callback(offset, guard, bufs, waiting, measure, 1);
   let (task, _) = if static_ref.len() == 1 {
     IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
   } else {
     IOTask::new_pwritev(static_ref, offset, Some(callback))
   };
-  result.guard.backend.submit(task);
+  backend.submit(task);
+}
+
+fn calc_byte_len(bufs: &[IoSlice]) -> usize {
+  bufs.iter().map(|v| v.len()).sum()
+}
+
+fn create_write_callback(
+  offset: u64,
+  guard: SBox<RecursiveWrite>,
+  bufs: Vec<IoSlice<'static>>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+  measurement: Option<Instant>,
+  trial: u8,
+) -> impl FnOnce(&Result<usize>) {
+  move |result: &Result<usize>| {
+    let result = match result {
+      Ok(c) if *c < calc_byte_len(&bufs) => {
+        return retry_write(offset, guard, bufs, waiting, measurement, trial + 1)
+      }
+      Ok(_) => Ok(()),
+      Err(err) => Err(err.kind()),
+    };
+    guard.metrics.disk_write.record(measurement);
+    for done in waiting {
+      done.fulfill(result.map_err(Error::from));
+    }
+  }
+}
+fn retry_write(
+  offset: u64,
+  guard: SBox<RecursiveWrite>,
+  bufs: Vec<IoSlice<'static>>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+  measure: Option<Instant>,
+  trial: u8,
+) {
+  if trial >= IO_RETRY {
+    guard.metrics.disk_write.record(measure);
+    return waiting
+      .into_iter()
+      .for_each(|done| done.fulfill(Err(Error::from(ErrorKind::WriteZero))));
+  };
+
+  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
+  let backend = guard.backend.clone();
+  let callback = create_write_callback(offset, guard, bufs, waiting, measure, trial + 1);
+  let (task, _) = if static_ref.len() == 1 {
+    IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+  } else {
+    IOTask::new_pwritev(static_ref, offset, Some(callback))
+  };
+  backend.submit(task);
 }
 
 fn create_fallocate_callback(
   guard: RecursiveWrite,
-  values: Vec<WriteTask>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
+  buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
   allocated: u64,
 ) -> impl FnOnce(&Result<usize>) {
   move |result| {
     if let Err(err) = result {
-      waiting
+      let kind = err.kind();
+      return buffered
         .into_iter()
-        .for_each(|done| done.fulfill(Err(Error::from(err.kind()))));
-      return;
+        .for_each(|(_, done)| done.fulfill(Err(Error::from(kind))));
     };
     unsafe { guard.alloc.as_deref().unwrap().set(allocated) };
 
     let state = guard.state.clone();
     let Some(_token) = state.try_shared() else {
       state.closed.fetch_or(true, Ordering::Relaxed);
-      return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
+      return buffered
+        .into_iter()
+        .for_each(|(_, done)| done.fulfill(Ok(())));
     };
 
-    finish_write(guard, values, waiting);
+    finish_write(guard, buffered);
   }
 }
 
 struct RecursiveWrite {
   queue: Arc<BatchQueue<WriteTask, Result<()>>>,
-  state: Arc<HandleState>,
+  state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
   alloc: Option<Arc<AllocState>>,
@@ -328,7 +350,7 @@ struct RecursiveWrite {
 impl RecursiveWrite {
   const fn new(
     queue: Arc<BatchQueue<WriteTask, Result<()>>>,
-    state: Arc<HandleState>,
+    state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
     alloc: Option<Arc<AllocState>>,
@@ -358,55 +380,18 @@ impl Drop for RecursiveWrite {
   }
 }
 
-struct BatchWriteResult {
-  error: AtomicCell<Option<ErrorKind>>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
-  buffers: Vec<IoSlice<'static>>,
-  guard: RecursiveWrite,
-}
-impl BatchWriteResult {
-  const fn new(
-    waiting: Vec<OneshotFulfill<Result<()>>>,
-    buffers: Vec<IoSlice<'static>>,
-    guard: RecursiveWrite,
-  ) -> Self {
-    Self {
-      error: AtomicCell::new(None),
-      waiting,
-      buffers,
-      guard,
-    }
-  }
-
-  fn range_buffer(&self, start: usize, end: usize) -> &[IoSlice<'static>] {
-    &self.buffers[start..end]
-  }
-
-  fn set_error(&self, error: ErrorKind) {
-    let _ = self.error.compare_exchange(None, Some(error));
-  }
-}
-impl Drop for BatchWriteResult {
-  fn drop(&mut self) {
-    let result = self.error.load().map(Err).unwrap_or(Ok(()));
-    for done in self.waiting.drain(..) {
-      done.fulfill(result.map_err(Error::from));
-    }
-  }
-}
-
 const EXTENT_SIZE: u64 = 1 << 20;
 
 struct RecursiveSync {
   queue: Arc<BatchQueue<(), Result<()>>>,
-  state: Arc<HandleState>,
+  state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
 }
 impl RecursiveSync {
   const fn new(
     queue: Arc<BatchQueue<(), Result<()>>>,
-    state: Arc<HandleState>,
+    state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
@@ -446,8 +431,7 @@ fn drain_sync(guard: RecursiveSync) {
   let state = guard.state.clone();
   let Some(_token) = state.pin.try_shared() else {
     state.closed.fetch_or(true, Ordering::Relaxed);
-    waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-    return;
+    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
   };
 
   guard.metrics.disk_sync_batch.record(waiting.len() as f64);
@@ -486,7 +470,7 @@ impl AllocState {
 unsafe impl Send for AllocState {}
 unsafe impl Sync for AllocState {}
 
-struct HandleState {
+struct State {
   /**
    * Pin to protect file I/O from truncate.
    */
@@ -496,7 +480,7 @@ struct HandleState {
    */
   closed: AtomicBool,
 }
-impl HandleState {
+impl State {
   const fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
