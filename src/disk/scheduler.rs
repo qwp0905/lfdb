@@ -288,7 +288,7 @@ fn finish_write(
     let batched = BatchedWrite::new(offset, bufs, waiting, guard.clone());
     let static_ref =
       unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
-    let callback = create_write_callback(batched, 1);
+    let callback = create_write_callback(batched, 0);
     let (task, _) = if static_ref.len() == 1 {
       IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
     } else {

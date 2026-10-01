@@ -32,7 +32,7 @@ fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
 }
 #[cfg(windows)]
 fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
-  self.seek_write(buf, offset)
+  file.seek_write(buf, offset)
 }
 #[cfg(unix)]
 fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {

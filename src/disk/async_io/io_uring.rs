@@ -25,8 +25,11 @@ use super::{AsyncTask, FullTask, TaskType};
 struct EventFd(File);
 impl EventFd {
   fn new() -> Result<Self> {
-    let fd = cvt(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) })?;
-    Ok(unsafe { Self::from_raw_fd(fd as RawFd) })
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) }?;
+    if fd < 0 {
+      return Err(Error::last_os_error());
+    }
+    Ok(unsafe { Self::from_raw_fd(fd) })
   }
   unsafe fn from_raw_fd(fd: RawFd) -> Self {
     Self(unsafe { File::from_raw_fd(fd) })
@@ -170,11 +173,12 @@ fn shutdown_gracefully(
   mut backlog: ChunkQueue<squeue::Entry>,
   mut submitted: usize,
 ) {
+  sq.sync();
   while !backlog.is_empty() {
-    sq.sync();
     submitted += drain_backlog(&submitter, &mut sq, &mut backlog);
     let (count, _) = drain_completion(&mut cq, None);
     submitted -= count;
+    sq.sync();
   }
 
   while submitted > 0 {
