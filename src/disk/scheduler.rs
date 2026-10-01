@@ -208,6 +208,52 @@ fn drain_write(guard: RecursiveWrite) {
   backend.submit(task);
 }
 
+struct BatchedWrite {
+  offset: u64,
+  bufs: Vec<IoSlice<'static>>,
+  waiting: Vec<OneshotFulfill<Result<()>>>,
+  measure: Option<Instant>,
+  guard: SBox<RecursiveWrite>,
+  error: Option<ErrorKind>,
+}
+impl BatchedWrite {
+  fn new(
+    offset: u64,
+    bufs: Vec<IoSlice<'static>>,
+    waiting: Vec<OneshotFulfill<Result<()>>>,
+    guard: SBox<RecursiveWrite>,
+  ) -> Self {
+    Self {
+      offset,
+      bufs,
+      waiting,
+      measure: guard.metrics.disk_write.start(),
+      guard,
+      error: None,
+    }
+  }
+  const fn set_error(&mut self, err: ErrorKind) {
+    self.error = Some(err);
+  }
+
+  const fn get_bufs(&self) -> &[IoSlice<'static>] {
+    self.bufs.as_slice()
+  }
+
+  fn bytes_len(&self) -> usize {
+    self.bufs.iter().map(|v| v.len()).sum()
+  }
+}
+impl Drop for BatchedWrite {
+  fn drop(&mut self) {
+    self.guard.metrics.disk_write.record(self.measure.take());
+    let result = self.error.take().map(Err).unwrap_or(Ok(()));
+    for done in self.waiting.drain(..) {
+      done.fulfill(result.map_err(Error::from));
+    }
+  }
+}
+
 fn finish_write(
   guard: RecursiveWrite,
   buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
@@ -238,10 +284,11 @@ fn finish_write(
     let bufs = replace(&mut bufs, vec![buf]);
     let waiting = replace(&mut waiting, vec![done]);
     let offset = replace(&mut start, offset);
-    let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-    let measure = guard.metrics.disk_write.start();
-    let callback =
-      create_write_callback(offset, guard.clone(), bufs, waiting, measure, 1);
+
+    let batched = BatchedWrite::new(offset, bufs, waiting, guard.clone());
+    let static_ref =
+      unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
+    let callback = create_write_callback(batched, 1);
     let (task, _) = if static_ref.len() == 1 {
       IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
     } else {
@@ -251,9 +298,9 @@ fn finish_write(
   }
 
   let offset = start;
-  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-  let measure = guard.metrics.disk_write.start();
-  let callback = create_write_callback(offset, guard, bufs, waiting, measure, 1);
+  let batched = BatchedWrite::new(offset, bufs, waiting, guard);
+  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
+  let callback = create_write_callback(batched, 1);
   let (task, _) = if static_ref.len() == 1 {
     IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
   } else {
@@ -262,50 +309,25 @@ fn finish_write(
   backend.submit(task);
 }
 
-fn calc_byte_len(bufs: &[IoSlice]) -> usize {
-  bufs.iter().map(|v| v.len()).sum()
-}
-
 fn create_write_callback(
-  offset: u64,
-  guard: SBox<RecursiveWrite>,
-  bufs: Vec<IoSlice<'static>>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
-  measurement: Option<Instant>,
+  mut batched: BatchedWrite,
   trial: u8,
 ) -> impl FnOnce(&Result<usize>) {
-  move |result: &Result<usize>| {
-    let result = match result {
-      Ok(c) if *c < calc_byte_len(&bufs) => {
-        return retry_write(offset, guard, bufs, waiting, measurement, trial + 1)
-      }
-      Ok(_) => Ok(()),
-      Err(err) => Err(err.kind()),
-    };
-    guard.metrics.disk_write.record(measurement);
-    for done in waiting {
-      done.fulfill(result.map_err(Error::from));
-    }
+  move |result: &Result<usize>| match result {
+    Ok(c) if *c < batched.bytes_len() => retry_write(batched, trial + 1),
+    Ok(_) => {}
+    Err(err) => batched.set_error(err.kind()),
   }
 }
-fn retry_write(
-  offset: u64,
-  guard: SBox<RecursiveWrite>,
-  bufs: Vec<IoSlice<'static>>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
-  measure: Option<Instant>,
-  trial: u8,
-) {
+fn retry_write(mut batched: BatchedWrite, trial: u8) {
   if trial >= IO_RETRY {
-    guard.metrics.disk_write.record(measure);
-    return waiting
-      .into_iter()
-      .for_each(|done| done.fulfill(Err(Error::from(ErrorKind::WriteZero))));
+    return batched.set_error(ErrorKind::WriteZero);
   };
 
-  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(&bufs) };
-  let backend = guard.backend.clone();
-  let callback = create_write_callback(offset, guard, bufs, waiting, measure, trial + 1);
+  let backend = batched.guard.backend.clone();
+  let offset = batched.offset;
+  let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
+  let callback = create_write_callback(batched, trial + 1);
   let (task, _) = if static_ref.len() == 1 {
     IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
   } else {
