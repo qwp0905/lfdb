@@ -10,7 +10,7 @@ use std::{
   thread::Builder,
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::queue::SegQueue;
 use io_uring::{
   opcode, squeue, types, CompletionQueue, IoUring, SubmissionQueue, Submitter,
 };
@@ -244,7 +244,6 @@ impl AsyncIO {
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
     move || {
-      let backoff = Backoff::new();
       let mut backlog = ChunkQueue::new();
       let mut submitted = 0;
       let mut ring = IoUring::builder()
@@ -282,25 +281,20 @@ impl AsyncIO {
 
         sq.sync();
         cq.sync();
-        if completed_count > 0 || backlog_count + task_count > 0 || !backlog.is_empty() {
+        if !cq.is_empty() || !backlog.is_empty() || !queue.is_empty() {
           submit_if_not_empty(&submitter, &sq);
-          backoff.reset();
-          continue;
-        }
-        if !backoff.is_completed() {
-          submit_if_not_empty(&submitter, &sq);
-          backoff.snooze();
           continue;
         }
 
         parked.fetch_or(true, Ordering::AcqRel);
-        backoff.reset();
         cq.sync();
-        if cq.is_empty() && queue.is_empty() {
-          ignore_ebusy(submitter.submit_and_wait(1));
-        } else {
+        if !cq.is_empty() || !queue.is_empty() {
+          parked.fetch_and(false, Ordering::AcqRel);
           submit_if_not_empty(&submitter, &sq);
+          continue;
         }
+
+        ignore_ebusy(submitter.submit_and_wait(1));
         parked.fetch_and(false, Ordering::AcqRel);
       }
     }
