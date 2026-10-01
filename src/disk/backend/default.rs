@@ -1,11 +1,3 @@
-/**
- * Default filesystem backend.
- *
- * This implementation uses the standard library whenever it exposes the needed
- * operation. Platform-specific code appears only for operations that are missing
- * from stable std APIs, such as vectored positioned writes, preallocation, and
- * direct-I/O-style open flags.
- */
 use std::{
   fs::{
     create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions,
@@ -16,23 +8,9 @@ use std::{
   sync::Arc,
 };
 
-#[cfg(all(unix, not(target_vendor = "apple")))]
-use std::os::unix::fs::OpenOptionsExt;
-#[cfg(target_vendor = "apple")]
-use std::{io::Error, os::fd::AsRawFd};
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-
-#[cfg(windows)]
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
-
 use crate::utils::info;
 
-use super::{
-  super::{AsyncIO, FullTask},
-  DiskBackend, IOBackend, IOTask,
-};
+use super::{direct_io, pread, AsyncIO, DiskBackend, FullTask, IOBackend, IOTask};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
@@ -47,13 +25,8 @@ impl DefaultIOBackend {
   }
 }
 impl IOBackend for DefaultIOBackend {
-  #[cfg(unix)]
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-    self.file.read_at(buf, offset)
-  }
-  #[cfg(windows)]
-  fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-    self.file.seek_read(buf, offset)
+    pread(&self.file, buf, offset)
   }
 
   fn submit(&self, task: IOTask) {
@@ -102,48 +75,12 @@ impl DiskBackend for DefaultDiskBackend {
     let file = Arc::new(options.open(path)?);
     Ok(Box::new(DefaultIOBackend::new(file, self.async_io.clone())))
   }
-
-  #[cfg(target_vendor = "apple")]
   fn open_direct_io(
     &self,
     options: &mut OpenOptions,
     path: &Path,
   ) -> Result<Box<dyn IOBackend>> {
-    // macOS does not expose Linux-style O_DIRECT here. F_NOCACHE is the closest
-    // default-backend approximation.
-    let file = options.open(path)?;
-    let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
-    if ret == -1 {
-      return Err(Error::last_os_error());
-    }
-    Ok(Box::new(DefaultIOBackend::new(
-      Arc::new(file),
-      self.async_io.clone(),
-    )))
-  }
-
-  #[cfg(all(unix, not(target_vendor = "apple")))]
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> Result<Box<dyn IOBackend>> {
-    // Closest default-backend approximation to Linux O_DIRECT on Windows.
-    let file = options.custom_flags(libc::O_DIRECT).open(path)?;
-    Ok(Box::new(DefaultIOBackend::new(
-      Arc::new(file),
-      self.async_io.clone(),
-    )))
-  }
-  #[cfg(windows)]
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> Result<Box<dyn IOBackend>> {
-    let file = options
-      .custom_flags(winapi::um::winbase::FILE_FLAG_NO_BUFFERING)
-      .open(path)?;
+    let file = direct_io(options, path)?;
     Ok(Box::new(DefaultIOBackend::new(
       Arc::new(file),
       self.async_io.clone(),

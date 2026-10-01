@@ -1,5 +1,6 @@
 use std::{
   collections::HashMap,
+  num::NonZero,
   panic::{RefUnwindSafe, UnwindSafe},
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -168,7 +169,7 @@ impl Engine {
       return Err(Error::UnsupportedPageSize);
     }
 
-    let thread_count = available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let thread_count = available_parallelism().map(NonZero::get).unwrap_or(1);
     let init_thread = ThreadBuilder::new()
       .name("bootstrap")
       .multi(thread_count)
