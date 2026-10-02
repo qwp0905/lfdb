@@ -279,10 +279,7 @@ impl LogBuffer {
       let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
       let pending = unsafe { self.segment_state.segment.assume_init_ref() }
         .write_async(self.segment_ptr, static_ref);
-      if let Err(callback) = pending.add_callback(create_cb(waiting, page)) {
-        callback.call(&pending.wait());
-      }
-
+      pending.add_callback(create_cb(waiting, page));
       if self.batch.try_release() {
         break;
       }

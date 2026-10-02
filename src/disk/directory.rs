@@ -5,8 +5,8 @@ use std::{
   sync::Arc,
 };
 
-use super::{DiskBackend, HandleState, IOBackend, PendingIO, SyncScheduler};
-use crate::{background::ThreadPool, metrics::MetricsRegistry};
+use super::{DiskBackend, IOBackend, PendingIO, SyncScheduler};
+use crate::metrics::MetricsRegistry;
 
 /**
  * Base-directory-bound disk backend.
@@ -16,41 +16,37 @@ use crate::{background::ThreadPool, metrics::MetricsRegistry};
  * lock and sync the directory itself.
  */
 pub struct DirHandle {
-  io_backend: Arc<dyn IOBackend>,
+  scheduler: SyncScheduler,
   disk_backend: Box<dyn DiskBackend>,
-  sync_handle: SyncScheduler,
-  state: Arc<HandleState>,
+  metrics: Arc<MetricsRegistry>,
   path: PathBuf,
 }
 impl DirHandle {
   pub fn ensure(
     path: &Path,
     disk_backend: Box<dyn DiskBackend>,
-    thread: Arc<ThreadPool>,
     metrics: Arc<MetricsRegistry>,
   ) -> IOResult<Self> {
     let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
     let path = path.canonicalize()?;
-    let file = disk_backend
+    let backend = disk_backend
       .open(options.read(true), &path)
       .map(Arc::<dyn IOBackend>::from)?;
-    let state = Arc::new(HandleState::new());
-    let sync_handle = SyncScheduler::new(thread, state.clone(), file.clone(), metrics);
 
     Ok(Self {
-      io_backend: file,
+      scheduler: SyncScheduler::new(backend),
       disk_backend,
-      sync_handle,
-      state,
+      metrics,
       path,
     })
   }
   pub fn fdatasync(&self) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_handle.schedule())
+    let done = self.scheduler.publish(&self.metrics);
+    PendingIO::Scheduled(done)
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
@@ -81,9 +77,9 @@ impl DirHandle {
     self.disk_backend.open_direct_io(options, path)
   }
   pub fn try_lock(&self) -> IOResult<bool> {
-    self.io_backend.try_flock()
+    self.scheduler.backend().try_flock()
   }
   pub fn unlock(&self) -> IOResult<()> {
-    self.io_backend.unlock()
+    self.scheduler.backend().unlock()
   }
 }

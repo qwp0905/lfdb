@@ -1,7 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
-use super::{AlignedArray, DirHandle, IOBackend, ALIGN};
-use crate::{error::Result, Error};
+use super::{AlignedArray, DirHandle, IOBackend, IOTask, ALIGN, IO_RETRY, NO_CALLBACK};
+use crate::{error::Result, utils::create_static_ref, Error};
 
 /**
  * Buffered writer for direct-I/O append-style output.
@@ -43,11 +43,16 @@ impl AppendIOHandle {
     Ok(())
   }
   fn flush_buf(&mut self) -> Result {
-    self
-      .file
-      .pwrite_exact(&*self.buffer, self.file_offset)
-      .map_err(Error::IO)?;
-    Ok(())
+    let static_ref = unsafe { create_static_ref::<[u8]>(&*self.buffer) };
+    for _ in 0..IO_RETRY {
+      let (task, done) = IOTask::new_pwrite(static_ref, self.file_offset, NO_CALLBACK);
+      self.file.submit(task);
+      let bytes = done.wait().map_err(Error::IO)?;
+      if bytes == self.buffer.len() {
+        return Ok(());
+      }
+    }
+    Err(Error::IO(io::Error::from(io::ErrorKind::WriteZero)))
   }
   /**
    * Flush the buffered stream, sync the file, and finish the writer.
@@ -57,7 +62,9 @@ impl AppendIOHandle {
    */
   pub fn flush_all(&mut self) -> Result {
     self.flush_buf()?;
-    self.file.fsync().map_err(Error::IO)?;
+    let (task, done) = IOTask::new_fsync(NO_CALLBACK);
+    self.file.submit(task);
+    done.wait().map_err(Error::IO)?;
     Ok(())
   }
 }

@@ -35,11 +35,14 @@ use task::*;
 mod pool;
 pub use pool::*;
 
-mod batch;
-pub use batch::*;
-
 mod vptr;
 pub use vptr::*;
 
 mod callback;
 pub use callback::*;
+
+mod shared;
+pub use shared::*;
+
+mod idle;
+use idle::*;
