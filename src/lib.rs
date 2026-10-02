@@ -20,7 +20,7 @@ pub use error::*;
 mod utils;
 
 mod disk;
-pub use disk::{DefaultDiskBackend, DiskBackend, IOBackend};
+pub use disk::{DefaultDiskBackend, DiskBackend, IOBackend, IOTask, TaskType};
 
 mod metrics;
 pub use metrics::EngineMetrics;

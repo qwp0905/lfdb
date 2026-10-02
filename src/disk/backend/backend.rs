@@ -4,7 +4,63 @@ use std::{
   path::Path,
 };
 
-const RETRY: u8 = 3;
+use super::{AsyncTask, PendingAsync, TaskType};
+
+pub const IO_RETRY: u8 = 3;
+
+type None = fn(&Result<usize>);
+pub const NO_CALLBACK: Option<None> = None;
+
+pub struct IOTask {
+  pub task_type: TaskType,
+  pub done: AsyncTask<usize>,
+}
+impl IOTask {
+  fn new<F: FnOnce(&Result<usize>) + Send + 'static>(
+    task_type: TaskType,
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    let (task, done) = AsyncTask::new(callback);
+    (
+      Self {
+        task_type,
+        done: task,
+      },
+      done,
+    )
+  }
+  pub fn new_pwrite<F: FnOnce(&Result<usize>) + Send + 'static>(
+    buf: &'static [u8],
+    offset: u64,
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    Self::new(TaskType::Pwrite { offset, buf }, callback)
+  }
+  pub fn new_pwritev<F: FnOnce(&Result<usize>) + Send + 'static>(
+    bufs: &'static [IoSlice<'static>],
+    offset: u64,
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    Self::new(TaskType::Pwritev { offset, bufs }, callback)
+  }
+  pub fn new_fsync<F: FnOnce(&Result<usize>) + Send + 'static>(
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    Self::new(TaskType::Fsync, callback)
+  }
+  pub fn new_fdatasync<F: FnOnce(&Result<usize>) + Send + 'static>(
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    Self::new(TaskType::Fdatasync, callback)
+  }
+  pub fn new_fallocate<F: FnOnce(&Result<usize>) + Send + 'static>(
+    offset: u64,
+    len: u64,
+    callback: Option<F>,
+  ) -> (Self, PendingAsync<usize>) {
+    Self::new(TaskType::Fallocate { offset, len }, callback)
+  }
+}
 
 /**
  * Low-level operations for one opened filesystem object.
@@ -16,12 +72,13 @@ const RETRY: u8 = 3;
  * same interface to inject I/O faults.
  */
 pub trait IOBackend: Send + Sync {
+  fn submit(&self, task: IOTask);
+  fn batch_submit(&self, tasks: Vec<IOTask>) {
+    for task in tasks {
+      self.submit(task);
+    }
+  }
   fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
-  fn pwrite(&self, buf: &[u8], offset: u64) -> Result<usize>;
-  fn pwritev(&self, bufs: &[IoSlice], offset: u64) -> Result<usize>;
-  fn fallocate(&self, offset: u64, len: u64) -> Result<()>;
-  fn fsync(&self) -> Result<()>;
-  fn fdatasync(&self) -> Result<()>;
   fn metadata(&self) -> Result<Metadata>;
   fn try_flock(&self) -> Result<bool>;
   fn unlock(&self) -> Result<()>;
@@ -34,45 +91,12 @@ pub trait IOBackend: Send + Sync {
    * fill the buffer.
    */
   fn pread_exact(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-    for _ in 0..RETRY {
+    for _ in 0..IO_RETRY {
       if buf.len() == self.pread(buf, offset)? {
         return Ok(());
       }
     }
     Err(Error::from(ErrorKind::UnexpectedEof))
-  }
-  /**
-   * Write the entire buffer or fail.
-   *
-   * This is not `write_all`: a short write is not treated as partial progress,
-   * and the helper never advances the offset to write only the remaining suffix.
-   * For block/direct-I/O paths, the submitted buffer must complete as one logical
-   * operation; otherwise the whole request is retried a small number of times and
-   * then reported as failed.
-   */
-  fn pwrite_exact(&self, buf: &[u8], offset: u64) -> Result<()> {
-    for _ in 0..RETRY {
-      if buf.len() == self.pwrite(buf, offset)? {
-        return Ok(());
-      }
-    }
-    Err(Error::from(ErrorKind::WriteZero))
-  }
-  /**
-   * Write the entire vectored batch or fail.
-   *
-   * A short vectored write is not treated as progress through the batch. The same
-   * full batch must complete as one logical operation, or the helper reports
-   * failure after a small number of retries.
-   */
-  fn pwritev_exact(&self, bufs: &[IoSlice<'_>], offset: u64) -> Result<()> {
-    let total: usize = bufs.iter().map(|b| b.len()).sum();
-    for _ in 0..RETRY {
-      if total == self.pwritev(bufs, offset)? {
-        return Ok(());
-      }
-    }
-    Err(Error::from(ErrorKind::WriteZero))
   }
 }
 
