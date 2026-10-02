@@ -1,4 +1,5 @@
 use std::{
+  cell::LazyCell,
   num::NonZero,
   sync::Arc,
   thread::{park, park_timeout, Builder, Thread},
@@ -170,12 +171,19 @@ const fn handle_thread(
     let handle = handle_timeout(version_controller);
 
     let backoff = Backoff::new();
-    let mut peeked = None;
     let mut next_tick = Instant::now() + TICK_SIZE;
     let mut standard = Instant::now();
     loop {
-      for ctx in (0u8..32).map_while(|_| peeked.take().or_else(|| unsafe { queue.pop() }))
-      {
+      let now = LazyCell::new(Instant::now);
+      while !wheel.is_empty() && next_tick <= *now {
+        let current = (next_tick - standard).as_millis() as u64;
+        for id in wheel.tick(current).into_iter().flatten() {
+          handle(id);
+        }
+        next_tick += TICK_SIZE;
+      }
+
+      if let Some(ctx) = unsafe { queue.pop() } {
         backoff.reset();
         let (id, timeout) = match ctx {
           Context::Register(id, timeout) => (id, timeout),
@@ -192,19 +200,6 @@ const fn handle_thread(
           continue;
         };
         wheel.register(id, execute_at);
-      }
-
-      let now = Instant::now();
-      while !wheel.is_empty() && next_tick <= now {
-        let current = (next_tick - standard).as_millis() as u64;
-        for id in wheel.tick(current).into_iter().flatten() {
-          handle(id);
-        }
-        next_tick += TICK_SIZE;
-      }
-
-      if let Some(ctx) = unsafe { queue.pop() } {
-        peeked = Some(ctx);
         continue;
       }
 
