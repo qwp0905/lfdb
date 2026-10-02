@@ -5,45 +5,18 @@ use std::{
 };
 
 use crossbeam::{
-  atomic::AtomicCell,
   deque::{Injector, Steal, Stealer, Worker},
-  queue::SegQueue,
   utils::Backoff,
 };
 
 use super::{
-  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadSlot, UnwindSpawner,
+  into_task, Close, IdleQueue, PendingTask, SharedFn, TaskRef, ThreadId, ThreadSlot,
+  UnwindSpawner,
 };
-
-type ThreadId = usize;
 
 enum Context {
   Task(TaskRef),
   Term,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-  /*
-   * The worker is not discoverable through the idle queue.
-   *
-   * Producers cannot wake this worker directly through `idle`; either it is
-   * running, or it will re-register itself before sleeping.
-   */
-  Unqueued,
-  /*
-   * The worker has published itself to the idle queue and is preparing to park.
-   *
-   * It is still checking for work. If a producer observes this state and changes
-   * it back to `Unqueued`, the worker will notice that signal and avoid parking.
-   */
-  Queued,
-  /*
-   * The worker found no work after publishing itself and has gone to sleep.
-   *
-   * A producer that takes this idle entry must unpark the corresponding thread.
-   */
-  Parked,
 }
 
 const fn worker_loop(
@@ -86,40 +59,30 @@ const fn worker_loop(
 struct Core<A> {
   global: Injector<A>,
   stealers: Box<[Stealer<A>]>,
-  idle: SegQueue<ThreadId>,
-  states: Box<[AtomicCell<State>]>,
+  idle: IdleQueue,
 }
 impl<A> Core<A> {
   fn new(count: usize) -> (Self, Vec<Worker<A>>) {
     let mut workers = Vec::with_capacity(count);
     let mut stealers = Vec::with_capacity(count);
-    let mut states = Vec::with_capacity(count);
 
     for _ in 0..count {
       let worker = Worker::new_fifo();
       stealers.push(worker.stealer());
       workers.push(worker);
-      states.push(AtomicCell::new(State::Unqueued));
     }
 
     (
       Self {
         global: Injector::new(),
         stealers: stealers.into_boxed_slice(),
-        idle: SegQueue::new(),
-        states: states.into_boxed_slice(),
+        idle: IdleQueue::new(count),
       },
       workers,
     )
   }
   fn wake_one(&self) -> Option<ThreadId> {
-    let id = self.idle.pop()?;
-    // if does not matches parked, worker thread are already working.
-    if let State::Parked = self.states[id].swap(State::Unqueued) {
-      return Some(id);
-    }
-
-    None
+    self.idle.wake_one()
   }
 
   fn drain_task(&self, local: &Worker<A>) {
@@ -129,22 +92,12 @@ impl<A> Core<A> {
   }
 
   fn try_park(&self, id: ThreadId) {
-    // if producer changed state, then never park.
-    if self.states[id]
-      .compare_exchange(State::Queued, State::Parked)
-      .is_ok()
-    {
+    if self.idle.try_park(id) {
       park();
-    }
+    };
   }
   fn try_enqueue_idle(&self, id: ThreadId) {
-    if self.states[id]
-      .compare_exchange(State::Unqueued, State::Queued)
-      .is_ok()
-    {
-      // there are no state in idle queue.
-      self.idle.push(id);
-    }
+    self.idle.try_enqueue(id);
   }
 
   fn steal_from_other(&self, id: ThreadId) -> Steal<A> {

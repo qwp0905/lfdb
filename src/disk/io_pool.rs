@@ -1,38 +1,37 @@
 use std::{
   fs::{DirEntry, OpenOptions},
   io::{Error as IOError, ErrorKind, Result as IOResult},
-  mem::forget,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
   thread::sleep,
   time::Duration,
 };
 
-use crossbeam::utils::Backoff;
-
 use super::{
-  AllocState, AppendIOHandle, DirHandle, DiskBackend, HandleState, IOBackend,
-  ScanIOHandle, SyncScheduler, WriteScheduler,
+  AllocState, AppendIOHandle, DirHandle, DiskBackend, IOBackend, IOScheduler, IOTask,
+  PendingAsync, ScanIOHandle, NO_CALLBACK,
 };
 use crate::{
-  background::{Callback, Close, Oneshot, ThreadBuilder, ThreadPool},
+  background::{Callback, Oneshot},
   metrics::{measure, MetricsRegistry},
-  utils::{error, ShortenedMutex, ToArc},
+  utils::{error, ShortenedMutex},
   Error, Result,
 };
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub enum PendingIO<T = ()> {
+pub enum PendingIO<T: 'static = ()> {
   Fulfilled(IOResult<T>),
-  Pending(Oneshot<IOResult<T>>),
+  Scheduled(Oneshot<IOResult<T>>),
+  Direct(PendingAsync<T>),
 }
 impl<T> PendingIO<T> {
   pub fn wait(self) -> IOResult<T> {
     match self {
       Self::Fulfilled(v) => v,
-      Self::Pending(o) => o.wait().unwrap(),
+      Self::Scheduled(o) => o.wait().unwrap(),
+      Self::Direct(o) => o.wait(),
     }
   }
 
@@ -40,15 +39,12 @@ impl<T> PendingIO<T> {
     self.wait().map_err(Error::IO)
   }
 
-  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(
-    &self,
-    f: F,
-  ) -> std::result::Result<(), Callback<IOResult<T>>> {
+  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
     match self {
-      PendingIO::Fulfilled(v) => f(v),
-      PendingIO::Pending(o) => o.add_callback(Callback::new(f))?,
+      Self::Fulfilled(v) => f(&v),
+      Self::Scheduled(o) => o.must_call(Callback::new(f)),
+      Self::Direct(o) => o.must_call(Callback::new(f)),
     };
-    Ok(())
   }
 }
 
@@ -61,40 +57,24 @@ impl<T> PendingIO<T> {
  * inside the engine, not just a handle factory.
  */
 pub struct IOPool {
-  thread: Arc<ThreadPool>,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
 }
 impl IOPool {
   pub fn with_backend<T: DiskBackend + 'static>(
     backend: T,
-    thread_count: usize,
     base_path: &Path,
     metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    let thread = ThreadBuilder::new()
-      .name("io pool")
-      .multi(thread_count)
-      .to_arc();
-
     // The base directory lock prevents multiple engine processes from using the
     // same database directory. Retry is a courtesy delay, not a recovery protocol:
     // if another process keeps the lock, opening the pool fails.
-    let base_dir = DirHandle::ensure(
-      base_path,
-      Box::new(backend),
-      thread.clone(),
-      metrics.clone(),
-    )
-    .map_err(Error::IO)
-    .map(Arc::new)?;
+    let base_dir = DirHandle::ensure(base_path, Box::new(backend), metrics.clone())
+      .map_err(Error::IO)
+      .map(Arc::new)?;
     for _ in 0..MAX_RETRY {
       if base_dir.try_lock().map_err(Error::IO)? {
-        return Ok(Self {
-          thread,
-          metrics,
-          base_dir,
-        });
+        return Ok(Self { metrics, base_dir });
       }
 
       error!(
@@ -159,26 +139,9 @@ impl IOPool {
     filename: PathBuf,
     alloc: Option<AllocState>,
   ) -> IOHandle {
-    let state = Arc::new(HandleState::new());
-    let write_handle = WriteScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      backend.clone(),
-      self.metrics.clone(),
-      alloc,
-    );
-    let sync_handle = SyncScheduler::new(
-      self.thread.clone(),
-      state.clone(),
-      backend.clone(),
-      self.metrics.clone(),
-    );
-
+    let scheduler = IOScheduler::new(backend, alloc);
     IOHandle {
-      backend,
-      write_scheduler: write_handle,
-      sync_scheduler: sync_handle,
-      state,
+      scheduler,
       metrics: self.metrics.clone(),
       base_dir: self.base_dir.clone(),
       filename: Mutex::new(filename),
@@ -187,7 +150,9 @@ impl IOPool {
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
-    file.fallocate(0, size).map_err(Error::IO)?;
+    let (task, done) = IOTask::new_fallocate(0, size, NO_CALLBACK);
+    file.submit(task);
+    done.wait().map_err(Error::IO)?;
     Ok(self.create_handle(file, filename, None))
   }
 
@@ -211,10 +176,6 @@ impl IOPool {
   pub fn exists(&self, filename: &Path) -> Result<bool> {
     self.base_dir.exists(filename).map_err(Error::IO)
   }
-
-  pub fn close(&self) {
-    self.thread.close();
-  }
 }
 impl Drop for IOPool {
   fn drop(&mut self) {
@@ -231,10 +192,7 @@ impl Drop for IOPool {
  * broadest file-handle abstraction in the disk layer.
  */
 pub struct IOHandle {
-  backend: Arc<dyn IOBackend>,
-  write_scheduler: WriteScheduler,
-  sync_scheduler: SyncScheduler,
-  state: Arc<HandleState>,
+  scheduler: IOScheduler,
   metrics: Arc<MetricsRegistry>,
   base_dir: Arc<DirHandle>,
   filename: Mutex<PathBuf>,
@@ -245,7 +203,7 @@ impl IOHandle {
     // If a path for read access to the removed table is established, pin guarantees are required.
     measure!(
       self.metrics.disk_read,
-      self.backend.pread_exact(buf, offset)
+      self.scheduler.backend().pread_exact(buf, offset)
     )
   }
 
@@ -257,7 +215,7 @@ impl IOHandle {
    * `UnexpectedEof`.
    */
   pub unsafe fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
-    match self.backend.pread(buf, offset) {
+    match self.scheduler.backend().pread(buf, offset) {
       Ok(0) => Ok(()),
       Ok(n) if n == buf.len() => Ok(()),
       Ok(_) => Err(IOError::from(ErrorKind::UnexpectedEof)),
@@ -266,24 +224,28 @@ impl IOHandle {
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.write_scheduler.schedule(buf, offset))
+    let done = self.scheduler.publish_write(buf, offset, &self.metrics);
+    PendingIO::Scheduled(done)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
-    if self.state.is_closed() {
+    if self.scheduler.is_closed() {
       return PendingIO::Fulfilled(Ok(()));
     }
-    PendingIO::Pending(self.sync_scheduler.schedule())
+    let done = self.scheduler.publish_sync(&self.metrics);
+    PendingIO::Scheduled(done)
   }
 
-  pub fn fsync(&self) -> IOResult<()> {
-    let Some(_token) = self.state.try_shared() else {
-      return Ok(());
+  pub fn fsync(&self) -> PendingIO<usize> {
+    let Some(_token) = self.scheduler.pin_state() else {
+      return PendingIO::Fulfilled(Ok(0));
     };
-    self.backend.fsync()
+    let (task, done) = IOTask::new_fsync(NO_CALLBACK);
+    self.scheduler.backend().submit(task);
+    PendingIO::Direct(done)
   }
 
   /**
@@ -293,11 +255,7 @@ impl IOHandle {
    * using the handle, then removes the file from the base directory.
    */
   pub fn truncate(&self) -> IOResult<()> {
-    let backoff = Backoff::new();
-    while self.state.try_exclusive().map(forget).is_none() {
-      backoff.snooze();
-    }
-
+    self.scheduler.close();
     self.base_dir.remove(&self.filename.l())
   }
 
