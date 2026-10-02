@@ -1,7 +1,7 @@
 use std::{
   cell::{RefCell, UnsafeCell},
   mem::MaybeUninit,
-  ptr::{null_mut, NonNull},
+  ptr::NonNull,
   sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
 };
 
@@ -17,13 +17,6 @@ struct Slot<T> {
   written: AtomicBool,
 }
 impl<T> Slot<T> {
-  const fn uninit() -> Self {
-    Self {
-      value: UnsafeCell::new(MaybeUninit::uninit()),
-      written: AtomicBool::new(false),
-    }
-  }
-
   fn write(&self, value: T) {
     unsafe { (*self.value.get()).write(value) };
     self.written.store(true, Ordering::Release);
@@ -37,7 +30,7 @@ impl<T> Slot<T> {
     unsafe { (*self.value.get()).assume_init_read() }
   }
 
-  fn drop_in_place(&mut self) {
+  unsafe fn drop_in_place(&mut self) {
     unsafe { self.value.get_mut().assume_init_drop() };
   }
 }
@@ -47,11 +40,8 @@ struct Block<T> {
   slots: [Slot<T>; BLOCK_CAP],
 }
 impl<T> Block<T> {
-  const fn new() -> Self {
-    Self {
-      next: AtomicPtr::new(null_mut()),
-      slots: [const { Slot::uninit() }; BLOCK_CAP],
-    }
+  fn alloc() -> Box<Self> {
+    unsafe { Box::<Self>::new_zeroed().assume_init() }
   }
 
   fn write(&self, value: T, index: usize) {
@@ -104,8 +94,7 @@ pub struct MpscQueue<T> {
 }
 impl<T> MpscQueue<T> {
   pub fn new() -> Self {
-    let block = Box::new(Block::new());
-    let ptr = Box::into_raw(block);
+    let ptr = Box::into_raw(Block::alloc());
     Self {
       head: CachePadded::new(Head::new(ptr, 0)),
       tail: CachePadded::new(Tail::new(ptr, 0)),
@@ -130,7 +119,7 @@ impl<T> MpscQueue<T> {
       }
 
       if offset + 1 == BLOCK_CAP && next_block.is_none() {
-        next_block = Some(Box::new(Block::<T>::new()));
+        next_block = Some(Block::<T>::alloc());
       }
 
       let new_tail = tail + (1 << SHIFT);
