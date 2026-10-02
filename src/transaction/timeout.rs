@@ -174,8 +174,8 @@ const fn handle_thread(
     let mut next_tick = Instant::now() + TICK_SIZE;
     let mut standard = Instant::now();
     loop {
-      let now = LazyCell::new(Instant::now);
-      while !wheel.is_empty() && next_tick <= *now {
+      let now = Instant::now();
+      while !wheel.is_empty() && next_tick <= now {
         let current = (next_tick - standard).as_millis() as u64;
         for id in wheel.tick(current).into_iter().flatten() {
           handle(id);
