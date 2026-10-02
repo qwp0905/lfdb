@@ -47,7 +47,7 @@ LFDB is designed to handle high-concurrency workloads through the following desi
 > Lock free WAL
 
 LFDB’s WAL is designed to be `lock-free`, using no mutexes at all. Before writing a WAL record, each insert request obtains the offset within the WAL buffer where it will write its data through an atomic operation. This allows data to be written without memory conflicts, and the WAL buffer is safely written to disk in order during commit through CAS. The WAL consists of multiple fixed-size segments and scales according to request frequency. In addition, when a WAL buffer or segment becomes full, it is replaced quickly and safely through atomic CAS, and its pointers are safely reclaimed through epoch-based GC.
-The fsync syscalls for WAL segments that occur on commit requests are grouped and processed by the fsync thread, distributing the cost of commits.
+Sync requests from concurrent commits are grouped per WAL segment and submitted through the asynchronous I/O backend, sharing the synchronization cost across transactions.
 
 > B-Link tree indexing
 
@@ -70,9 +70,9 @@ LFDB uses a high-performance block cache based on a modern algorithm to reduce I
 
 LFDB reads do not copy any data blocks when the size is small. Through copy-on-write, LFDB does not modify blocks registered in the block cache directly; instead, it only replaces blocks, enabling safe reads without copying data blocks. See the `VecRef` struct for details. However, because VecRef holds a reference to the underlying data block, keeping it alive for a long time may increase memory pressure.
 
-> Buffered io
+> Asynchronous disk I/O
 
-All disk writes in LFDB are performed asynchronously on separate threads. Disk writes requested around the same time are buffered per file, deduplicated and sorted by offset, then issued through the pwritev syscall. Like WAL group commit, this distributes the cost of disk writes and provides logical async I/O.
+LFDB batches disk writes per file, eliminating duplicates and combining adjacent blocks into a single I/O request. On Linux, io_uring provides native asynchronous I/O; on other platforms, a worker pool executes blocking I/O asynchronously from the caller’s perspective.
 
 > Incremental background work
 

@@ -6,7 +6,7 @@ use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   btree::ResolvedConflict,
   cache::{BlockCache, CachedSlot, RefedSlot},
-  disk::{IOPool, Pointer},
+  disk::Pointer,
   error::Result,
   maintenance::{Compactor, GarbageCollector},
   metrics::{measure, MetricsRegistry},
@@ -31,7 +31,6 @@ pub struct TxOrchestrator {
   gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
   compactor: Arc<Compactor>,
-  io_pool: Arc<IOPool>,
   blob: Arc<BlobStorage>,
   metrics: Arc<MetricsRegistry>,
 }
@@ -44,7 +43,6 @@ impl TxOrchestrator {
     gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
     compactor: Arc<Compactor>,
-    io_pool: Arc<IOPool>,
     blob: Arc<BlobStorage>,
     checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
@@ -58,7 +56,6 @@ impl TxOrchestrator {
       gc,
       recorder,
       compactor,
-      io_pool,
       blob,
       metrics,
     }
@@ -165,8 +162,6 @@ impl TxOrchestrator {
     info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
-    self.io_pool.close();
-    info!("io pool closed.");
     Ok(())
   }
 }

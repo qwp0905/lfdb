@@ -11,7 +11,7 @@ use crossbeam::utils::Backoff;
 
 use crate::utils::SBox;
 
-use super::CallbackSlot;
+use super::{Callback, CallbackSlot};
 
 #[repr(C)]
 struct PairInner<T: ?Sized> {
@@ -36,7 +36,7 @@ impl<T> Pair<T> {
   }
 
   pub const fn into_raw(this: Self) -> *mut T {
-    let ptr = unsafe { &raw mut (*this.0.as_ptr()).value };
+    let ptr = this.as_ptr();
     forget(this);
     ptr
   }
@@ -45,6 +45,10 @@ impl<T> Pair<T> {
     let offset = offset_of!(PairInner<T>, value);
     let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
     Self(NonNull::new_unchecked(ptr))
+  }
+
+  const fn as_ptr(&self) -> *mut T {
+    unsafe { &raw mut (*self.0.as_ptr()).value }
   }
 }
 impl<T: ?Sized> Drop for Pair<T> {
@@ -169,7 +173,7 @@ impl<T> Atomic<T> {
 pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
-  callback: CallbackSlot,
+  callback: CallbackSlot<T>,
 }
 impl<T> OneshotBehavior<T> {
   pub const fn new() -> Self {
@@ -180,29 +184,23 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
-  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
-    &self,
-    f: F,
-  ) -> std::result::Result<(), F> {
+  pub fn add_callback(&self, f: Callback<T>) -> std::result::Result<(), Callback<T>> {
     self.callback.set(f)
   }
 
-  pub unsafe fn fulfill(&self, result: T) {
+  pub fn fulfill_and_wake(&self, result: T) {
     if let Some(callback) = self.callback.take() {
-      unsafe { callback.call(&result) };
+      callback.call(&result);
     }
     unsafe { (*self.value.get()).write(result) };
-  }
-
-  pub unsafe fn wake(this: *const Self) {
     let backoff = Backoff::new();
-    let mut state = (*this).state.load();
+    let mut state = self.state.load();
     loop {
       if state == STATE_DISCONNECTED {
-        return unsafe { (*this).drop_value() };
+        return unsafe { self.drop_value() };
       }
 
-      if let Err(err) = (*this).state.cas_weak(state, STATE_FULFILLED) {
+      if let Err(err) = self.state.cas_weak(state, STATE_FULFILLED) {
         backoff.spin();
         state = err;
         continue;
@@ -213,13 +211,6 @@ impl<T> OneshotBehavior<T> {
         STATE_WAITING => {}
         _ => unsafe { SBox::from_raw(state) }.wake(),
       };
-    }
-  }
-
-  pub fn fulfill_and_wake(this: *const Self, result: T) {
-    unsafe {
-      (*this).fulfill(result);
-      Self::wake(this);
     }
   }
 
@@ -337,11 +328,17 @@ impl<T> Oneshot<T> {
     self.0.wait()
   }
 
-  pub fn add_callback<F: FnOnce(&T) + Send + 'static>(
+  pub fn add_callback(
     &self,
-    f: F,
-  ) -> std::result::Result<(), F> {
-    self.0.add_callback(f)
+    callback: Callback<T>,
+  ) -> std::result::Result<(), Callback<T>> {
+    self.0.add_callback(callback)
+  }
+
+  pub fn must_call(self, callback: Callback<T>) {
+    if let Err(err) = self.add_callback(callback) {
+      err.call(&self.wait().unwrap())
+    }
   }
 }
 impl<T> Drop for Oneshot<T> {
@@ -353,7 +350,7 @@ impl<T> Drop for Oneshot<T> {
 pub struct OneshotFulfill<T>(Pair<OneshotBehavior<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
-    OneshotBehavior::fulfill_and_wake(&*self.0 as _, result);
+    self.0.fulfill_and_wake(result);
   }
 }
 impl<T> Drop for OneshotFulfill<T> {

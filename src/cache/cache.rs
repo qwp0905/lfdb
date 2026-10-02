@@ -9,7 +9,7 @@ use super::{
   EvictionGuard, MappingTable, PendingFlush,
 };
 use crate::{
-  background::{Close, ThreadBuilder, ThreadPool},
+  background::{Close, SharedWorkThread, ThreadBuilder},
   disk::{PagePool, PageRef, Pointer, PAGE_SIZE},
   metrics::{measure, MetricsRegistry},
   table::TableHandleRef,
@@ -122,14 +122,14 @@ impl Core {
     Err(err)
   }
 
-  fn flush_tables_with(&self, executor: &Arc<ThreadPool>) -> Result {
-    let mut stream = executor.stream(handle_flush_table);
+  fn flush_tables(&self) -> Result {
+    let mut pending = Vec::new();
     for table in self.dirty_tables.drain() {
-      stream.push(table);
+      pending.push((table.disk().fsync(), table));
     }
 
-    for (result, table) in stream.join() {
-      let Err(err) = result else {
+    for (pending, table) in pending {
+      let Err(err) = pending.wait_flatten() else {
         continue;
       };
 
@@ -198,7 +198,7 @@ impl Core {
 pub struct BlockCache {
   table: MappingTable,
   core: Arc<Core>,
-  flush_executor: Arc<ThreadPool>,
+  flush_executor: Arc<SharedWorkThread<BlockId, Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BlockCache {
@@ -222,6 +222,7 @@ impl BlockCache {
     let flush_executor = ThreadBuilder::new()
       .name("flush executor")
       .multi(PRE_FLUSH_CONCURRENCY)
+      .shared(handle_flush_blocks(core.clone()))
       .to_arc();
 
     Ok(Self {
@@ -368,12 +369,12 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
   core: Arc<Core>,
-  executor: Arc<ThreadPool>,
+  executor: Arc<SharedWorkThread<BlockId, Result>>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<ThreadPool>,
+    executor: Arc<SharedWorkThread<BlockId, Result>>,
     core: Arc<Core>,
   ) -> Self {
     Self {
@@ -385,16 +386,15 @@ impl CacheFlusher {
 
   pub fn advance(&mut self, count: usize) -> Result {
     let count = count.min(self.dirty_blocks.len());
-    let handler = handle_flush_blocks(self.core.clone());
-    let tasks = self.dirty_blocks.iter().take(count).copied();
+    let mut pending = Vec::with_capacity(count);
+    for &id in self.dirty_blocks.iter().take(count) {
+      pending.push(self.executor.execute(id));
+    }
 
-    self
-      .executor
-      .fork(tasks, handler)
-      .join()
-      .collect::<Result>()?;
+    for pending in pending {
+      pending.wait().unwrap()?;
+    }
     self.dirty_blocks.drain(..count);
-
     Ok(())
   }
 
@@ -412,7 +412,7 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    self.core.flush_tables_with(&self.executor)
+    self.core.flush_tables()
   }
 }
 
@@ -420,8 +420,4 @@ const PRE_FLUSH_CONCURRENCY: usize = 3;
 
 const fn handle_flush_blocks(core: Arc<Core>) -> impl Fn(BlockId) -> Result {
   move |id| core.flush_block(id)
-}
-
-fn handle_flush_table(table: TableHandleRef) -> (Result, TableHandleRef) {
-  (table.disk().fsync(), table)
 }

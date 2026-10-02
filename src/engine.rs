@@ -1,5 +1,6 @@
 use std::{
   collections::HashMap,
+  num::NonZero,
   panic::{RefUnwindSafe, UnwindSafe},
   sync::{
     atomic::{AtomicBool, Ordering},
@@ -58,13 +59,9 @@ impl Engine {
 
     info!("start engine");
 
-    let io_pool = IOPool::with_backend(
-      backend,
-      config.io_thread_count,
-      config.base_path.as_ref(),
-      metrics_registry.clone(),
-    )?
-    .to_arc();
+    let io_pool =
+      IOPool::with_backend(backend, config.base_path.as_ref(), metrics_registry.clone())?
+        .to_arc();
 
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
@@ -152,7 +149,6 @@ impl Engine {
         gc,
         recorder,
         compactor,
-        io_pool,
         blob,
         checkpoint,
         metrics_registry.clone(),
@@ -171,10 +167,11 @@ impl Engine {
       return Err(Error::UnsupportedPageSize);
     }
 
-    let thread_count = available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let thread_count = available_parallelism().map(NonZero::get).unwrap_or(1);
     let init_thread = ThreadBuilder::new()
       .name("bootstrap")
       .multi(thread_count)
+      .pool()
       .into_once()
       .to_arc();
 
@@ -357,7 +354,6 @@ impl Engine {
       gc,
       recorder,
       compactor,
-      io_pool,
       blob,
       checkpoint.clone(),
       metrics_registry.clone(),
