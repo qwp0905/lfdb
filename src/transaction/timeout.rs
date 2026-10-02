@@ -1,5 +1,4 @@
 use std::{
-  cell::LazyCell,
   num::NonZero,
   sync::Arc,
   thread::{park, park_timeout, Builder, Thread},
