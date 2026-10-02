@@ -5,7 +5,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use crossbeam::{atomic::AtomicCell, queue::SegQueue};
+use crossbeam::atomic::AtomicCell;
 
 use super::CheckpointSnapshot;
 
@@ -19,7 +19,7 @@ use crate::{
   disk::{IOPool, PAGE_SIZE},
   metrics::MetricsRegistry,
   mvcc::VersionController,
-  utils::{debug, error, info, trace, uuid_simple, ToArc, ToBox},
+  utils::{debug, error, info, trace, uuid_simple, MpscQueue, ToArc, ToBox},
   wal::{LogId, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog},
   Result,
 };
@@ -86,7 +86,7 @@ impl CheckpointCycle {
 }
 
 pub struct Checkpoint {
-  incoming: Arc<SegQueue<WALSegmentRotated>>,
+  incoming: Arc<MpscQueue<WALSegmentRotated>>,
   ticker: Box<IntervalWorkThread>,
   /**
    * Shared storage for the active checkpoint cycle.
@@ -105,7 +105,7 @@ impl Checkpoint {
     metrics: Arc<MetricsRegistry>,
     flush_factor: f64,
   ) -> Arc<Self> {
-    let incoming = SegQueue::new().to_arc();
+    let incoming = MpscQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
     let ticker = ThreadBuilder::new()
       .name("checkpoint")
@@ -168,7 +168,7 @@ impl Checkpoint {
   fn failover(&self) {
     self.ticker.close();
     let _ = self.cycle.take();
-    while self.incoming.pop().is_some() {}
+    while unsafe { self.incoming.pop() }.is_some() {}
   }
 
   /**
@@ -199,7 +199,7 @@ impl Checkpoint {
     }
 
     let id = self.worker.run_hard()?;
-    while let Some(event) = self.incoming.pop() {
+    while let Some(event) = unsafe { self.incoming.pop() } {
       if id >= event.last_log_id {
         event.segment.truncate()?;
       }
@@ -295,13 +295,13 @@ impl CheckpointWorker {
 
   fn create_cycle(
     &self,
-    incoming: &SegQueue<WALSegmentRotated>,
+    incoming: &MpscQueue<WALSegmentRotated>,
     metrics: &MetricsRegistry,
   ) -> CheckpointCycle {
     let log_id = self.wal.durable_log_id();
     let mut non_durable = Vec::new();
     let mut durable = Vec::new();
-    while let Some(event) = incoming.pop() {
+    while let Some(event) = unsafe { incoming.pop() } {
       if log_id >= event.last_log_id {
         durable.push(event.segment);
       } else {
@@ -321,7 +321,7 @@ impl CheckpointWorker {
 
   fn run_tick<F: Fn(usize) -> usize>(
     &self,
-    incoming: &SegQueue<WALSegmentRotated>,
+    incoming: &MpscQueue<WALSegmentRotated>,
     cycle: &AtomicCell<Option<CheckpointCycle>>,
     metrics: &MetricsRegistry,
     calc_batch_size: &F,
@@ -383,7 +383,7 @@ impl CheckpointWorker {
  * more cache blocks are flushed.
  */
 fn checkpoint_loop(
-  incoming: Arc<SegQueue<WALSegmentRotated>>,
+  incoming: Arc<MpscQueue<WALSegmentRotated>>,
   worker: Arc<CheckpointWorker>,
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   metrics: Arc<MetricsRegistry>,

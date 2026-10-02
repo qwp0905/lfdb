@@ -33,3 +33,6 @@ pub use semaphore::*;
 
 mod lifetime;
 pub use lifetime::*;
+
+mod mpsc;
+pub use mpsc::*;

@@ -6,8 +6,6 @@ use std::{
   sync::atomic::{fence, AtomicBool, Ordering},
 };
 
-use crossbeam::queue::SegQueue;
-
 use super::{
   AppendCompletion, AppendTicket, BookingResult, FsyncResult, LogId, OffsetBooking,
   SegmentGeneration, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
@@ -15,19 +13,19 @@ use super::{
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   disk::{Page, PagePool, PageRef, Pointer},
-  utils::{create_static_ref, ExclusivePin, SBox, SharedToken},
+  utils::{create_static_ref, ExclusivePin, MpscQueue, SBox, SharedToken},
 };
 
 struct LogBufferBatch {
   occupied: AtomicBool,
-  queue: SegQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
+  queue: MpscQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
   max_offset: Cell<usize>,
 }
 impl LogBufferBatch {
   fn new() -> Self {
     Self {
       occupied: AtomicBool::new(false),
-      queue: SegQueue::new(),
+      queue: MpscQueue::new(),
       max_offset: Cell::new(0),
     }
   }
@@ -60,7 +58,7 @@ impl LogBufferBatch {
   fn drain_all(
     &self,
   ) -> impl Iterator<Item = (AppendTicket, OneshotFulfill<io::Result<()>>)> + '_ {
-    repeat(()).map_while(|_| self.queue.pop())
+    repeat(()).map_while(|_| unsafe { self.queue.pop() })
   }
 
   const fn get_max_offset(&self) -> usize {

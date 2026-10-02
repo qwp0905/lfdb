@@ -4,7 +4,7 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::{epoch::pin, queue::SegQueue};
+use crossbeam::epoch::pin;
 
 use super::CompactionTriggered;
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
   },
   table::{TableHandleRef, TableId, TableMapper},
   transaction::PageRecorder,
-  utils::{error, ChunkQueue, ToArc, ToBox},
+  utils::{error, ChunkQueue, MpscQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX},
   Result,
 };
@@ -37,7 +37,7 @@ pub struct GarbageCollectionConfig {
 const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct GarbageCollector {
-  release_queue: Arc<SegQueue<DropTableCommitted>>,
+  release_queue: Arc<MpscQueue<DropTableCommitted>>,
   main: Box<IntervalWorkThread>,
 }
 impl GarbageCollector {
@@ -50,7 +50,7 @@ impl GarbageCollector {
     blob: Arc<BlobStorage>,
     config: GarbageCollectionConfig,
   ) -> Arc<Self> {
-    let release_queue = SegQueue::new().to_arc();
+    let release_queue = MpscQueue::new().to_arc();
     let worker =
       GcWorker::new(block_cache, version_controller, recorder, mapper, blob).to_arc();
 
@@ -494,7 +494,7 @@ impl GcWorker {
 
   fn release_tables(
     &self,
-    release_queue: &SegQueue<DropTableCommitted>,
+    release_queue: &MpscQueue<DropTableCommitted>,
     steps: &mut TableSteps,
   ) -> Result {
     steps.ingest(release_queue);
@@ -580,8 +580,8 @@ impl TableSteps {
     }
   }
 
-  fn ingest(&mut self, queue: &SegQueue<DropTableCommitted>) {
-    while let Some(committed) = queue.pop() {
+  fn ingest(&mut self, queue: &MpscQueue<DropTableCommitted>) {
+    while let Some(committed) = unsafe { queue.pop() } {
       self.incoming.push_back((
         committed.handle,
         committed.owner,
@@ -605,7 +605,7 @@ impl TableSteps {
 fn gc_main_loop(
   worker: Arc<GcWorker>,
   event_bus: Arc<EventBus>,
-  release_queue: Arc<SegQueue<DropTableCommitted>>,
+  release_queue: Arc<MpscQueue<DropTableCommitted>>,
   config: GarbageCollectionConfig,
 ) -> impl FnMut() {
   let mut cycle = None;

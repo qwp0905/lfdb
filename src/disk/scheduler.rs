@@ -9,13 +9,15 @@ use std::{
   time::Instant,
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::utils::Backoff;
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
-  utils::{create_static_ref, ExclusivePin, ExclusiveToken, SBox, SharedToken},
+  utils::{
+    create_static_ref, ExclusivePin, ExclusiveToken, MpscQueue, SBox, SharedToken,
+  },
 };
 
 type WriteTask = (u64, IoSlice<'static>);
@@ -115,7 +117,7 @@ impl IOScheduler {
 }
 
 pub struct BatchQueue<T, R> {
-  queue: SegQueue<(T, OneshotFulfill<R>)>,
+  queue: MpscQueue<(T, OneshotFulfill<R>)>,
   occupied: AtomicBool,
 }
 impl<T, R> Default for BatchQueue<T, R> {
@@ -124,9 +126,9 @@ impl<T, R> Default for BatchQueue<T, R> {
   }
 }
 impl<T, R> BatchQueue<T, R> {
-  const fn new() -> Self {
+  fn new() -> Self {
     Self {
-      queue: SegQueue::new(),
+      queue: MpscQueue::new(),
       occupied: AtomicBool::new(false),
     }
   }
@@ -153,7 +155,7 @@ impl<T, R> BatchQueue<T, R> {
   }
 
   fn drain_n(&self, count: usize) -> impl Iterator<Item = (T, OneshotFulfill<R>)> + '_ {
-    (0..count).map_while(|_| self.queue.pop())
+    (0..count).map_while(|_| unsafe { self.queue.pop() })
   }
 }
 
