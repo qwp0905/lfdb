@@ -1,19 +1,16 @@
 use std::{
-  mem::replace,
+  num::NonZero,
   sync::Arc,
-  thread::Builder,
+  thread::{park, park_timeout, Builder, Thread},
   time::{Duration, Instant},
 };
 
-use crossbeam::{
-  channel::{tick, unbounded, Receiver, Sender},
-  select,
-};
+use crossbeam::utils::Backoff;
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
   mvcc::VersionController,
-  utils::{debug, warn},
+  utils::{debug, warn, MpscQueue},
   wal::TxId,
 };
 
@@ -24,24 +21,6 @@ const LAYER_PER_BUCKET: usize = 1 << LAYER_PER_BUCKET_BIT as usize;
 const LAYER_PER_BUCKET_MASK: u64 = LAYER_PER_BUCKET as u64 - 1;
 const MAX_LAYER_PER_BUCKET: usize =
   (usize::MAX.ilog2() as usize).div_ceil(LAYER_PER_BUCKET_BIT as usize);
-
-struct SystemTimer(Instant);
-impl SystemTimer {
-  #[inline]
-  pub fn new() -> Self {
-    Self(Instant::now())
-  }
-
-  #[inline]
-  fn now(&self) -> u64 {
-    self.0.elapsed().as_millis() as u64
-  }
-
-  #[inline]
-  fn reset(&mut self) {
-    self.0 = Instant::now();
-  }
-}
 
 struct Task<T> {
   execute_at: u64,
@@ -108,50 +87,20 @@ impl<T> BucketLayer<T> {
  * so the timer is reset whenever the wheel becomes empty — keeping execute_at
  * values small and the layer count minimal.
  */
-struct TimingWheel<T, F> {
+struct TimingWheel<T> {
   layers: Vec<BucketLayer<T>>,
-  current: u64,
-  timer: SystemTimer,
   tasks: usize,
-  handle: F,
 }
-impl<T, F> TimingWheel<T, F>
-where
-  F: Fn(T),
-{
-  fn new(handle: F) -> Self {
+impl<T> TimingWheel<T> {
+  fn new() -> Self {
     Self {
       layers: Vec::with_capacity(MAX_LAYER_PER_BUCKET),
-      current: 0,
-      timer: SystemTimer::new(),
       tasks: 0,
-      handle,
     }
   }
 
-  /**
-   * Reset the wheel clock whenever a new non-empty batch starts.
-   *
-   * Bucket layers are derived from the remaining delay magnitude. Resetting after
-   * the wheel becomes empty prevents old elapsed time from forcing newly
-   * registered timeouts into unnecessarily high layers.
-   */
-  #[inline]
-  fn reset(&mut self) {
-    self.timer.reset();
-    self.current = 0;
-  }
-  fn register(&mut self, data: T, delay: Duration) {
-    if self.tasks == 0 {
-      self.reset();
-    }
-
-    let execute_at = self.timer.now() + delay.as_millis() as u64;
-    if execute_at == 0 {
-      return (self.handle)(data);
-    }
-
-    let task = Task::new(data, execute_at);
+  fn register(&mut self, data: T, execute_at: NonZero<u64>) {
+    let task = Task::new(data, execute_at.get());
     let layer_size = task.layer_size();
     for len in self.layers.len()..layer_size {
       self.layers.push(BucketLayer::new(len as u64));
@@ -161,42 +110,29 @@ where
     self.tasks += 1;
   }
 
-  fn tick(&mut self) {
-    let now = self.timer.now();
+  fn tick(&mut self, current: u64) -> Option<impl Iterator<Item = T> + '_> {
     let mut dropdown: Option<Bucket<T>> = None;
-
-    for current in replace(&mut self.current, now)..now {
-      for (i, layer) in self.layers.iter_mut().enumerate().rev() {
-        match (layer.is_empty(), dropdown.take()) {
-          (true, None) => continue,
-          (_, Some(tasks)) => tasks.into_iter().for_each(|task| layer.insert(task)),
-          _ => {}
-        }
-
-        let index =
-          (current >> (i as u64 * LAYER_PER_BUCKET_BIT)) & LAYER_PER_BUCKET_MASK;
-        dropdown = layer.dropdown(index as usize);
+    for (i, layer) in self.layers.iter_mut().enumerate().rev() {
+      match (layer.is_empty(), dropdown.take()) {
+        (true, None) => continue,
+        (_, Some(tasks)) => tasks.into_iter().for_each(|task| layer.insert(task)),
+        _ => {}
       }
 
-      while let Some(true) = self.layers.last().map(|l| l.is_empty()) {
-        self.layers.pop();
-      }
-
-      match dropdown.take() {
-        Some(tasks) => self.handle_tasks(tasks),
-        None => continue,
-      }
-
-      if self.tasks == 0 {
-        self.layers.clear();
-        break;
-      }
+      let index = (current >> (i as u64 * LAYER_PER_BUCKET_BIT)) & LAYER_PER_BUCKET_MASK;
+      dropdown = layer.dropdown(index as usize);
     }
-  }
 
-  fn handle_tasks(&mut self, tasks: Bucket<T>) {
+    while let Some(true) = self.layers.last().map(|l| l.is_empty()) {
+      self.layers.pop();
+    }
+
+    let tasks = dropdown?;
     self.tasks -= tasks.len();
-    tasks.into_iter().map(|t| t.take()).for_each(&self.handle);
+    if self.tasks == 0 {
+      self.layers.clear();
+    }
+    Some(tasks.into_iter().map(|t| t.take()))
   }
 
   #[inline]
@@ -205,47 +141,83 @@ where
   }
 }
 
-enum Msg {
+enum Context {
   Register(TxId, Duration),
   Term,
 }
 
+const fn handle_timeout(version_controller: Arc<VersionController>) -> impl Fn(TxId) {
+  move |tx_id: TxId| {
+    let Some(state) = version_controller.get_active_state(tx_id) else {
+      return;
+    };
+    if !state.try_timeout() {
+      return;
+    }
+    warn!("tx {} timeout reached", state.get_id());
+
+    version_controller.set_abort(state.get_id());
+    state.deactive();
+  }
+}
+
 const fn handle_thread(
   version_controller: Arc<VersionController>,
-  receiver: Receiver<Msg>,
+  queue: Arc<MpscQueue<Context>>,
 ) -> impl FnOnce() {
   move || {
-    let mut wheel = TimingWheel::new(move |tx_id: TxId| {
-      let Some(state) = version_controller.get_active_state(tx_id) else {
-        return;
-      };
-      if !state.try_timeout() {
-        return;
-      }
-      warn!("tx {} timeout reached", state.get_id());
+    let mut wheel = TimingWheel::new();
+    let handle = handle_timeout(version_controller);
 
-      version_controller.set_abort(state.get_id());
-      state.deactive();
-    });
-    let ticker = tick(TICK_SIZE);
-
-    while let Ok(ctx) = receiver.recv() {
-      match ctx {
-        Msg::Register(id, timeout) => wheel.register(id, timeout),
-        Msg::Term => return,
-      }
-      debug!("timeout thread wake up.");
-
-      while !wheel.is_empty() {
-        select! {
-          recv(ticker) -> _ => wheel.tick(),
-          recv(receiver) -> msg => match msg {
-            Ok(Msg::Register(id, timeout)) => wheel.register(id, timeout),
-            Err(_) | Ok(Msg::Term) => return,
-          }
+    let backoff = Backoff::new();
+    let mut next_tick = Instant::now() + TICK_SIZE;
+    let mut standard = Instant::now();
+    loop {
+      let now = Instant::now();
+      while !wheel.is_empty() && next_tick <= now {
+        let current = (next_tick - standard).as_millis() as u64;
+        for id in wheel.tick(current).into_iter().flatten() {
+          handle(id);
         }
+        next_tick += TICK_SIZE;
       }
-      debug!("timeout thread switches to idle.");
+
+      if let Some(ctx) = unsafe { queue.pop() } {
+        backoff.reset();
+        let (id, timeout) = match ctx {
+          Context::Register(id, timeout) => (id, timeout),
+          Context::Term => return,
+        };
+        if wheel.is_empty() {
+          standard = Instant::now();
+        }
+
+        let Some(execute_at) =
+          NonZero::new((Instant::now() + timeout - standard).as_millis() as u64)
+        else {
+          handle(id);
+          continue;
+        };
+        wheel.register(id, execute_at);
+        continue;
+      }
+
+      if !backoff.is_completed() {
+        backoff.snooze();
+        continue;
+      }
+
+      if wheel.is_empty() {
+        debug!("timeout thread switches to idle.");
+        park();
+        debug!("timeout thread wake up.");
+        next_tick = Instant::now();
+        continue;
+      }
+
+      if let Some(dur) = next_tick.checked_duration_since(Instant::now()) {
+        park_timeout(dur);
+      }
     }
   }
 }
@@ -256,31 +228,36 @@ const fn handle_thread(
  * The thread idles when no transactions are registered, waking on the first registration.
  */
 pub struct TimeoutThread {
-  channel: Sender<Msg>,
+  queue: Arc<MpscQueue<Context>>,
+  waker: Thread,
   slot: ThreadSlot,
 }
 impl TimeoutThread {
   pub fn new(version_controller: Arc<VersionController>) -> Self {
-    let (tx, rx) = unbounded();
-    let th = Builder::new()
+    let queue = Arc::new(MpscQueue::new());
+    let handle = Builder::new()
       .name("timeout".to_string())
       .stack_size(2 << 20)
-      .spawn_unwind(handle_thread(version_controller, rx));
-
+      .spawn_unwind(handle_thread(version_controller, queue.clone()));
+    let waker = handle.thread().clone();
     Self {
-      channel: tx,
-      slot: ThreadSlot::new(th),
+      queue,
+      waker,
+      slot: ThreadSlot::new(handle),
     }
   }
 
   pub fn register(&self, id: TxId, timeout: Duration) {
-    self.channel.send(Msg::Register(id, timeout)).unwrap();
+    self.queue.push(Context::Register(id, timeout));
+    self.waker.unpark();
   }
 
   pub fn close(&self) {
-    if let Some(th) = self.slot.close() {
-      self.channel.send(Msg::Term).unwrap();
-      th.join().unwrap();
-    }
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.queue.push(Context::Term);
+    handle.thread().unpark();
+    handle.join().unwrap();
   }
 }
