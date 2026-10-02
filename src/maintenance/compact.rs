@@ -1,6 +1,6 @@
 use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
-use crossbeam::{atomic::AtomicCell, epoch::pin, queue::SegQueue};
+use crossbeam::{atomic::AtomicCell, epoch::pin};
 
 use super::DropTableCommitted;
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
   objects::Serializable,
   table::{TableHandleRef, TableMapper, TableMetadata, TableMetadataView, TableNameRef},
   transaction::PageRecorder,
-  utils::{error, info, trace, warn, ToArc, ToBox},
+  utils::{error, info, trace, warn, MpscQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
   Error, Result,
 };
@@ -592,8 +592,8 @@ impl CompactionWorker {
 
   fn run_tick(
     &self,
-    incoming: &SegQueue<CompactTask>,
-    in_progress: &SegQueue<CompactionCycle>,
+    incoming: &MpscQueue<CompactTask>,
+    in_progress: &MpscQueue<CompactionCycle>,
     cycle: &AtomicCell<Option<CompactionCycle>>,
     batch_size: usize,
     waiting_publish: &mut LinkedList<(
@@ -603,7 +603,7 @@ impl CompactionWorker {
       TxId,
     )>,
   ) -> Result {
-    while let Some(task) = incoming.pop() {
+    while let Some(task) = unsafe { incoming.pop() } {
       match task {
         CompactTask::Committed(committed) => waiting_publish.push_back((
           committed.old,
@@ -635,11 +635,10 @@ impl CompactionWorker {
 
     // SAFETY: single threaded access to cycle.
     let cycle_ref = unsafe { &mut *cycle.as_ptr() };
-    let Some(current) = cycle_ref.as_mut().or_else(|| {
-      in_progress
-        .pop()
-        .map(|v| unsafe { (*cycle.as_ptr()).insert(v) })
-    }) else {
+    let Some(current) = cycle_ref
+      .as_mut()
+      .or_else(|| unsafe { in_progress.pop().map(|v| (*cycle.as_ptr()).insert(v)) })
+    else {
       return Ok(());
     };
 
@@ -652,8 +651,8 @@ impl CompactionWorker {
 }
 
 pub struct Compactor {
-  incoming: Arc<SegQueue<CompactTask>>,
-  in_progress: Arc<SegQueue<CompactionCycle>>,
+  incoming: Arc<MpscQueue<CompactTask>>,
+  in_progress: Arc<MpscQueue<CompactionCycle>>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   ticker: Box<IntervalWorkThread>,
   worker: Arc<CompactionWorker>,
@@ -670,8 +669,8 @@ impl Compactor {
     config: CompactionConfig,
   ) -> Arc<Self> {
     let meta_table = tables.meta_table();
-    let incoming = SegQueue::new().to_arc();
-    let in_progress = SegQueue::new().to_arc();
+    let incoming = MpscQueue::new().to_arc();
+    let in_progress = MpscQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
     let worker = CompactionWorker::new(
       block_cache,
@@ -736,7 +735,8 @@ impl Compactor {
       self.in_progress.len()
     );
 
-    while let Some(mut cycle) = cycle.take().or_else(|| self.in_progress.pop()) {
+    while let Some(mut cycle) = cycle.take().or_else(|| unsafe { self.in_progress.pop() })
+    {
       self.worker.finalize_cycle(&mut cycle)?;
     }
     Ok(())
@@ -745,7 +745,7 @@ impl Compactor {
   fn failover(&self) {
     self.ticker.close();
     let _ = self.cycle.take();
-    while self.in_progress.pop().is_some() {}
+    while unsafe { self.in_progress.pop() }.is_some() {}
   }
 }
 
@@ -811,8 +811,8 @@ impl CompactionCycle {
 }
 
 fn compaction_loop(
-  incoming: Arc<SegQueue<CompactTask>>,
-  in_progress: Arc<SegQueue<CompactionCycle>>,
+  incoming: Arc<MpscQueue<CompactTask>>,
+  in_progress: Arc<MpscQueue<CompactionCycle>>,
   worker: Arc<CompactionWorker>,
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   batch_size: usize,
