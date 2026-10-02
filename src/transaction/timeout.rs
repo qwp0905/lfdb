@@ -5,6 +5,8 @@ use std::{
   time::{Duration, Instant},
 };
 
+use crossbeam::utils::Backoff;
+
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
   mvcc::VersionController,
@@ -167,12 +169,14 @@ const fn handle_thread(
     let mut wheel = TimingWheel::new();
     let handle = handle_timeout(version_controller);
 
+    let backoff = Backoff::new();
     let mut peeked = None;
     let mut next_tick = Instant::now() + TICK_SIZE;
     let mut standard = Instant::now();
     loop {
       for ctx in (0u8..32).map_while(|_| peeked.take().or_else(|| unsafe { queue.pop() }))
       {
+        backoff.reset();
         let (id, timeout) = match ctx {
           Context::Register(id, timeout) => (id, timeout),
           Context::Term => return,
@@ -192,7 +196,7 @@ const fn handle_thread(
 
       let now = Instant::now();
       while !wheel.is_empty() && next_tick <= now {
-        let current = (now - standard).as_millis() as u64;
+        let current = (next_tick - standard).as_millis() as u64;
         for id in wheel.tick(current).into_iter().flatten() {
           handle(id);
         }
@@ -201,6 +205,11 @@ const fn handle_thread(
 
       if let Some(ctx) = unsafe { queue.pop() } {
         peeked = Some(ctx);
+        continue;
+      }
+
+      if !backoff.is_completed() {
+        backoff.snooze();
         continue;
       }
 
