@@ -10,14 +10,13 @@ use std::{
   thread::Builder,
 };
 
-use crossbeam::queue::SegQueue;
 use io_uring::{
   opcode, squeue, types, CompletionQueue, IoUring, SubmissionQueue, Submitter,
 };
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
-  utils::warn,
+  utils::{warn, MpscQueue},
 };
 
 use super::{AsyncTask, FullTask, TaskType};
@@ -200,11 +199,11 @@ fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
 }
 
 struct InputQueue {
-  queue: Arc<SegQueue<Context<FullTask>>>,
+  queue: Arc<MpscQueue<Context<FullTask>>>,
   peeked: Option<Context<FullTask>>,
 }
 impl InputQueue {
-  const fn new(queue: Arc<SegQueue<Context<FullTask>>>) -> Self {
+  const fn new(queue: Arc<MpscQueue<Context<FullTask>>>) -> Self {
     Self {
       queue,
       peeked: None,
@@ -212,12 +211,12 @@ impl InputQueue {
   }
   fn peek(&mut self) -> Option<&Context<FullTask>> {
     if self.peeked.is_none() {
-      self.peeked = self.queue.pop();
+      self.peeked = unsafe { self.queue.pop() };
     }
     self.peeked.as_ref()
   }
   fn pop(&mut self) -> Option<Context<FullTask>> {
-    self.peeked.take().or_else(|| self.queue.pop())
+    self.peeked.take().or_else(|| unsafe { self.queue.pop() })
   }
 }
 
@@ -229,7 +228,7 @@ enum Context<T> {
 const POLL: u64 = 0;
 
 pub struct AsyncIO {
-  queue: Arc<SegQueue<Context<FullTask>>>,
+  queue: Arc<MpscQueue<Context<FullTask>>>,
   parked: Arc<AtomicBool>,
   waker: EventFd,
   slot: ThreadSlot,
@@ -237,7 +236,7 @@ pub struct AsyncIO {
 impl AsyncIO {
   const fn worker_loop(
     entries: u32,
-    queue: Arc<SegQueue<Context<FullTask>>>,
+    queue: Arc<MpscQueue<Context<FullTask>>>,
     waker_fd: RawFd,
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
@@ -296,7 +295,7 @@ impl AsyncIO {
     }
   }
   pub fn new(entries: u32) -> Result<Self> {
-    let queue = Arc::new(SegQueue::new());
+    let queue = Arc::new(MpscQueue::new());
     let parked = Arc::new(AtomicBool::new(false));
     let waker = EventFd::new()?;
     let handle = Builder::new()
