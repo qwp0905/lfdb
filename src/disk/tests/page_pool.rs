@@ -4,7 +4,7 @@ const PAGE_SIZE: usize = 4 << 10;
 
 #[test]
 fn test_return_and_reuse() {
-  let pool = PagePool::<PAGE_SIZE>::new(10);
+  let pool: PagePool<PAGE_SIZE> = create_page_pool!(10, PAGE_SIZE);
   assert_eq!(pool.len(), 0);
 
   let page = pool.acquire();
@@ -24,7 +24,7 @@ fn test_return_and_reuse() {
 #[test]
 fn test_drop() {
   let cap = 3;
-  let pool = PagePool::<PAGE_SIZE>::new(cap);
+  let pool = create_page_pool!(cap, PAGE_SIZE);
 
   let mut pages = Vec::new();
   for _ in 0..cap {
