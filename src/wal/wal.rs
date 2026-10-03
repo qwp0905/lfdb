@@ -14,7 +14,7 @@ use crossbeam::{
 use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
-  disk::{IOPool, PagePool, Pointer},
+  disk::{create_page_pool, IOPool, PagePool, Pointer},
   table::TableId,
   utils::{error, info, SharedToken},
   Error, Result,
@@ -121,7 +121,8 @@ impl WriteAheadLog {
     io_pool: Arc<IOPool>,
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let page_pool =
+      create_page_pool!(config.max_buffer_size / WAL_BLOCK_SIZE, WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer =
@@ -146,7 +147,8 @@ impl WriteAheadLog {
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let page_pool =
+      create_page_pool!(config.max_buffer_size / WAL_BLOCK_SIZE, WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 

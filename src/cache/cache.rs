@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
   background::{Close, SharedWorkThread, ThreadBuilder},
-  disk::{PagePool, PageRef, Pointer, PAGE_SIZE},
+  disk::{create_page_pool, PagePool, PageRef, Pointer, PAGE_SIZE},
   metrics::{measure, MetricsRegistry},
   table::TableHandleRef,
   utils::{error, ExclusivePin, SharedToken, ToArc},
@@ -203,7 +203,7 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.capacity + config.buffer_size);
+    let page_pool = create_page_pool!(config.capacity + config.buffer_size, PAGE_SIZE);
 
     let mut blocks = Vec::with_capacity(config.capacity);
     blocks.resize_with(config.capacity, BlockCell::uninit);
