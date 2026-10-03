@@ -1,28 +1,32 @@
-use crate::background::SingleFn;
+use crate::{background::SingleFn, utils::MpscQueue};
 
 use super::{oneshot, Close, Execute, ExecuteOnlyContext, ThreadSlot, UnwindSpawner};
-use std::thread::Builder;
-
-use crossbeam::channel::{unbounded, Receiver, Sender};
+use std::{
+  sync::Arc,
+  thread::{park, Builder, Thread},
+};
 
 const fn worker_loop<T>(
   mut preload: SingleFn<'static, (), T>,
   mut fallback: SingleFn<'static, T, ()>,
-  receiver: Receiver<ExecuteOnlyContext<(), T>>,
+  queue: Arc<MpscQueue<ExecuteOnlyContext<(), T>>>,
 ) -> impl FnOnce()
 where
   T: Send,
 {
   let mut preloaded = None;
   move || loop {
-    let result = preloaded.take().unwrap_or_else(|| preload.call(()));
-    let Ok(ctx) = receiver.recv() else {
-      return fallback.call(result);
+    let loaded = preloaded.take().unwrap_or_else(|| preload.call(()));
+    if let Some(ctx) = unsafe { queue.pop() } {
+      match ctx {
+        ExecuteOnlyContext::Work(_, done) => done.fulfill(loaded),
+        ExecuteOnlyContext::Term => return fallback.call(loaded),
+      };
+      continue;
     };
-    match ctx {
-      ExecuteOnlyContext::Work(_, done) => done.fulfill(result),
-      ExecuteOnlyContext::Term => return fallback.call(result),
-    };
+
+    preloaded = Some(loaded);
+    park();
   }
 }
 
@@ -32,18 +36,10 @@ where
  * This is one of the single-threaded runtime variants. It packages a specific
  * usage pattern: keep one value prepared ahead of demand and return it when a
  * request arrives.
- *
- * The worker creates a value with `preload` before it is requested. When a
- * `Work` message arrives, the preloaded value is returned immediately through
- * the oneshot fulfiller. If no request arrives before the timeout, the value is
- * kept for the next wait cycle after reporting the timeout through
- * `fallback(None)`.
- *
- * On shutdown, any unused preloaded value is passed to `fallback(Some(value))`
- * so the caller can clean it up or return it to another owner.
  */
 pub struct PreloadThread<T> {
-  channel: Sender<ExecuteOnlyContext<(), T>>,
+  queue: Arc<MpscQueue<ExecuteOnlyContext<(), T>>>,
+  waker: Thread,
   slot: ThreadSlot,
 }
 impl<T> PreloadThread<T> {
@@ -56,26 +52,29 @@ impl<T> PreloadThread<T> {
   where
     T: Send + 'static,
   {
-    let (tx, rx) = unbounded();
+    let queue = Arc::new(MpscQueue::new());
     let handle = Builder::new()
       .name(name.to_string())
       .stack_size(size)
-      .spawn_unwind(worker_loop(preload, fallback, rx));
-
+      .spawn_unwind(worker_loop(preload, fallback, queue.clone()));
+    let waker = handle.thread().clone();
     Self {
-      channel: tx,
+      queue,
+      waker,
       slot: ThreadSlot::new(handle),
     }
   }
 
   fn register(&self, ctx: ExecuteOnlyContext<(), T>) {
-    self.channel.send(ctx).unwrap()
+    self.queue.push(ctx);
+    self.waker.unpark();
   }
 }
 impl<T: Send> Close for PreloadThread<T> {
   fn close(&self) {
     if let Some(handle) = self.slot.close() {
-      self.channel.send(ExecuteOnlyContext::Term).unwrap();
+      self.queue.push(ExecuteOnlyContext::Term);
+      handle.thread().unpark();
       handle.join().unwrap();
     }
   }
