@@ -37,15 +37,16 @@ impl PageRecorder {
     T: Serializable,
   {
     let ptr = slot.get_pointer();
-    let page = slot.as_mut();
-    let byte_len = page.serialize_from(data)?;
-    self.wal.append_insert(
-      tx_id,
-      table_id,
-      ptr,
-      current_version,
-      page.range(0..byte_len),
-    )?;
-    Ok(())
+    slot.modify_with(|page| {
+      let byte_len = page.serialize_from(data)?;
+      self.wal.append_insert(
+        tx_id,
+        table_id,
+        ptr,
+        current_version,
+        page.range(0..byte_len),
+      )?;
+      Ok(())
+    })
   }
 }

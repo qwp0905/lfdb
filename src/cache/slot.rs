@@ -105,6 +105,27 @@ impl<'a> WritableSlot<'a> {
   pub const fn get_pointer(&self) -> Pointer {
     self.pointer
   }
+
+  pub fn modify_with<T, F: FnOnce(&mut Page) -> T>(&mut self, f: F) -> T {
+    match &mut self.state {
+      CopiedState::Borrowed {
+        page: _,
+        dirty_blocks,
+        page_pool,
+        block_id,
+      } => {
+        let mut page = page_pool.acquire();
+        let result = f(&mut page);
+        dirty_blocks.insert(*block_id);
+        self.state = CopiedState::Copied(ManuallyDrop::new(page));
+        result
+      }
+      CopiedState::Copied(shadow) => f(shadow),
+    }
+  }
+  pub fn copy_from(&mut self, data: &[u8]) {
+    self.modify_with(|page| page.copy_from(data, 0))
+  }
 }
 impl<'a> AsRef<Page> for WritableSlot<'a> {
   fn as_ref(&self) -> &Page {
@@ -112,26 +133,6 @@ impl<'a> AsRef<Page> for WritableSlot<'a> {
       CopiedState::Borrowed { page, .. } => page,
       CopiedState::Copied(shadow) => shadow,
     }
-  }
-}
-impl<'a> AsMut<Page> for WritableSlot<'a> {
-  fn as_mut(&mut self) -> &mut Page {
-    if let CopiedState::Borrowed {
-      page,
-      dirty_blocks,
-      page_pool,
-      block_id,
-    } = &self.state
-    {
-      dirty_blocks.insert(*block_id);
-      let mut shadow = page_pool.acquire();
-      shadow.copy_from(page.as_slice(), 0);
-      self.state = CopiedState::Copied(ManuallyDrop::new(shadow));
-    }
-    let CopiedState::Copied(page) = &mut self.state else {
-      unreachable!()
-    };
-    page
   }
 }
 unsafe impl<'a> Send for WritableSlot<'a> {}
