@@ -6,7 +6,7 @@ use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   btree::ResolvedConflict,
   cache::{BlockCache, CachedSlot, RefedSlot},
-  disk::Pointer,
+  disk::{PendingIO, Pointer},
   error::Result,
   maintenance::{Compactor, GarbageCollector},
   metrics::{measure, MetricsRegistry},
@@ -159,7 +159,7 @@ impl TxOrchestrator {
   pub fn get_blob_handle(&self, blob_id: BlobId) -> Option<Arc<BlobHandle>> {
     self.blob.get(blob_id)
   }
-  pub fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
+  pub fn write_blob(&self, data: Vec<u8>) -> Result<(BlobAppendGuard<'_>, PendingIO)> {
     self.blob.append(data)
   }
 

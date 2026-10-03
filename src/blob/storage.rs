@@ -1,6 +1,6 @@
 use crate::{
   cache::ShrinkMap,
-  disk::{AlignedBuf, IOPool},
+  disk::{AlignedBuf, IOPool, PendingIO},
   utils::{debug, uuid_simple, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
   Result,
@@ -130,7 +130,7 @@ impl BlobStorage {
       .or_else(|| self.writable.rl().get(&blob_id).cloned())
   }
 
-  pub fn append(&self, buf: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
+  pub fn append(&self, buf: Vec<u8>) -> Result<(BlobAppendGuard<'_>, PendingIO)> {
     let buf = AlignedBuf::from_vec(buf);
     let len = buf.len();
     let size = buf.size() as BlobOffset;
@@ -143,26 +143,26 @@ impl BlobStorage {
           BlobReserved::Ok(offset) => {
             drop(permit);
             handle.write(&buf, offset)?;
-            // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
-            // before returning a reference that may be persisted into the tree.
-            handle.sync().wait_flatten()?;
-            return Ok(BlobAppendGuard::new(
+            let pending = handle.sync();
+            let guard = BlobAppendGuard::new(
               handle.metadata().get_id(),
               offset,
               len as BlobLen,
               None,
-            ));
+            );
+            return Ok((guard, pending));
           }
           BlobReserved::Last(offset) => {
             drop(permit);
             handle.write(&buf, offset)?;
-            handle.sync().wait_flatten()?;
-            return Ok(BlobAppendGuard::new(
+            let pending = handle.sync();
+            let guard = BlobAppendGuard::new(
               handle.metadata().get_id(),
               offset,
               len as BlobLen,
-              Some((handle, self)),
-            ));
+              None,
+            );
+            return Ok((guard, pending));
           }
           BlobReserved::Eof => continue,
         }

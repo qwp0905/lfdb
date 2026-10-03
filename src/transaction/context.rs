@@ -1,9 +1,14 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+  atomic::{AtomicBool, Ordering},
+  OnceLock,
+};
+
+use crossbeam::queue::SegQueue;
 
 use crate::{
   btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
   cache::RefedSlot,
-  disk::Pointer,
+  disk::{PendingIO, Pointer},
   mvcc::{TxSnapshot, TxState},
   objects::Serializable,
   table::TableHandleRef,
@@ -24,6 +29,7 @@ pub struct TxContext<'a> {
   state: TxState<'a>,
   snapshot: TxSnapshot<'a>,
   modified: AtomicBool,
+  blob_sync: OnceLock<SegQueue<PendingIO>>,
 }
 impl<'a> TxContext<'a> {
   #[inline]
@@ -37,6 +43,7 @@ impl<'a> TxContext<'a> {
       state,
       snapshot,
       modified: AtomicBool::new(false),
+      blob_sync: OnceLock::new(),
     }
   }
 
@@ -53,6 +60,16 @@ impl<'a> TxContext<'a> {
   #[inline]
   pub const fn state(&self) -> &'_ TxState<'a> {
     &self.state
+  }
+
+  pub fn resolve_blob_sync(&self) -> Result {
+    let Some(blob_sync) = self.blob_sync.get() else {
+      return Ok(());
+    };
+    while let Some(pending) = blob_sync.pop() {
+      pending.wait_flatten()?;
+    }
+    Ok(())
   }
 }
 
@@ -122,7 +139,9 @@ impl<'a> WritablePolicy for TxContext<'a> {
     self.orchestrator.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
-    self.orchestrator.write_blob(data)
+    let (guard, pending) = self.orchestrator.write_blob(data)?;
+    self.blob_sync.get_or_init(SegQueue::new).push(pending);
+    Ok(guard)
   }
 }
 impl<'a> CreatablePolicy for TxContext<'a> {

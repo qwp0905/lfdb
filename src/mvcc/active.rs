@@ -16,6 +16,7 @@ const STATUS_AVAILABLE: u8 = 0;
 const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
 const STATUS_TIMEOUT: u8 = 3;
+const STATUS_UNAVAILABLE: u8 = 4;
 
 /**
  * Active transaction status transitions.
@@ -23,7 +24,7 @@ const STATUS_TIMEOUT: u8 = 3;
  * Every transaction starts as `AVAILABLE`.
  * - commit path:  `AVAILABLE -> ON_COMMIT`
  * - timeout path: `AVAILABLE -> TIMEOUT`
- * - abort path:   `AVAILABLE | TIMEOUT -> ABORTED`
+ * - abort path:   `AVAILABLE | TIMEOUT | STATUS_UNAVAILABLE -> ABORTED`
  *
  * `ON_COMMIT` is terminal for timeout/abort ownership: once commit owns the
  * transaction, timeout code cannot abort it.
@@ -50,7 +51,10 @@ impl ActiveState {
 
   pub fn try_abort(&self) -> bool {
     let current = self.status.load(Ordering::Relaxed);
-    if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
+    if !matches!(
+      current,
+      STATUS_AVAILABLE | STATUS_TIMEOUT | STATUS_UNAVAILABLE
+    ) {
       return false;
     }
 
@@ -91,9 +95,20 @@ impl ActiveState {
       .is_ok()
   }
 
-  #[inline]
-  pub fn make_available(&self) {
-    self.status.store(STATUS_AVAILABLE, Ordering::Relaxed)
+  pub fn make_unavailable(&self) {
+    self.status.store(STATUS_UNAVAILABLE, Ordering::Relaxed)
+  }
+
+  pub fn try_unavailable(&self) -> bool {
+    self
+      .status
+      .compare_exchange(
+        STATUS_AVAILABLE,
+        STATUS_UNAVAILABLE,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      )
+      .is_ok()
   }
 
   pub fn park(&self) {

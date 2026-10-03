@@ -87,8 +87,8 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     self.block_cache.alloc(pointer, table)
   }
 
-  fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
-    self.blob.append(data)
+  fn write_blob(&self, _: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
+    unreachable!()
   }
 }
 
