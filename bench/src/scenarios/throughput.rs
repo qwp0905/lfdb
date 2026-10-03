@@ -133,7 +133,7 @@ where
     .collect();
 
   group
-    .throughput(Throughput::Elements(SEQ_SIZE as u64))
+    .throughput(Throughput::Elements(CONC_SIZE as u64))
     .bench_function("bench", |b| {
       b.iter(|| {
         let mut waiting = Vec::with_capacity(CONC_SIZE);
@@ -176,7 +176,7 @@ where
     .collect();
 
   group
-    .throughput(Throughput::Elements(SEQ_SIZE as u64))
+    .throughput(Throughput::Elements(CONC_SIZE as u64))
     .bench_function("bench", |b| {
       b.iter(|| {
         engine.ensure_table(TABLE);
@@ -222,7 +222,7 @@ where
     .collect();
 
   group
-    .throughput(Throughput::Elements(SEQ_SIZE as u64))
+    .throughput(Throughput::Elements(CONC_SIZE as u64))
     .bench_function("bench", |b| {
       b.iter(|| {
         let mut waiting = Vec::with_capacity(CONC_SIZE);

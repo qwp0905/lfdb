@@ -6,7 +6,9 @@ use std::{
   thread::{park, Builder, Thread},
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::utils::Backoff;
+
+use crate::utils::MpscQueue;
 
 use super::{ThreadSlot, UnwindSpawner};
 
@@ -299,8 +301,8 @@ enum EventMsg {
   Terminate,
 }
 
-const fn handle_thread(queue: Arc<SegQueue<EventMsg>>) -> impl FnOnce() {
-  move || {
+const fn handle_thread(queue: Arc<MpscQueue<EventMsg>>) -> impl FnOnce() {
+  move || unsafe {
     let mut router = EventRouter::new();
     let backoff = Backoff::new();
 
@@ -335,13 +337,13 @@ const fn handle_thread(queue: Arc<SegQueue<EventMsg>>) -> impl FnOnce() {
 }
 
 pub struct EventBus {
-  queue: Arc<SegQueue<EventMsg>>,
+  queue: Arc<MpscQueue<EventMsg>>,
   waker: Thread,
   slot: ThreadSlot,
 }
 impl EventBus {
   pub fn new() -> Self {
-    let queue = Arc::new(SegQueue::new());
+    let queue = Arc::new(MpscQueue::new());
     let handle = Builder::new()
       .name("event bus".to_string())
       .stack_size(2 << 20)
