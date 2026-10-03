@@ -93,19 +93,14 @@ impl<const N: usize> PagePool<N> {
   }
 
   pub fn acquire(&self) -> PageRef<N> {
-    self.local.with(|v| {
-      let backoff = Backoff::new();
-      let local = v.get_or_init(|| LocalQueue::new(self.global.clone()));
-
-      while !backoff.is_completed() {
-        if let Some(page) = local.pop() {
-          self.global.idle_count.fetch_sub(1, Ordering::Relaxed);
-          return PageRef::from_exists(self.global.clone(), page);
-        }
-        backoff.snooze();
-      }
-      PageRef::new(self.global.clone())
-    })
+    let Some(page) = self
+      .local
+      .with(|v| v.get_or_init(|| LocalQueue::new(self.global.clone())).pop())
+    else {
+      return PageRef::new(self.global.clone());
+    };
+    self.global.idle_count.fetch_sub(1, Ordering::Relaxed);
+    PageRef::from_exists(self.global.clone(), page)
   }
 
   #[cfg(test)]
@@ -133,15 +128,19 @@ impl<const N: usize> LocalQueue<N> {
     if let Some(page) = self.queue.pop() {
       return Some(page);
     }
-    loop {
-      let steal = self
+    let backoff = Backoff::new();
+    while !backoff.is_completed() {
+      if let Some(page) = self
         .global
         .queue
-        .steal_batch_with_limit_and_pop(&self.queue, BATCH_SIZE);
-      if !steal.is_retry() {
-        return steal.success();
+        .steal_batch_with_limit_and_pop(&self.queue, BATCH_SIZE)
+        .success()
+      {
+        return Some(page);
       }
+      backoff.snooze();
     }
+    None
   }
 }
 impl<const N: usize> Drop for LocalQueue<N> {
