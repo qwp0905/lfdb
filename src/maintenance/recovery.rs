@@ -70,7 +70,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::RefedSlot,
+    slot: &mut crate::cache::WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -418,7 +418,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   }
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::RefedSlot,
+    slot: &mut crate::cache::WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {

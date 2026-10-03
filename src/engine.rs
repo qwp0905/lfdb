@@ -222,9 +222,8 @@ impl Engine {
         move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
           unsafe { block_cache.read_unchecked(ptr, &table)? }
             .for_write()
-            .as_mut()
-            .writer()
-            .write(&data)
+            .copy_from(&data);
+          Ok(())
         },
       )
     };

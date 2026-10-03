@@ -1,6 +1,6 @@
 use crate::{
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
-  cache::{CachedSlot, RefedSlot},
+  cache::{CachedSlot, WritableSlot},
   disk::{AlignedBuf, FreePointer, Pointer},
   objects::Serializable,
   table::TableHandleRef,
@@ -86,7 +86,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
   fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>>;
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result;
@@ -124,7 +124,7 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut RefedSlot,
+    slot: &mut WritableSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
