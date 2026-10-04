@@ -182,10 +182,14 @@ impl<const N: usize> GlobalQueue<N> {
   }
 
   fn pop_batch_with(&self, local: &LocalQueue<N>) -> Option<Page<N>> {
-    self
-      .queue
-      .steal_batch_with_limit_and_pop(&local.queue, BATCH_SIZE)
-      .success()
+    loop {
+      let steal = self
+        .queue
+        .steal_batch_with_limit_and_pop(&local.queue, BATCH_SIZE);
+      if !steal.is_retry() {
+        return steal.success();
+      }
+    }
   }
 }
 
