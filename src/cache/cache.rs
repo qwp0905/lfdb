@@ -186,7 +186,7 @@ impl Core {
     if guard.is_evicted() {
       self.page_pool.acquire()
     } else {
-      self.page_pool.acquire_new()
+      self.page_pool.create_new()
     }
   }
 }

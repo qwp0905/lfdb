@@ -75,7 +75,7 @@ impl<const N: usize> PagePool<N> {
     }
   }
 
-  pub fn acquire_new(&self) -> PageRef<N> {
+  pub fn create_new(&self) -> PageRef<N> {
     PageRef::new(self.store.clone())
   }
 
@@ -87,7 +87,7 @@ impl<const N: usize> PagePool<N> {
       }
       backoff.snooze();
     }
-    self.acquire_new()
+    self.create_new()
   }
 
   #[cfg(test)]
