@@ -66,9 +66,17 @@ pub struct PagePool<const N: usize> {
 }
 impl<const N: usize> PagePool<N> {
   pub fn new(cap: usize) -> Self {
-    Self {
-      store: Arc::new(ArrayQueue::new(cap)),
+    let store = ArrayQueue::new(cap);
+    for _ in 0..cap {
+      let _ = store.push(Page::new());
     }
+    Self {
+      store: Arc::new(store),
+    }
+  }
+
+  pub fn create_new(&self) -> PageRef<N> {
+    PageRef::new(self.store.clone())
   }
 
   pub fn acquire(&self) -> PageRef<N> {
@@ -79,7 +87,7 @@ impl<const N: usize> PagePool<N> {
       }
       backoff.snooze();
     }
-    PageRef::new(self.store.clone())
+    self.create_new()
   }
 
   #[cfg(test)]
