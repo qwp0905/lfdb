@@ -185,8 +185,6 @@ impl Core {
   }
 }
 
-const PAGE_POOL_BATCH: usize = 4;
-
 /**
  * Central block-cache manager and higher-level disk abstraction.
  *
@@ -205,7 +203,7 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = create_page_pool!(config.buffer_size, PAGE_SIZE, PAGE_POOL_BATCH);
+    let page_pool = create_page_pool!(config.buffer_size, PAGE_SIZE);
 
     let mut blocks = Vec::with_capacity(config.capacity);
     blocks.resize_with(config.capacity, BlockCell::uninit);

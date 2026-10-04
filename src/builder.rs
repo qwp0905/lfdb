@@ -78,9 +78,8 @@ impl EngineBuilder {
     self
   }
   /**
-   * This specifies the size of the cache and buffers used for zero-copy reads
+   * This specifies the size of the local cache and buffers used for zero-copy reads
    * and copy-on-write operations, cache evictions.
-   * We recommend setting the size to (number of threads expected to access simultaneously) × 4 MiB
    */
   pub const fn block_cache_buffer_size(mut self, size: usize) -> Self {
     self.0.block_cache_buffer_size = size;
@@ -146,7 +145,7 @@ const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
 const DEFAULT_BLOCK_CACHE_MEMORY_CAPACITY: usize = 32 << 20; // 32 mib
-const DEFAULT_BLOCK_CACHE_BUFFER_SIZE: usize = 4 << 20; // 4 mib
+const DEFAULT_BLOCK_CACHE_BUFFER_SIZE: usize = 16 << 10; // 16 mib (4pages)
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_mins(3);
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.5;
 const DEFAULT_COMPACTION_MIN_SIZE: usize = 512 << 20; // 512 mib
