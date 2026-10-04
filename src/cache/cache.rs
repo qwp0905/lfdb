@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, BlockCell, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables,
-  EvictionGuard, MappingTable, PendingFlush,
+  Acquired, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables, EvictionGuard,
+  MappingTable, PendingFlush,
 };
 use crate::{
   background::{Close, SharedWorkThread, ThreadBuilder},
@@ -24,7 +24,7 @@ pub struct BlockCacheConfig {
 }
 
 struct Core {
-  cached_blocks: Box<[BlockCell]>,
+  cached_blocks: Box<[CachedBlock]>,
   /**
    * pin to protect each block in cached blocks from eviction
    */
@@ -38,7 +38,7 @@ struct Core {
 }
 impl Core {
   const fn new(
-    cached_blocks: Box<[BlockCell]>,
+    cached_blocks: Box<[CachedBlock]>,
     pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
@@ -53,7 +53,7 @@ impl Core {
     }
   }
 
-  const fn get_block_cell(&self, block_id: BlockId) -> &BlockCell {
+  const fn get_block(&self, block_id: BlockId) -> &CachedBlock {
     &self.cached_blocks[block_id]
   }
   const fn get_pin(&self, block_id: BlockId) -> &ExclusivePin {
@@ -69,30 +69,32 @@ impl Core {
       return None;
     }
 
-    Some(self.cached_blocks[block_id].get().flusher().submit())
+    Some(self.cached_blocks[block_id].flusher().submit())
   }
 
   fn resolve_eviction(
     &self,
     pending: Option<PendingFlush>,
     guard: &EvictionGuard,
-    new: CachedBlock,
+    new: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    table: TableHandleRef,
   ) -> Result {
     let block_id = guard.get_block_id();
     let block = &self.cached_blocks[block_id];
 
     if !guard.is_evicted() {
-      block.write(new);
+      unsafe { block.init(new, pointer, table) };
       return Ok(());
     }
 
     if let Some(pending) = pending {
       pending.finalize()?;
       self.dirty_blocks.remove(block_id);
-      self.dirty_tables.mark(block.get().handle());
+      self.dirty_tables.mark(block.handle());
     }
 
-    block.replace(new);
+    unsafe { block.replace(new, pointer, table) };
     Ok(())
   }
 
@@ -101,7 +103,7 @@ impl Core {
       return Ok(());
     };
 
-    let block = self.cached_blocks[id].get();
+    let block = &self.cached_blocks[id];
     let (pending, epoch) = {
       let latch = block.latch();
       if !self.dirty_blocks.remove(id) {
@@ -155,7 +157,7 @@ impl Core {
       // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
       // pointers from the same table together reduces random write scattering during
       // checkpoint.
-      let block = self.cached_blocks[id].get();
+      let block = &self.cached_blocks[id];
       let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
       buckets.entry(key).or_default().push(id);
       len += 1;
@@ -172,7 +174,7 @@ impl Core {
 
   fn create_slot<'a>(&'a self, id: BlockId, token: SharedToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
-      self.get_block_cell(id).get(),
+      self.get_block(id),
       &self.dirty_blocks,
       id,
       token,
@@ -203,10 +205,12 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.capacity + config.buffer_size);
+    let page_pool = PagePool::new(config.buffer_size);
 
     let mut blocks = Vec::with_capacity(config.capacity);
-    blocks.resize_with(config.capacity, BlockCell::uninit);
+    for _ in 0..config.capacity {
+      blocks.push(CachedBlock::new(page_pool.acquire_new()));
+    }
 
     let mut pins = Vec::with_capacity(config.capacity);
     pins.resize_with(config.capacity, ExclusivePin::new);
@@ -255,8 +259,13 @@ impl BlockCache {
       .alloc(table_id, pointer, |id| self.core.get_pin(id));
 
     let pending = self.core.submit_eviction(&guard);
-    let new_block = CachedBlock::new(pointer, self.core.acquire_page(), handle.clone());
-    self.resolve_eviction(pending, guard, new_block)
+    self.resolve_eviction(
+      pending,
+      guard,
+      self.core.acquire_page(),
+      pointer,
+      handle.clone(),
+    )
   }
 
   /**
@@ -283,17 +292,20 @@ impl BlockCache {
     let pending = self.core.submit_eviction(&guard);
     let mut new = self.core.acquire_page();
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
-    let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_eviction(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 
   fn resolve_eviction<'a>(
     &'a self,
     pending: Option<PendingFlush>,
     guard: EvictionGuard<'a>,
-    new: CachedBlock,
+    new: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    table: TableHandleRef,
   ) -> Result<CachedSlot<'a>> {
-    self.core.resolve_eviction(pending, &guard, new)?;
+    self
+      .core
+      .resolve_eviction(pending, &guard, new, pointer, table)?;
     Ok(self.cache_slot(guard.get_block_id(), guard.commit()))
   }
 
@@ -313,8 +325,7 @@ impl BlockCache {
     let pending = self.core.submit_eviction(&guard);
     let mut new = self.core.acquire_page();
     handle.disk().read(pointer, &mut new)?;
-    let new_block = CachedBlock::new(pointer, new, handle.clone());
-    self.resolve_eviction(pending, guard, new_block)
+    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 
   #[inline]
@@ -346,7 +357,7 @@ impl Drop for BlockCache {
       .len_per_shard()
       .flat_map(|(len, offset)| offset..offset + len)
     {
-      self.core.get_block_cell(i).drop_in_place();
+      unsafe { self.core.get_block(i).drop_in_place() };
     }
   }
 }
