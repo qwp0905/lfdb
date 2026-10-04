@@ -182,8 +182,12 @@ impl Core {
     )
   }
 
-  fn acquire_page(&self) -> PageRef<PAGE_SIZE> {
-    self.page_pool.acquire()
+  fn acquire_page_with(&self, guard: &EvictionGuard) -> PageRef<PAGE_SIZE> {
+    if guard.is_evicted() {
+      self.page_pool.acquire()
+    } else {
+      self.page_pool.acquire_new()
+    }
   }
 }
 
@@ -208,9 +212,7 @@ impl BlockCache {
     let page_pool = PagePool::new(config.buffer_size);
 
     let mut blocks = Vec::with_capacity(config.capacity);
-    for _ in 0..config.capacity {
-      blocks.push(CachedBlock::new(page_pool.acquire_new()));
-    }
+    blocks.resize_with(config.capacity, CachedBlock::uninit);
 
     let mut pins = Vec::with_capacity(config.capacity);
     pins.resize_with(config.capacity, ExclusivePin::new);
@@ -259,13 +261,8 @@ impl BlockCache {
       .alloc(table_id, pointer, |id| self.core.get_pin(id));
 
     let pending = self.core.submit_eviction(&guard);
-    self.resolve_eviction(
-      pending,
-      guard,
-      self.core.acquire_page(),
-      pointer,
-      handle.clone(),
-    )
+    let new = self.core.acquire_page_with(&guard);
+    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 
   /**
@@ -290,7 +287,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
+    let mut new = self.core.acquire_page_with(&guard);
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
@@ -323,7 +320,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
+    let mut new = self.core.acquire_page_with(&guard);
     handle.disk().read(pointer, &mut new)?;
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }

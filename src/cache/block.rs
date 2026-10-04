@@ -89,15 +89,13 @@ impl Drop for PendingFlush {
  * installed. epoch is protected by batch mutation in writable slot.
  */
 pub struct CachedBlock {
-  page: AtomicSBox<PageRef<PAGE_SIZE>>,
   metadata: UnsafeCell<MaybeUninit<BlockMetadata>>,
   latch: Mutex<u64>,
 }
 impl CachedBlock {
   #[inline]
-  pub fn new(page: PageRef<PAGE_SIZE>) -> Self {
+  pub const fn uninit() -> Self {
     Self {
-      page: AtomicSBox::new(page),
       metadata: UnsafeCell::new(MaybeUninit::uninit()),
       latch: Mutex::new(0),
     }
@@ -106,31 +104,39 @@ impl CachedBlock {
   #[inline]
   pub fn latch(&self) -> BlockLatch<'_> {
     BlockLatch {
-      pages: &self.page,
+      pages: unsafe { &self.metadata_ref().page },
       guard: self.latch.l(),
     }
   }
 
   #[inline]
   pub const fn get_pointer(&self) -> Pointer {
-    unsafe { (*self.metadata.get()).assume_init_ref().pointer }
+    unsafe { self.metadata_ref().pointer }
   }
 
   #[inline]
   pub fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
-    self.page.load()
+    unsafe { self.metadata_ref().page.load() }
+  }
+
+  const unsafe fn metadata_ref(&self) -> &BlockMetadata {
+    unsafe { (*self.metadata.get()).assume_init_ref() }
   }
 
   #[inline]
   pub const fn handle(&self) -> &TableHandleRef {
-    unsafe { &(*self.metadata.get()).assume_init_ref().handle }
+    unsafe { &self.metadata_ref().handle }
   }
 
   /**
    * Write the current page to disk.
    */
   pub const fn flusher(&self) -> BlockFlusher<'_> {
-    BlockFlusher::new(&self.page, self.handle(), self.get_pointer())
+    BlockFlusher::new(
+      unsafe { &self.metadata_ref().page },
+      self.handle(),
+      self.get_pointer(),
+    )
   }
 
   pub unsafe fn drop_in_place(&self) {
@@ -153,19 +159,23 @@ impl CachedBlock {
     pointer: Pointer,
     table: TableHandleRef,
   ) {
-    let metadata = BlockMetadata::new(pointer, table);
+    let metadata = BlockMetadata::new(page, pointer, table);
     (*self.metadata.get()).write(metadata);
-    self.page.store(page);
   }
 }
 
 struct BlockMetadata {
+  page: AtomicSBox<PageRef<PAGE_SIZE>>,
   pointer: Pointer,
   handle: TableHandleRef,
 }
 impl BlockMetadata {
-  const fn new(pointer: Pointer, handle: TableHandleRef) -> Self {
-    Self { pointer, handle }
+  fn new(page: PageRef<PAGE_SIZE>, pointer: Pointer, handle: TableHandleRef) -> Self {
+    Self {
+      page: AtomicSBox::new(page),
+      pointer,
+      handle,
+    }
   }
 }
 
