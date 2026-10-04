@@ -19,8 +19,5 @@ use node::*;
 mod shrink;
 pub use shrink::*;
 
-mod cell;
-use cell::*;
-
 mod vec_ref;
 pub use vec_ref::*;
