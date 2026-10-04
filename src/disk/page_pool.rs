@@ -207,11 +207,12 @@ struct RingBuffer<T> {
 }
 impl<T> RingBuffer<T> {
   fn new(cap: usize) -> Self {
-    let slots = (0..cap).map(|_| MaybeUninit::uninit()).collect();
+    let mut slots = Vec::with_capacity(cap);
+    slots.resize_with(cap, MaybeUninit::uninit);
     Self {
       head: 0,
       len: 0,
-      slots,
+      slots: slots.into_boxed_slice(),
     }
   }
   const fn is_full(&self) -> bool {
