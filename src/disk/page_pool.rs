@@ -1,10 +1,10 @@
 use std::{
-  cell::OnceCell,
+  cell::{OnceCell, RefCell},
   mem::ManuallyDrop,
   ops::{Deref, DerefMut},
   sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Weak,
   },
   thread::LocalKey,
 };
@@ -92,15 +92,36 @@ impl<const N: usize> PagePool<N> {
     }
   }
 
+  fn create_local(&self) -> RefCell<LocalQueue<N>> {
+    RefCell::new(LocalQueue::new(Arc::downgrade(&self.global)))
+  }
+
   pub fn acquire(&self) -> PageRef<N> {
-    let Some(page) = self
-      .local
-      .with(|v| v.get_or_init(|| LocalQueue::new(self.global.clone())).pop())
-    else {
-      return PageRef::new(self.global.clone());
-    };
-    self.global.idle_count.fetch_sub(1, Ordering::Relaxed);
-    PageRef::from_exists(self.global.clone(), page)
+    self.local.with(|v| {
+      let mut local = v.get_or_init(|| self.create_local()).borrow_mut();
+      if local.global.as_ptr().addr() != Arc::as_ptr(&self.global).addr() {
+        self
+          .global
+          .idle_count
+          .fetch_add(local.queue.len(), Ordering::Relaxed);
+        local.global = Arc::downgrade(&self.global);
+      }
+
+      if let Some(page) = local.pop() {
+        self.global.idle_count.fetch_sub(1, Ordering::Relaxed);
+        return PageRef::from_exists(self.global.clone(), page);
+      };
+
+      let backoff = Backoff::new();
+      while !backoff.is_completed() {
+        if let Some(page) = self.global.pop_batch_with(&local) {
+          self.global.idle_count.fetch_sub(1, Ordering::Relaxed);
+          return PageRef::from_exists(self.global.clone(), page);
+        }
+        backoff.snooze();
+      }
+      PageRef::new(self.global.clone())
+    })
   }
 
   #[cfg(test)]
@@ -111,42 +132,30 @@ impl<const N: usize> PagePool<N> {
 
 const BATCH_SIZE: usize = 4;
 
-pub type LocalPool<const N: usize> = OnceCell<LocalQueue<N>>;
+pub type LocalPool<const N: usize> = OnceCell<RefCell<LocalQueue<N>>>;
 
 pub struct LocalQueue<const N: usize> {
   queue: Worker<Page<N>>,
-  global: Arc<GlobalQueue<N>>,
+  global: Weak<GlobalQueue<N>>,
 }
 impl<const N: usize> LocalQueue<N> {
-  fn new(global: Arc<GlobalQueue<N>>) -> Self {
+  fn new(global: Weak<GlobalQueue<N>>) -> Self {
     Self {
       queue: Worker::new_fifo(),
       global,
     }
   }
   fn pop(&self) -> Option<Page<N>> {
-    if let Some(page) = self.queue.pop() {
-      return Some(page);
-    }
-    let backoff = Backoff::new();
-    while !backoff.is_completed() {
-      if let Some(page) = self
-        .global
-        .queue
-        .steal_batch_with_limit_and_pop(&self.queue, BATCH_SIZE)
-        .success()
-      {
-        return Some(page);
-      }
-      backoff.snooze();
-    }
-    None
+    self.queue.pop()
   }
 }
 impl<const N: usize> Drop for LocalQueue<N> {
   fn drop(&mut self) {
+    let Some(global) = self.global.upgrade() else {
+      return;
+    };
     while let Some(page) = self.queue.pop() {
-      self.global.store(page);
+      global.queue.push(page);
     }
   }
 }
@@ -170,6 +179,13 @@ impl<const N: usize> GlobalQueue<N> {
       return;
     };
     self.idle_count.fetch_sub(1, Ordering::Relaxed);
+  }
+
+  fn pop_batch_with(&self, local: &LocalQueue<N>) -> Option<Page<N>> {
+    self
+      .queue
+      .steal_batch_with_limit_and_pop(&local.queue, BATCH_SIZE)
+      .success()
   }
 }
 
