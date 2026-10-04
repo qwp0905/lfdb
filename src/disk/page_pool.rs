@@ -178,11 +178,9 @@ pub struct LocalPageQueue<const N: usize> {
   global: Weak<ArrayQueue<Page<N>>>,
 }
 impl<const N: usize> LocalPageQueue<N> {
-  fn new(global: Weak<ArrayQueue<Page<N>>>, batch_size: usize) -> Self {
-    Self {
-      queue: RingBuffer::new(batch_size - 1),
-      global,
-    }
+  fn new(global: Weak<ArrayQueue<Page<N>>>, capacity: usize) -> Self {
+    let queue = RingBuffer::new(capacity);
+    Self { queue, global }
   }
   fn pop(&mut self) -> Option<Page<N>> {
     self.queue.pop()
