@@ -79,13 +79,21 @@ pub struct PagePool<const N: usize> {
 }
 impl<const N: usize> PagePool<N> {
   pub fn with_local(cap: usize, local: &'static LocalKey<LocalPool<N>>) -> Self {
+    let queue = ArrayQueue::new(cap);
+    for _ in 0..cap {
+      let _ = queue.push(Page::new());
+    }
     Self {
-      strategy: Strategy::LocalCached(Arc::new(ArrayQueue::new(cap)), local),
+      strategy: Strategy::LocalCached(Arc::new(queue), local),
     }
   }
   pub fn new(cap: usize) -> Self {
+    let queue = ArrayQueue::new(cap);
+    for _ in 0..cap {
+      let _ = queue.push(Page::new());
+    }
     Self {
-      strategy: Strategy::Global(Arc::new(ArrayQueue::new(cap))),
+      strategy: Strategy::Global(Arc::new(queue)),
     }
   }
 
