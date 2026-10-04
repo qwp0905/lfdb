@@ -89,11 +89,15 @@ impl<const N: usize> PagePool<N> {
     }
   }
 
+  pub fn create_new(&self) -> PageRef<N> {
+    PageRef::new(self.strategy.clone())
+  }
+
   pub fn acquire(&self) -> PageRef<N> {
     if let Some(page) = self.strategy.pop() {
       return PageRef::from_exists(self.strategy.clone(), page);
     }
-    PageRef::new(self.strategy.clone())
+    self.create_new()
   }
 }
 

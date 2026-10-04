@@ -1,4 +1,8 @@
-use std::sync::{Mutex, MutexGuard};
+use std::{
+  cell::UnsafeCell,
+  mem::MaybeUninit,
+  sync::{Mutex, MutexGuard},
+};
 
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
@@ -85,18 +89,14 @@ impl Drop for PendingFlush {
  * installed. epoch is protected by batch mutation in writable slot.
  */
 pub struct CachedBlock {
-  page: AtomicSBox<PageRef<PAGE_SIZE>>,
-  pointer: Pointer,
-  handle: TableHandleRef,
+  metadata: UnsafeCell<MaybeUninit<BlockMetadata>>,
   latch: Mutex<u64>,
 }
 impl CachedBlock {
   #[inline]
-  pub fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>, handle: TableHandleRef) -> Self {
+  pub const fn uninit() -> Self {
     Self {
-      page: AtomicSBox::new(page),
-      pointer,
-      handle,
+      metadata: UnsafeCell::new(MaybeUninit::uninit()),
       latch: Mutex::new(0),
     }
   }
@@ -104,32 +104,80 @@ impl CachedBlock {
   #[inline]
   pub fn latch(&self) -> BlockLatch<'_> {
     BlockLatch {
-      pages: &self.page,
+      pages: unsafe { &self.metadata_ref().page },
       guard: self.latch.l(),
     }
   }
 
   #[inline]
   pub const fn get_pointer(&self) -> Pointer {
-    self.pointer
+    unsafe { self.metadata_ref().pointer }
   }
 
   #[inline]
   pub fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
-    self.page.load()
+    unsafe { self.metadata_ref().page.load() }
+  }
+
+  const unsafe fn metadata_ref(&self) -> &BlockMetadata {
+    unsafe { (*self.metadata.get()).assume_init_ref() }
   }
 
   #[inline]
   pub const fn handle(&self) -> &TableHandleRef {
-    &self.handle
+    unsafe { &self.metadata_ref().handle }
   }
 
   /**
    * Write the current page to disk.
    */
   pub const fn flusher(&self) -> BlockFlusher<'_> {
-    BlockFlusher::new(&self.page, &self.handle, self.pointer)
+    BlockFlusher::new(
+      unsafe { &self.metadata_ref().page },
+      self.handle(),
+      self.get_pointer(),
+    )
+  }
+
+  pub unsafe fn drop_in_place(&self) {
+    unsafe { (*self.metadata.get()).assume_init_drop() };
+  }
+
+  pub unsafe fn replace(
+    &self,
+    page: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    table: TableHandleRef,
+  ) {
+    let _ = (*self.metadata.get()).assume_init_read();
+    self.init(page, pointer, table);
+  }
+
+  pub unsafe fn init(
+    &self,
+    page: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    table: TableHandleRef,
+  ) {
+    let metadata = BlockMetadata::new(page, pointer, table);
+    (*self.metadata.get()).write(metadata);
   }
 }
 
+struct BlockMetadata {
+  page: AtomicSBox<PageRef<PAGE_SIZE>>,
+  pointer: Pointer,
+  handle: TableHandleRef,
+}
+impl BlockMetadata {
+  fn new(page: PageRef<PAGE_SIZE>, pointer: Pointer, handle: TableHandleRef) -> Self {
+    Self {
+      page: AtomicSBox::new(page),
+      pointer,
+      handle,
+    }
+  }
+}
+
+unsafe impl Send for CachedBlock {}
 unsafe impl Sync for CachedBlock {}
