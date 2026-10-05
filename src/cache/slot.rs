@@ -20,7 +20,7 @@ pub struct CachedSlot<'a> {
   dirty: &'a DirtyBlocks,
   block_id: BlockId,
   token: SharedToken<'a>,
-  page_pool: &'a PageAllocator<PAGE_SIZE>,
+  allocator: &'a PageAllocator<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
   pub fn new(
@@ -28,14 +28,14 @@ impl<'a> CachedSlot<'a> {
     dirty: &'a DirtyBlocks,
     block_id: BlockId,
     token: SharedToken<'a>,
-    page_pool: &'a PageAllocator<PAGE_SIZE>,
+    allocator: &'a PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
       block,
       dirty,
       block_id,
       token,
-      page_pool,
+      allocator,
     }
   }
 
@@ -54,7 +54,7 @@ impl<'a> CachedSlot<'a> {
       state: CopiedState::Borrowed {
         page: self.block.load_page(),
         dirty_blocks: self.dirty,
-        page_pool: self.page_pool,
+        allocator: self.allocator,
         block_id: self.block_id,
       },
       latch,
@@ -90,7 +90,7 @@ enum CopiedState<'a> {
   Borrowed {
     page: SBox<PageRef<PAGE_SIZE>>,
     dirty_blocks: &'a DirtyBlocks,
-    page_pool: &'a PageAllocator<PAGE_SIZE>,
+    allocator: &'a PageAllocator<PAGE_SIZE>,
     block_id: BlockId,
   },
   Copied(ManuallyDrop<PageRef<PAGE_SIZE>>),
@@ -112,10 +112,10 @@ impl<'a> WritableSlot<'a> {
       CopiedState::Borrowed {
         page: _,
         dirty_blocks,
-        page_pool,
+        allocator,
         block_id,
       } => {
-        let mut page = page_pool.allocate();
+        let mut page = allocator.allocate();
         let result = f(&mut page);
         dirty_blocks.insert(*block_id);
         self.state = CopiedState::Copied(ManuallyDrop::new(page));

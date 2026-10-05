@@ -237,11 +237,11 @@ impl LogBuffer {
 
   pub fn flush_and_forget(
     &self,
-    page_pool: &PageAllocator<WAL_BLOCK_SIZE>,
+    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
     ticket: AppendTicket,
   ) {
     debug_assert_eq!(ticket.get_offset() + ticket.get_len(), WAL_BLOCK_SIZE);
-    let batch = self.flush_block_with(ticket, page_pool);
+    let batch = self.flush_block_with(ticket, allocator);
     self
       .segment_state
       .write_completion
@@ -251,7 +251,7 @@ impl LogBuffer {
   pub fn flush_block_with(
     &self,
     ticket: AppendTicket,
-    page_pool: &PageAllocator<WAL_BLOCK_SIZE>,
+    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
   ) -> BatchedWrite {
     debug_assert!(!self.segment_state.taken.get());
 
@@ -272,7 +272,7 @@ impl LogBuffer {
       }
       self.batch.set_max_offset(max_offset);
 
-      let mut page = page_pool.allocate();
+      let mut page = allocator.allocate();
       page.copy_from(self.entry.range(0..max_offset), 0);
 
       let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };

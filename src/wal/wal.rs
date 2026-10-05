@@ -92,7 +92,7 @@ pub struct WriteAheadLog {
   /**
    * preloaded data block.
    */
-  page_pool: PageAllocator<WAL_BLOCK_SIZE>,
+  allocator: PageAllocator<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
 }
@@ -104,16 +104,16 @@ impl WriteAheadLog {
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
 
-    let page_pool = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let allocator = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer =
-      LogBuffer::init_new(page_pool.allocate(), preloader.load()?, 0, max_len, 0);
+      LogBuffer::init_new(allocator.allocate(), preloader.load()?, 0, max_len, 0);
 
     Ok(Self {
       preloader,
       buffer: AtomicSBox::new(buffer),
-      page_pool,
+      allocator,
       sync_completion: SyncCompletion::new(),
       log_completion: LogCompletion::new(0),
       state: AtomicCell::new(State::Available),
@@ -129,7 +129,7 @@ impl WriteAheadLog {
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let allocator = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 
@@ -146,7 +146,7 @@ impl WriteAheadLog {
 
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer = LogBuffer::init_new(
-      page_pool.allocate(),
+      allocator.allocate(),
       preloader.load()?,
       0,
       max_len,
@@ -157,7 +157,7 @@ impl WriteAheadLog {
       Self {
         preloader,
         buffer: AtomicSBox::new(buffer),
-        page_pool,
+        allocator,
         sync_completion: SyncCompletion::new(),
         log_completion: LogCompletion::new(replay_result.last_log_id),
         state: AtomicCell::new(State::Available),
@@ -207,7 +207,7 @@ impl WriteAheadLog {
     if !flush {
       return Ok(log_id);
     }
-    buffer.flush_block_with(ticket, &self.page_pool).wait()?;
+    buffer.flush_block_with(ticket, &self.allocator).wait()?;
     buffer.wait_prev_blocks()?;
     self.wait_sync(&buffer, token)?;
     Ok(log_id)
@@ -240,7 +240,7 @@ impl WriteAheadLog {
     debug_assert_eq!(available.len(), ticket.get_len());
     debug_assert_eq!(remain.len(), overflow.get_len());
 
-    let mut new_page = self.page_pool.allocate();
+    let mut new_page = self.allocator.allocate();
     new_page.copy_from(remain, 0);
     let new_buffer =
       self
@@ -248,14 +248,14 @@ impl WriteAheadLog {
         .store_and_load(buffer.init_next(new_page, overflow.get_len(), log_id));
 
     buffer.append_at(available, &ticket);
-    buffer.flush_and_forget(&self.page_pool, ticket);
+    buffer.flush_and_forget(&self.allocator, ticket);
 
     if !flush {
       return Ok(log_id);
     }
 
     new_buffer
-      .flush_block_with(overflow, &self.page_pool)
+      .flush_block_with(overflow, &self.allocator)
       .wait()?;
     new_buffer.wait_prev_blocks()?;
     self.wait_sync(&buffer, token)?;
@@ -277,7 +277,7 @@ impl WriteAheadLog {
 
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
     let replacement = LogBuffer::init_new(
-      self.page_pool.allocate(),
+      self.allocator.allocate(),
       new,
       buffer.get_generation() + 1,
       self.max_len,
@@ -287,7 +287,7 @@ impl WriteAheadLog {
     self.buffer.store(replacement);
 
     if let Err(err) = buffer
-      .flush_block_with(ticket, &self.page_pool)
+      .flush_block_with(ticket, &self.allocator)
       .wait()
       .and_then(|_| buffer.wait_prev_blocks())
     {

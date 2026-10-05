@@ -35,7 +35,7 @@ struct Core {
    */
   dirty_blocks: DirtyBlocks,
   dirty_tables: DirtyTables,
-  page_pool: PageAllocator<PAGE_SIZE>,
+  allocator: PageAllocator<PAGE_SIZE>,
 }
 impl Core {
   const fn new(
@@ -43,14 +43,14 @@ impl Core {
     pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
-    page_pool: PageAllocator<PAGE_SIZE>,
+    allocator: PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
       cached_blocks,
       pins,
       dirty_blocks,
       dirty_tables,
-      page_pool,
+      allocator,
     }
   }
 
@@ -179,12 +179,12 @@ impl Core {
       &self.dirty_blocks,
       id,
       token,
-      &self.page_pool,
+      &self.allocator,
     )
   }
 
   fn acquire_page(&self) -> PageRef<PAGE_SIZE> {
-    self.page_pool.allocate()
+    self.allocator.allocate()
   }
 }
 
@@ -206,7 +206,7 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = create_page_allocator!(config.capacity + config.buffer_size);
+    let allocator = create_page_allocator!(config.capacity + config.buffer_size);
 
     let mut blocks = Vec::with_capacity(config.capacity);
     blocks.resize_with(config.capacity, CachedBlock::uninit);
@@ -219,7 +219,7 @@ impl BlockCache {
       pins.into_boxed_slice(),
       DirtyBlocks::new(config.capacity),
       DirtyTables::new(),
-      page_pool,
+      allocator,
     ));
 
     let flush_executor = ThreadBuilder::new()
