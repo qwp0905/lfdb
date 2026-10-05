@@ -209,7 +209,7 @@ impl WriteAheadLog {
     }
     buffer.flush_block_with(ticket, &self.allocator).wait()?;
     buffer.wait_prev_blocks()?;
-    self.wait_sync(&buffer, token)?;
+    self.wait_sync(buffer, token)?;
     Ok(log_id)
   }
 
@@ -257,7 +257,7 @@ impl WriteAheadLog {
       .flush_block_with(overflow, &self.allocator)
       .wait()?;
     new_buffer.wait_prev_blocks()?;
-    self.wait_sync(&buffer, token)?;
+    self.wait_sync(buffer, token)?;
     Ok(log_id)
   }
 
