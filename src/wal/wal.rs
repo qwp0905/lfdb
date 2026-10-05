@@ -8,7 +8,7 @@ use crate::{
   disk::{IOPool, Pointer},
   page::{create_page_allocator, PageAllocator},
   table::TableId,
-  utils::{error, info, AtomicSBox, SBox, SharedToken},
+  utils::{error, info, AtomicSBox, SharedToken},
   Error, Result,
 };
 
@@ -246,7 +246,6 @@ impl WriteAheadLog {
       self
         .buffer
         .store_and_load(buffer.init_next(new_page, overflow.get_len(), log_id));
-
     buffer.append_at(available, &ticket);
     buffer.flush_and_forget(&self.allocator, ticket);
 
@@ -338,7 +337,7 @@ impl WriteAheadLog {
       };
 
       let reserved = ReservedAppend {
-        buffer: buffer.clone(),
+        buffer: &buffer,
         token,
         ticket,
       };
@@ -424,7 +423,7 @@ impl WriteAheadLog {
 }
 
 struct ReservedAppend<'a> {
-  buffer: SBox<LogBuffer>,
+  buffer: &'a LogBuffer,
   token: SharedToken<'a>,
   ticket: AppendTicket,
 }

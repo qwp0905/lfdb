@@ -47,7 +47,7 @@ LFDB is designed to handle high-concurrency workloads through the following desi
 
 > Lock free WAL
 
-LFDB’s WAL is designed to be `lock-free`, using no mutexes at all. Before writing a WAL record, each insert request obtains the offset within the WAL buffer where it will write its data through an atomic operation. This allows data to be written without memory conflicts, and the WAL buffer is safely written to disk in order during commit through CAS. The WAL consists of multiple fixed-size segments and scales according to request frequency. In addition, when a WAL buffer or segment becomes full, it is replaced quickly and safely through atomic CAS, and its pointers are safely reclaimed through epoch-based GC.
+LFDB’s WAL is designed to be `lock-free`, using no mutexes at all. Before writing a WAL record, each insert request obtains the offset within the WAL buffer where it will write its data through an atomic operation. This allows data to be written without memory conflicts, and the WAL buffer is safely written to disk in order during commit through CAS. The WAL consists of multiple fixed-size segments and scales according to request frequency. In addition, when a WAL buffer or segment becomes full, it is replaced quickly and safely through atomic operations.
 Sync requests from concurrent commits are grouped per WAL segment and submitted through the asynchronous I/O backend, sharing the synchronization cost across transactions.
 
 > B-Link tree indexing
