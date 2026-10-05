@@ -1,8 +1,7 @@
 use std::{
-  alloc::{alloc, handle_alloc_error, Layout},
-  mem::{forget, offset_of, ManuallyDrop, MaybeUninit},
+  mem::{forget, offset_of, MaybeUninit},
   ops::Deref,
-  ptr::{copy_nonoverlapping, slice_from_raw_parts_mut, NonNull},
+  ptr::NonNull,
   sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
@@ -53,6 +52,9 @@ impl<T> SBox<T> {
 }
 
 impl<T: ?Sized> SBox<T> {
+  pub const fn as_ptr(&self) -> *mut T {
+    unsafe { &raw mut (*self.inner.as_ptr()).data }
+  }
   pub fn get_mut(this: &mut SBox<T>) -> Option<&mut T> {
     let inner = unsafe { this.inner.as_mut() };
     if inner.count.load(Ordering::Acquire) > 1 {
@@ -80,32 +82,6 @@ impl<T> SBox<MaybeUninit<T>> {
     forget(self);
     SBox {
       inner: inner.cast(),
-    }
-  }
-}
-
-impl<T> SBox<[T]> {
-  pub fn from_boxed_slice(boxed: Box<[T]>) -> Self {
-    let layout = Layout::new::<Inner<()>>()
-      .extend(Layout::for_value(&*boxed))
-      .unwrap()
-      .0
-      .pad_to_align();
-
-    let len = boxed.len();
-    unsafe {
-      let ptr = alloc(layout);
-      if ptr.is_null() {
-        handle_alloc_error(layout);
-      }
-
-      let src = Box::into_raw(boxed);
-      let inner = slice_from_raw_parts_mut(ptr, len) as *mut Inner<[T]>;
-      (&raw mut (*inner).count).write(AtomicUsize::new(1));
-      copy_nonoverlapping(src as *const T, &raw mut (*inner).data as *mut T, len);
-      let _ = Box::from_raw(src as *mut ManuallyDrop<[T]>);
-
-      Self::from_inner_ptr(inner)
     }
   }
 }
