@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::{
   blob::{BlobId, BlobLen, BlobOffset, BLOB_ID_BYTES, BLOB_LEN_BYTES, BLOB_OFFSET_BYTES},
-  disk::Page,
+  page::Page,
   wal::{TxId, TX_ID_BYTES},
   Error,
 };
@@ -71,7 +71,7 @@ impl VersionRecord {
    * */
   pub const RESERVED_BYTES: usize = (TX_ID_BYTES << 1);
 
-  pub fn serialize_to(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
+  pub fn serialize_to(&self, writer: &mut crate::page::PageWriter) -> crate::Result {
     writer.write_u64(self.version)?;
     writer.write_u64(self.owner)?;
     match &self.data {
@@ -91,7 +91,7 @@ impl VersionRecord {
     Ok(())
   }
 
-  pub fn deserialize_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
+  pub fn deserialize_from(reader: &mut crate::page::PageScanner) -> crate::Result<Self> {
     let version = reader.read_u64()?;
     let owner = reader.read_u64()?;
     let data = match reader.read()? {
@@ -171,7 +171,7 @@ impl VersionRecordView {
     )
   }
 
-  pub fn deserialize_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
+  pub fn deserialize_from(reader: &mut crate::page::PageScanner) -> crate::Result<Self> {
     let version = reader.read_u64()?;
     let owner = reader.read_u64()?;
     let data = match reader.read()? {

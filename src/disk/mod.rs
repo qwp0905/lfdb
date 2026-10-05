@@ -1,14 +1,8 @@
-mod page;
-pub use page::*;
-
 mod block_io;
 pub use block_io::*;
 
 mod constants;
 use constants::*;
-
-mod page_pool;
-pub use page_pool::*;
 
 mod types;
 pub use types::*;
@@ -24,9 +18,6 @@ use scheduler::*;
 
 mod backend;
 pub use backend::*;
-
-mod align;
-pub use align::*;
 
 mod directory;
 use directory::*;

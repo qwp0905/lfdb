@@ -55,6 +55,19 @@ impl<T> AtomicSBox<T> {
     }
   }
 
+  pub fn store_and_load(&self, value: T) -> SBox<T> {
+    let value = SBox::new(value);
+    let cloned = value.clone();
+    let backoff = Backoff::new();
+    loop {
+      if let Some(_token) = self.lock.try_exclusive() {
+        unsafe { self.value.get().replace(value) };
+        return cloned;
+      }
+      backoff.snooze();
+    }
+  }
+
   #[inline]
   pub fn store(&self, value: T) {
     let _ = self.swap(value);

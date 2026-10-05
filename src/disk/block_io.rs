@@ -1,5 +1,5 @@
-use super::{IOHandle, Page, PendingIO, Pointer};
-use crate::{error::Result, Error};
+use super::{IOHandle, PendingIO, Pointer};
+use crate::{error::Result, page::Page, Error};
 
 /**
  * Block-addressed wrapper around `IOHandle`.

@@ -8,7 +8,8 @@ use super::{
   VersionRecordView, DEFAULT_BIAS, MAX_KEY, SERIALIZABLE_BYTES, SPLIT_BIAS_BYTES,
 };
 use crate::{
-  disk::{Page, PageScanner, PageWriter, Pointer, POINTER_BYTES},
+  disk::{Pointer, POINTER_BYTES},
+  page::{Page, PageScanner, PageWriter},
   Result,
 };
 

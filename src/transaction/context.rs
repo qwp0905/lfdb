@@ -81,7 +81,7 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
     blob_id: crate::blob::BlobId,
     offset: crate::blob::BlobOffset,
     len: crate::blob::BlobLen,
-  ) -> Result<crate::disk::AlignedBuf> {
+  ) -> Result<crate::page::AlignedBuf> {
     let blob = self
       .orchestrator
       .get_blob_handle(blob_id)

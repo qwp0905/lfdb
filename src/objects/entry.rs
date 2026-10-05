@@ -5,7 +5,8 @@ use super::{
   VersionRecordView, Viewable, SERIALIZABLE_BYTES,
 };
 use crate::{
-  disk::{Page, PageScanner, Pointer, POINTER_BYTES},
+  disk::{Pointer, POINTER_BYTES},
+  page::{Page, PageScanner},
   Result,
 };
 
@@ -63,7 +64,7 @@ impl TypedObject for DataEntry {
   const TYPE: SerializeType = SerializeType::DataEntry;
 }
 impl Serializable for DataEntry {
-  fn write_at(&self, writer: &mut crate::disk::PageWriter) -> crate::Result {
+  fn write_at(&self, writer: &mut crate::page::PageWriter) -> crate::Result {
     writer.write_u64(self.next.unwrap_or(0))?;
     writer.write_u16(self.versions.len() as u16)?;
 
@@ -74,7 +75,7 @@ impl Serializable for DataEntry {
   }
 }
 impl Deserializable for DataEntry {
-  fn read_from(reader: &mut crate::disk::PageScanner) -> crate::Result<Self> {
+  fn read_from(reader: &mut crate::page::PageScanner) -> crate::Result<Self> {
     let next = reader.read_u64()?;
     let len = reader.read_u16()? as usize;
     let mut versions = VecDeque::with_capacity(len + 1);

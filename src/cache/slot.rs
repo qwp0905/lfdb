@@ -2,7 +2,8 @@ use std::mem::ManuallyDrop;
 
 use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks};
 use crate::{
-  disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
+  disk::Pointer,
+  page::{Page, PageAllocator, PageRef, PAGE_SIZE},
   utils::{SBox, SharedToken},
 };
 
@@ -19,7 +20,7 @@ pub struct CachedSlot<'a> {
   dirty: &'a DirtyBlocks,
   block_id: BlockId,
   token: SharedToken<'a>,
-  page_pool: &'a PagePool<PAGE_SIZE>,
+  page_pool: &'a PageAllocator<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
   pub fn new(
@@ -27,7 +28,7 @@ impl<'a> CachedSlot<'a> {
     dirty: &'a DirtyBlocks,
     block_id: BlockId,
     token: SharedToken<'a>,
-    page_pool: &'a PagePool<PAGE_SIZE>,
+    page_pool: &'a PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
       block,
@@ -89,7 +90,7 @@ enum CopiedState<'a> {
   Borrowed {
     page: SBox<PageRef<PAGE_SIZE>>,
     dirty_blocks: &'a DirtyBlocks,
-    page_pool: &'a PagePool<PAGE_SIZE>,
+    page_pool: &'a PageAllocator<PAGE_SIZE>,
     block_id: BlockId,
   },
   Copied(ManuallyDrop<PageRef<PAGE_SIZE>>),
@@ -114,7 +115,7 @@ impl<'a> WritableSlot<'a> {
         page_pool,
         block_id,
       } => {
-        let mut page = page_pool.acquire();
+        let mut page = page_pool.allocate();
         let result = f(&mut page);
         dirty_blocks.insert(*block_id);
         self.state = CopiedState::Copied(ManuallyDrop::new(page));
