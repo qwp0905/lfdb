@@ -3,7 +3,7 @@ use std::mem::ManuallyDrop;
 use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks};
 use crate::{
   disk::{Page, PagePool, PageRef, Pointer, PAGE_SIZE},
-  utils::{SBox, SharedToken},
+  utils::{AtomicRef, SharedToken},
 };
 
 /**
@@ -70,7 +70,7 @@ impl<'a> CachedSlot<'a> {
  * same page snapshot without batch mutation.
  */
 pub struct ReadonlySlot {
-  page: SBox<PageRef<PAGE_SIZE>>,
+  page: AtomicRef<PageRef<PAGE_SIZE>>,
 }
 impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
@@ -87,7 +87,7 @@ impl Clone for ReadonlySlot {
 
 enum CopiedState<'a> {
   Borrowed {
-    page: SBox<PageRef<PAGE_SIZE>>,
+    page: AtomicRef<PageRef<PAGE_SIZE>>,
     dirty_blocks: &'a DirtyBlocks,
     page_pool: &'a PagePool<PAGE_SIZE>,
     block_id: BlockId,

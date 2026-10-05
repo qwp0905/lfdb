@@ -7,7 +7,7 @@ use std::{
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{create_static_ref, AtomicSBox, SBox, ShortenedMutex},
+  utils::{create_static_ref, AtomicRef, AtomicSBox, ShortenedMutex},
   Result,
 };
 
@@ -66,7 +66,7 @@ impl<'a> BlockFlusher<'a> {
 
 pub struct PendingFlush {
   handle: Option<PendingIO>,
-  _page: SBox<PageRef<PAGE_SIZE>>,
+  _page: AtomicRef<PageRef<PAGE_SIZE>>,
 }
 impl PendingFlush {
   pub fn finalize(mut self) -> Result {
@@ -115,7 +115,7 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
+  pub fn load_page(&self) -> AtomicRef<PageRef<PAGE_SIZE>> {
     unsafe { self.metadata_ref().page.load() }
   }
 

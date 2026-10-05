@@ -92,7 +92,7 @@ impl WriteCompletion {
     self.queue.push((ptr, batch));
   }
 
-  pub fn drain(&self) {
+  fn drain(&self) {
     while let Some((ptr, batched)) = self.queue.pop() {
       let _ = batched.wait();
       self.completed.insert(ptr);
@@ -102,6 +102,11 @@ impl WriteCompletion {
         self.frontier.fetch_max(i + 1, Ordering::Release);
       }
     }
+  }
+}
+impl Drop for WriteCompletion {
+  fn drop(&mut self) {
+    self.drain()
   }
 }
 
