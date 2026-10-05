@@ -196,7 +196,7 @@ impl Core {
  * loads missing pages, allocates fresh cached blocks, tracks dirty state, and
  * drives checkpoint flushing. `MappingTable` owns the logical-address to slot
  * mapping and eviction decisions; the block arrays, pins, batch handles, dirty
- * bitmap, and page pool hold the actual cached-page state.
+ * bitmap.
  */
 pub struct BlockCache {
   table: MappingTable,
