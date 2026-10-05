@@ -1,13 +1,13 @@
 use std::{
   cell::UnsafeCell,
   mem::MaybeUninit,
-  sync::{Mutex, MutexGuard},
+  sync::{Mutex, MutexGuard, RwLock},
 };
 
 use crate::{
   disk::{Page, PageRef, PendingIO, Pointer, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{create_static_ref, AtomicRef, AtomicSBox, ShortenedMutex},
+  utils::{create_static_ref, SBox, ShortenedMutex, ShortenedRwLock},
   Result,
 };
 
@@ -17,12 +17,12 @@ use crate::{
  * Applying a page installs the new page pointer and advances the block epoch.
  */
 pub struct BlockLatch<'a> {
-  pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
+  metadata: &'a BlockMetadata,
   guard: MutexGuard<'a, u64>,
 }
 impl<'a> BlockLatch<'a> {
   pub fn apply(&mut self, page: PageRef<PAGE_SIZE>) {
-    self.pages.store(page);
+    self.metadata.store_page(page);
     *self.guard += 1;
   }
   pub fn epoch(&self) -> u64 {
@@ -30,43 +30,9 @@ impl<'a> BlockLatch<'a> {
   }
 }
 
-pub struct BlockFlusher<'a> {
-  pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
-  handle: &'a TableHandleRef,
-  pointer: Pointer,
-}
-impl<'a> BlockFlusher<'a> {
-  const fn new(
-    pages: &'a AtomicSBox<PageRef<PAGE_SIZE>>,
-    handle: &'a TableHandleRef,
-    pointer: Pointer,
-  ) -> Self {
-    Self {
-      pages,
-      handle,
-      pointer,
-    }
-  }
-  pub fn submit(self) -> PendingFlush {
-    let page = self.pages.load();
-
-    // SAFETY: `write_async` needs a `'static` page because the IO worker may run
-    // after this function returns. `PendingFlush` keeps an `SBox` clone of the
-    // loaded page, and `finalize(self)` waits for the async write before that clone
-    // is dropped. Therefore the submitted page remains alive until the worker is
-    // done with the slice.
-    let static_ref = unsafe { create_static_ref::<Page>(&**page) };
-    let handle = self.handle.disk().write_async(self.pointer, static_ref);
-    PendingFlush {
-      handle: Some(handle),
-      _page: page,
-    }
-  }
-}
-
 pub struct PendingFlush {
   handle: Option<PendingIO>,
-  _page: AtomicRef<PageRef<PAGE_SIZE>>,
+  _page: SBox<PageRef<PAGE_SIZE>>,
 }
 impl PendingFlush {
   pub fn finalize(mut self) -> Result {
@@ -104,7 +70,7 @@ impl CachedBlock {
   #[inline]
   pub fn latch(&self) -> BlockLatch<'_> {
     BlockLatch {
-      pages: unsafe { &self.metadata_ref().page },
+      metadata: unsafe { self.metadata_ref() },
       guard: self.latch.l(),
     }
   }
@@ -115,8 +81,8 @@ impl CachedBlock {
   }
 
   #[inline]
-  pub fn load_page(&self) -> AtomicRef<PageRef<PAGE_SIZE>> {
-    unsafe { self.metadata_ref().page.load() }
+  pub fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
+    unsafe { self.metadata_ref().load_page() }
   }
 
   const unsafe fn metadata_ref(&self) -> &BlockMetadata {
@@ -131,12 +97,24 @@ impl CachedBlock {
   /**
    * Write the current page to disk.
    */
-  pub const fn flusher(&self) -> BlockFlusher<'_> {
-    BlockFlusher::new(
-      unsafe { &self.metadata_ref().page },
-      self.handle(),
-      self.get_pointer(),
-    )
+  pub fn submit_flush(&self) -> PendingFlush {
+    let metadata = unsafe { self.metadata_ref() };
+    let page = metadata.load_page();
+
+    // SAFETY: `write_async` needs a `'static` page because the IO worker may run
+    // after this function returns. `PendingFlush` keeps an `SBox` clone of the
+    // loaded page, and `finalize(self)` waits for the async write before that clone
+    // is dropped. Therefore the submitted page remains alive until the worker is
+    // done with the slice.
+    let static_ref = unsafe { create_static_ref::<Page>(&**page) };
+    let handle = metadata
+      .handle
+      .disk()
+      .write_async(metadata.pointer, static_ref);
+    PendingFlush {
+      handle: Some(handle),
+      _page: page,
+    }
   }
 
   pub unsafe fn drop_in_place(&self) {
@@ -165,17 +143,24 @@ impl CachedBlock {
 }
 
 struct BlockMetadata {
-  page: AtomicSBox<PageRef<PAGE_SIZE>>,
+  page: RwLock<SBox<PageRef<PAGE_SIZE>>>,
   pointer: Pointer,
   handle: TableHandleRef,
 }
 impl BlockMetadata {
   fn new(page: PageRef<PAGE_SIZE>, pointer: Pointer, handle: TableHandleRef) -> Self {
     Self {
-      page: AtomicSBox::new(page),
+      page: RwLock::new(SBox::new(page)),
       pointer,
       handle,
     }
+  }
+  fn load_page(&self) -> SBox<PageRef<PAGE_SIZE>> {
+    self.page.rl().clone()
+  }
+  fn store_page(&self, page: PageRef<PAGE_SIZE>) {
+    let page = SBox::new(page);
+    *self.page.wl() = page;
   }
 }
 

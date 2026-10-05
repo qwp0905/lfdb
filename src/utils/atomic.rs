@@ -22,17 +22,13 @@ impl<T> AtomicSBox<T> {
     AtomicRef(self.0.load())
   }
 
-  pub fn swap(&self, value: T) -> SBox<T> {
-    self.0.swap(SBox::new(value))
-  }
-
   #[inline]
   pub fn store(&self, value: T) {
-    let _ = self.swap(value);
+    let _ = self.0.swap(SBox::new(value));
   }
   pub fn store_and_load(&self, value: T) -> SBox<T> {
     let value = SBox::new(value);
-    self.0.swap(value.clone());
+    let _ = self.0.swap(value.clone());
     value
   }
 }
