@@ -12,7 +12,7 @@ use std::{
   slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-use super::ALIGN;
+pub const ALIGN: usize = 512;
 
 /**
  * Fixed one-alignment-unit buffer.
@@ -76,6 +76,9 @@ impl AlignedBuf {
   }
   pub const fn size(&self) -> usize {
     self.layout.size()
+  }
+  pub const fn as_ptr(&self) -> *mut u8 {
+    self.ptr
   }
   pub fn from_vec(data: Vec<u8>) -> Self {
     let mut buf = Self::new(data.len());
