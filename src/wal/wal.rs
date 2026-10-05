@@ -1,22 +1,13 @@
-use std::{
-  io,
-  mem::forget,
-  path::PathBuf,
-  sync::{atomic::Ordering, Arc, OnceLock},
-};
+use std::{io, mem::forget, path::PathBuf, sync::Arc};
 
-use crossbeam::{
-  atomic::AtomicCell,
-  epoch::{Atomic, Collector, Guard, LocalHandle, Owned, Shared},
-  utils::Backoff,
-};
+use crossbeam::{atomic::AtomicCell, utils::Backoff};
 
 use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, PagePool, Pointer},
   table::TableId,
-  utils::{error, info, SharedToken},
+  utils::{error, info, AtomicSBox, SharedToken},
   Error, Result,
 };
 
@@ -57,14 +48,6 @@ impl State {
   }
 }
 
-static COLLECTOR: OnceLock<Collector> = OnceLock::new();
-thread_local! {
-  static LOCAL: LocalHandle = COLLECTOR.get_or_init(Collector::new).register();
-}
-fn pin() -> Guard {
-  LOCAL.with(LocalHandle::pin)
-}
-
 const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
 
 /**
@@ -87,7 +70,7 @@ pub struct WriteAheadLog {
    * pointer remains valid for the duration of a guard — preventing use-after-free
    * when the buffer is rotated and the old one is deferred-destroyed.
    */
-  buffer: Atomic<LogBuffer>,
+  buffer: AtomicSBox<LogBuffer>,
 
   sync_completion: SyncCompletion,
   log_completion: LogCompletion,
@@ -129,7 +112,7 @@ impl WriteAheadLog {
 
     Ok(Self {
       preloader,
-      buffer: Atomic::new(buffer),
+      buffer: AtomicSBox::new(buffer),
       page_pool,
       sync_completion: SyncCompletion::new(),
       log_completion: LogCompletion::new(0),
@@ -173,7 +156,7 @@ impl WriteAheadLog {
     Ok((
       Self {
         preloader,
-        buffer: Atomic::new(buffer),
+        buffer: AtomicSBox::new(buffer),
         page_pool,
         sync_completion: SyncCompletion::new(),
         log_completion: LogCompletion::new(replay_result.last_log_id),
@@ -214,8 +197,6 @@ impl WriteAheadLog {
     flush: bool,
   ) -> io::Result<LogId> {
     let ReservedAppend {
-      buffer_ptr: _buffer_ptr,
-      guard: _guard,
       buffer,
       ticket,
       token,
@@ -248,8 +229,6 @@ impl WriteAheadLog {
     flush: bool,
   ) -> io::Result<LogId> {
     let ReservedAppend {
-      buffer_ptr,
-      guard,
       buffer,
       ticket,
       token,
@@ -263,17 +242,10 @@ impl WriteAheadLog {
 
     let mut new_page = self.page_pool.acquire();
     new_page.copy_from(remain, 0);
-    let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
-      buffer_ptr,
-      Owned::new(buffer.init_next(new_page, overflow.get_len(), log_id)),
-      Ordering::Release,
-      Ordering::Acquire,
-      guard,
-    ) else {
-      unreachable!()
-    };
-    unsafe { guard.defer_destroy(buffer_ptr) };
-
+    let new_buffer =
+      self
+        .buffer
+        .store_and_load(buffer.init_next(new_page, overflow.get_len(), log_id));
     buffer.append_at(available, &ticket);
     buffer.flush_and_forget(&self.page_pool, ticket);
 
@@ -281,7 +253,6 @@ impl WriteAheadLog {
       return Ok(log_id);
     }
 
-    let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
     new_buffer
       .flush_block_with(overflow, &self.page_pool)
       .wait()?;
@@ -292,8 +263,6 @@ impl WriteAheadLog {
 
   fn rotate_segment(&self, reserved: ReservedAppend, backoff: &Backoff) -> Result {
     let ReservedAppend {
-      buffer_ptr,
-      guard,
       buffer,
       ticket,
       mut token,
@@ -314,10 +283,7 @@ impl WriteAheadLog {
       log_id,
     );
 
-    self
-      .buffer
-      .store(Owned::init(replacement), Ordering::Release);
-    unsafe { guard.defer_destroy(buffer_ptr) };
+    self.buffer.store(replacement);
 
     if let Err(err) = buffer
       .flush_block_with(ticket, &self.page_pool)
@@ -351,10 +317,7 @@ impl WriteAheadLog {
         return Err(Error::WALUnavailable);
       }
 
-      let guard = pin();
-      let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
-      let buffer = unsafe { &*buffer_ptr.as_raw() };
-
+      let buffer = self.buffer.load();
       let Some(token) = buffer.pin_segment() else {
         backoff.snooze();
         continue;
@@ -374,9 +337,7 @@ impl WriteAheadLog {
       };
 
       let reserved = ReservedAppend {
-        buffer_ptr,
-        guard: &guard,
-        buffer,
+        buffer: &buffer,
         token,
         ticket,
       };
@@ -454,13 +415,6 @@ impl WriteAheadLog {
 
   pub fn close(&self) {
     self.sync_completion.drain();
-    let guard = pin();
-    let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
-    if !ptr.is_null() {
-      unsafe { guard.defer_destroy(ptr) };
-      unsafe { (*ptr.as_raw()).drain_batch() };
-    }
-
     if !self.state.load().is_available() {
       return;
     }
@@ -469,9 +423,7 @@ impl WriteAheadLog {
 }
 
 struct ReservedAppend<'a> {
-  buffer_ptr: Shared<'a, LogBuffer>,
-  guard: &'a Guard,
-  buffer: &'static LogBuffer,
+  buffer: &'a LogBuffer,
   token: SharedToken<'a>,
   ticket: AppendTicket,
 }

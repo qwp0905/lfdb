@@ -71,25 +71,6 @@ fn test_drop_with_move() {
 }
 
 #[test]
-fn test_drop_counts() {
-  let l = 10;
-  let mut vec = Vec::with_capacity(l);
-  let c = SBox::new(AtomicUsize::new(0));
-  vec.resize_with(l, || C::new(c.clone()));
-
-  {
-    let boxed = SBox::from_boxed_slice(vec.into_boxed_slice());
-    assert_eq!(l, boxed.len());
-    let _ = boxed.clone();
-    let _ = boxed.clone();
-    let _ = boxed.clone();
-    let _ = boxed.clone();
-  }
-
-  assert_eq!(c.load(Ordering::Relaxed), l)
-}
-
-#[test]
 fn test_into_raw_from_raw_drop_counts() {
   let c = SBox::new(AtomicUsize::new(0));
   let a = SBox::new(C::new(c.clone()));

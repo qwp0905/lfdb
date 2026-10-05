@@ -69,7 +69,7 @@ impl Core {
       return None;
     }
 
-    Some(self.cached_blocks[block_id].flusher().submit())
+    Some(self.cached_blocks[block_id].submit_flush())
   }
 
   fn resolve_eviction(
@@ -109,7 +109,7 @@ impl Core {
       if !self.dirty_blocks.remove(id) {
         return Ok(());
       }
-      (block.flusher().submit(), latch.epoch())
+      (block.submit_flush(), latch.epoch())
     };
 
     let Err(err) = pending.finalize() else {

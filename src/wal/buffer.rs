@@ -312,10 +312,6 @@ impl LogBuffer {
       .wait_until(self.segment_ptr)
   }
 
-  pub fn drain_batch(&self) {
-    self.segment_state.write_completion.drain();
-  }
-
   pub const fn get_log_id_offset(&self) -> LogId {
     self.log_id_offset
   }
