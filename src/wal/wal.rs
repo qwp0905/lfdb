@@ -1,22 +1,14 @@
-use std::{
-  io,
-  mem::forget,
-  path::PathBuf,
-  sync::{atomic::Ordering, Arc, OnceLock},
-};
+use std::{io, mem::forget, path::PathBuf, sync::Arc};
 
-use crossbeam::{
-  atomic::AtomicCell,
-  epoch::{Atomic, Collector, Guard, LocalHandle, Owned, Shared},
-  utils::Backoff,
-};
+use crossbeam::{atomic::AtomicCell, utils::Backoff};
 
 use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
-  disk::{IOPool, PagePool, Pointer},
+  disk::{IOPool, Pointer},
+  page::{create_page_allocator, PageAllocator},
   table::TableId,
-  utils::{error, info, SharedToken},
+  utils::{error, info, AtomicSBox, SBox, SharedToken},
   Error, Result,
 };
 
@@ -57,14 +49,6 @@ impl State {
   }
 }
 
-static COLLECTOR: OnceLock<Collector> = OnceLock::new();
-thread_local! {
-  static LOCAL: LocalHandle = COLLECTOR.get_or_init(Collector::new).register();
-}
-fn pin() -> Guard {
-  LOCAL.with(LocalHandle::pin)
-}
-
 const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
 
 /**
@@ -83,11 +67,9 @@ const DEFAULT_ENCODING: RecordEncoding = RecordEncoding::Lz4;
  */
 pub struct WriteAheadLog {
   /**
-   * Current log buffer, managed via epoch GC. Epoch pinning guarantees the buffer
-   * pointer remains valid for the duration of a guard — preventing use-after-free
-   * when the buffer is rotated and the old one is deferred-destroyed.
+   * Current log buffer.
    */
-  buffer: Atomic<LogBuffer>,
+  buffer: AtomicSBox<LogBuffer>,
 
   sync_completion: SyncCompletion,
   log_completion: LogCompletion,
@@ -110,7 +92,7 @@ pub struct WriteAheadLog {
   /**
    * preloaded data block.
    */
-  page_pool: PagePool<WAL_BLOCK_SIZE>,
+  page_pool: PageAllocator<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
 }
@@ -121,15 +103,16 @@ impl WriteAheadLog {
     io_pool: Arc<IOPool>,
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+
+    let page_pool = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer =
-      LogBuffer::init_new(page_pool.acquire(), preloader.load()?, 0, max_len, 0);
+      LogBuffer::init_new(page_pool.allocate(), preloader.load()?, 0, max_len, 0);
 
     Ok(Self {
       preloader,
-      buffer: Atomic::new(buffer),
+      buffer: AtomicSBox::new(buffer),
       page_pool,
       sync_completion: SyncCompletion::new(),
       log_completion: LogCompletion::new(0),
@@ -146,7 +129,7 @@ impl WriteAheadLog {
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let page_pool = PagePool::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let page_pool = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 
@@ -163,7 +146,7 @@ impl WriteAheadLog {
 
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer = LogBuffer::init_new(
-      page_pool.acquire(),
+      page_pool.allocate(),
       preloader.load()?,
       0,
       max_len,
@@ -173,7 +156,7 @@ impl WriteAheadLog {
     Ok((
       Self {
         preloader,
-        buffer: Atomic::new(buffer),
+        buffer: AtomicSBox::new(buffer),
         page_pool,
         sync_completion: SyncCompletion::new(),
         log_completion: LogCompletion::new(replay_result.last_log_id),
@@ -214,8 +197,6 @@ impl WriteAheadLog {
     flush: bool,
   ) -> io::Result<LogId> {
     let ReservedAppend {
-      buffer_ptr: _buffer_ptr,
-      guard: _guard,
       buffer,
       ticket,
       token,
@@ -228,7 +209,7 @@ impl WriteAheadLog {
     }
     buffer.flush_block_with(ticket, &self.page_pool).wait()?;
     buffer.wait_prev_blocks()?;
-    self.wait_sync(buffer, token)?;
+    self.wait_sync(&buffer, token)?;
     Ok(log_id)
   }
 
@@ -248,8 +229,6 @@ impl WriteAheadLog {
     flush: bool,
   ) -> io::Result<LogId> {
     let ReservedAppend {
-      buffer_ptr,
-      guard,
       buffer,
       ticket,
       token,
@@ -261,18 +240,12 @@ impl WriteAheadLog {
     debug_assert_eq!(available.len(), ticket.get_len());
     debug_assert_eq!(remain.len(), overflow.get_len());
 
-    let mut new_page = self.page_pool.acquire();
+    let mut new_page = self.page_pool.allocate();
     new_page.copy_from(remain, 0);
-    let Ok(new_buffer_ptr) = self.buffer.compare_exchange(
-      buffer_ptr,
-      Owned::new(buffer.init_next(new_page, overflow.get_len(), log_id)),
-      Ordering::Release,
-      Ordering::Acquire,
-      guard,
-    ) else {
-      unreachable!()
-    };
-    unsafe { guard.defer_destroy(buffer_ptr) };
+    let new_buffer =
+      self
+        .buffer
+        .store_and_load(buffer.init_next(new_page, overflow.get_len(), log_id));
 
     buffer.append_at(available, &ticket);
     buffer.flush_and_forget(&self.page_pool, ticket);
@@ -281,19 +254,16 @@ impl WriteAheadLog {
       return Ok(log_id);
     }
 
-    let new_buffer = unsafe { &*new_buffer_ptr.as_raw() };
     new_buffer
       .flush_block_with(overflow, &self.page_pool)
       .wait()?;
     new_buffer.wait_prev_blocks()?;
-    self.wait_sync(buffer, token)?;
+    self.wait_sync(&buffer, token)?;
     Ok(log_id)
   }
 
   fn rotate_segment(&self, reserved: ReservedAppend, backoff: &Backoff) -> Result {
     let ReservedAppend {
-      buffer_ptr,
-      guard,
       buffer,
       ticket,
       mut token,
@@ -307,17 +277,14 @@ impl WriteAheadLog {
 
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
     let replacement = LogBuffer::init_new(
-      self.page_pool.acquire(),
+      self.page_pool.allocate(),
       new,
       buffer.get_generation() + 1,
       self.max_len,
       log_id,
     );
 
-    self
-      .buffer
-      .store(Owned::init(replacement), Ordering::Release);
-    unsafe { guard.defer_destroy(buffer_ptr) };
+    self.buffer.store(replacement);
 
     if let Err(err) = buffer
       .flush_block_with(ticket, &self.page_pool)
@@ -351,10 +318,7 @@ impl WriteAheadLog {
         return Err(Error::WALUnavailable);
       }
 
-      let guard = pin();
-      let buffer_ptr = self.buffer.load(Ordering::Acquire, &guard);
-      let buffer = unsafe { &*buffer_ptr.as_raw() };
-
+      let buffer = self.buffer.load();
       let Some(token) = buffer.pin_segment() else {
         backoff.snooze();
         continue;
@@ -374,9 +338,7 @@ impl WriteAheadLog {
       };
 
       let reserved = ReservedAppend {
-        buffer_ptr,
-        guard: &guard,
-        buffer,
+        buffer: buffer.clone(),
         token,
         ticket,
       };
@@ -454,13 +416,6 @@ impl WriteAheadLog {
 
   pub fn close(&self) {
     self.sync_completion.drain();
-    let guard = pin();
-    let ptr = self.buffer.swap(Shared::null(), Ordering::Release, &guard);
-    if !ptr.is_null() {
-      unsafe { guard.defer_destroy(ptr) };
-      unsafe { (*ptr.as_raw()).drain_batch() };
-    }
-
     if !self.state.load().is_available() {
       return;
     }
@@ -469,9 +424,7 @@ impl WriteAheadLog {
 }
 
 struct ReservedAppend<'a> {
-  buffer_ptr: Shared<'a, LogBuffer>,
-  guard: &'a Guard,
-  buffer: &'static LogBuffer,
+  buffer: SBox<LogBuffer>,
   token: SharedToken<'a>,
   ticket: AppendTicket,
 }
