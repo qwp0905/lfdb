@@ -1,10 +1,8 @@
-use std::cell::UnsafeCell;
+use std::ops::Deref;
 
-use crossbeam::utils::Backoff;
+use arc_swap::{ArcSwapAny, Guard, RefCnt};
 
 use crate::utils::SBox;
-
-use super::ExclusivePin;
 
 /**
  * Atomically swappable `SBox` slot.
@@ -14,52 +12,56 @@ use super::ExclusivePin;
  * After `load` returns, the caller owns an independent strong reference and no
  * longer depends on the slot.
  */
-pub struct AtomicSBox<T> {
-  /*
-   * The `UnsafeCell` is protected by `ExclusivePin`.
-   *
-   * Readers hold a shared token only long enough to clone the current `SBox`.
-   * Writers hold the exclusive token only long enough to replace it. Since these
-   * critical sections are intentionally tiny, contention is handled with a short
-   * backoff loop instead of an OS lock.
-   */
-  value: UnsafeCell<SBox<T>>,
-  lock: ExclusivePin,
-}
+pub struct AtomicSBox<T>(ArcSwapAny<SBox<T>>);
 impl<T> AtomicSBox<T> {
   pub fn new(value: T) -> Self {
-    Self {
-      value: UnsafeCell::new(SBox::new(value)),
-      lock: ExclusivePin::new(),
-    }
+    Self(ArcSwapAny::new(SBox::new(value)))
   }
 
-  pub fn load(&self) -> SBox<T> {
-    let backoff = Backoff::new();
-    loop {
-      if let Some(_token) = self.lock.try_shared() {
-        return unsafe { &*self.value.get() }.clone();
-      }
-      backoff.snooze();
-    }
+  pub fn load(&self) -> AtomicRef<T> {
+    AtomicRef(self.0.load())
   }
 
   pub fn swap(&self, value: T) -> SBox<T> {
-    let value = SBox::new(value);
-    let backoff = Backoff::new();
-    loop {
-      if let Some(_token) = self.lock.try_exclusive() {
-        return unsafe { self.value.get().replace(value) };
-      }
-      backoff.snooze();
-    }
+    self.0.swap(SBox::new(value))
   }
 
   #[inline]
   pub fn store(&self, value: T) {
     let _ = self.swap(value);
   }
+  pub fn store_and_load(&self, value: T) -> SBox<T> {
+    let value = SBox::new(value);
+    self.0.swap(value.clone());
+    value
+  }
+}
+
+pub struct AtomicRef<T>(Guard<SBox<T>>);
+impl<T> Clone for AtomicRef<T> {
+  fn clone(&self) -> Self {
+    Self(Guard::from_inner(SBox::clone(&*self.0)))
+  }
+}
+impl<T> Deref for AtomicRef<T> {
+  type Target = T;
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
 }
 
 unsafe impl<T: Send + Sync> Send for AtomicSBox<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicSBox<T> {}
+
+unsafe impl<T> RefCnt for SBox<T> {
+  type Base = T;
+  fn into_ptr(me: Self) -> *mut Self::Base {
+    SBox::into_raw(me)
+  }
+  fn as_ptr(me: &Self) -> *mut Self::Base {
+    me.as_ptr()
+  }
+  unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+    SBox::from_raw(ptr.cast_mut())
+  }
+}
