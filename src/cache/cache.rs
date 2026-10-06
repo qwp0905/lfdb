@@ -12,7 +12,7 @@ use crate::{
   background::{Close, SharedWorkThread, ThreadBuilder},
   disk::Pointer,
   metrics::{measure, MetricsRegistry},
-  page::{create_page_allocator, PageAllocator, PageRef, PAGE_SIZE},
+  page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::{error, ExclusivePin, SharedToken, ToArc},
   Result,
@@ -206,7 +206,7 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let allocator = create_page_allocator!(config.capacity + config.buffer_size);
+    let allocator = PageAllocator::new(config.capacity + config.buffer_size);
 
     let mut blocks = Vec::with_capacity(config.capacity);
     blocks.resize_with(config.capacity, CachedBlock::uninit);

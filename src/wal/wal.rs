@@ -6,7 +6,7 @@ use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, Pointer},
-  page::{create_page_allocator, PageAllocator},
+  page::PageAllocator,
   table::TableId,
   utils::{error, info, AtomicSBox, SharedToken},
   Error, Result,
@@ -104,7 +104,7 @@ impl WriteAheadLog {
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
 
-    let allocator = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
     let buffer =
@@ -129,7 +129,7 @@ impl WriteAheadLog {
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let allocator = create_page_allocator!(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 

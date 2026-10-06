@@ -1,11 +1,11 @@
-use crate::page::create_page_allocator;
+use crate::page::PageAllocator;
 
 use super::super::*;
 use super::*;
 
 #[test]
 fn test_tree_header_roundtrip() {
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let height = 0u16;
   let root = 42;
@@ -20,7 +20,7 @@ fn test_tree_header_roundtrip() {
 
 #[test]
 fn test_tree_header_zero_root() {
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let height = 123u16;
   let root = 0;
@@ -35,7 +35,7 @@ fn test_tree_header_zero_root() {
 
 #[test]
 fn test_tree_header_large_root() {
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let height = u16::MAX;
   let root = Pointer::MAX;

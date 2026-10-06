@@ -1,4 +1,4 @@
-use crate::page::create_page_allocator;
+use crate::page::PageAllocator;
 
 use super::super::*;
 use super::*;
@@ -8,7 +8,7 @@ fn test_serialize_internal() {
   let keys = vec![];
   let children = vec![10];
   let next = None;
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let node = BTreeNode::Internal(InternalNode::new(
     keys.clone(),
@@ -30,7 +30,7 @@ fn test_serialize_internal() {
 
 #[test]
 fn test_serialize_leaf() {
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let mut leaf = LeafNode::empty();
 
@@ -75,7 +75,7 @@ fn test_serialize_leaf() {
 
 #[test]
 fn test_serialize_internal_with_keys_and_right() {
-  let alloc = create_page_allocator!(10);
+  let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let keys = vec![vec![1, 2], vec![3, 4]];
   let children = vec![10, 20, 30];
