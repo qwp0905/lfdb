@@ -6,6 +6,3 @@ pub use page::*;
 
 mod align;
 pub use align::*;
-
-mod parker;
-use parker::*;

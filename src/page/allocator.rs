@@ -5,7 +5,9 @@ use std::{
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
-use super::{create_parker, AlignedBuf, Page, ThreadParker};
+use crate::background::{create_parker, ThreadParker};
+
+use super::{AlignedBuf, Page};
 
 pub struct PageRef<const N: usize> {
   page: Page<N>,
