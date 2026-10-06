@@ -4,7 +4,8 @@ use crossbeam_skiplist::{map::Entry, SkipMap};
 
 use super::{TableFormatVersion, TableId, TableMetadata, TableName};
 use crate::{
-  disk::{BlockIOHandle, FreeList, PAGE_SIZE},
+  disk::{BlockIOHandle, FreeList},
+  page::PAGE_SIZE,
   table::TableNameRef,
   utils::{ExclusivePin, SharedToken},
   wal::TxId,

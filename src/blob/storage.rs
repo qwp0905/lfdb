@@ -1,6 +1,7 @@
 use crate::{
   cache::ShrinkMap,
-  disk::{AlignedBuf, IOPool},
+  disk::IOPool,
+  page::AlignedBuf,
   utils::{debug, uuid_simple, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
   Result,

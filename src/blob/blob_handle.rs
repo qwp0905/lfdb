@@ -4,7 +4,8 @@ use crossbeam::utils::Backoff;
 
 use super::{BlobLen, BlobMetadata, BlobOffset, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
-  disk::{AlignedBuf, IOHandle, PendingIO},
+  disk::{IOHandle, PendingIO},
+  page::AlignedBuf,
   utils::create_static_ref,
   Error, Result,
 };

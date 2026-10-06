@@ -15,7 +15,7 @@ use crate::{
   background::{Close, EventBus, ThreadBuilder},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
-  disk::{DiskBackend, IOPool, Pointer, PAGE_SIZE},
+  disk::{DiskBackend, IOPool, Pointer},
   maintenance::{
     initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
     CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
@@ -23,6 +23,7 @@ use crate::{
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,
+  page::PAGE_SIZE,
   table::{TableFormatVersion, TableHandleRef, TableId, TableMapper},
   transaction::{
     Checkpoint, CheckpointSnapshot, PageRecorder, SnapshotFormatVersion, Transaction,

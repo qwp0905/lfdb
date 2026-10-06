@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
-  disk::{IOHandle, IOPool, Page, PendingIO, Pointer},
+  disk::{IOHandle, IOPool, PendingIO, Pointer},
+  page::Page,
   utils::uuid_simple,
   Error, Result,
 };

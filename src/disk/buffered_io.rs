@@ -1,7 +1,12 @@
 use std::{io, path::PathBuf, sync::Arc};
 
-use super::{AlignedArray, DirHandle, IOBackend, IOTask, ALIGN, IO_RETRY, NO_CALLBACK};
-use crate::{error::Result, utils::create_static_ref, Error};
+use super::{DirHandle, IOBackend, IOTask, IO_RETRY, NO_CALLBACK};
+use crate::{
+  error::Result,
+  page::{AlignedArray, ALIGN},
+  utils::create_static_ref,
+  Error,
+};
 
 /**
  * Buffered writer for direct-I/O append-style output.

@@ -106,7 +106,7 @@ impl WriteCompletion {
 }
 impl Drop for WriteCompletion {
   fn drop(&mut self) {
-    self.drain()
+    self.drain();
   }
 }
 

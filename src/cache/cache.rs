@@ -10,8 +10,9 @@ use super::{
 };
 use crate::{
   background::{Close, SharedWorkThread, ThreadBuilder},
-  disk::{PagePool, PageRef, Pointer, PAGE_SIZE},
+  disk::Pointer,
   metrics::{measure, MetricsRegistry},
+  page::{create_page_allocator, PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::{error, ExclusivePin, SharedToken, ToArc},
   Result,
@@ -34,7 +35,7 @@ struct Core {
    */
   dirty_blocks: DirtyBlocks,
   dirty_tables: DirtyTables,
-  page_pool: PagePool<PAGE_SIZE>,
+  allocator: PageAllocator<PAGE_SIZE>,
 }
 impl Core {
   const fn new(
@@ -42,14 +43,14 @@ impl Core {
     pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
-    page_pool: PagePool<PAGE_SIZE>,
+    allocator: PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
       cached_blocks,
       pins,
       dirty_blocks,
       dirty_tables,
-      page_pool,
+      allocator,
     }
   }
 
@@ -178,16 +179,12 @@ impl Core {
       &self.dirty_blocks,
       id,
       token,
-      &self.page_pool,
+      &self.allocator,
     )
   }
 
-  fn acquire_page_with(&self, guard: &EvictionGuard) -> PageRef<PAGE_SIZE> {
-    if guard.is_evicted() {
-      self.page_pool.acquire()
-    } else {
-      self.page_pool.create_new()
-    }
+  fn acquire_page(&self) -> PageRef<PAGE_SIZE> {
+    self.allocator.allocate()
   }
 }
 
@@ -199,7 +196,7 @@ impl Core {
  * loads missing pages, allocates fresh cached blocks, tracks dirty state, and
  * drives checkpoint flushing. `MappingTable` owns the logical-address to slot
  * mapping and eviction decisions; the block arrays, pins, batch handles, dirty
- * bitmap, and page pool hold the actual cached-page state.
+ * bitmap.
  */
 pub struct BlockCache {
   table: MappingTable,
@@ -209,7 +206,7 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let page_pool = PagePool::new(config.buffer_size);
+    let allocator = create_page_allocator!(config.capacity + config.buffer_size);
 
     let mut blocks = Vec::with_capacity(config.capacity);
     blocks.resize_with(config.capacity, CachedBlock::uninit);
@@ -222,7 +219,7 @@ impl BlockCache {
       pins.into_boxed_slice(),
       DirtyBlocks::new(config.capacity),
       DirtyTables::new(),
-      page_pool,
+      allocator,
     ));
 
     let flush_executor = ThreadBuilder::new()
@@ -261,7 +258,7 @@ impl BlockCache {
       .alloc(table_id, pointer, |id| self.core.get_pin(id));
 
     let pending = self.core.submit_eviction(&guard);
-    let new = self.core.acquire_page_with(&guard);
+    let new = self.core.acquire_page();
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 
@@ -287,7 +284,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page_with(&guard);
+    let mut new = self.core.acquire_page();
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
@@ -320,7 +317,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page_with(&guard);
+    let mut new = self.core.acquire_page();
     handle.disk().read(pointer, &mut new)?;
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }

@@ -3,7 +3,7 @@ use super::{
   SerializeType, TypedObject, Viewable,
 };
 use crate::{
-  disk::{PageScanner, PageWriter},
+  page::{PageScanner, PageWriter},
   Error, Result,
 };
 
@@ -24,7 +24,7 @@ impl<'a> TypedObject for BTreeNodeView<'a> {
 
 impl<'a> Viewable<'a> for BTreeNodeView<'a> {
   fn read_from(
-    page: &'a crate::disk::Page,
+    page: &'a crate::page::Page,
     scanner: &mut PageScanner<'a>,
   ) -> Result<Self> {
     match scanner.read()? {

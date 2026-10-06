@@ -3,7 +3,7 @@ use std::{
   ops::{Deref, Range},
 };
 
-use crate::{disk::AlignedBuf, utils::SBox};
+use crate::{page::AlignedBuf, utils::SBox};
 
 use super::ReadonlySlot;
 

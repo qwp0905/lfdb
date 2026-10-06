@@ -1,6 +1,6 @@
 use crate::{
-  disk::{Page, PageScanner, PageWriter, PAGE_SIZE},
   error::{Error, Result},
+  page::{Page, PageScanner, PageWriter, PAGE_SIZE},
 };
 
 /**

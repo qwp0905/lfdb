@@ -1,8 +1,9 @@
 use crate::{
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
   cache::{CachedSlot, WritableSlot},
-  disk::{AlignedBuf, FreePointer, Pointer},
+  disk::{FreePointer, Pointer},
   objects::Serializable,
+  page::AlignedBuf,
   table::TableHandleRef,
   wal::TxId,
   Result,

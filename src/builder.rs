@@ -42,7 +42,7 @@ impl EngineBuilder {
     self
   }
   /**
-   * Soft limit of WAL buffer size.
+   * Hard limit of WAL buffer size.
    */
   pub const fn wal_buffer_size(mut self, size: usize) -> Self {
     self.0.wal_buffer_size = size;
@@ -78,9 +78,9 @@ impl EngineBuilder {
     self
   }
   /**
-   * This specifies the size of the cache and buffers used for zero-copy reads
+   * This specifies the hard limit of the cache and buffers used for zero-copy reads
    * and copy-on-write operations, cache evictions.
-   * We recommend setting the size to (number of threads expected to access simultaneously) × 4 MiB
+   * We recommend setting the size to (number of threads expected to access simultaneously) × 4 kiB
    */
   pub const fn block_cache_buffer_size(mut self, size: usize) -> Self {
     self.0.block_cache_buffer_size = size;
@@ -141,7 +141,7 @@ impl Clone for EngineBuilder {
 }
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 128 mib
-const DEFAULT_WAL_BUFFER_SIZE: usize = 8 << 20; // 8 mib
+const DEFAULT_WAL_BUFFER_SIZE: usize = 16 << 20; // 16 mib
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64
