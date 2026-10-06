@@ -43,6 +43,3 @@ pub use callback::*;
 
 mod shared;
 pub use shared::*;
-
-mod idle;
-use idle::*;

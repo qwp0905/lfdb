@@ -1,8 +1,4 @@
-use std::{
-  iter::repeat_with,
-  sync::Arc,
-  thread::{park, Builder, Thread},
-};
+use std::{iter::repeat_with, sync::Arc, thread::Builder};
 
 use crossbeam::{
   deque::{Injector, Steal, Stealer, Worker},
@@ -10,8 +6,8 @@ use crossbeam::{
 };
 
 use super::{
-  into_task, Close, IdleQueue, PendingTask, SharedFn, TaskRef, ThreadId, ThreadSlot,
-  UnwindSpawner,
+  create_parker, into_task, Close, PendingTask, SharedFn, TaskRef, ThreadParker,
+  ThreadSlot, UnwindSpawner,
 };
 
 enum Context {
@@ -22,7 +18,7 @@ enum Context {
 const fn worker_loop(
   local: Worker<Context>,
   core: Arc<Core<Context>>,
-  id: ThreadId,
+  id: usize,
 ) -> impl FnOnce() {
   move || {
     let backoff = Backoff::new();
@@ -41,9 +37,7 @@ const fn worker_loop(
       }
 
       backoff.reset();
-      core.try_enqueue_idle(id);
-      let Some(ctx) = core.pop_or_steal(&local, id) else {
-        core.try_park(id);
+      let Some(ctx) = core.parker.park_or_cancel(|| core.pop_or_steal(&local, id)) else {
         continue;
       };
 
@@ -59,7 +53,7 @@ const fn worker_loop(
 struct Core<A> {
   global: Injector<A>,
   stealers: Box<[Stealer<A>]>,
-  idle: IdleQueue,
+  parker: ThreadParker,
 }
 impl<A> Core<A> {
   fn new(count: usize) -> (Self, Vec<Worker<A>>) {
@@ -76,13 +70,10 @@ impl<A> Core<A> {
       Self {
         global: Injector::new(),
         stealers: stealers.into_boxed_slice(),
-        idle: IdleQueue::new(count),
+        parker: create_parker!(),
       },
       workers,
     )
-  }
-  fn wake_one(&self) -> Option<ThreadId> {
-    self.idle.wake_one()
   }
 
   fn drain_task(&self, local: &Worker<A>) {
@@ -91,23 +82,14 @@ impl<A> Core<A> {
     }
   }
 
-  fn try_park(&self, id: ThreadId) {
-    if self.idle.try_park(id) {
-      park();
-    };
-  }
-  fn try_enqueue_idle(&self, id: ThreadId) {
-    self.idle.try_enqueue(id);
-  }
-
-  fn steal_from_other(&self, id: ThreadId) -> Steal<A> {
+  fn steal_from_other(&self, id: usize) -> Steal<A> {
     (0..self.stealers.len())
       .filter(move |&i| i != id)
       .map(|i| self.stealers[i].steal())
       .collect()
   }
 
-  fn steal_one(&self, local: &Worker<A>, id: ThreadId) -> Steal<A> {
+  fn steal_one(&self, local: &Worker<A>, id: usize) -> Steal<A> {
     self
       .global
       .steal_batch_and_pop(local)
@@ -120,7 +102,7 @@ impl<A> Core<A> {
    * 2. pull a batch from the global injector,
    * 3. steal from other workers as a fallback.
    */
-  fn pop_or_steal<'a>(&self, local: &Worker<A>, id: ThreadId) -> Option<A>
+  fn pop_or_steal<'a>(&self, local: &Worker<A>, id: usize) -> Option<A>
   where
     A: 'a,
   {
@@ -144,7 +126,6 @@ impl<A> Core<A> {
 
 pub struct ThreadPool {
   core: Arc<Core<Context>>,
-  wakers: Arc<[Thread]>,
   threads: Box<[ThreadSlot]>,
 }
 impl ThreadPool {
@@ -152,35 +133,28 @@ impl ThreadPool {
     let (core, workers) = Core::new(count);
     let core = Arc::new(core);
     let mut threads = Vec::with_capacity(count);
-    let mut wakers = Vec::with_capacity(count);
     let name = name.to_string();
     for (id, local) in workers.into_iter().enumerate() {
       let thread = Builder::new()
         .name(name.clone())
         .stack_size(size)
         .spawn_unwind(worker_loop(local, core.clone(), id));
-
-      wakers.push(thread.thread().clone());
       threads.push(ThreadSlot::new(thread));
     }
-
     Self {
       core,
-      wakers: Arc::from(wakers.into_boxed_slice()),
       threads: threads.into_boxed_slice(),
     }
   }
 
-  fn spawn_internal<F, T>(core: &Core<Context>, wakers: &[Thread], f: F) -> PendingTask<T>
+  fn spawn_internal<F, T>(core: &Core<Context>, f: F) -> PendingTask<T>
   where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
     let (task, pending) = into_task(f);
     core.push_global(Context::Task(task));
-    if let Some(id) = core.wake_one() {
-      wakers[id].unpark();
-    };
+    core.parker.wake_once();
     pending
   }
 
@@ -189,7 +163,7 @@ impl ThreadPool {
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
-    Self::spawn_internal(&self.core, &self.wakers, f)
+    Self::spawn_internal(&self.core, f)
   }
 
   pub fn fork<T, R, F, I>(&self, input: I, handler: F) -> ForkJoin<R>
@@ -210,7 +184,7 @@ impl ThreadPool {
     }
 
     for _ in 0..self.threads.len().min(count) {
-      self.wake_one();
+      self.core.parker.wake_once();
     }
 
     ForkJoin::new(pending)
@@ -220,11 +194,7 @@ impl ThreadPool {
   where
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    TypedExecutor::new(
-      self.core.clone(),
-      self.wakers.clone(),
-      SharedFn::new(handler),
-    )
+    TypedExecutor::new(self.core.clone(), SharedFn::new(handler))
   }
 
   pub fn stream<T, R, F>(&self, handler: F) -> ForkStream<T, R>
@@ -232,12 +202,6 @@ impl ThreadPool {
     F: Fn(T) -> R + Send + Sync + 'static,
   {
     ForkStream::new(self.typed_executor(handler))
-  }
-
-  fn wake_one(&self) {
-    if let Some(id) = self.core.wake_one() {
-      self.wakers[id].unpark();
-    }
   }
 }
 impl Close for ThreadPool {
@@ -254,8 +218,9 @@ impl Close for ThreadPool {
     for _ in 0..threads.len() {
       self.core.push_global(Context::Term);
     }
+
+    self.core.parker.wake_all();
     for handle in threads {
-      handle.thread().unpark();
       handle.join().unwrap();
     }
 
@@ -269,20 +234,11 @@ impl Close for ThreadPool {
 
 struct TypedExecutor<T, R> {
   core: Arc<Core<Context>>,
-  wakers: Arc<[Thread]>,
   handler: SharedFn<'static, T, R>,
 }
 impl<T, R> TypedExecutor<T, R> {
-  const fn new(
-    core: Arc<Core<Context>>,
-    wakers: Arc<[Thread]>,
-    handler: SharedFn<'static, T, R>,
-  ) -> Self {
-    Self {
-      core,
-      wakers,
-      handler,
-    }
+  const fn new(core: Arc<Core<Context>>, handler: SharedFn<'static, T, R>) -> Self {
+    Self { core, handler }
   }
   fn execute(&self, input: T) -> PendingTask<R>
   where
@@ -290,7 +246,7 @@ impl<T, R> TypedExecutor<T, R> {
     R: Send + 'static,
   {
     let handler = self.handler.clone();
-    ThreadPool::spawn_internal(&self.core, &self.wakers, move || handler.call(input))
+    ThreadPool::spawn_internal(&self.core, move || handler.call(input))
   }
 }
 
