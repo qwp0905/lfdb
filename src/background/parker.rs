@@ -1,10 +1,10 @@
 use std::{
-  cell::{OnceCell, RefCell},
+  cell::OnceCell,
   sync::{
-    atomic::{AtomicU32, AtomicU8, Ordering},
+    atomic::{AtomicU64, Ordering},
     Once,
   },
-  thread::{current, park, LocalKey, Thread},
+  thread::{current, park, Thread},
 };
 
 use crossbeam::queue::SegQueue;
@@ -44,35 +44,47 @@ impl Default for OnceParker {
   }
 }
 
-const STATE_UNQUEUED: u8 = 0;
-const STATE_QUEUED: u8 = 1;
-const STATE_PARKED: u8 = 2;
-const STATE_CANCELED: u8 = 3;
+const STATE_UNQUEUED: u64 = 0;
+const STATE_QUEUED: u64 = 1;
+const STATE_PARKED: u64 = 2;
+const STATE_CANCELED: u64 = 3;
 
-static PARKER_ID: AtomicU32 = AtomicU32::new(0);
-type ParkerId = u32;
+const STATE_BITS: u32 = 2;
+const STATE_MASK: u64 = (1 << STATE_BITS) - 1;
+
+static PARKER_ID: AtomicU64 = AtomicU64::new(1);
+type ParkerId = u64;
+
+const MAX_PARKER_ID: ParkerId = ParkerId::MAX >> STATE_BITS;
+
+const fn cast_to(v: u64) -> (ParkerId, u64) {
+  (v >> STATE_BITS, v & STATE_MASK)
+}
+const fn cast_from(id: ParkerId, state: u64) -> u64 {
+  (id << STATE_BITS) | state
+}
 
 struct Waker {
-  state: AtomicU8,
+  /**
+   * 62 bits parker id + 2bit state.
+   */
+  state: AtomicU64,
   thread: Thread,
 }
 impl Waker {
   fn new() -> Self {
     Self {
-      state: AtomicU8::new(STATE_UNQUEUED),
+      state: AtomicU64::new(0),
       thread: current(),
     }
   }
 
-  fn try_park(&self) {
+  fn try_park(&self, id: ParkerId) {
+    let queued = cast_from(id, STATE_QUEUED);
+    let parked = cast_from(id, STATE_PARKED);
     if self
       .state
-      .compare_exchange(
-        STATE_QUEUED,
-        STATE_PARKED,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-      )
+      .compare_exchange(queued, parked, Ordering::AcqRel, Ordering::Acquire)
       .is_err()
     {
       return;
@@ -80,113 +92,121 @@ impl Waker {
 
     debug_assert_eq!(current().id(), self.thread.id());
     park();
+
     let _ = self.state.compare_exchange(
-      STATE_PARKED,
-      STATE_QUEUED,
-      Ordering::Release,
+      parked,
+      cast_from(id, STATE_CANCELED),
+      Ordering::AcqRel,
       Ordering::Acquire,
     );
   }
 
-  fn try_cancel(&self) -> bool {
+  fn try_cancel(&self, id: ParkerId) -> bool {
+    let queued = cast_from(id, STATE_QUEUED);
+    let canceled = cast_from(id, STATE_CANCELED);
     self
       .state
-      .compare_exchange(
-        STATE_QUEUED,
-        STATE_CANCELED,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-      )
+      .compare_exchange(queued, canceled, Ordering::AcqRel, Ordering::Acquire)
       .is_ok()
   }
 }
 
-pub struct LocalState {
+struct LocalState {
   waker: SBox<Waker>,
-  parker_id: ParkerId,
 }
 impl LocalState {
-  fn new(parker_id: ParkerId) -> Self {
+  fn new() -> Self {
     Self {
       waker: SBox::new(Waker::new()),
-      parker_id,
     }
   }
 }
-
-macro_rules! create_parker {
-  () => {{
-    use crate::background::LocalState;
-    use std::cell::{OnceCell, RefCell};
-    thread_local! {
-      static LOCAL: OnceCell<RefCell<LocalState>> = const { OnceCell::new() };
-    }
-    ThreadParker::new(&LOCAL)
-  }};
+impl Default for LocalState {
+  fn default() -> Self {
+    Self::new()
+  }
 }
-pub(crate) use create_parker;
+
+thread_local! {
+  static LOCAL_STATE: OnceCell<LocalState> = const { OnceCell::new() };
+}
 
 pub struct ThreadParker {
   queue: SegQueue<SBox<Waker>>,
-  local: &'static LocalKey<OnceCell<RefCell<LocalState>>>,
   id: ParkerId,
 }
 impl ThreadParker {
-  pub fn new(local: &'static LocalKey<OnceCell<RefCell<LocalState>>>) -> Self {
+  pub fn new() -> Self {
+    let id = PARKER_ID.fetch_add(1, Ordering::Relaxed);
+    if id > MAX_PARKER_ID {
+      panic!("parker id overflowed.");
+    }
     Self {
       queue: SegQueue::new(),
-      local,
-      id: PARKER_ID.fetch_add(1, Ordering::Relaxed),
+      id,
     }
   }
-  fn create_local(&self) -> LocalState {
-    LocalState::new(self.id)
-  }
   fn try_enqueue(&self, waker: &SBox<Waker>) {
-    match waker.state.swap(STATE_QUEUED, Ordering::AcqRel) {
-      STATE_UNQUEUED => self.queue.push(waker.clone()),
-      STATE_QUEUED | STATE_CANCELED => {}
-      _ => unreachable!(),
+    let prev = waker
+      .state
+      .swap(cast_from(self.id, STATE_QUEUED), Ordering::AcqRel);
+    let (id, state) = cast_to(prev);
+    if id != self.id || state == STATE_UNQUEUED {
+      self.queue.push(waker.clone());
     }
   }
 
   pub fn wake_all(&self) {
     while let Some(waker) = self.queue.pop() {
-      let state = waker.state.swap(STATE_UNQUEUED, Ordering::AcqRel);
-      match state {
-        STATE_QUEUED => {}
-        STATE_PARKED => waker.thread.unpark(),
-        STATE_CANCELED => {}
-        _ => unreachable!(),
+      self.wake_one(&waker);
+    }
+  }
+
+  fn wake_one(&self, waker: &Waker) -> bool {
+    let mut current = waker.state.load(Ordering::Acquire);
+    loop {
+      let (id, state) = cast_to(current);
+      if id != self.id {
+        return false;
       }
+      if let Err(err) = waker.state.compare_exchange_weak(
+        current,
+        cast_from(id, STATE_UNQUEUED),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        current = err;
+        continue;
+      }
+
+      match state {
+        STATE_UNQUEUED | STATE_CANCELED => return false,
+        STATE_QUEUED => return true,
+        STATE_PARKED => {
+          waker.thread.unpark();
+          return true;
+        }
+        _ => unreachable!(),
+      };
     }
   }
 
   pub fn wake_once(&self) {
     while let Some(waker) = self.queue.pop() {
-      let state = waker.state.swap(STATE_UNQUEUED, Ordering::AcqRel);
-      match state {
-        STATE_QUEUED => return,
-        STATE_PARKED => return waker.thread.unpark(),
-        STATE_CANCELED => continue,
-        _ => unreachable!(),
+      if self.wake_one(&waker) {
+        return;
       }
     }
   }
   pub fn park_or_cancel<T>(&self, has_next: impl FnOnce() -> Option<T>) -> Option<T> {
-    self.local.with(|v| {
-      let mut local = v
-        .get_or_init(|| RefCell::new(self.create_local()))
-        .borrow_mut();
-      if local.parker_id != self.id {
-        *local = self.create_local();
-      };
+    LOCAL_STATE.with(|v| {
+      let local = v.get_or_init(Default::default);
       self.try_enqueue(&local.waker);
       let Some(next) = has_next() else {
-        local.waker.try_park();
+        local.waker.try_park(self.id);
         return None;
       };
-      if !local.waker.try_cancel() {
+      if !local.waker.try_cancel(self.id) {
         self.wake_once();
       }
       Some(next)
@@ -195,8 +215,6 @@ impl ThreadParker {
 }
 impl Drop for ThreadParker {
   fn drop(&mut self) {
-    while !self.queue.is_empty() {
-      self.wake_once();
-    }
+    self.wake_all();
   }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
-use crate::background::{create_parker, ThreadParker};
+use crate::background::ThreadParker;
 
 use super::{AlignedBuf, Page};
 
@@ -79,7 +79,7 @@ impl GlobalQueue {
     Self {
       free,
       buf,
-      parker: create_parker!(),
+      parker: ThreadParker::new(),
     }
   }
 

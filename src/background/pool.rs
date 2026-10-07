@@ -6,8 +6,8 @@ use crossbeam::{
 };
 
 use super::{
-  create_parker, into_task, Close, PendingTask, SharedFn, TaskRef, ThreadParker,
-  ThreadSlot, UnwindSpawner,
+  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadParker, ThreadSlot,
+  UnwindSpawner,
 };
 
 enum Context {
@@ -70,7 +70,7 @@ impl<A> Core<A> {
       Self {
         global: Injector::new(),
         stealers: stealers.into_boxed_slice(),
-        parker: create_parker!(),
+        parker: ThreadParker::new(),
       },
       workers,
     )
