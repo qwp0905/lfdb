@@ -95,7 +95,7 @@ impl Engine {
 
       let tables = tables.to_arc();
       let wal =
-        WriteAheadLog::init(&wal_config, event_bus.clone(), io_pool.clone())?.to_arc();
+        WriteAheadLog::init(wal_config, event_bus.clone(), io_pool.clone())?.to_arc();
       let blob = BlobStorage::init(io_pool.clone(), wal.clone()).to_arc();
       let recorder = PageRecorder::new(wal.clone()).to_arc();
       let version_controller = VersionController::init(&event_bus);
@@ -183,7 +183,7 @@ impl Engine {
 
     info!("trying to replay...");
     let (wal, replay) = WriteAheadLog::replay(
-      &wal_config,
+      wal_config,
       event_bus.clone(),
       io_pool.clone(),
       &init_thread,
