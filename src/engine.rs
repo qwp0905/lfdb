@@ -70,13 +70,13 @@ impl Engine {
     };
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,
-      capacity: config.block_cache_memory_capacity / PAGE_SIZE,
-      buffer_size: config.block_cache_buffer_size / PAGE_SIZE,
+      capacity: config.block_cache_memory_capacity,
+      buffer_size: config.block_cache_buffer_size,
     };
     let gc_config = GarbageCollectionConfig {
       batch_size: config.gc_batch_size,
       compact_threshold: config.compaction_threshold,
-      compact_min_size: (config.compaction_min_size / PAGE_SIZE) as Pointer,
+      compact_min_size: config.compaction_min_size,
     };
     let compaction_config = CompactionConfig {
       batch_size: config.compaction_batch_size,

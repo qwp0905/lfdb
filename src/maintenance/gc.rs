@@ -20,6 +20,7 @@ use crate::{
     BTreeNode, BTreeNodeView, DataEntry, DataEntryView, RecordDataView, Serializable,
     StaticKey, TreeHeader, HEADER_POINTER,
   },
+  page::PAGE_SIZE,
   table::{TableHandleRef, TableId, TableMapper},
   transaction::PageRecorder,
   utils::{error, ChunkQueue, MpscQueue, ToArc, ToBox},
@@ -27,11 +28,10 @@ use crate::{
   Result,
 };
 
-#[derive(Clone)]
 pub struct GarbageCollectionConfig {
   pub batch_size: usize,
   pub compact_threshold: f64,
-  pub compact_min_size: Pointer,
+  pub compact_min_size: usize,
 }
 
 const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
@@ -60,7 +60,14 @@ impl GarbageCollector {
       .single()
       .interval(
         GC_RUN_INTERVAL,
-        gc_main_loop(worker, event_bus.clone(), release_queue.clone(), config),
+        gc_main_loop(
+          worker,
+          event_bus.clone(),
+          release_queue.clone(),
+          config.batch_size,
+          config.compact_threshold,
+          (config.compact_min_size / PAGE_SIZE) as Pointer,
+        ),
       )
       .to_box();
 
@@ -377,14 +384,16 @@ impl GcWorker {
     &self,
     cycle: &mut Option<GcCycle>,
     event_bus: &EventBus,
-    config: GarbageCollectionConfig,
+    batch_size: usize,
+    compact_threshold: f64,
+    compact_min_size: Pointer,
   ) -> Result {
     let Some(current) = cycle.as_mut() else {
       *cycle = Some(self.create_cycle());
       return Ok(());
     };
 
-    for _ in 0..config.batch_size {
+    for _ in 0..batch_size {
       let Some(mut task) = current.tasks.pop() else {
         self.finalize_cycle(current)?;
         *cycle = None;
@@ -478,10 +487,10 @@ impl GcWorker {
       if table.get_id() == self.mapper.meta_table_id() {
         continue;
       }
-      if table.free().file_len() <= config.compact_min_size {
+      if table.free().file_len() <= compact_min_size {
         continue;
       }
-      if inner.dead as f64 / inner.total as f64 <= config.compact_threshold {
+      if inner.dead as f64 / inner.total as f64 <= compact_threshold {
         continue;
       }
 
@@ -606,14 +615,22 @@ fn gc_main_loop(
   worker: Arc<GcWorker>,
   event_bus: Arc<EventBus>,
   release_queue: Arc<MpscQueue<DropTableCommitted>>,
-  config: GarbageCollectionConfig,
+  batch_size: usize,
+  compact_threshold: f64,
+  compact_min_size: Pointer,
 ) -> impl FnMut() {
   let mut cycle = None;
   let mut steps = TableSteps::new();
 
   move || {
     worker
-      .run_tick(&mut cycle, &event_bus, config.clone())
+      .run_tick(
+        &mut cycle,
+        &event_bus,
+        batch_size,
+        compact_threshold,
+        compact_min_size,
+      )
       .and_then(|_| worker.release_tables(&release_queue, &mut steps))
       .unwrap();
   }
