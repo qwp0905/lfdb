@@ -1,3 +1,5 @@
+use crate::wal::WALConfig;
+
 use super::{Error, Result};
 use std::{path::PathBuf, time::Duration};
 
@@ -28,7 +30,7 @@ impl EngineConfig {
       return invalid!("wal_file_size must be greater than 0.");
     }
 
-    if self.wal_buffer_size == 0 {
+    if self.wal_buffer_size < WALConfig::MIN_BUFFER_SIZE {
       return invalid!("wal_buffer_size must be greater than 0.");
     }
 

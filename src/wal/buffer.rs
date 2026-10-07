@@ -2,20 +2,123 @@ use std::{
   cell::Cell,
   io,
   iter::repeat,
-  mem::MaybeUninit,
-  sync::atomic::{fence, AtomicBool, Ordering},
+  mem::ManuallyDrop,
+  sync::{
+    atomic::{fence, AtomicBool, Ordering},
+    Arc,
+  },
+};
+
+use crate::{
+  background::{oneshot, EventBus, Oneshot, OneshotFulfill},
+  disk::Pointer,
+  page::{Page, PageAllocator, PageRef},
+  utils::{create_static_ref, AtomicRef, AtomicSBox, MpscQueue, SBox},
 };
 
 use super::{
   AppendCompletion, AppendTicket, BookingResult, FsyncResult, LogId, OffsetBooking,
-  SegmentGeneration, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
+  SegmentGeneration, SyncCompletion, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
 };
-use crate::{
-  background::{oneshot, Oneshot, OneshotFulfill},
-  disk::Pointer,
-  page::{Page, PageAllocator, PageRef},
-  utils::{create_static_ref, ExclusivePin, MpscQueue, SBox, SharedToken},
-};
+
+pub struct WALSegmentRotated {
+  pub last_log_id: LogId,
+  pub segment: WALSegment,
+}
+impl WALSegmentRotated {
+  const fn new(last_log_id: LogId, segment: WALSegment) -> Self {
+    Self {
+      last_log_id,
+      segment,
+    }
+  }
+}
+
+pub struct SegmentBuffer {
+  log_buffer: AtomicSBox<LogBuffer>,
+  segment: ManuallyDrop<WALSegment>,
+  write_completion: WriteCompletion,
+  sync_completion: Arc<SyncCompletion>,
+  last_log_id: Cell<Option<LogId>>,
+  generation: SegmentGeneration,
+  event_bus: Arc<EventBus>,
+}
+impl SegmentBuffer {
+  pub fn new(
+    segment: WALSegment,
+    entry: PageRef<WAL_BLOCK_SIZE>,
+    log_id_offset: LogId,
+    max_len: Pointer,
+    sync_completion: Arc<SyncCompletion>,
+    generation: SegmentGeneration,
+    event_bus: Arc<EventBus>,
+  ) -> Self {
+    Self {
+      log_buffer: AtomicSBox::new(LogBuffer::new(0, entry, log_id_offset, 0, 0)),
+      segment: ManuallyDrop::new(segment),
+      write_completion: WriteCompletion::new(max_len as usize),
+      sync_completion,
+      last_log_id: Cell::new(None),
+      generation,
+      event_bus,
+    }
+  }
+
+  pub fn init_next(
+    &self,
+    segment: WALSegment,
+    entry: PageRef<WAL_BLOCK_SIZE>,
+    log_id_offset: LogId,
+    max_len: Pointer,
+  ) -> Self {
+    Self::new(
+      segment,
+      entry,
+      log_id_offset,
+      max_len,
+      self.sync_completion.clone(),
+      self.generation + 1,
+      self.event_bus.clone(),
+    )
+  }
+
+  pub fn set_last_log_id(&self, log_id: LogId) {
+    self.last_log_id.set(Some(log_id));
+  }
+
+  pub fn load_log_buffer(&self) -> AtomicRef<LogBuffer> {
+    self.log_buffer.load()
+  }
+  pub fn store_log_buffer(&self, log_buffer: LogBuffer) -> SBox<LogBuffer> {
+    self.log_buffer.store_and_load(log_buffer)
+  }
+
+  pub fn wait_completion(&self, pointer: Pointer) -> io::Result<()> {
+    self.write_completion.wait_until(pointer)
+  }
+
+  pub fn sync(&self) -> FsyncResult {
+    self.segment.fsync()
+  }
+
+  pub const fn get_generation(&self) -> SegmentGeneration {
+    self.generation
+  }
+}
+impl Drop for SegmentBuffer {
+  fn drop(&mut self) {
+    let segment = unsafe { ManuallyDrop::take(&mut self.segment) };
+    let Some(last_log_id) = self.last_log_id.get() else {
+      return;
+    };
+    self
+      .sync_completion
+      .register(self.generation, segment.fsync());
+    self
+      .event_bus
+      .publish(WALSegmentRotated::new(last_log_id, segment));
+  }
+}
 
 struct LogBufferBatch {
   occupied: AtomicBool,
@@ -83,178 +186,58 @@ impl BatchedWrite {
   }
 }
 
-/**
- * Shared segment ownership state for buffers in the same WAL segment.
- *
- * Multiple `LogBuffer`s can write blocks that belong to one segment, but the WAL
- * manager eventually needs to recover ownership of that segment for reuse.
- * `MaybeUninit` allows the segment to be moved out exactly once by
- * `take_segment` instead of being dropped with the shared state.
- */
-struct SegmentState {
-  /**
-   * Shared across all buffers within the same segment. Raw pointer allows exclusive
-   * ownership transfer via take_segment() when the last buffer finishes — required
-   * for segment reuse. It must taken after pin is empty.
-   */
-  segment: MaybeUninit<WALSegment>,
-  /**
-   * pin for using segment
-   * it must taken with segment pointer.
-   */
-  pin: ExclusivePin,
-  /**
-   * rotated and written complete data block count for current segment
-   */
-  write_completion: WriteCompletion,
-  /**
-   * flag which segment has been taken to check drop.
-   */
-  taken: Cell<bool>,
-
-  /**
-   * current generation for current segment
-   */
-  generation: SegmentGeneration,
-}
-impl SegmentState {
-  fn new(segment: WALSegment, generation: SegmentGeneration, max_len: Pointer) -> Self {
-    Self {
-      segment: MaybeUninit::new(segment),
-      pin: ExclusivePin::new(),
-      write_completion: WriteCompletion::new(max_len as usize),
-      taken: Cell::new(false),
-      generation,
-    }
-  }
-}
-impl Drop for SegmentState {
-  fn drop(&mut self) {
-    if self.taken.get() {
-      return;
-    }
-    unsafe { self.segment.assume_init_drop() };
-  }
-}
-
-/**
- * A single WAL block (16KB page) being filled concurrently by multiple writers.
- * Writers atomically claim a slot and sequence number via a single fetch_add on offset,
- * then write their record independently.
- */
 pub struct LogBuffer {
-  offset: OffsetBooking,
-  /**
-   * data block for current pointer to store wal records.
-   * must mark records count before write to disk.
-   * records count can be obtained from pinning entry.
-   */
+  pointer: Pointer,
   entry: PageRef<WAL_BLOCK_SIZE>,
-
-  append_completion: AppendCompletion,
-  /**
-   * disk pointer for current data block
-   */
-  segment_ptr: Pointer,
-
-  segment_state: SBox<SegmentState>,
-
+  reserved_offset: OffsetBooking,
   batch: LogBufferBatch,
-
+  append_completion: AppendCompletion,
   log_id_offset: LogId,
 }
 impl LogBuffer {
-  pub fn init_new(
-    entry: PageRef<WAL_BLOCK_SIZE>,
-    segment: WALSegment,
-    generation: SegmentGeneration,
-    max_len: Pointer,
-    log_id_offset: LogId,
-  ) -> Self {
-    Self::new(
-      entry,
-      0,
-      SBox::new(SegmentState::new(segment, generation, max_len)),
-      0,
-      0,
-      log_id_offset,
-    )
-  }
-  /**
-   * if segment is not full, then copy pointers and recreate buffer
-   */
-  pub fn init_next(
-    &self,
-    entry: PageRef<WAL_BLOCK_SIZE>,
-    offset: usize,
-    log_id_offset: LogId,
-  ) -> Self {
-    Self::new(
-      entry,
-      self.segment_ptr + 1,
-      self.segment_state.clone(),
-      offset,
-      1,
-      log_id_offset,
-    )
-  }
-
   fn new(
+    pointer: Pointer,
     entry: PageRef<WAL_BLOCK_SIZE>,
-    segment_ptr: Pointer,
-    segment_state: SBox<SegmentState>,
+    log_id_offset: LogId,
     offset: usize,
     order: u32,
-    log_id_offset: LogId,
   ) -> Self {
     Self {
-      offset: OffsetBooking::new(offset, order),
+      pointer,
       entry,
-      append_completion: AppendCompletion::new(order),
-      segment_ptr,
-      segment_state,
+      reserved_offset: OffsetBooking::new(offset, order),
       batch: LogBufferBatch::new(),
+      append_completion: AppendCompletion::new(order),
       log_id_offset,
     }
   }
 
-  pub fn pin_segment(&self) -> Option<SharedToken<'_>> {
-    self.segment_state.pin.try_shared()
+  pub fn initialized(
+    pointer: Pointer,
+    entry: PageRef<WAL_BLOCK_SIZE>,
+    log_id_offset: LogId,
+    offset: usize,
+  ) -> Self {
+    Self::new(pointer, entry, log_id_offset, offset, 1)
   }
 
   pub fn reserve_append(&self, len: usize) -> BookingResult {
-    self.offset.reserve(len)
+    self.reserved_offset.reserve(len)
+  }
+  pub const fn get_log_id_offset(&self) -> LogId {
+    self.log_id_offset
   }
   pub fn append_at(&self, record: &[u8], ticket: &AppendTicket) {
     unsafe { self.entry.copy_from_unchecked(record, ticket.get_offset()) };
     self.append_completion.complete(ticket.get_order());
   }
 
-  pub fn sync_segment(&self) -> FsyncResult {
-    debug_assert!(!self.segment_state.taken.get());
-    unsafe { self.segment_state.segment.assume_init_ref() }.fsync()
-  }
-
-  pub fn flush_and_forget(
-    &self,
-    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
-    ticket: AppendTicket,
-  ) {
-    debug_assert_eq!(ticket.get_offset() + ticket.get_len(), WAL_BLOCK_SIZE);
-    let batch = self.flush_block_with(ticket, allocator);
-    self
-      .segment_state
-      .write_completion
-      .register(self.segment_ptr, batch);
-  }
-
   pub fn flush_block_with(
     &self,
     ticket: AppendTicket,
+    upstream: &SegmentBuffer,
     allocator: &PageAllocator<WAL_BLOCK_SIZE>,
   ) -> BatchedWrite {
-    debug_assert!(!self.segment_state.taken.get());
-
     let (o, f) = oneshot();
     let batched = BatchedWrite::new(o);
 
@@ -263,6 +246,8 @@ impl LogBuffer {
     };
 
     loop {
+      let mut page = allocator.allocate();
+
       let mut max_offset = self.batch.get_max_offset();
       let mut waiting = Vec::new();
       for (ticket, done) in self.batch.drain_all() {
@@ -272,49 +257,30 @@ impl LogBuffer {
       }
       self.batch.set_max_offset(max_offset);
 
-      let mut page = allocator.allocate();
       page.copy_from(self.entry.range(0..max_offset), 0);
 
       let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
-      let pending = unsafe { self.segment_state.segment.assume_init_ref() }
-        .write_async(self.segment_ptr, static_ref);
+      let pending = upstream.segment.write_async(self.pointer, static_ref);
       pending.add_callback(create_cb(waiting, page));
       if self.batch.try_release() {
-        break;
+        return batched;
       }
     }
+  }
 
-    batched
+  pub fn flush_and_forget(
+    &self,
+    ticket: AppendTicket,
+    upstream: &SegmentBuffer,
+    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
+  ) {
+    debug_assert_eq!(ticket.get_offset() + ticket.get_len(), WAL_BLOCK_SIZE);
+    let batch = self.flush_block_with(ticket, upstream, allocator);
+    upstream.write_completion.register(self.pointer, batch);
   }
 
   pub const fn get_pointer(&self) -> Pointer {
-    self.segment_ptr
-  }
-
-  /**
-   * to drop segment and pin
-   * it should be call when nothing to refer this segment
-   */
-  pub fn take_segment(&self) -> WALSegment {
-    debug_assert!(self.segment_state.pin.is_exclusive());
-    debug_assert!(!self.segment_state.taken.get());
-    self.segment_state.taken.set(true);
-    unsafe { self.segment_state.segment.assume_init_read() }
-  }
-
-  pub fn get_generation(&self) -> SegmentGeneration {
-    self.segment_state.generation
-  }
-
-  pub fn wait_prev_blocks(&self) -> io::Result<()> {
-    self
-      .segment_state
-      .write_completion
-      .wait_until(self.segment_ptr)
-  }
-
-  pub const fn get_log_id_offset(&self) -> LogId {
-    self.log_id_offset
+    self.pointer
   }
 }
 
@@ -323,13 +289,10 @@ const fn create_cb(
   page: PageRef<WAL_BLOCK_SIZE>,
 ) -> impl FnOnce(&io::Result<()>) {
   move |result| {
-    let _page = page;
+    drop(page);
     let result = result.as_ref().map_err(|err| err.kind()).copied();
     for done in waiting {
       done.fulfill(result.map_err(io::Error::from));
     }
   }
 }
-
-unsafe impl Send for LogBuffer {}
-unsafe impl Sync for LogBuffer {}

@@ -1,4 +1,4 @@
-use std::{io, mem::forget, path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
 use crossbeam::{atomic::AtomicCell, utils::Backoff};
 
@@ -8,32 +8,22 @@ use crate::{
   disk::{IOPool, Pointer},
   page::PageAllocator,
   table::TableId,
-  utils::{error, info, AtomicSBox, SharedToken},
+  utils::{error, info, AtomicRef, AtomicSBox},
   Error, Result,
 };
 
 use super::{
   replay, AppendTicket, BookingResult, LogBuffer, LogCompletion, LogId, LogRecordUninit,
-  RecordEncoding, ReplayResult, SegmentPreload, SyncCompletion, TxId, WALFormatVersion,
-  WALSegment, WAL_BLOCK_SIZE,
+  RecordEncoding, ReplayResult, SegmentBuffer, SegmentPreload, SyncCompletion, TxId,
+  WALFormatVersion, WALSegment, WAL_BLOCK_SIZE,
 };
 
 pub struct WALConfig {
   pub max_file_size: usize,
   pub max_buffer_size: usize,
 }
-
-pub struct WALSegmentRotated {
-  pub last_log_id: LogId,
-  pub segment: WALSegment,
-}
-impl WALSegmentRotated {
-  const fn new(last_log_id: LogId, segment: WALSegment) -> Self {
-    Self {
-      last_log_id,
-      segment,
-    }
-  }
+impl WALConfig {
+  pub const MIN_BUFFER_SIZE: usize = WAL_BLOCK_SIZE * 4;
 }
 
 pub struct WALFailed;
@@ -69,9 +59,9 @@ pub struct WriteAheadLog {
   /**
    * Current log buffer.
    */
-  buffer: AtomicSBox<LogBuffer>,
+  buffer: AtomicSBox<SegmentBuffer>,
 
-  sync_completion: SyncCompletion,
+  sync_completion: Arc<SyncCompletion>,
   log_completion: LogCompletion,
 
   /**
@@ -92,45 +82,63 @@ pub struct WriteAheadLog {
   /**
    * preloaded data block.
    */
-  allocator: PageAllocator<WAL_BLOCK_SIZE>,
+  buffer_allocator: PageAllocator<WAL_BLOCK_SIZE>,
+  io_allocator: PageAllocator<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
 }
 impl WriteAheadLog {
-  pub fn init(
-    config: &WALConfig,
+  fn new(
+    config: WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    last_log_id: LogId,
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
 
-    let allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
+    let buffer_allocator =
+      PageAllocator::new((config.max_buffer_size / WAL_BLOCK_SIZE) / 2);
+    let io_allocator = PageAllocator::new((config.max_buffer_size / WAL_BLOCK_SIZE) / 2);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
-    let buffer =
-      LogBuffer::init_new(allocator.allocate(), preloader.load()?, 0, max_len, 0);
+    let sync_completion = Arc::new(SyncCompletion::new());
+
+    let buffer = SegmentBuffer::new(
+      preloader.load()?,
+      buffer_allocator.allocate(),
+      last_log_id,
+      max_len,
+      sync_completion.clone(),
+      0,
+      event_bus.clone(),
+    );
 
     Ok(Self {
       preloader,
       buffer: AtomicSBox::new(buffer),
-      allocator,
-      sync_completion: SyncCompletion::new(),
-      log_completion: LogCompletion::new(0),
+      buffer_allocator,
+      io_allocator,
+      sync_completion,
+      log_completion: LogCompletion::new(last_log_id),
       state: AtomicCell::new(State::Available),
       max_len,
       event_bus,
     })
   }
+  pub fn init(
+    config: WALConfig,
+    event_bus: Arc<EventBus>,
+    io_pool: Arc<IOPool>,
+  ) -> Result<Self> {
+    Self::new(config, event_bus, io_pool, 0)
+  }
   pub fn replay(
-    config: &WALConfig,
+    config: WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
     init_thread: &ThreadPool,
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
-    let max_len = config.max_file_size / WAL_BLOCK_SIZE;
-    let allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
-    let max_len = max_len as Pointer;
     info!("start to replay wal segments version: {}", replay_version);
 
     let replay_result = replay(io_pool.clone(), init_thread, replay_version)?;
@@ -143,29 +151,8 @@ impl WriteAheadLog {
       replay_result.segments.len(),
       replay_result.last_snapshot,
     );
-
-    let preloader = SegmentPreload::new(max_len, io_pool);
-    let buffer = LogBuffer::init_new(
-      allocator.allocate(),
-      preloader.load()?,
-      0,
-      max_len,
-      replay_result.last_log_id,
-    );
-
-    Ok((
-      Self {
-        preloader,
-        buffer: AtomicSBox::new(buffer),
-        allocator,
-        sync_completion: SyncCompletion::new(),
-        log_completion: LogCompletion::new(replay_result.last_log_id),
-        state: AtomicCell::new(State::Available),
-        max_len,
-        event_bus,
-      },
-      replay_result,
-    ))
+    let this = Self::new(config, event_bus, io_pool, replay_result.last_log_id)?;
+    Ok((this, replay_result))
   }
 
   /**
@@ -199,25 +186,29 @@ impl WriteAheadLog {
     let ReservedAppend {
       buffer,
       ticket,
-      token,
+      segment,
     } = reserved;
-
+    let pointer = buffer.get_pointer();
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
     buffer.append_at(&record.init(log_id), &ticket);
+    let pending = buffer.flush_block_with(ticket, &segment, &self.io_allocator);
+    drop(buffer);
+
     if !flush {
       return Ok(log_id);
-    }
-    buffer.flush_block_with(ticket, &self.allocator).wait()?;
-    buffer.wait_prev_blocks()?;
-    self.wait_sync(buffer, token)?;
+    };
+    pending.wait()?;
+    segment.wait_completion(pointer)?;
+    self.wait_sync(segment)?;
     Ok(log_id)
   }
 
-  fn wait_sync(&self, buffer: &LogBuffer, token: SharedToken) -> io::Result<()> {
-    let done = buffer.sync_segment();
-    drop(token);
+  fn wait_sync(&self, buffer: AtomicRef<SegmentBuffer>) -> io::Result<()> {
+    let generation = buffer.get_generation();
+    let done = buffer.sync();
+    drop(buffer);
     done.wait()?;
-    self.sync_completion.wait_until(buffer.get_generation())?;
+    self.sync_completion.wait_until(generation)?;
     Ok(())
   }
 
@@ -231,7 +222,7 @@ impl WriteAheadLog {
     let ReservedAppend {
       buffer,
       ticket,
-      token,
+      segment,
     } = reserved;
 
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
@@ -240,33 +231,41 @@ impl WriteAheadLog {
     debug_assert_eq!(available.len(), ticket.get_len());
     debug_assert_eq!(remain.len(), overflow.get_len());
 
-    let mut new_page = self.allocator.allocate();
-    new_page.copy_from(remain, 0);
-    let new_buffer =
-      self
-        .buffer
-        .store_and_load(buffer.init_next(new_page, overflow.get_len(), log_id));
+    let pointer = buffer.get_pointer() + 1;
     buffer.append_at(available, &ticket);
-    buffer.flush_and_forget(&self.allocator, ticket);
+    buffer.flush_and_forget(ticket, &segment, &self.io_allocator);
+    drop(buffer);
+
+    let mut new_page = self.buffer_allocator.allocate();
+    new_page.copy_from(remain, 0);
+
+    let new_buffer =
+      LogBuffer::initialized(pointer, new_page, log_id, overflow.get_len());
+    let new_buffer = segment.store_log_buffer(new_buffer);
 
     if !flush {
       return Ok(log_id);
     }
+    let pending = new_buffer.flush_block_with(overflow, &segment, &self.io_allocator);
+    drop(new_buffer);
 
-    new_buffer
-      .flush_block_with(overflow, &self.allocator)
-      .wait()?;
-    new_buffer.wait_prev_blocks()?;
-    self.wait_sync(buffer, token)?;
+    pending.wait()?;
+    segment.wait_completion(pointer)?;
+    self.wait_sync(segment)?;
     Ok(log_id)
   }
 
-  fn rotate_segment(&self, reserved: ReservedAppend, backoff: &Backoff) -> Result {
+  fn rotate_segment(&self, reserved: ReservedAppend) -> Result {
     let ReservedAppend {
       buffer,
       ticket,
-      mut token,
+      segment,
     } = reserved;
+
+    let pointer = buffer.get_pointer();
+    let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
+    let pending = buffer.flush_block_with(ticket, &segment, &self.io_allocator);
+    drop(buffer);
 
     let new = match self.preloader.load() {
       Ok(v) => v,
@@ -274,37 +273,17 @@ impl WriteAheadLog {
       Err(err) => return Err(err),
     };
 
-    let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
-    let replacement = LogBuffer::init_new(
-      self.allocator.allocate(),
-      new,
-      buffer.get_generation() + 1,
-      self.max_len,
-      log_id,
-    );
-
+    let replacement =
+      segment.init_next(new, self.buffer_allocator.allocate(), log_id, self.max_len);
     self.buffer.store(replacement);
 
-    if let Err(err) = buffer
-      .flush_block_with(ticket, &self.allocator)
+    if let Err(err) = pending
       .wait()
-      .and_then(|_| buffer.wait_prev_blocks())
+      .and_then(|_| segment.wait_completion(pointer))
     {
       return Err(self.failover(err.kind()));
     };
-
-    while let Err(err) = token.try_upgrade().map(forget) {
-      token = err;
-      backoff.snooze();
-    }
-
-    let segment = buffer.take_segment();
-    self
-      .sync_completion
-      .register(buffer.get_generation(), segment.fsync());
-    self
-      .event_bus
-      .publish(WALSegmentRotated::new(log_id, segment));
+    segment.set_last_log_id(log_id);
     Ok(())
   }
 
@@ -317,15 +296,12 @@ impl WriteAheadLog {
         return Err(Error::WALUnavailable);
       }
 
-      let buffer = self.buffer.load();
-      let Some(token) = buffer.pin_segment() else {
-        backoff.snooze();
-        continue;
-      };
-
+      let segment = self.buffer.load();
+      let buffer = segment.load_log_buffer();
       let (ticket, overflow) = match buffer.reserve_append(len) {
         BookingResult::Overflow => {
-          drop(token);
+          drop(buffer);
+          drop(segment);
           backoff.snooze();
           continue;
         }
@@ -336,27 +312,20 @@ impl WriteAheadLog {
         } => (available, Some(overflow)),
       };
 
-      let reserved = ReservedAppend {
-        buffer: &buffer,
-        token,
-        ticket,
-      };
-
+      let reserved = ReservedAppend::new(segment, buffer, ticket);
       let Some(overflow) = overflow else {
         let log_id = self
           .append_in_block(reserved, record, flush)
           .map_err(self.handle_failover())?;
         return Ok(DurabilityGuard::new(&self.log_completion, log_id));
       };
-      if buffer.get_pointer() + 1 < self.max_len {
+      if reserved.buffer.get_pointer() + 1 < self.max_len {
         let log_id = self
           .rotate_block(reserved, overflow, record, flush)
           .map_err(self.handle_failover())?;
         return Ok(DurabilityGuard::new(&self.log_completion, log_id));
       }
-
-      self.rotate_segment(reserved, &backoff)?;
-      backoff.reset();
+      self.rotate_segment(reserved)?;
     }
   }
 
@@ -422,10 +391,26 @@ impl WriteAheadLog {
   }
 }
 
-struct ReservedAppend<'a> {
-  buffer: &'a LogBuffer,
-  token: SharedToken<'a>,
+unsafe impl Send for WriteAheadLog {}
+unsafe impl Sync for WriteAheadLog {}
+
+struct ReservedAppend {
+  segment: AtomicRef<SegmentBuffer>,
+  buffer: AtomicRef<LogBuffer>,
   ticket: AppendTicket,
+}
+impl ReservedAppend {
+  const fn new(
+    segment: AtomicRef<SegmentBuffer>,
+    buffer: AtomicRef<LogBuffer>,
+    ticket: AppendTicket,
+  ) -> Self {
+    Self {
+      segment,
+      buffer,
+      ticket,
+    }
+  }
 }
 
 pub struct DurabilityGuard<'a> {

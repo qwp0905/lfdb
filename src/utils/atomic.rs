@@ -22,7 +22,6 @@ impl<T> AtomicSBox<T> {
     AtomicRef(self.0.load())
   }
 
-  #[inline]
   pub fn store(&self, value: T) {
     let _ = self.0.swap(SBox::new(value));
   }
@@ -34,11 +33,6 @@ impl<T> AtomicSBox<T> {
 }
 
 pub struct AtomicRef<T>(Guard<SBox<T>>);
-impl<T> Clone for AtomicRef<T> {
-  fn clone(&self) -> Self {
-    Self(Guard::from_inner(SBox::clone(&*self.0)))
-  }
-}
 impl<T> Deref for AtomicRef<T> {
   type Target = T;
   fn deref(&self) -> &Self::Target {

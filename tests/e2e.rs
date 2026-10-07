@@ -35,7 +35,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder {
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)
-    .wal_buffer_size(512 << 10)
+    .wal_buffer_size(64 << 10)
     .block_cache_memory_capacity(32 << 20)
     .block_cache_shard_count(1 << 2)
     .block_cache_buffer_size(256 << 10)
