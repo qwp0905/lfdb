@@ -206,18 +206,20 @@ pub struct BlockCache {
 }
 impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
-    let allocator = PageAllocator::new(config.capacity + config.buffer_size);
+    let capacity = config.capacity / PAGE_SIZE;
+    let buffer_size = config.buffer_size / PAGE_SIZE;
+    let allocator = PageAllocator::new(capacity + buffer_size);
 
-    let mut blocks = Vec::with_capacity(config.capacity);
-    blocks.resize_with(config.capacity, CachedBlock::uninit);
+    let mut blocks = Vec::with_capacity(capacity);
+    blocks.resize_with(capacity, CachedBlock::uninit);
 
-    let mut pins = Vec::with_capacity(config.capacity);
-    pins.resize_with(config.capacity, ExclusivePin::new);
+    let mut pins = Vec::with_capacity(capacity);
+    pins.resize_with(capacity, ExclusivePin::new);
 
     let core = Arc::new(Core::new(
       blocks.into_boxed_slice(),
       pins.into_boxed_slice(),
-      DirtyBlocks::new(config.capacity),
+      DirtyBlocks::new(capacity),
       DirtyTables::new(),
       allocator,
     ));
@@ -229,7 +231,7 @@ impl BlockCache {
       .to_arc();
 
     Ok(Self {
-      table: MappingTable::new(config.shard_count, config.capacity),
+      table: MappingTable::new(config.shard_count, capacity),
       core,
       flush_executor,
       metrics,
