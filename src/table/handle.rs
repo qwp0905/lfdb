@@ -132,10 +132,6 @@ impl<'a> PinnedHandle<'a> {
   pub const fn handle(&self) -> &TableHandleRef {
     self.handle
   }
-
-  pub fn into_inner(self) -> TableHandleRef {
-    self.handle.clone()
-  }
 }
 
 impl<'a> Deref for PinnedHandle<'a> {
