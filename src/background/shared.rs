@@ -3,8 +3,8 @@ use std::{sync::Arc, thread::Builder};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{
-  create_parker, oneshot, Close, Oneshot, OneshotFulfill, SharedFn, ThreadParker,
-  ThreadSlot, UnwindSpawner,
+  oneshot, Close, Oneshot, OneshotFulfill, SharedFn, ThreadParker, ThreadSlot,
+  UnwindSpawner,
 };
 
 enum Context<T, R> {
@@ -22,20 +22,9 @@ impl<T, R> Inner<T, R> {
   fn new() -> Self {
     Self {
       queue: SegQueue::new(),
-      parker: create_parker!(),
+      parker: ThreadParker::new(),
     }
   }
-  // fn try_park(&self, id: ThreadId) {
-  //   if self.parker.try_park(id) {
-  //     park();
-  //   }
-  // }
-  // fn try_enqueue_idle(&self, id: ThreadId) {
-  //   self.parker.try_enqueue(id);
-  // }
-  // fn wake_one(&self) -> Option<ThreadId> {
-  //   self.parker.wake_one()
-  // }
 }
 pub struct SharedWorkThread<T, R> {
   inner: Arc<Inner<T, R>>,
