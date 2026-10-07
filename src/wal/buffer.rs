@@ -147,10 +147,6 @@ impl LogBufferBatch {
     true
   }
 
-  fn release_force(&self) {
-    self.occupied.fetch_and(false, Ordering::Release);
-  }
-
   fn try_release(&self) -> bool {
     self.occupied.fetch_and(false, Ordering::Release);
     if self.queue.is_empty() {
@@ -236,24 +232,21 @@ impl LogBuffer {
     self.append_completion.complete(ticket.get_order());
   }
 
-  fn flush(
+  pub fn flush_block_with(
     &self,
     ticket: AppendTicket,
     upstream: &SegmentBuffer,
-    allocate: impl Fn() -> Option<PageRef<WAL_BLOCK_SIZE>>,
-  ) -> Option<BatchedWrite> {
+    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
+  ) -> BatchedWrite {
     let (o, f) = oneshot();
     let batched = BatchedWrite::new(o);
 
     if !self.batch.push_and_compete(f, ticket) {
-      return Some(batched);
+      return batched;
     };
 
     loop {
-      let Some(mut page) = allocate() else {
-        self.batch.release_force();
-        return None;
-      };
+      let mut page = allocator.allocate();
 
       let mut max_offset = self.batch.get_max_offset();
       let mut waiting = Vec::new();
@@ -270,20 +263,9 @@ impl LogBuffer {
       let pending = upstream.segment.write_async(self.pointer, static_ref);
       pending.add_callback(create_cb(waiting, page));
       if self.batch.try_release() {
-        return Some(batched);
+        return batched;
       }
     }
-  }
-
-  pub fn flush_block_with(
-    &self,
-    ticket: AppendTicket,
-    upstream: &SegmentBuffer,
-    allocator: &PageAllocator<WAL_BLOCK_SIZE>,
-  ) -> BatchedWrite {
-    self
-      .flush(ticket, upstream, || Some(allocator.allocate()))
-      .unwrap_or_else(|| unreachable!())
   }
 
   pub fn flush_and_forget(
