@@ -11,6 +11,7 @@ mod replay;
 pub use replay::*;
 
 mod buffer;
+pub use buffer::WALSegmentRotated;
 use buffer::*;
 
 mod preload;
