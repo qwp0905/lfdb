@@ -220,11 +220,14 @@ impl Engine {
     let mut stream = {
       let block_cache = block_cache.clone();
       init_thread.stream(
-        move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
-          unsafe { block_cache.read_unchecked(ptr, &table)? }
-            .for_write()
-            .copy_from(&data);
-          Ok(())
+        move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| loop {
+          if let Some(slot) = unsafe { block_cache.read_unchecked(ptr, &table)? } {
+            let mut slot = slot.for_write();
+            if let Some(prepared) = slot.prepare() {
+              prepared.as_mut().copy_from(&data, 0);
+              return Ok(());
+            }
+          }
         },
       )
     };

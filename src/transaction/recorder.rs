@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-  cache::WritableSlot,
+  cache::PreparedSlot,
   error::Result,
   objects::{Serializable, SerializeFrom},
   table::TableId,
@@ -30,23 +30,21 @@ impl PageRecorder {
     tx_id: TxId,
     table_id: TableId,
     current_version: TxId,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
   ) -> Result
   where
     T: Serializable,
   {
     let ptr = slot.get_pointer();
-    slot.modify_with(|page| {
-      let byte_len = page.serialize_from(data)?;
-      self.wal.append_insert(
-        tx_id,
-        table_id,
-        ptr,
-        current_version,
-        page.range(0..byte_len),
-      )?;
-      Ok(())
-    })
+    let byte_len = slot.as_mut().serialize_from(data)?;
+    self.wal.append_insert(
+      tx_id,
+      table_id,
+      ptr,
+      current_version,
+      slot.as_ref().range(0..byte_len),
+    )?;
+    Ok(())
   }
 }

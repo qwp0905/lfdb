@@ -81,6 +81,12 @@ impl BTreeNode {
       Self::Leaf(node) => Ok(node),
     }
   }
+  pub fn into_leaf(self) -> Result<LeafNode> {
+    match self {
+      Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
+      Self::Leaf(node) => Ok(node),
+    }
+  }
 }
 impl TypedObject for BTreeNode {
   const TYPE: SerializeType = SerializeType::BTreeNode;

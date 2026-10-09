@@ -13,7 +13,7 @@ use crate::{
     SharedSubscription, ThreadBuilder,
   },
   blob::{BlobId, BlobStorage},
-  cache::{BlockCache, WritableSlot},
+  cache::{BlockCache, PreparedSlot, ReadonlySlot},
   disk::Pointer,
   mvcc::VersionController,
   objects::{
@@ -145,7 +145,7 @@ impl GcWorker {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table_id: TableId,
   ) -> Result {
@@ -169,7 +169,7 @@ impl GcWorker {
   ) -> Result<bool> {
     let mut found = false;
     let mut need_trim = false;
-    let slot = self.block_cache.read(ptr, table)?.for_read();
+    let slot = self.acquire_read_slot(ptr, table)?;
     let entry = slot.as_ref().view::<DataEntryView>()?;
     *next = entry.get_next();
 
@@ -212,9 +212,7 @@ impl GcWorker {
     while let Some(ptr) = next.take() {
       if max_found.is_some() {
         next = self
-          .block_cache
-          .read(ptr, table)?
-          .for_read()
+          .acquire_read_slot(ptr, table)?
           .as_ref()
           .view::<DataEntryView>()?
           .get_next();
@@ -231,27 +229,34 @@ impl GcWorker {
         continue;
       }
 
-      let mut slot = self.block_cache.read(ptr, table)?.for_write();
-      let mut entry: DataEntry = slot.as_ref().deserialize()?;
-      let mut new_versions = VecDeque::new();
-
-      for record in entry.take_versions() {
-        let version = record.version;
-        new_versions.push_back(record);
-        if version >= min_version {
+      loop {
+        let Some(slot) = self.block_cache.read(ptr, table)? else {
           continue;
+        };
+        let mut slot = slot.for_write();
+        let Some(prepared) = slot.prepare() else {
+          continue;
+        };
+        let mut entry: DataEntry = prepared.as_ref().deserialize()?;
+        let mut new_versions = VecDeque::new();
+
+        for record in entry.take_versions() {
+          let version = record.version;
+          new_versions.push_back(record);
+          if version >= min_version {
+            continue;
+          }
+          max_found = Some(version);
+          break;
         }
-        max_found = Some(version);
+
+        if max_found.is_some() {
+          entry.set_versions(new_versions);
+          entry.clear_next();
+          self.serialize_and_log(prepared, &entry, table_id)?;
+        }
         break;
       }
-
-      if max_found.is_none() {
-        continue;
-      }
-
-      entry.set_versions(new_versions);
-      entry.clear_next();
-      self.serialize_and_log(&mut slot, &entry, table_id)?;
     }
 
     Ok(EntryRelease {
@@ -260,13 +265,23 @@ impl GcWorker {
     })
   }
 
+  fn acquire_read_slot(
+    &self,
+    ptr: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<ReadonlySlot> {
+    loop {
+      if let Some(slot) = self.block_cache.read(ptr, table)? {
+        return Ok(slot.for_read());
+      };
+    }
+  }
+
   fn release_entry(&self, pointer: Pointer, table: &TableHandleRef) -> Result {
     let mut next = Some(pointer);
     while let Some(ptr) = next.take() {
       next = self
-        .block_cache
-        .read(ptr, table)?
-        .for_read()
+        .acquire_read_slot(ptr, table)?
         .as_ref()
         .view::<DataEntryView>()?
         .get_next();
@@ -304,19 +319,13 @@ impl GcWorker {
 
   fn get_predecessor(&self, table: &TableHandleRef) -> Result<Pointer> {
     let mut ptr = self
-      .block_cache
-      .read(HEADER_POINTER, table)?
-      .for_read()
+      .acquire_read_slot(HEADER_POINTER, table)?
       .as_ref()
       .deserialize::<TreeHeader>()?
       .get_root();
 
-    while let BTreeNodeView::Internal(node) = self
-      .block_cache
-      .read(ptr, table)?
-      .for_read()
-      .as_ref()
-      .view()?
+    while let BTreeNodeView::Internal(node) =
+      self.acquire_read_slot(ptr, table)?.as_ref().view()?
     {
       ptr = node.first_child()?;
     }
@@ -340,9 +349,17 @@ impl GcWorker {
     while let Some(ptr) = next.take() {
       let mut targets = Vec::new();
       {
-        let mut slot = self.block_cache.read(ptr, table)?.for_write();
+        let Some(slot) = self.block_cache.read(ptr, table)? else {
+          next = Some(ptr);
+          continue;
+        };
+        let mut slot = slot.for_write();
+        let Some(prepared) = slot.prepare() else {
+          next = Some(ptr);
+          continue;
+        };
 
-        let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+        let mut node = prepared.as_ref().deserialize::<BTreeNode>()?;
         let leaf = node.as_leaf_mut()?;
 
         for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
@@ -368,9 +385,9 @@ impl GcWorker {
         }
 
         if !targets.is_empty() {
-          self.serialize_and_log(&mut slot, &node, table.get_id())?;
+          self.serialize_and_log(prepared, &node, table.get_id())?;
         }
-      };
+      }
       for ptr in targets {
         let task = GcTask::new(TaskType::ReleaseEntry(ptr), table.clone());
         task_queue.push(task);
@@ -427,10 +444,7 @@ impl GcWorker {
       let mut release_candidates = HashSet::new();
       let has_next = {
         let min_version = self.version_controller.min_version();
-        let slot = self
-          .block_cache
-          .read(inner.pointer, table.handle())?
-          .for_read();
+        let slot = self.acquire_read_slot(inner.pointer, table.handle())?;
         let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let mut iter = node.get_entries();
         while let Some(e) = iter.try_next()? {

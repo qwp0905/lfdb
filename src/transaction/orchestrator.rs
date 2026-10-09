@@ -5,7 +5,7 @@ use super::{Checkpoint, PageRecorder, TimeoutThread};
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   btree::ResolvedConflict,
-  cache::{BlockCache, CachedSlot, WritableSlot},
+  cache::{BlockCache, CachedSlot, PreparedSlot},
   disk::Pointer,
   error::Result,
   maintenance::{Compactor, GarbageCollector},
@@ -77,7 +77,7 @@ impl TxOrchestrator {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     self.block_cache.read(pointer, handle)
   }
   #[inline]
@@ -85,7 +85,7 @@ impl TxOrchestrator {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     self.block_cache.alloc(pointer, handle)
   }
 
@@ -95,7 +95,7 @@ impl TxOrchestrator {
     tx_id: TxId,
     table_id: TableId,
     current_version: TxId,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
   ) -> Result
   where

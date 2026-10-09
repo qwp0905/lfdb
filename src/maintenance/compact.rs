@@ -13,7 +13,7 @@ use crate::{
     BTreeIndex, CreatablePolicy, GetResult, ReadonlyPolicy, ResolvedConflict,
     Snapshotter, WritablePolicy,
   },
-  cache::{BlockCache, WritableSlot},
+  cache::{BlockCache, PreparedSlot},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
@@ -106,7 +106,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
@@ -137,7 +137,7 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
 impl<'a> WritablePolicy for MiniTx<'a> {
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -156,7 +156,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
@@ -207,7 +207,7 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.read(pointer, table)
   }
   fn read_blob(
@@ -236,7 +236,7 @@ impl ReadonlyPolicy for CompactionWritePolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.read(pointer, table)
   }
   fn is_aborted(&self, owner: TxId) -> bool {
@@ -271,7 +271,7 @@ impl WritablePolicy for CompactionWritePolicy {
    */
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -284,7 +284,7 @@ impl WritablePolicy for CompactionWritePolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.alloc(pointer, table)
   }
   fn write_blob(&self, _: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
@@ -527,7 +527,7 @@ impl CompactionWorker {
       None => self.old_index.snapshot(old.handle())?,
     };
 
-    const CAP: usize = 1000;
+    const CAP: usize = 3;
     let mut bulk = Vec::with_capacity(CAP);
     while let Some(snap) = snapshotter.next_snapshot()? {
       bulk.push(snap);

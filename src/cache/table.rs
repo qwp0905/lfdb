@@ -184,46 +184,6 @@ impl MappingTable {
   }
 
   /**
-   * Reserve a cache slot for a key that is known not to exist.
-   *
-   * This is used when the caller has created a logically new disk address, such
-   * as a newly allocated pointer or a new table. Since the key cannot hit, the
-   * method skips lookup semantics and goes directly through reservation/eviction.
-   */
-  pub fn alloc<'a, F>(
-    &'a self,
-    table_id: TableId,
-    pointer: Pointer,
-    get_pin: F,
-  ) -> EvictionGuard<'a>
-  where
-    F: Fn(BlockId) -> &'a ExclusivePin,
-  {
-    let key = (table_id, pointer);
-    let selected = self.select_shard(key);
-    let hasher = &self.hasher;
-    let backoff = Backoff::new();
-    let try_evict = |bid: &BlockId| get_pin(*bid).try_exclusive();
-
-    loop {
-      let mut guard = selected.shard.l();
-      debug_assert!(guard.eviction.get(selected.hash, &key).is_none());
-      let Ok(reserved) = guard.node.evict_one(hasher, try_evict) else {
-        drop(guard);
-        backoff.snooze();
-        continue;
-      };
-
-      if let Some(guard) =
-        self.handle_reserved(reserved, key, guard, &selected, try_evict)
-      {
-        return guard;
-      };
-      backoff.snooze();
-    }
-  }
-
-  /**
    * Acquire a cache slot for an existing logical block address.
    *
    * Hits return the mapped block id with a shared slot token. Misses reserve a

@@ -50,8 +50,8 @@ impl<'a> CachedSlot<'a> {
   {
     let latch = self.block.latch();
     WritableSlot {
-      pointer: self.block.get_pointer(),
       state: CopiedState::Borrowed {
+        pointer: self.block.get_pointer(),
         page: self.block.load_page(),
         dirty_blocks: self.dirty,
         allocator: self.allocator,
@@ -88,54 +88,81 @@ impl Clone for ReadonlySlot {
 
 enum CopiedState<'a> {
   Borrowed {
+    pointer: Pointer,
     page: SBox<PageRef<PAGE_SIZE>>,
     dirty_blocks: &'a DirtyBlocks,
     allocator: &'a PageAllocator<PAGE_SIZE>,
     block_id: BlockId,
   },
-  Copied(ManuallyDrop<PageRef<PAGE_SIZE>>),
+  Copied(ManuallyDrop<PreparedSlot>),
+}
+
+pub struct PreparedSlot {
+  pointer: Pointer,
+  page: PageRef<PAGE_SIZE>,
+}
+impl PreparedSlot {
+  const fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>) -> Self {
+    Self { pointer, page }
+  }
+  pub const fn get_pointer(&self) -> Pointer {
+    self.pointer
+  }
+}
+impl AsRef<Page> for PreparedSlot {
+  fn as_ref(&self) -> &Page {
+    &self.page
+  }
+}
+impl AsMut<Page> for PreparedSlot {
+  fn as_mut(&mut self) -> &mut Page {
+    &mut self.page
+  }
 }
 
 pub struct WritableSlot<'a> {
-  pointer: Pointer,
   state: CopiedState<'a>,
   latch: BlockLatch<'a>,
   _token: SharedToken<'a>,
 }
 impl<'a> WritableSlot<'a> {
-  pub const fn get_pointer(&self) -> Pointer {
-    self.pointer
-  }
-
-  pub fn modify_with<T, F: FnOnce(&mut Page) -> T>(&mut self, f: F) -> T {
-    match &mut self.state {
-      CopiedState::Borrowed {
-        page: _,
-        dirty_blocks,
-        allocator,
-        block_id,
-      } => {
-        let mut page = allocator.allocate();
-        let result = f(&mut page);
-        dirty_blocks.insert(*block_id);
-        self.state = CopiedState::Copied(ManuallyDrop::new(page));
-        result
-      }
-      CopiedState::Copied(shadow) => f(shadow),
+  pub fn get_pointer(&self) -> Pointer {
+    match &self.state {
+      CopiedState::Borrowed { pointer, .. } => *pointer,
+      CopiedState::Copied(slot) => slot.get_pointer(),
     }
   }
-  pub fn copy_from(&mut self, data: &[u8]) {
-    self.modify_with(|page| page.copy_from(data, 0))
+  pub fn prepare(&mut self) -> Option<&mut PreparedSlot> {
+    if let CopiedState::Borrowed {
+      pointer,
+      page,
+      dirty_blocks,
+      allocator,
+      block_id,
+    } = &mut self.state
+    {
+      let mut shadow = allocator.try_allocate()?;
+      shadow.copy_from(page.as_slice(), 0);
+      dirty_blocks.insert(*block_id);
+      self.state =
+        CopiedState::Copied(ManuallyDrop::new(PreparedSlot::new(*pointer, shadow)));
+    };
+
+    let CopiedState::Copied(page) = &mut self.state else {
+      unreachable!()
+    };
+    Some(page)
   }
 }
 impl<'a> AsRef<Page> for WritableSlot<'a> {
   fn as_ref(&self) -> &Page {
     match &self.state {
       CopiedState::Borrowed { page, .. } => page,
-      CopiedState::Copied(shadow) => shadow,
+      CopiedState::Copied(shadow) => shadow.as_ref(),
     }
   }
 }
+
 unsafe impl<'a> Send for WritableSlot<'a> {}
 unsafe impl<'a> Sync for WritableSlot<'a> {}
 
@@ -145,6 +172,6 @@ impl<'a> Drop for WritableSlot<'a> {
       CopiedState::Borrowed { .. } => return,
       CopiedState::Copied(shadow) => unsafe { ManuallyDrop::take(shadow) },
     };
-    self.latch.apply(shadow);
+    self.latch.apply(shadow.page);
   }
 }

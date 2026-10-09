@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
-  cache::WritableSlot,
+  cache::PreparedSlot,
   disk::Pointer,
   mvcc::{TxSnapshot, TxState},
   objects::Serializable,
@@ -73,7 +73,7 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.orchestrator.fetch(pointer, table)
   }
   fn read_blob(
@@ -99,7 +99,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
    */
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -118,7 +118,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.orchestrator.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {

@@ -24,7 +24,7 @@ pub enum RecordData {
   Tombstone,
 }
 impl RecordData {
-  const fn byte_len(&self) -> usize {
+  pub const fn byte_len(&self) -> usize {
     1 + match self {
       RecordData::Data(data) => 2 + data.len(),
       RecordData::Blob(_, _, _) => BLOB_ID_BYTES + BLOB_OFFSET_BYTES + BLOB_LEN_BYTES,

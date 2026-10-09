@@ -10,9 +10,9 @@ pub fn read_header<Policy: ReadonlyPolicy>(
   policy: &Policy,
   table: &TableHandleRef,
 ) -> Result<TreeHeader> {
-  policy
-    .fetch_slot(HEADER_POINTER, table)?
-    .for_read()
-    .as_ref()
-    .deserialize()
+  loop {
+    if let Some(slot) = policy.fetch_slot(HEADER_POINTER, table)? {
+      return slot.for_read().as_ref().deserialize();
+    };
+  }
 }

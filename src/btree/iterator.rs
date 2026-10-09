@@ -3,16 +3,15 @@ use std::{collections::VecDeque, ops::Bound};
 use crate::{
   cache::{ReadonlySlot, VecRef},
   disk::Pointer,
-  objects::{
-    BTreeNodeView, DataEntryView, RecordDataView, StaticKey, TreeHeader,
-    VersionRecordView, HEADER_POINTER,
-  },
+  objects::{BTreeNodeView, DataEntryView, RecordDataView, StaticKey, VersionRecordView},
   table::TableHandleRef,
   wal::TxId,
   Result,
 };
 
-use super::{KVSnapshot, MergeSortable, ReadonlyPolicy, ScannedItem, SnapshotValue};
+use super::{
+  read_header, KVSnapshot, MergeSortable, ReadonlyPolicy, ScannedItem, SnapshotValue,
+};
 
 struct BufferedRecord {
   data: SnapshotValue,
@@ -96,7 +95,11 @@ fn find_in_entry<Policy: ReadonlyPolicy>(
   let mut next = Some(ptr);
 
   while let Some(ptr) = next.take() {
-    let slot = policy.fetch_slot(ptr, table)?.for_read();
+    let Some(slot) = policy.fetch_slot(ptr, table)? else {
+      next = Some(ptr);
+      continue;
+    };
+    let slot = slot.for_read();
     let entry: DataEntryView = slot.as_ref().view()?;
     if let Some(record) =
       entry.find(|record| policy.is_visible(record.owner, record.version))?
@@ -134,17 +137,14 @@ where
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<Self> {
-    let mut ptr = policy
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
+    let mut ptr = read_header(&policy, table)?.get_root();
     let mut buffered = VecDeque::new();
 
     loop {
-      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let Some(slot) = policy.fetch_slot(ptr, table)? else {
+        continue;
+      };
+      let slot = slot.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => match start {
           Bound::Included(k) => ptr = node.find(k)?.unwrap_or_else(|i| i),
@@ -198,9 +198,13 @@ where
       return Ok(());
     };
 
-    let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
-    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+    let slot = loop {
+      if let Some(slot) = self.policy.fetch_slot(ptr, &self.table)? {
+        break slot.for_read();
+      }
+    };
 
+    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
     let mut iter = node.range_entries(&Bound::Unbounded, &self.end);
     while let Some(e) = iter.try_next()? {
       if self.policy.is_visible(e.record.owner, e.record.version) {
@@ -284,13 +288,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<Self> {
-    let ptr = policy
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
+    let ptr = read_header(&policy, table)?.get_root();
     let mut stack = Vec::new();
     let mut buffered = Vec::new();
     let (end, closed) =
@@ -318,7 +316,10 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
     let mut upper = None;
     let mut closed = false;
     loop {
-      let slot = policy.fetch_slot(ptr, table)?.for_read();
+      let Some(slot) = policy.fetch_slot(ptr, table)? else {
+        continue;
+      };
+      let slot = slot.for_read();
       match slot.as_ref().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => {
           let (pos, p) = match end {

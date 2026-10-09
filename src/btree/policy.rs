@@ -1,7 +1,7 @@
 use crate::{
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
-  cache::{CachedSlot, WritableSlot},
-  disk::{FreePointer, Pointer},
+  cache::{CachedSlot, PreparedSlot},
+  disk::Pointer,
   objects::Serializable,
   page::AlignedBuf,
   table::TableHandleRef,
@@ -32,7 +32,7 @@ pub trait ReadonlyPolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>>;
+  ) -> Result<Option<CachedSlot<'_>>>;
 
   /**
    * Common MVCC visibility rule shared by all read policies. Implementations
@@ -63,7 +63,7 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     (*self).fetch_slot(pointer, table)
   }
   fn read_blob(
@@ -87,7 +87,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
   fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>>;
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result;
@@ -95,7 +95,7 @@ pub trait WritablePolicy: ReadonlyPolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>>;
+  ) -> Result<Option<CachedSlot<'_>>>;
 
   /**
    * Reused pointers may still have existing disk contents, so fetch through the
@@ -106,17 +106,31 @@ pub trait WritablePolicy: ReadonlyPolicy {
     &self,
     data: &T,
     table: &TableHandleRef,
-  ) -> Result<Pointer>
+  ) -> Result<Option<Pointer>>
   where
     Self: Sync,
   {
-    let mut slot = match table.free().alloc() {
-      FreePointer::Reuse(ptr) => self.fetch_slot(ptr, table),
-      FreePointer::Alloc(ptr) => self.alloc_slot(ptr, table),
-    }?
-    .for_write();
-    self.serialize_and_log(&mut slot, data, table)?;
-    Ok(slot.get_pointer())
+    let Some(slot) = self.try_alloc_slot(table)? else {
+      return Ok(None);
+    };
+    let mut slot = slot.for_write();
+    let Some(prepared) = slot.prepare() else {
+      table.free().dealloc(slot.get_pointer());
+      return Ok(None);
+    };
+    self.serialize_and_log(prepared, data, table)?;
+    Ok(Some(slot.get_pointer()))
+  }
+  fn try_alloc_slot(&self, table: &TableHandleRef) -> Result<Option<CachedSlot<'_>>>
+  where
+    Self: Sync,
+  {
+    let ptr = table.free().alloc();
+    let Some(slot) = self.alloc_slot(ptr, table)? else {
+      table.free().dealloc(ptr);
+      return Ok(None);
+    };
+    Ok(Some(slot))
   }
 }
 impl<Policy: WritablePolicy> WritablePolicy for &Policy {
@@ -125,7 +139,7 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -135,7 +149,7 @@ impl<Policy: WritablePolicy> WritablePolicy for &Policy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     (*self).alloc_slot(pointer, table)
   }
 }

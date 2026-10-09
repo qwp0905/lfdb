@@ -51,7 +51,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.read(pointer, table)
   }
   fn read_blob(
@@ -71,7 +71,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::WritableSlot,
+    slot: &mut crate::cache::PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -84,7 +84,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.alloc(pointer, table)
   }
 
@@ -208,16 +208,18 @@ impl TableRecovery {
       return Ok(RecoveryResult(self.complete_job().map(|r| vec![r])));
     };
     self.status.set_max_used(ptr);
-
     let mut pendings = Vec::new();
 
-    match self
-      .block_cache
-      .read(ptr, &self.table)?
-      .for_read()
-      .as_ref()
-      .view::<BTreeNodeView>()?
-    {
+    let Some(slot) = self.block_cache.read(ptr, &self.table)? else {
+      self.status.remove_visited(ptr);
+      pendings.push(self.fetch_job(self.scan_node(ptr, level)));
+      if let Some(pending) = self.complete_job() {
+        pendings.push(pending);
+      }
+      return Ok(RecoveryResult(Some(pendings)));
+    };
+
+    match slot.for_read().as_ref().view::<BTreeNodeView>()? {
       BTreeNodeView::Internal(node) => {
         if let Some((k, p)) = node.get_right() {
           pendings.push(self.fetch_job(self.scan_node(p, level)));
@@ -264,13 +266,17 @@ impl TableRecovery {
         continue;
       }
       self.status.set_max_used(ptr);
-      next = self
-        .block_cache
-        .read(ptr, &self.table)?
-        .for_read()
-        .as_ref()
-        .view::<DataEntryView>()?
-        .get_next();
+
+      let Some(slot) = self.block_cache.read(ptr, &self.table)? else {
+        self.status.remove_visited(ptr);
+        let mut pendings = vec![self.fetch_job(self.scan_entry(ptr))];
+        if let Some(pending) = self.complete_job() {
+          pendings.push(pending);
+        }
+        return Ok(RecoveryResult(Some(pendings)));
+      };
+
+      next = slot.for_read().as_ref().view::<DataEntryView>()?.get_next();
     }
     Ok(RecoveryResult(self.complete_job().map(|r| vec![r])))
   }
@@ -319,11 +325,7 @@ impl TableRecovery {
     level: u16,
   ) -> impl FnOnce() -> Result<RecoveryResult> {
     let this = self.clone();
-    move || {
-      this
-        .recovery_split_internal(split_key, split_ptr, level)
-        .map(|_| RecoveryResult(None))
-    }
+    move || this.recovery_split_internal(split_key, split_ptr, level)
   }
 
   fn recovery_split_internal(
@@ -331,7 +333,7 @@ impl TableRecovery {
     split_key: Option<StaticKey>,
     split_ptr: Pointer,
     level: u16,
-  ) -> Result {
+  ) -> Result<RecoveryResult> {
     let index = BTreeIndex::new(RecoveryPolicy {
       block_cache: &self.block_cache,
       recorder: &self.recorder,
@@ -339,15 +341,20 @@ impl TableRecovery {
 
     if let Some(k) = split_key {
       index.recovery_half_split(k, split_ptr, level, &self.table)?;
-      return Ok(());
+      return Ok(RecoveryResult(None));
     }
 
-    let slot = self.block_cache.read(split_ptr, &self.table)?.for_read();
+    let Some(slot) = self.block_cache.read(split_ptr, &self.table)? else {
+      let pending = self.fetch_job(self.recovery_split(None, split_ptr, level));
+      return Ok(RecoveryResult(Some(vec![pending])));
+    };
+
+    let slot = slot.for_read();
     let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
 
     let key = node.top()?.to_vec();
     index.recovery_half_split(key, split_ptr, level, &self.table)?;
-    Ok(())
+    Ok(RecoveryResult(None))
   }
 
   fn complete_table(&self) -> impl FnOnce() -> Result<RecoveryResult> {
@@ -406,7 +413,7 @@ impl<'a> ReadonlyPolicy for RecoveryPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.read(pointer, table)
   }
   fn read_blob(&self, _: BlobId, _: BlobOffset, _: BlobLen) -> Result<AlignedBuf> {
@@ -419,7 +426,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   }
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::WritableSlot,
+    slot: &mut crate::cache::PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -431,7 +438,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<Option<crate::cache::CachedSlot<'_>>> {
     self.block_cache.alloc(pointer, table)
   }
 }
@@ -465,6 +472,9 @@ impl RecoveryStatus {
   fn set_visited(&self, ptr: Pointer) -> bool {
     self.visited.l().insert(ptr)
   }
+  fn remove_visited(&self, ptr: Pointer) {
+    self.visited.l().remove(&ptr);
+  }
   fn take_visited(&self) -> HashSet<Pointer> {
     take(&mut self.visited.l())
   }
@@ -497,31 +507,33 @@ impl RecoveryResult {
   }
 }
 
-fn create_tasks(
+fn create_tasks_internal(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
   thread_pool: Arc<OnceThread<ThreadPool>>,
   table: TableHandleRef,
-  max_used: &HashMap<TableId, Pointer>,
+  max_used: Pointer,
 ) -> impl FnOnce() -> Result<RecoveryResult> + Send {
-  let max_used = max_used
-    .get(&table.get_id())
-    .copied()
-    .unwrap_or(HEADER_POINTER);
   move || {
+    let (root, height) = {
+      let Some(slot) = block_cache.read(HEADER_POINTER, &table)? else {
+        let pending = thread_pool.clone().spawn(create_tasks_internal(
+          block_cache,
+          recorder,
+          thread_pool,
+          table,
+          max_used,
+        ));
+        return Ok(RecoveryResult(Some(vec![pending])));
+      };
+      let header = slot.for_read().as_ref().deserialize::<TreeHeader>()?;
+      (header.get_root(), header.get_height())
+    };
+
     debug!(
       "table {} start to collect orphaned blocks.",
       table.get_name()
     );
-
-    let (root, height) = {
-      let header = block_cache
-        .read(HEADER_POINTER, &table)?
-        .for_read()
-        .as_ref()
-        .deserialize::<TreeHeader>()?;
-      (header.get_root(), header.get_height())
-    };
 
     let status = RecoveryStatus {
       visited: Mutex::new(HashSet::from_iter([HEADER_POINTER])),
@@ -542,4 +554,18 @@ fn create_tasks(
     let pending = thread_pool.spawn(recovery.scan_node(root, height));
     Ok(RecoveryResult(Some(vec![pending])))
   }
+}
+
+fn create_tasks(
+  block_cache: Arc<BlockCache>,
+  recorder: Arc<PageRecorder>,
+  thread_pool: Arc<OnceThread<ThreadPool>>,
+  table: TableHandleRef,
+  max_used: &HashMap<TableId, Pointer>,
+) -> impl FnOnce() -> Result<RecoveryResult> + Send {
+  let max_used = max_used
+    .get(&table.get_id())
+    .copied()
+    .unwrap_or(HEADER_POINTER);
+  create_tasks_internal(block_cache, recorder, thread_pool, table, max_used)
 }

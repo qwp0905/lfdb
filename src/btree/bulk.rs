@@ -10,7 +10,7 @@ use crate::{
 use super::{
   append_or_reserve_at_leaf, copy_and_update, propagate_split, read_header,
   resolve_conflict, AppendOrReserve, CreatablePolicy, KeyPair, KeyPairList,
-  ReadonlyPolicy, WriteOp,
+  MaybeWrittenKeyPair, ReadonlyPolicy, WriteOp,
 };
 
 pub struct BulkOp(std::collections::BTreeSet<KeyPair>);
@@ -44,13 +44,14 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
   policy: &Policy,
   leaf_ptr: Pointer,
   table: &TableHandleRef,
-  mut must_apply: KeyPair,
+  must_apply: KeyPair,
   bulk: &mut KeyPairList,
   stack: Vec<Pointer>,
 ) -> Result<BulkResult> {
   let mut copy_old = Vec::new();
   let mut splitted = Vec::new();
   let mut ptr = leaf_ptr;
+  let mut must_apply = MaybeWrittenKeyPair::KeyPair(must_apply);
   loop {
     match append_or_reserve_at_leaf(policy, ptr, must_apply, table, Some(bulk))? {
       AppendOrReserve::Move(p, kp) => (ptr, must_apply) = (p, kp),
@@ -75,6 +76,16 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
         splitted.extend(s);
         break;
       }
+      AppendOrReserve::Stopped {
+        resume,
+        copy_old: c,
+        splitted: s,
+        ..
+      } => {
+        copy_old.extend(c);
+        splitted.extend(s);
+        must_apply = resume;
+      }
     };
   }
 
@@ -88,6 +99,38 @@ fn drain_bulk_once<Policy: CreatablePolicy + Sync>(
   Ok(result)
 }
 
+enum FindKey {
+  ReachedLeaf,
+  MoveDown(Option<StaticKey>, Pointer),
+  MoveRight(Pointer),
+}
+
+fn find_key<Policy: ReadonlyPolicy>(
+  policy: &Policy,
+  key: StaticKeyRef,
+  ptr: Pointer,
+  table: &TableHandleRef,
+) -> Result<FindKey> {
+  loop {
+    let Some(slot) = policy.fetch_slot(ptr, table)? else {
+      continue;
+    };
+    let slot = slot.for_read();
+    let BTreeNodeView::Internal(node) = slot.as_ref().view::<BTreeNodeView>()? else {
+      return Ok(FindKey::ReachedLeaf);
+    };
+    match node.find(key)? {
+      Ok(p) => {
+        return Ok(FindKey::MoveDown(
+          node.get_right_key().map(|k| k.to_vec()),
+          p,
+        ))
+      }
+      Err(p) => return Ok(FindKey::MoveRight(p)),
+    };
+  }
+}
+
 pub fn fill_stack_from<Policy: ReadonlyPolicy>(
   policy: &Policy,
   key: StaticKeyRef,
@@ -96,18 +139,12 @@ pub fn fill_stack_from<Policy: ReadonlyPolicy>(
   stack: &mut Vec<(Option<StaticKey>, Pointer)>,
 ) -> Result<Pointer> {
   let mut ptr = start;
-  while let BTreeNodeView::Internal(node) = policy
-    .fetch_slot(ptr, table)?
-    .for_read()
-    .as_ref()
-    .view::<BTreeNodeView>()?
-  {
-    match node.find(key)? {
-      Ok(p) => stack.push((
-        node.get_right_key().map(|k| k.to_vec()),
-        replace(&mut ptr, p),
-      )),
-      Err(p) => ptr = p,
+
+  loop {
+    match find_key(policy, key, ptr, table)? {
+      FindKey::ReachedLeaf => break,
+      FindKey::MoveDown(k, p) => stack.push((k, replace(&mut ptr, p))),
+      FindKey::MoveRight(p) => ptr = p,
     }
   }
   Ok(ptr)

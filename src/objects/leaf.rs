@@ -4,8 +4,9 @@ use std::{
 };
 
 use super::{
-  count_directions, update_bias, SplitBias, StaticKey, StaticKeyRef, VersionRecord,
-  VersionRecordView, DEFAULT_BIAS, MAX_KEY, SERIALIZABLE_BYTES, SPLIT_BIAS_BYTES,
+  count_directions, update_bias, RecordData, SplitBias, StaticKey, StaticKeyRef,
+  VersionRecord, VersionRecordView, DEFAULT_BIAS, MAX_KEY, SERIALIZABLE_BYTES,
+  SPLIT_BIAS_BYTES,
 };
 use crate::{
   disk::{Pointer, POINTER_BYTES},
@@ -147,12 +148,29 @@ impl LeafNode {
     k.len() + 2 + POINTER_BYTES
   }
 
-  pub fn split_if_needed(&mut self) -> Option<LeafNode> {
+  pub fn is_available(
+    &self,
+    key: StaticKeyRef,
+    record: &RecordData,
+    replacement: Option<usize>,
+  ) -> bool {
+    let prev = replacement
+      .map(|i| self.entries[i].bytes_len())
+      .unwrap_or(0);
+    let record_bytes = record.byte_len()
+      + VersionRecord::RESERVED_BYTES
+      + LeafEntry::RESERVED_BYTES
+      + key.len();
     let right_bytes = self.right_bytes();
     let data_bytes = self.data_bytes();
-    if right_bytes + data_bytes + Self::RESERVED_BYTES <= SERIALIZABLE_BYTES {
-      return None;
-    }
+    record_bytes + right_bytes + data_bytes + Self::RESERVED_BYTES - prev
+      <= SERIALIZABLE_BYTES
+  }
+
+  pub fn split_node(&mut self) -> LeafNode {
+    let right_bytes = self.right_bytes();
+    let data_bytes = self.data_bytes();
+    debug_assert!(right_bytes + data_bytes + Self::RESERVED_BYTES > SERIALIZABLE_BYTES);
     let (multiplier, divisor) = {
       let [l, m, r] = count_directions(replace(&mut self.bias, DEFAULT_BIAS));
       debug_assert!((l + m + r) != 0);
@@ -193,7 +211,7 @@ impl LeafNode {
 
     debug_assert!(!self.entries.is_empty());
     debug_assert!(!split.entries.is_empty());
-    Some(split)
+    split
   }
 
   pub fn replace_at(&mut self, pos: usize, record: VersionRecord) -> VersionRecord {
