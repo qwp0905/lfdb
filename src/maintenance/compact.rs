@@ -1,6 +1,6 @@
 use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
-use crossbeam::{atomic::AtomicCell, epoch::pin};
+use crossbeam::atomic::AtomicCell;
 
 use super::DropTableCommitted;
 use crate::{
@@ -536,7 +536,10 @@ impl CompactionWorker {
         bulk = Vec::with_capacity(CAP);
       }
     }
+
+    let guard = cycle.old.free().protect();
     self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
+    drop(guard);
     self.remove_compaction(&cycle.metadata)?;
     Ok(())
   }
@@ -581,11 +584,10 @@ impl CompactionWorker {
       let Some(snap) = snapshotter.next_snapshot()? else {
         break;
       };
-
       bulk.push(snap);
     }
 
-    let _guard = pin();
+    let _guard = current.old.free().protect();
     self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
     Ok(false)
   }
