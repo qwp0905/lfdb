@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
+use std::{cell::Cell, collections::LinkedList, mem::replace, sync::Arc, time::Duration};
 
 use crossbeam::atomic::AtomicCell;
 
@@ -530,14 +530,15 @@ impl CompactionWorker {
     const CAP: usize = 1000;
     let mut bulk = Vec::with_capacity(CAP);
     while let Some(snap) = snapshotter.next_snapshot()? {
-      bulk.push(snap);
       if bulk.len() >= CAP {
+        let bulk = replace(&mut bulk, Vec::with_capacity(CAP));
+        let _guard = cycle.new.free().protect();
         self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
-        bulk = Vec::with_capacity(CAP);
       }
+      bulk.push(snap);
     }
 
-    let guard = cycle.old.free().protect();
+    let guard = cycle.new.free().protect();
     self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
     drop(guard);
     self.remove_compaction(&cycle.metadata)?;
@@ -587,7 +588,7 @@ impl CompactionWorker {
       bulk.push(snap);
     }
 
-    let _guard = current.old.free().protect();
+    let _guard = current.new.free().protect();
     self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
     Ok(false)
   }
