@@ -4,8 +4,6 @@ use std::{
   time::Duration,
 };
 
-use crossbeam::epoch::pin;
-
 use super::CompactionTriggered;
 use crate::{
   background::{
@@ -218,12 +216,7 @@ impl GcWorker {
           .as_ref()
           .view::<DataEntryView>()?
           .get_next();
-
-        // lazily dealloc pointers since compaction can reachable.
-        let guard = pin();
-        let cloned = table.clone();
-        guard.defer(move || cloned.free().dealloc(ptr));
-        guard.flush();
+        table.free().dealloc(ptr);
         continue;
       }
 
@@ -270,12 +263,7 @@ impl GcWorker {
         .as_ref()
         .view::<DataEntryView>()?
         .get_next();
-
-      // lazily dealloc pointers since compaction can reachable.
-      let guard = pin();
-      let cloned = table.clone();
-      guard.defer(move || cloned.free().dealloc(ptr));
-      guard.flush();
+      table.free().dealloc(ptr);
     }
     Ok(())
   }
