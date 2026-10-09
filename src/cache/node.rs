@@ -309,15 +309,18 @@ where
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
-    while self.len() >= self.capacity {
-      if self.small_count > self.small_cap {
-        return self.evict_small(build_hasher, &try_evict).map(Some);
-      }
-      if let Some(v) = self.evict_main(build_hasher, &try_evict)? {
-        return Ok(Some(v));
-      }
+    if self.len() < self.capacity {
+      return Ok(None);
     }
-    Ok(None)
+
+    if self.small_count > self.small_cap {
+      return self.evict_small(build_hasher, &try_evict).map(Some);
+    };
+
+    let Some(evicted) = self.evict_main(build_hasher, &try_evict)? else {
+      unreachable!()
+    };
+    Ok(Some(evicted))
   }
 
   fn evict_small<S, R, F>(
@@ -331,58 +334,68 @@ where
     F: Fn(&V) -> Option<R>,
   {
     loop {
-      let (id, epoch) = self.small.pop().unwrap();
-      let entry = self.entries.get(id);
-      if entry.get_epoch() != epoch {
-        continue;
+      let mut count = 0;
+      for _ in 0..self.small.len() {
+        let Some((id, epoch)) = self.small.pop() else {
+          unreachable!();
+        };
+        let entry = self.entries.get(id);
+        if entry.get_epoch() != epoch {
+          continue;
+        }
+
+        match entry.get_state() {
+          State::Small { freq, key, value } if *freq > 1 => {
+            let Ok(evicted) = self.evict_main(build_hasher, try_evict) else {
+              self.small.push((id, epoch));
+              return Err(());
+            };
+
+            let entry = self.entries.get_mut(id);
+            let State::Small { key, value, .. } = entry.take_state() else {
+              unreachable!()
+            };
+            entry.set_state(State::Main {
+              key,
+              value,
+              freq: 0,
+            });
+
+            self.main.push((id, epoch));
+            self.small_count -= 1;
+            self.main_count += 1;
+            if let Some(v) = evicted {
+              return Ok(v);
+            }
+          }
+          State::Small { value, .. } => {
+            let Some(reserved) = try_evict(value) else {
+              self.small.push((id, epoch));
+              count += 1;
+              continue;
+            };
+
+            self.evict_ghost(build_hasher);
+
+            let entry = self.entries.get_mut(id);
+            let State::Small { key, value, .. } = entry.take_state() else {
+              unreachable!()
+            };
+            entry.set_state(State::Ghost { key: key.clone() });
+
+            self.ghost.push((id, epoch));
+            self.small_count -= 1;
+            let hash = build_hasher.hash_one(&key);
+            return Ok((key, value, reserved, hash));
+          }
+          State::Vacant => {}
+          State::Main { .. } | State::Ghost { .. } => unreachable!(),
+        };
       }
 
-      match entry.get_state() {
-        State::Small { freq, key, value } if *freq > 1 => {
-          let Ok(evicted) = self.evict_main(build_hasher, try_evict) else {
-            self.small.push((id, epoch));
-            return Err(());
-          };
-
-          let entry = self.entries.get_mut(id);
-          let State::Small { key, value, .. } = entry.take_state() else {
-            unreachable!()
-          };
-          entry.set_state(State::Main {
-            key,
-            value,
-            freq: 0,
-          });
-
-          self.main.push((id, epoch));
-          self.small_count -= 1;
-          self.main_count += 1;
-          if let Some(v) = evicted {
-            return Ok(v);
-          }
-        }
-        State::Small { value, .. } => {
-          let Some(reserved) = try_evict(value) else {
-            self.small.push((id, epoch));
-            return Err(());
-          };
-
-          self.evict_ghost(build_hasher);
-
-          let entry = self.entries.get_mut(id);
-          let State::Small { key, value, .. } = entry.take_state() else {
-            unreachable!()
-          };
-          entry.set_state(State::Ghost { key: key.clone() });
-
-          self.ghost.push((id, epoch));
-          self.small_count -= 1;
-          let hash = build_hasher.hash_one(&key);
-          return Ok((key, value, reserved, hash));
-        }
-        State::Vacant => {}
-        State::Main { .. } | State::Ghost { .. } => unreachable!(),
-      };
+      if count == self.small.len() {
+        return Err(());
+      }
     }
   }
 
@@ -395,44 +408,56 @@ where
     S: BuildHasher,
     F: Fn(&V) -> Option<R>,
   {
-    while let Some((id, epoch)) = self.main.pop() {
-      let entry = self.entries.get_mut(id);
-      if entry.get_epoch() != epoch {
-        continue;
-      }
-
-      match entry.get_state_mut() {
-        State::Main { freq, .. } if *freq > 0 => {
-          *freq -= 1;
-          self.main.push((id, epoch));
+    loop {
+      let mut count = 0;
+      for _ in 0..self.main.len() {
+        let Some((id, epoch)) = self.main.pop() else {
+          unreachable!();
+        };
+        let entry = self.entries.get_mut(id);
+        if entry.get_epoch() != epoch {
           continue;
         }
-        State::Main { value, .. } => {
-          let Some(reserved) = try_evict(value) else {
+
+        match entry.get_state_mut() {
+          State::Main { freq, .. } if *freq > 0 => {
+            *freq -= 1;
             self.main.push((id, epoch));
-            return Err(());
-          };
-          let hasher = self.entries.make_hasher(build_hasher);
-          let hash = hasher(&id);
-          self
-            .table
-            .remove_and_shrink(hash, entry_eq(id), hasher)
-            .unwrap_or_else(|| unreachable!());
+            continue;
+          }
+          State::Main { value, .. } => {
+            let Some(reserved) = try_evict(value) else {
+              self.main.push((id, epoch));
+              count += 1;
+              continue;
+            };
+            let hasher = self.entries.make_hasher(build_hasher);
+            let hash = hasher(&id);
+            self
+              .table
+              .remove_and_shrink(hash, entry_eq(id), hasher)
+              .unwrap_or_else(|| unreachable!());
 
-          let State::Main { key, value, .. } = self.entries.get_mut(id).take_state()
-          else {
-            unreachable!()
-          };
-          self.entries.reuse(id);
-          self.main_count -= 1;
-          return Ok(Some((key, value, reserved, hash)));
-        }
-        State::Small { .. } | State::Ghost { .. } => unreachable!(),
-        State::Vacant => {}
-      };
+            let State::Main { key, value, .. } = self.entries.get_mut(id).take_state()
+            else {
+              unreachable!()
+            };
+            self.entries.reuse(id);
+            self.main_count -= 1;
+            return Ok(Some((key, value, reserved, hash)));
+          }
+          State::Small { .. } | State::Ghost { .. } => unreachable!(),
+          State::Vacant => {}
+        };
+      }
+
+      if self.main_count == 0 {
+        return Ok(None);
+      }
+      if count == self.main.len() {
+        return Err(());
+      }
     }
-
-    Ok(None)
   }
 
   fn evict_ghost<S>(&mut self, build_hasher: &S)
