@@ -183,8 +183,8 @@ impl Core {
     )
   }
 
-  fn acquire_page(&self) -> PageRef<PAGE_SIZE> {
-    self.allocator.allocate()
+  fn acquire_page(&self) -> Option<PageRef<PAGE_SIZE>> {
+    self.allocator.try_allocate()
   }
 }
 
@@ -253,15 +253,25 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     let table_id = handle.get_id();
-    let guard = self
+    let guard = match self
       .table
-      .alloc(table_id, pointer, |id| self.core.get_pin(id));
+      .acquire(table_id, pointer, |id| self.core.get_pin(id))
+    {
+      Acquired::Hit(block_id, token) => {
+        return Ok(Some(self.cache_slot(block_id, token)))
+      }
+      Acquired::Evicted(guard) => guard,
+    };
 
+    let Some(new) = self.core.acquire_page() else {
+      return Ok(None);
+    };
     let pending = self.core.submit_eviction(&guard);
-    let new = self.core.acquire_page();
-    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
+    self
+      .resolve_eviction(pending, guard, new, pointer, handle.clone())
+      .map(Some)
   }
 
   /**
@@ -275,20 +285,27 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     let table_id = handle.get_id();
     let guard = match self
       .table
       .acquire(table_id, pointer, |id| self.core.get_pin(id))
     {
-      Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
+      Acquired::Hit(block_id, token) => {
+        return Ok(Some(self.cache_slot(block_id, token)))
+      }
       Acquired::Evicted(guard) => guard,
     };
 
+    let Some(mut new) = self.core.acquire_page() else {
+      return Ok(None);
+    };
+
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
-    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
+    self
+      .resolve_eviction(pending, guard, new, pointer, handle.clone())
+      .map(Some)
   }
 
   fn resolve_eviction<'a>(
@@ -305,7 +322,11 @@ impl BlockCache {
     Ok(self.cache_slot(guard.get_block_id(), guard.commit()))
   }
 
-  fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
+  fn __read(
+    &self,
+    pointer: Pointer,
+    handle: &TableHandleRef,
+  ) -> Result<Option<CachedSlot<'_>>> {
     let table_id = handle.get_id();
     let guard = match self
       .table
@@ -313,15 +334,19 @@ impl BlockCache {
     {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
-        return Ok(self.cache_slot(block_id, token));
+        return Ok(Some(self.cache_slot(block_id, token)));
       }
       Acquired::Evicted(guard) => guard,
     };
+    let Some(mut new) = self.core.acquire_page() else {
+      return Ok(None);
+    };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
     handle.disk().read(pointer, &mut new)?;
-    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
+    self
+      .resolve_eviction(pending, guard, new, pointer, handle.clone())
+      .map(Some)
   }
 
   #[inline]
@@ -329,7 +354,7 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<Option<CachedSlot<'_>>> {
     measure!(self.metrics.block_cache_read, self.__read(pointer, handle))
   }
 
