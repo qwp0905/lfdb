@@ -23,7 +23,7 @@ pub struct WALConfig {
   pub max_buffer_size: usize,
 }
 impl WALConfig {
-  pub const MIN_BUFFER_SIZE: usize = WAL_BLOCK_SIZE * 4;
+  pub const MIN_BUFFER_SIZE: usize = WAL_BLOCK_SIZE * 3;
 }
 
 pub struct WALFailed;
@@ -82,8 +82,7 @@ pub struct WriteAheadLog {
   /**
    * preloaded data block.
    */
-  buffer_allocator: PageAllocator<WAL_BLOCK_SIZE>,
-  io_allocator: PageAllocator<WAL_BLOCK_SIZE>,
+  allocator: PageAllocator<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
 }
@@ -96,9 +95,7 @@ impl WriteAheadLog {
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
 
-    let buffer_allocator =
-      PageAllocator::new((config.max_buffer_size / WAL_BLOCK_SIZE) / 2);
-    let io_allocator = PageAllocator::new((config.max_buffer_size / WAL_BLOCK_SIZE) / 2);
+    let buffer_allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
     let preloader = SegmentPreload::new(max_len, io_pool);
     let sync_completion = Arc::new(SyncCompletion::new());
@@ -116,8 +113,7 @@ impl WriteAheadLog {
     Ok(Self {
       preloader,
       buffer: AtomicSBox::new(buffer),
-      buffer_allocator,
-      io_allocator,
+      allocator: buffer_allocator,
       sync_completion,
       log_completion: LogCompletion::new(last_log_id),
       state: AtomicCell::new(State::Available),
@@ -191,7 +187,7 @@ impl WriteAheadLog {
     let pointer = buffer.get_pointer();
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
     buffer.append_at(&record.init(log_id), &ticket);
-    let pending = buffer.flush_block_with(ticket, &segment, &self.io_allocator);
+    let pending = buffer.flush_block_with(ticket, &segment, &self.allocator);
     drop(buffer);
 
     if !flush {
@@ -232,21 +228,21 @@ impl WriteAheadLog {
     debug_assert_eq!(remain.len(), overflow.get_len());
 
     let pointer = buffer.get_pointer() + 1;
-    buffer.append_at(available, &ticket);
-    buffer.flush_and_forget(ticket, &segment, &self.io_allocator);
-    drop(buffer);
-
-    let mut new_page = self.buffer_allocator.allocate();
+    let mut new_page = self.allocator.allocate();
     new_page.copy_from(remain, 0);
 
     let new_buffer =
       LogBuffer::initialized(pointer, new_page, log_id, overflow.get_len());
     let new_buffer = segment.store_log_buffer(new_buffer);
 
+    buffer.append_at(available, &ticket);
+    buffer.flush_and_forget(ticket, &segment, &self.allocator);
+    drop(buffer);
+
     if !flush {
       return Ok(log_id);
     }
-    let pending = new_buffer.flush_block_with(overflow, &segment, &self.io_allocator);
+    let pending = new_buffer.flush_block_with(overflow, &segment, &self.allocator);
     drop(new_buffer);
 
     pending.wait()?;
@@ -264,8 +260,6 @@ impl WriteAheadLog {
 
     let pointer = buffer.get_pointer();
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
-    let pending = buffer.flush_block_with(ticket, &segment, &self.io_allocator);
-    drop(buffer);
 
     let new = match self.preloader.load() {
       Ok(v) => v,
@@ -274,8 +268,11 @@ impl WriteAheadLog {
     };
 
     let replacement =
-      segment.init_next(new, self.buffer_allocator.allocate(), log_id, self.max_len);
+      segment.init_next(new, self.allocator.allocate(), log_id, self.max_len);
     self.buffer.store(replacement);
+
+    let pending = buffer.flush_block_with(ticket, &segment, &self.allocator);
+    drop(buffer);
 
     if let Err(err) = pending
       .wait()
