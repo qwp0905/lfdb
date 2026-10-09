@@ -317,9 +317,9 @@ where
       return self.evict_small(build_hasher, &try_evict).map(Some);
     };
 
-    let Some(evicted) = self.evict_main(build_hasher, &try_evict)? else {
-      unreachable!()
-    };
+    let evicted = self
+      .evict_main(build_hasher, &try_evict)?
+      .unwrap_or_else(|| unreachable!());
     Ok(Some(evicted))
   }
 
@@ -336,9 +336,7 @@ where
     loop {
       let mut count = 0;
       for _ in 0..self.small.len() {
-        let Some((id, epoch)) = self.small.pop() else {
-          unreachable!();
-        };
+        let (id, epoch) = self.small.pop().unwrap_or_else(|| unreachable!());
         let entry = self.entries.get(id);
         if entry.get_epoch() != epoch {
           continue;
@@ -348,7 +346,8 @@ where
           State::Small { freq, key, value } if *freq > 1 => {
             let Ok(evicted) = self.evict_main(build_hasher, try_evict) else {
               self.small.push((id, epoch));
-              return Err(());
+              count += 1;
+              continue;
             };
 
             let entry = self.entries.get_mut(id);
@@ -411,9 +410,7 @@ where
     loop {
       let mut count = 0;
       for _ in 0..self.main.len() {
-        let Some((id, epoch)) = self.main.pop() else {
-          unreachable!();
-        };
+        let (id, epoch) = self.main.pop().unwrap_or_else(|| unreachable!());
         let entry = self.entries.get_mut(id);
         if entry.get_epoch() != epoch {
           continue;
