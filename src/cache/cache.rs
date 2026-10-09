@@ -183,8 +183,12 @@ impl Core {
     )
   }
 
-  fn acquire_page(&self) -> PageRef<PAGE_SIZE> {
-    self.allocator.allocate()
+  fn acquire_page_with(&self, guard: &EvictionGuard) -> PageRef<PAGE_SIZE> {
+    if guard.is_evicted() {
+      self.allocator.allocate()
+    } else {
+      self.allocator.allocate_new()
+    }
   }
 }
 
@@ -208,7 +212,7 @@ impl BlockCache {
   pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
     let capacity = config.capacity / PAGE_SIZE;
     let buffer_size = config.buffer_size / PAGE_SIZE;
-    let allocator = PageAllocator::new(capacity + buffer_size);
+    let allocator = PageAllocator::new(buffer_size);
 
     let mut blocks = Vec::with_capacity(capacity);
     blocks.resize_with(capacity, CachedBlock::uninit);
@@ -260,7 +264,7 @@ impl BlockCache {
       .alloc(table_id, pointer, |id| self.core.get_pin(id));
 
     let pending = self.core.submit_eviction(&guard);
-    let new = self.core.acquire_page();
+    let new = self.core.acquire_page_with(&guard);
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 
@@ -286,7 +290,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
+    let mut new = self.core.acquire_page_with(&guard);
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
@@ -319,7 +323,7 @@ impl BlockCache {
     };
 
     let pending = self.core.submit_eviction(&guard);
-    let mut new = self.core.acquire_page();
+    let mut new = self.core.acquire_page_with(&guard);
     handle.disk().read(pointer, &mut new)?;
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }

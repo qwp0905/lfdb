@@ -72,6 +72,10 @@ impl<const N: usize> PageAllocator<N> {
     }
   }
 
+  pub fn allocate_new(&self) -> PageRef<N> {
+    PageRef::new(OwnedPage::allocate(), self.global.clone())
+  }
+
   pub fn allocate(&self) -> PageRef<N> {
     let backoff = Backoff::new();
     while !backoff.is_completed() {
