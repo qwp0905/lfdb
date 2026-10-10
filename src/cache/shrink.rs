@@ -219,4 +219,7 @@ impl<T> ShrinkQueue<T> {
     self.0.shrink_to(cap >> 1);
     Some(v)
   }
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
 }
