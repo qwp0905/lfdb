@@ -1,5 +1,5 @@
 use std::{
-  mem::forget,
+  mem::{forget, ManuallyDrop},
   sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -81,25 +81,9 @@ impl ExclusivePin {
 
 pub struct SharedToken<'a>(&'a AtomicU32);
 impl<'a> SharedToken<'a> {
-  /**
-   * Try to turn this shared token into the exclusive token.
-   *
-   * Upgrade succeeds only when this token is the only shared holder. On failure,
-   * the original shared token is returned so the caller does not accidentally
-   * release its pin. This is useful when a current shared holder should get the
-   * first chance to perform the exclusive transition.
-   */
-  pub fn try_upgrade(self) -> std::result::Result<ExclusiveToken<'a>, Self> {
-    let pin = self.0;
-    if pin
-      .compare_exchange(1, EXCLUSIVE, Ordering::Acquire, Ordering::Relaxed)
-      .is_err()
-    {
-      return Err(self);
-    }
-
-    forget(self);
-    Ok(ExclusiveToken(pin))
+  pub fn drop_in_place(self) -> bool {
+    let this = ManuallyDrop::new(self);
+    this.0.fetch_sub(1, Ordering::AcqRel) == 1
   }
 }
 /*

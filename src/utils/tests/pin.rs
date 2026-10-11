@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use super::*;
 
@@ -108,71 +107,6 @@ fn exclusive_drop_allows_another_exclusive() {
     let _e = pin.try_exclusive().unwrap();
   }
   assert!(pin.try_exclusive().is_some());
-}
-
-// ----- Upgrade / Downgrade -----
-
-#[test]
-fn upgrade_from_sole_shared() {
-  let pin = ExclusivePin::new();
-  let mut s = pin.try_shared().unwrap();
-  let _e = loop {
-    match s.try_upgrade() {
-      Ok(t) => break t,
-      Err(t) => s = t,
-    }
-  };
-  assert!(pin.is_exclusive());
-  assert!(pin.try_shared().is_none());
-}
-
-#[test]
-fn upgraded_drop_clears_exclusive() {
-  let pin = ExclusivePin::new();
-  {
-    let mut s = pin.try_shared().unwrap();
-    let _e = loop {
-      match s.try_upgrade() {
-        Ok(t) => break t,
-        Err(t) => s = t,
-      }
-    };
-  }
-  assert!(!pin.is_exclusive());
-  assert!(pin.try_shared().is_some());
-}
-
-#[test]
-fn upgrade_blocks_until_other_shared_drops() {
-  let pin = ExclusivePin::new();
-  let mut s1 = pin.try_shared().unwrap();
-  let s2 = pin.try_shared().unwrap();
-
-  let done = AtomicBool::new(false);
-
-  thread::scope(|scope| {
-    let handle = scope.spawn(|| {
-      let _e = loop {
-        match s1.try_upgrade() {
-          Ok(t) => break t,
-          Err(t) => s1 = t,
-        }
-      };
-      done.store(true, Ordering::Release);
-    });
-
-    // give the thread time to enter spin loop
-    thread::sleep(Duration::from_millis(30));
-    assert!(
-      !done.load(Ordering::Acquire),
-      "upgrade must wait while other shared holder exists"
-    );
-
-    drop(s2);
-
-    handle.join().unwrap();
-    assert!(done.load(Ordering::Acquire));
-  });
 }
 
 #[test]
@@ -428,43 +362,4 @@ fn shared_drop_release_visible_to_exclusive_acquire() {
   // After the reader thread finished (joined via scope), take exclusive.
   let _e = pin.try_exclusive().unwrap();
   assert_eq!(payload.load(Ordering::Relaxed), 0xCAFE_BABE);
-}
-
-/**
- * Writes performed under shared(1) and then upgraded to exclusive stay
- * consistent across the upgrade boundary. Tests that upgrade's CAS Acquire
- * establishes happens-before with prior Release operations.
- */
-#[test]
-fn upgrade_preserves_happens_before() {
-  let pin = ExclusivePin::new();
-  let payload = AtomicUsize::new(0);
-  let ready = AtomicBool::new(false);
-
-  thread::scope(|scope| {
-    // Writer: takes exclusive, writes, drops. Provides a Release.
-    scope
-      .spawn(|| {
-        let _e = pin.try_exclusive().unwrap();
-        payload.store(123, Ordering::Relaxed);
-        ready.store(true, Ordering::Relaxed);
-      })
-      .join()
-      .unwrap();
-
-    // Reader: takes shared (Acquire), then upgrades (Acquire on CAS).
-    scope.spawn(|| {
-      assert!(ready.load(Ordering::Relaxed));
-      let mut s = pin.try_shared().unwrap();
-      assert_eq!(payload.load(Ordering::Relaxed), 123);
-      let _e = loop {
-        match s.try_upgrade() {
-          Ok(t) => break t,
-          Err(t) => s = t,
-        }
-      };
-      // After upgrade (CAS Acquire), still see the write.
-      assert_eq!(payload.load(Ordering::Relaxed), 123);
-    });
-  });
 }
