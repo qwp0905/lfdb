@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables, EvictionGuard,
-  MappingTable, PendingFlush,
+  Acquired, AllocatedSlot, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables,
+  EvictionGuard, MappingTable, MappingToken, PendingFlush,
 };
 use crate::{
   background::{Close, SharedWorkThread, ThreadBuilder},
@@ -14,7 +14,7 @@ use crate::{
   metrics::{measure, MetricsRegistry},
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{error, ExclusivePin, SharedToken, ToArc},
+  utils::{error, ToArc},
   Result,
 };
 
@@ -25,11 +25,8 @@ pub struct BlockCacheConfig {
 }
 
 struct Core {
+  mapping: MappingTable,
   cached_blocks: Box<[CachedBlock]>,
-  /**
-   * pin to protect each block in cached blocks from eviction
-   */
-  pins: Box<[ExclusivePin]>,
   /**
    * each dirty bits are protected by each batch mutations.
    */
@@ -39,15 +36,15 @@ struct Core {
 }
 impl Core {
   const fn new(
+    mapping: MappingTable,
     cached_blocks: Box<[CachedBlock]>,
-    pins: Box<[ExclusivePin]>,
     dirty_blocks: DirtyBlocks,
     dirty_tables: DirtyTables,
     allocator: PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
+      mapping,
       cached_blocks,
-      pins,
       dirty_blocks,
       dirty_tables,
       allocator,
@@ -56,9 +53,6 @@ impl Core {
 
   const fn get_block(&self, block_id: BlockId) -> &CachedBlock {
     &self.cached_blocks[block_id]
-  }
-  const fn get_pin(&self, block_id: BlockId) -> &ExclusivePin {
-    &self.pins[block_id]
   }
 
   fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
@@ -100,7 +94,7 @@ impl Core {
   }
 
   fn flush_block(&self, id: BlockId) -> Result {
-    let Some(_token) = self.pins[id].try_shared() else {
+    let Some(_token) = self.mapping.try_pin(id) else {
       return Ok(());
     };
 
@@ -149,7 +143,7 @@ impl Core {
     let mut buckets = HashMap::<_, Vec<_>>::new();
     let mut len = 0;
     for id in self.dirty_blocks.iter() {
-      let Some(_token) = self.pins[id].try_shared() else {
+      let Some(_token) = self.mapping.try_pin(id) else {
         // An exclusive owner is already handling this slot, for example during
         // eviction/install. Do not add it to this flush snapshot.
         continue;
@@ -173,7 +167,7 @@ impl Core {
     dirty
   }
 
-  fn create_slot<'a>(&'a self, id: BlockId, token: SharedToken<'a>) -> CachedSlot<'a> {
+  fn create_slot<'a>(&'a self, id: BlockId, token: MappingToken<'a>) -> CachedSlot<'a> {
     CachedSlot::new(
       self.get_block(id),
       &self.dirty_blocks,
@@ -203,7 +197,6 @@ impl Core {
  * bitmap.
  */
 pub struct BlockCache {
-  table: MappingTable,
   core: Arc<Core>,
   flush_executor: Arc<SharedWorkThread<BlockId, Result>>,
   metrics: Arc<MetricsRegistry>,
@@ -217,12 +210,9 @@ impl BlockCache {
     let mut blocks = Vec::with_capacity(capacity);
     blocks.resize_with(capacity, CachedBlock::uninit);
 
-    let mut pins = Vec::with_capacity(capacity);
-    pins.resize_with(capacity, ExclusivePin::new);
-
     let core = Arc::new(Core::new(
+      MappingTable::new(config.shard_count, capacity),
       blocks.into_boxed_slice(),
-      pins.into_boxed_slice(),
       DirtyBlocks::new(capacity),
       DirtyTables::new(),
       allocator,
@@ -235,7 +225,6 @@ impl BlockCache {
       .to_arc();
 
     Ok(Self {
-      table: MappingTable::new(config.shard_count, capacity),
       core,
       flush_executor,
       metrics,
@@ -243,7 +232,7 @@ impl BlockCache {
   }
 
   #[inline]
-  fn cache_slot<'a>(&'a self, id: usize, token: SharedToken<'a>) -> CachedSlot<'a> {
+  fn cache_slot<'a>(&'a self, id: usize, token: MappingToken<'a>) -> CachedSlot<'a> {
     self.core.create_slot(id, token)
   }
 
@@ -257,15 +246,27 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
+  ) -> Result<AllocatedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = self
-      .table
-      .alloc(table_id, pointer, |id| self.core.get_pin(id));
-
+    let Some(acquired) = self.core.mapping.try_acquire(table_id, pointer) else {
+      return Ok(AllocatedSlot::new_temp(
+        handle.clone(),
+        self.core.allocator.allocate(),
+        pointer,
+        &self.core.dirty_tables,
+      ));
+    };
+    let guard = match acquired {
+      Acquired::Hit(block_id, token) => {
+        let slot = self.cache_slot(block_id, token).for_write();
+        return Ok(AllocatedSlot::Hit(slot));
+      }
+      Acquired::Evicted(guard) => guard,
+    };
     let pending = self.core.submit_eviction(&guard);
     let new = self.core.acquire_page_with(&guard);
-    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
+    let slot = self.resolve_eviction(pending, guard, new, pointer, handle.clone())?;
+    Ok(AllocatedSlot::Hit(slot.for_write()))
   }
 
   /**
@@ -281,10 +282,7 @@ impl BlockCache {
     handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self
-      .table
-      .acquire(table_id, pointer, |id| self.core.get_pin(id))
-    {
+    let guard = match self.core.mapping.acquire(table_id, pointer) {
       Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
       Acquired::Evicted(guard) => guard,
     };
@@ -311,10 +309,7 @@ impl BlockCache {
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self
-      .table
-      .acquire(table_id, pointer, |id| &self.core.pins[id])
-    {
+    let guard = match self.core.mapping.acquire(table_id, pointer) {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
         return Ok(self.cache_slot(block_id, token));
@@ -353,7 +348,8 @@ impl BlockCache {
 impl Drop for BlockCache {
   fn drop(&mut self) {
     for i in self
-      .table
+      .core
+      .mapping
       .len_per_shard()
       .flat_map(|(len, offset)| offset..offset + len)
     {

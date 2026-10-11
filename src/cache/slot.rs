@@ -1,10 +1,13 @@
 use std::mem::ManuallyDrop;
 
-use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks};
+use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks, MappingToken};
 use crate::{
+  cache::dirty::DirtyTables,
   disk::Pointer,
   page::{Page, PageAllocator, PageRef, PAGE_SIZE},
-  utils::{SBox, SharedToken},
+  table::TableHandleRef,
+  utils::{create_static_ref, SBox},
+  Result,
 };
 
 /**
@@ -19,7 +22,7 @@ pub struct CachedSlot<'a> {
   block: &'a CachedBlock,
   dirty: &'a DirtyBlocks,
   block_id: BlockId,
-  token: SharedToken<'a>,
+  token: MappingToken<'a>,
   allocator: &'a PageAllocator<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
@@ -27,7 +30,7 @@ impl<'a> CachedSlot<'a> {
     block: &'a CachedBlock,
     dirty: &'a DirtyBlocks,
     block_id: BlockId,
-    token: SharedToken<'a>,
+    token: MappingToken<'a>,
     allocator: &'a PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
@@ -50,8 +53,8 @@ impl<'a> CachedSlot<'a> {
   {
     let latch = self.block.latch();
     WritableSlot {
-      pointer: self.block.get_pointer(),
       state: CopiedState::Borrowed {
+        pointer: self.block.get_pointer(),
         page: self.block.load_page(),
         dirty_blocks: self.dirty,
         allocator: self.allocator,
@@ -88,54 +91,57 @@ impl Clone for ReadonlySlot {
 
 enum CopiedState<'a> {
   Borrowed {
+    pointer: Pointer,
     page: SBox<PageRef<PAGE_SIZE>>,
     dirty_blocks: &'a DirtyBlocks,
     allocator: &'a PageAllocator<PAGE_SIZE>,
     block_id: BlockId,
   },
-  Copied(ManuallyDrop<PageRef<PAGE_SIZE>>),
+  Copied(ManuallyDrop<PreparedSlot>),
 }
 
 pub struct WritableSlot<'a> {
-  pointer: Pointer,
   state: CopiedState<'a>,
   latch: BlockLatch<'a>,
-  _token: SharedToken<'a>,
+  _token: MappingToken<'a>,
 }
 impl<'a> WritableSlot<'a> {
-  pub const fn get_pointer(&self) -> Pointer {
-    self.pointer
-  }
-
-  pub fn modify_with<T, F: FnOnce(&mut Page) -> T>(&mut self, f: F) -> T {
-    match &mut self.state {
-      CopiedState::Borrowed {
-        page: _,
-        dirty_blocks,
-        allocator,
-        block_id,
-      } => {
-        let mut page = allocator.allocate();
-        let result = f(&mut page);
-        dirty_blocks.insert(*block_id);
-        self.state = CopiedState::Copied(ManuallyDrop::new(page));
-        result
-      }
-      CopiedState::Copied(shadow) => f(shadow),
+  pub fn get_pointer(&self) -> Pointer {
+    match &self.state {
+      CopiedState::Borrowed { pointer, .. } => *pointer,
+      CopiedState::Copied(slot) => slot.get_pointer(),
     }
   }
-  pub fn copy_from(&mut self, data: &[u8]) {
-    self.modify_with(|page| page.copy_from(data, 0))
+  pub fn as_prepared(&mut self) -> &mut PreparedSlot {
+    if let CopiedState::Borrowed {
+      pointer,
+      page: _,
+      dirty_blocks,
+      allocator,
+      block_id,
+    } = &self.state
+    {
+      let page = allocator.allocate();
+      dirty_blocks.insert(*block_id);
+      self.state =
+        CopiedState::Copied(ManuallyDrop::new(PreparedSlot::new(*pointer, page)));
+    };
+
+    let CopiedState::Copied(slot) = &mut self.state else {
+      unreachable!();
+    };
+    slot
   }
 }
-impl<'a> AsRef<Page> for WritableSlot<'a> {
-  fn as_ref(&self) -> &Page {
+impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
+  fn as_ref(&self) -> &Page<PAGE_SIZE> {
     match &self.state {
       CopiedState::Borrowed { page, .. } => page,
-      CopiedState::Copied(shadow) => shadow,
+      CopiedState::Copied(slot) => slot.as_ref(),
     }
   }
 }
+
 unsafe impl<'a> Send for WritableSlot<'a> {}
 unsafe impl<'a> Sync for WritableSlot<'a> {}
 
@@ -145,6 +151,96 @@ impl<'a> Drop for WritableSlot<'a> {
       CopiedState::Borrowed { .. } => return,
       CopiedState::Copied(shadow) => unsafe { ManuallyDrop::take(shadow) },
     };
-    self.latch.apply(shadow);
+    self.latch.apply(shadow.into_inner());
+  }
+}
+
+pub struct PreparedSlot {
+  pointer: Pointer,
+  page: PageRef<PAGE_SIZE>,
+}
+impl PreparedSlot {
+  const fn new(pointer: Pointer, page: PageRef<PAGE_SIZE>) -> Self {
+    Self { pointer, page }
+  }
+  pub const fn get_pointer(&self) -> Pointer {
+    self.pointer
+  }
+  pub fn into_inner(self) -> PageRef<PAGE_SIZE> {
+    self.page
+  }
+}
+impl AsRef<Page> for PreparedSlot {
+  fn as_ref(&self) -> &Page {
+    &self.page
+  }
+}
+impl AsMut<Page> for PreparedSlot {
+  fn as_mut(&mut self) -> &mut Page {
+    &mut self.page
+  }
+}
+
+pub enum AllocatedSlot<'a> {
+  Hit(WritableSlot<'a>),
+  Temp(TempSlot<'a>),
+}
+impl<'a> AllocatedSlot<'a> {
+  pub const fn new_temp(
+    table: TableHandleRef,
+    page: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    dirty_tables: &'a DirtyTables,
+  ) -> Self {
+    Self::Temp(TempSlot::new(table, page, pointer, dirty_tables))
+  }
+  pub fn finalize(&mut self) -> Result {
+    match self {
+      Self::Hit(_) => Ok(()),
+      Self::Temp(temp) => temp.finalize(),
+    }
+  }
+  pub fn get_pointer(&self) -> Pointer {
+    match self {
+      Self::Hit(slot) => slot.get_pointer(),
+      Self::Temp(slot) => slot.refed.get_pointer(),
+    }
+  }
+
+  pub fn as_prepared(&mut self) -> &mut PreparedSlot {
+    match self {
+      Self::Hit(slot) => slot.as_prepared(),
+      Self::Temp(slot) => &mut slot.refed,
+    }
+  }
+}
+
+pub struct TempSlot<'a> {
+  table: TableHandleRef,
+  refed: PreparedSlot,
+  dirty_tables: &'a DirtyTables,
+}
+impl<'a> TempSlot<'a> {
+  const fn new(
+    table: TableHandleRef,
+    page: PageRef<PAGE_SIZE>,
+    pointer: Pointer,
+    dirty_tables: &'a DirtyTables,
+  ) -> Self {
+    Self {
+      table,
+      refed: PreparedSlot::new(pointer, page),
+      dirty_tables,
+    }
+  }
+  fn finalize(&mut self) -> Result {
+    let static_ref = unsafe { create_static_ref::<Page<PAGE_SIZE>>(self.refed.as_ref()) };
+    self
+      .table
+      .disk()
+      .write_async(self.refed.get_pointer(), static_ref)
+      .wait_flatten()?;
+    self.dirty_tables.mark(&self.table);
+    Ok(())
   }
 }

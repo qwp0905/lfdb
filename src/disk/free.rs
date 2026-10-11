@@ -9,11 +9,6 @@ use crate::utils::{ChunkQueue, ShortenedMutex};
 
 use super::Pointer;
 
-pub enum FreePointer {
-  Reuse(Pointer),
-  Alloc(Pointer),
-}
-
 /**
  * Free page list, reconstructed at startup via a full B-tree scan.
  */
@@ -31,11 +26,11 @@ impl FreeList {
     }
   }
 
-  pub fn alloc(&self) -> FreePointer {
+  pub fn alloc(&self) -> Pointer {
     if let Some(ptr) = self.released.pop() {
-      return FreePointer::Reuse(ptr);
+      return ptr;
     }
-    FreePointer::Alloc(self.file_end.fetch_add(1, Ordering::Relaxed))
+    self.file_end.fetch_add(1, Ordering::Relaxed)
   }
 
   pub fn dealloc(&self, pointer: Pointer) {

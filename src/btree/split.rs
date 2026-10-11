@@ -35,13 +35,13 @@ fn apply_split<Policy: WritablePolicy + Sync>(
     };
 
     let Some((split_node, split_key)) = internal.split_if_needed() else {
-      policy.serialize_and_log(&mut slot, &node, table)?;
+      policy.serialize_and_log(slot.as_prepared(), &node, table)?;
       return Ok(None);
     };
 
     let split_ptr = policy.alloc_and_log(&split_node.into_node(), table)?;
     internal.set_right(&split_key, split_ptr);
-    policy.serialize_and_log(&mut slot, &node, table)?;
+    policy.serialize_and_log(slot.as_prepared(), &node, table)?;
 
     return Ok(Some((split_key, split_ptr)));
   }
@@ -79,7 +79,7 @@ fn update_header<Policy: WritablePolicy + Sync>(
 
   header.set_root(new_root_ptr);
   header.increase_height();
-  policy.serialize_and_log(&mut slot, &header, table)?;
+  policy.serialize_and_log(slot.as_prepared(), &header, table)?;
   Ok(None)
 }
 

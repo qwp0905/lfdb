@@ -11,7 +11,7 @@ use crate::{
     SharedSubscription, ThreadBuilder,
   },
   blob::{BlobId, BlobStorage},
-  cache::{BlockCache, WritableSlot},
+  cache::{BlockCache, PreparedSlot},
   disk::Pointer,
   mvcc::VersionController,
   objects::{
@@ -143,7 +143,7 @@ impl GcWorker {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut WritableSlot,
+    slot: &mut PreparedSlot,
     data: &T,
     table_id: TableId,
   ) -> Result {
@@ -244,7 +244,7 @@ impl GcWorker {
 
       entry.set_versions(new_versions);
       entry.clear_next();
-      self.serialize_and_log(&mut slot, &entry, table_id)?;
+      self.serialize_and_log(slot.as_prepared(), &entry, table_id)?;
     }
 
     Ok(EntryRelease {
@@ -356,7 +356,7 @@ impl GcWorker {
         }
 
         if !targets.is_empty() {
-          self.serialize_and_log(&mut slot, &node, table.get_id())?;
+          self.serialize_and_log(slot.as_prepared(), &node, table.get_id())?;
         }
       };
       for ptr in targets {

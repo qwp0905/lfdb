@@ -71,7 +71,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::WritableSlot,
+    slot: &mut crate::cache::PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -84,7 +84,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<crate::cache::AllocatedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
 
@@ -419,7 +419,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   }
   fn serialize_and_log<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::WritableSlot,
+    slot: &mut crate::cache::PreparedSlot,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -431,7 +431,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::CachedSlot<'_>> {
+  ) -> Result<crate::cache::AllocatedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
 }
