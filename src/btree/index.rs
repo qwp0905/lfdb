@@ -198,10 +198,11 @@ impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
 impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
   pub fn initialize(&self, table: &TableHandleRef) -> Result {
     let root = self.0.alloc_and_log(&BTreeNode::initial_state(), table)?;
-    let mut slot = self.0.alloc_slot(HEADER_POINTER, table)?.for_write();
+    let mut slot = self.0.alloc_slot(HEADER_POINTER, table)?;
     self
       .0
-      .serialize_and_log(&mut slot, &TreeHeader::new(root), table)?;
+      .serialize_and_log(slot.as_prepared(), &TreeHeader::new(root), table)?;
+    slot.finalize()?;
     Ok(())
   }
 

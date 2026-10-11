@@ -132,7 +132,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
       match apply_snapshot_once(policy, leaf, &k, ptr, r, table)? {
         ApplySnapshotOnce::Move(p, r) => {
           if modified {
-            policy.serialize_and_log(&mut slot, &node, table)?;
+            policy.serialize_and_log(slot.as_prepared(), &node, table)?;
           }
           (key, ptr, record) = (k, p, r);
           continue 'outer;
@@ -146,7 +146,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
       };
     }
     if modified {
-      policy.serialize_and_log(&mut slot, &node, table)?;
+      policy.serialize_and_log(slot.as_prepared(), &node, table)?;
     }
     break 'outer;
   }
@@ -178,7 +178,7 @@ fn apply_snapshot_at_entry<Policy: WritablePolicy + Sync>(
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     if entry.is_available(&record) {
       entry.attach_back(record);
-      policy.serialize_and_log(&mut slot, &entry, table)?;
+      policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
       return Ok(());
     }
 
@@ -189,7 +189,7 @@ fn apply_snapshot_at_entry<Policy: WritablePolicy + Sync>(
 
     let new_entry = DataEntry::init(record, None);
     entry.set_next(policy.alloc_and_log(&new_entry, table)?);
-    policy.serialize_and_log(&mut slot, &entry, table)?;
+    policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
     return Ok(());
   }
 }

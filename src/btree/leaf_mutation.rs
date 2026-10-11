@@ -36,13 +36,13 @@ fn copy_old_record<Policy: WritablePolicy + Sync>(
   let mut entry = slot.as_ref().deserialize::<DataEntry>()?;
   if entry.is_available(&old) {
     entry.attach_front(old);
-    policy.serialize_and_log(&mut slot, &entry, table)?;
+    policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
     return Ok(());
   }
 
   let new_entry_ptr = policy.alloc_and_log(&entry, table)?;
   let new_entry = DataEntry::init(old, Some(new_entry_ptr));
-  policy.serialize_and_log(&mut slot, &new_entry, table)?;
+  policy.serialize_and_log(slot.as_prepared(), &new_entry, table)?;
   Ok(())
 }
 
@@ -176,7 +176,7 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
         }
       };
     }
-    policy.serialize_and_log(&mut slot, &node, table)?;
+    policy.serialize_and_log(slot.as_prepared(), &node, table)?;
     return Ok((splitted, leaf_ptr));
   }
 }
@@ -468,7 +468,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   };
   let Some(others) = others else {
     if let MaybeOwned::Owned(leaf) = maybe_owned {
-      policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
+      policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
     }
     return Ok(AppendOrReserve::Done {
       copy_old,
@@ -492,7 +492,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       }
       TryAppendAtLeaf::Conflict(i, op) => {
         if modified {
-          policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
+          policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
         }
         return Ok(AppendOrReserve::Conflict {
           owner: i,
@@ -511,7 +511,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
     };
   }
   if modified {
-    policy.serialize_and_log(&mut slot, &leaf.into_node(), table)?;
+    policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
   }
   Ok(AppendOrReserve::Done {
     copy_old,
