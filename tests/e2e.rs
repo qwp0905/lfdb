@@ -37,7 +37,7 @@ fn default_options(dir: &TempDir) -> EngineBuilder {
     .wal_file_size(8 << 20)
     .wal_buffer_size(64 << 10)
     .block_cache_memory_capacity(32 << 20)
-    .block_cache_shard_count(1 << 2)
+    .block_cache_shard_count(1)
     .block_cache_buffer_size(32 << 10)
     .gc_batch_size(10240)
     .compaction_batch_size(10_000)
