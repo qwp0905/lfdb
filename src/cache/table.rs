@@ -51,10 +51,8 @@ pub struct EvictionGuard<'a> {
   evicted: Option<(Key, u64)>,
   block_id: BlockId,
   token: ManuallyDrop<ExclusiveToken<'a>>,
-  shard: &'a Mutex<Shard>,
-  parker: &'a ThreadParker,
-  new_pointer: Key,
-  new_pointer_hash: u64,
+  selected: SelectedShard<'a>,
+  new_key: Key,
   committed: bool,
   hasher: &'a RandomState,
 }
@@ -64,20 +62,16 @@ impl<'a> EvictionGuard<'a> {
     evicted: Option<(Key, u64)>,
     block_id: usize,
     token: ExclusiveToken<'a>,
-    shard: &'a Mutex<Shard>,
-    parker: &'a ThreadParker,
-    new_pointer: Key,
-    new_pointer_hash: u64,
+    selected: SelectedShard<'a>,
+    new_key: Key,
     hasher: &'a RandomState,
   ) -> Self {
     Self {
       evicted,
       block_id,
       token: ManuallyDrop::new(token),
-      shard,
-      parker,
-      new_pointer,
-      new_pointer_hash,
+      selected,
+      new_key,
       committed: false,
       hasher,
     }
@@ -98,12 +92,12 @@ impl<'a> EvictionGuard<'a> {
     debug_assert!(!self.committed);
     self.committed = true;
     let token = unsafe { ManuallyDrop::take(&mut self.token) }.downgrade();
-    MappingToken::new(token, self.parker)
+    MappingToken::new(token, self.selected.parker)
   }
 }
 impl<'a> Drop for EvictionGuard<'a> {
   fn drop(&mut self) {
-    let mut guard = self.shard.l();
+    let mut guard = self.selected.shard.l();
     if let Some((k, h)) = self.evicted {
       guard.eviction.remove(h, &k, self.hasher);
     }
@@ -113,11 +107,11 @@ impl<'a> Drop for EvictionGuard<'a> {
       guard.aborted.push((self.block_id, self.evicted));
       guard
         .node
-        .remove(&self.new_pointer, self.new_pointer_hash, self.hasher)
+        .remove(&self.new_key, self.selected.hash, self.hasher)
         .unwrap_or_else(|| unreachable!());
       // No ownership claimed — block is immediately available for eviction.
       unsafe { ManuallyDrop::drop(&mut self.token) };
-      self.parker.wake_once();
+      self.selected.parker.wake_once();
     }
   }
 }
@@ -127,6 +121,7 @@ pub enum Acquired<'a> {
   Evicted(EvictionGuard<'a>),
 }
 
+#[derive(Clone, Copy)]
 struct SelectedShard<'a> {
   shard: &'a Mutex<Shard>,
   parker: &'a ThreadParker,
@@ -215,7 +210,7 @@ impl MappingTable {
 
   fn try_acquire_once<'a>(
     &'a self,
-    selected: &SelectedShard<'a>,
+    selected: SelectedShard<'a>,
     key: Key,
   ) -> Option<Acquired<'a>> {
     let hasher = &self.hasher;
@@ -268,7 +263,7 @@ impl MappingTable {
     let selected = self.select_shard(key);
     let backoff = Backoff::new();
     while !backoff.is_completed() {
-      if let Some(acquired) = self.try_acquire_once(&selected, key) {
+      if let Some(acquired) = self.try_acquire_once(selected, key) {
         return Some(acquired);
       };
       backoff.snooze();
@@ -289,14 +284,14 @@ impl MappingTable {
     let backoff = Backoff::new();
     loop {
       while !backoff.is_completed() {
-        if let Some(acquired) = self.try_acquire_once(&selected, key) {
+        if let Some(acquired) = self.try_acquire_once(selected, key) {
           return acquired;
         };
         backoff.snooze();
       }
       if let Some(acquired) = selected
         .parker
-        .park_or_cancel(|| self.try_acquire_once(&selected, key))
+        .park_or_cancel(|| self.try_acquire_once(selected, key))
       {
         return acquired;
       }
@@ -309,7 +304,7 @@ impl MappingTable {
     mut evicted: Evicted<Key, BlockId, ExclusiveToken<'a>>,
     key: Key,
     mut guard: MutexGuard<'a, Shard>,
-    selected: &SelectedShard<'a>,
+    selected: SelectedShard<'a>,
   ) -> Option<EvictionGuard<'a>> {
     let toward = evicted.toward();
     if let Some((evicted, bid, token, evicted_hash)) = evicted.take_evicted() {
@@ -326,10 +321,8 @@ impl MappingTable {
         Some((evicted, evicted_hash)),
         bid,
         token,
-        selected.shard,
-        selected.parker,
+        selected,
         key,
-        selected.hash,
         &self.hasher,
       ));
     }
@@ -353,10 +346,8 @@ impl MappingTable {
         None,
         bid,
         token,
-        selected.shard,
-        selected.parker,
+        selected,
         key,
-        selected.hash,
         &self.hasher,
       ));
     };
@@ -369,10 +360,8 @@ impl MappingTable {
         Some((evicted, evicted_hash)),
         bid,
         token,
-        selected.shard,
-        selected.parker,
+        selected,
         key,
-        selected.hash,
         &self.hasher,
       ));
     }
