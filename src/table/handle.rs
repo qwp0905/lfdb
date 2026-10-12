@@ -1,4 +1,4 @@
-use std::{mem::forget, ops::Deref, sync::Arc};
+use std::{mem::forget, sync::Arc};
 
 use crossbeam_skiplist::{map::Entry, SkipMap};
 
@@ -104,12 +104,8 @@ impl TableHandle {
   pub fn is_reserved(&self, key: &[u8]) -> bool {
     self.conflict_set.contains_key(key)
   }
-  pub fn try_pin(self: &Arc<Self>) -> Option<PinnedHandle<'_>> {
-    let token = self.pin.try_shared()?;
-    Some(PinnedHandle {
-      handle: self,
-      _token: token,
-    })
+  pub fn try_pin(self: &Arc<Self>) -> Option<SharedToken<'_>> {
+    self.pin.try_shared()
   }
 }
 
@@ -117,28 +113,5 @@ pub struct ReserveGuard<'a>(Entry<'a, Vec<u8>, TxId>);
 impl<'a> Drop for ReserveGuard<'a> {
   fn drop(&mut self) {
     self.0.remove();
-  }
-}
-
-/**
- * Guarded table handle.
- */
-pub struct PinnedHandle<'a> {
-  handle: &'a TableHandleRef,
-  _token: SharedToken<'a>,
-}
-impl<'a> PinnedHandle<'a> {
-  #[inline]
-  pub const fn handle(&self) -> &TableHandleRef {
-    self.handle
-  }
-}
-
-impl<'a> Deref for PinnedHandle<'a> {
-  type Target = TableHandle;
-
-  #[inline]
-  fn deref(&self) -> &Self::Target {
-    self.handle
   }
 }

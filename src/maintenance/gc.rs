@@ -388,25 +388,25 @@ impl GcWorker {
         return Ok(());
       };
 
-      let Some(table) = task.table.try_pin() else {
+      let Some(token) = task.table.try_pin() else {
         continue;
       };
 
       let mut inner = match task.inner {
         TaskType::Uninit => {
-          let ptr = self.get_predecessor(table.handle())?;
+          let ptr = self.get_predecessor(&task.table)?;
           task.inner = TaskType::CheckLeaf(CheckLeafTask::new(ptr));
-          drop(table);
+          drop(token);
           current.tasks.push(task);
           continue;
         }
         TaskType::CheckEntry(ptr) => {
-          let result = self.check_and_release_entry(ptr, table.handle())?;
+          let result = self.check_and_release_entry(ptr, &task.table)?;
           current.apply_release(result);
           continue;
         }
         TaskType::ReleaseEntry(ptr) => {
-          self.release_entry(ptr, table.handle())?;
+          self.release_entry(ptr, &task.table)?;
           continue;
         }
         TaskType::CheckLeaf(inner) => inner,
@@ -417,7 +417,7 @@ impl GcWorker {
         let min_version = self.version_controller.min_version();
         let slot = self
           .block_cache
-          .read(inner.pointer, table.handle())?
+          .read(inner.pointer, &task.table)?
           .for_read();
         let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
         let mut iter = node.get_entries();
@@ -428,7 +428,7 @@ impl GcWorker {
           if self.version_controller.is_aborted(e.record.owner) {
             inner.dead += 1;
             if let Some(p) = e.next {
-              let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
+              let task = GcTask::new(TaskType::CheckEntry(p), task.table.clone());
               current.tasks.push(task);
             }
             continue;
@@ -450,7 +450,7 @@ impl GcWorker {
             continue;
           }
 
-          let task = GcTask::new(TaskType::CheckEntry(p), table.handle().clone());
+          let task = GcTask::new(TaskType::CheckEntry(p), task.table.clone());
           current.tasks.push(task);
         }
 
@@ -458,7 +458,7 @@ impl GcWorker {
       };
 
       self.release_leaf(
-        table.handle(),
+        &task.table,
         release_candidates,
         inner.pointer,
         &mut current.tasks,
@@ -467,22 +467,22 @@ impl GcWorker {
       if let Some(p) = has_next {
         inner.pointer = p;
         task.inner = TaskType::CheckLeaf(inner);
-        drop(table);
+        drop(token);
         current.tasks.push(task);
         continue;
       }
 
-      if table.get_id() == self.mapper.meta_table_id() {
+      if task.table.get_id() == self.mapper.meta_table_id() {
         continue;
       }
-      if table.free().file_len() <= compact_min_size {
+      if task.table.free().file_len() <= compact_min_size {
         continue;
       }
       if inner.dead as f64 / inner.total as f64 <= compact_threshold {
         continue;
       }
 
-      drop(table);
+      drop(token);
       event_bus.publish(CompactionTriggered::new(task.table));
     }
 
