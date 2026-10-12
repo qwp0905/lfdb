@@ -67,6 +67,12 @@ impl Close for IntervalWorkThread {
   }
 }
 
+impl Drop for IntervalWorkThread {
+  fn drop(&mut self) {
+    self.close();
+  }
+}
+
 #[cfg(test)]
 #[path = "tests/interval.rs"]
 mod tests;

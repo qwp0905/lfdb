@@ -415,6 +415,11 @@ impl EventBus {
     }
   }
 }
+impl Drop for EventBus {
+  fn drop(&mut self) {
+    self.close();
+  }
+}
 
 #[cfg(test)]
 #[path = "tests/event_bus.rs"]

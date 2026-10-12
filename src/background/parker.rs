@@ -138,9 +138,7 @@ pub struct ThreadParker {
 impl ThreadParker {
   pub fn new() -> Self {
     let id = PARKER_ID.fetch_add(1, Ordering::Relaxed);
-    if id > MAX_PARKER_ID {
-      panic!("parker id overflowed.");
-    }
+    assert!(id <= MAX_PARKER_ID, "parker id overflowed.");
     Self {
       queue: SegQueue::new(),
       id,

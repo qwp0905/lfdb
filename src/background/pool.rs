@@ -80,6 +80,7 @@ impl<A> Core<A> {
     while let Some(ctx) = local.pop() {
       self.global.push(ctx);
     }
+    self.parker.wake_all();
   }
 
   fn steal_from_other(&self, id: usize) -> Steal<A> {
@@ -298,6 +299,11 @@ impl<T> ForkJoin<T> {
 
   fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
     self.pending.drain(..).map(|recv| recv.wait().unwrap())
+  }
+}
+impl Drop for ThreadPool {
+  fn drop(&mut self) {
+    self.close();
   }
 }
 
