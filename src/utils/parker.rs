@@ -127,7 +127,7 @@ mod futex {
       None
     }
 
-    pub fn wake_once(&self) {
+    pub fn wake_one(&self) {
       self.generation.fetch_add(1, Ordering::Release);
       fence(Ordering::SeqCst);
 
