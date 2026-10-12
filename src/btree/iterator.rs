@@ -3,16 +3,16 @@ use std::{collections::VecDeque, ops::Bound};
 use crate::{
   cache::{ReadonlySlot, VecRef},
   disk::Pointer,
-  objects::{
-    BTreeNodeView, DataEntryView, RecordDataView, StaticKey, TreeHeader,
-    VersionRecordView, HEADER_POINTER,
-  },
+  objects::{BTreeNodeView, RecordDataView, StaticKey, VersionRecordView},
   table::TableHandleRef,
   wal::TxId,
   Result,
 };
 
-use super::{KVSnapshot, MergeSortable, ReadonlyPolicy, ScannedItem, SnapshotValue};
+use super::{
+  find_record_in_entry, read_header, KVSnapshot, MergeSortable, ReadonlyPolicy,
+  ScannedItem, SnapshotValue,
+};
 
 struct BufferedRecord {
   data: SnapshotValue,
@@ -26,6 +26,17 @@ impl BufferedRecord {
       owner,
       version,
     }
+  }
+
+  fn find<Policy: ReadonlyPolicy>(
+    policy: Policy,
+    ptr: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<Option<Option<Self>>> {
+    let Some((slot, record)) = find_record_in_entry(&policy, ptr, table)? else {
+      return Ok(None);
+    };
+    Ok(Some(Self::from(&slot, record)))
   }
 
   fn from(slot: &ReadonlySlot, record: VersionRecordView) -> Option<Self> {
@@ -88,27 +99,6 @@ impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
   }
 }
 
-fn find_in_entry<Policy: ReadonlyPolicy>(
-  policy: Policy,
-  table: &TableHandleRef,
-  ptr: Pointer,
-) -> Result<Option<Option<BufferedRecord>>> {
-  let mut next = Some(ptr);
-
-  while let Some(ptr) = next.take() {
-    let slot = policy.fetch_slot(ptr, table)?.for_read();
-    let entry: DataEntryView = slot.as_ref().view()?;
-    if let Some(record) =
-      entry.find(|record| policy.is_visible(record.owner, record.version))?
-    {
-      return Ok(Some(BufferedRecord::from(&slot, record)));
-    }
-
-    next = entry.get_next();
-  }
-
-  Ok(None)
-}
 /**
  * Iterates the visible key/value stream of a B-tree.
  *
@@ -134,13 +124,7 @@ where
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<Self> {
-    let mut ptr = policy
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
+    let mut ptr = read_header(&policy, table)?.get_root();
     let mut buffered = VecDeque::new();
 
     loop {
@@ -163,7 +147,7 @@ where
             }
 
             let Some(p) = e.next else { continue };
-            if let Some(found) = find_in_entry(&policy, table, p)? {
+            if let Some(found) = BufferedRecord::find(&policy, p, table)? {
               buffered.push_back((VecRef::refed(slot.clone(), e.range), found));
             };
           }
@@ -187,7 +171,7 @@ where
   }
 
   fn find_value(&self, ptr: Pointer) -> Result<Option<Option<BufferedRecord>>> {
-    find_in_entry(&self.policy, &self.table, ptr)
+    BufferedRecord::find(&self.policy, ptr, &self.table)
   }
 
   fn fill_up(&mut self) -> Result {
@@ -284,13 +268,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
   ) -> Result<Self> {
-    let ptr = policy
-      .fetch_slot(HEADER_POINTER, table)?
-      .for_read()
-      .as_ref()
-      .deserialize::<TreeHeader>()?
-      .get_root();
-
+    let ptr = read_header(&policy, table)?.get_root();
     let mut stack = Vec::new();
     let mut buffered = Vec::new();
     let (end, closed) =
@@ -364,7 +342,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
             }
 
             let Some(p) = e.next else { continue };
-            if let Some(found) = find_in_entry(policy, table, p)? {
+            if let Some(found) = BufferedRecord::find(policy, p, table)? {
               buffered.push((VecRef::refed(slot.clone(), e.range), found));
             };
           }
