@@ -36,6 +36,3 @@ pub use lifetime::*;
 
 mod mpsc;
 pub use mpsc::*;
-
-mod parker;
-pub use parker::*;

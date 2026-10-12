@@ -8,11 +8,10 @@ use crossbeam::utils::Backoff;
 
 use super::{CacheNode, Evicted, GetOrEvicted, ShrinkSet};
 use crate::{
+  background::ThreadParker,
   disk::Pointer,
   table::TableId,
-  utils::{
-    ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex, ThreadParker,
-  },
+  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
 };
 
 type Key = (TableId, Pointer);
