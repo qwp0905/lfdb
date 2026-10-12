@@ -48,6 +48,9 @@ mod fallback {
       {
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
+        if state.waiters == 0 {
+          return;
+        }
       }
       self.cvar.notify_one();
     }
@@ -56,6 +59,9 @@ mod fallback {
       {
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
+        if state.waiters == 0 {
+          return;
+        }
       }
       self.cvar.notify_all();
     }
