@@ -7,8 +7,7 @@ use std::{
 };
 
 use crate::{
-  background::OnceParker,
-  utils::{OffsetBitmap, SBox, ShortenedRwLock},
+  utils::{OffsetBitmap, OnceParker, SBox, ShortenedRwLock},
   wal::{AtomicTxId, TxId},
 };
 
