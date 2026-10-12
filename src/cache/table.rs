@@ -53,7 +53,6 @@ pub struct EvictionGuard<'a> {
   token: ManuallyDrop<ExclusiveToken<'a>>,
   selected: SelectedShard<'a>,
   new_key: Key,
-  committed: bool,
   hasher: &'a RandomState,
 }
 
@@ -72,7 +71,6 @@ impl<'a> EvictionGuard<'a> {
       token: ManuallyDrop::new(token),
       selected,
       new_key,
-      committed: false,
       hasher,
     }
   }
@@ -89,10 +87,16 @@ impl<'a> EvictionGuard<'a> {
    * the caller can continue with read access while other readers are allowed in.
    */
   pub fn commit(mut self) -> MappingToken<'a> {
-    debug_assert!(!self.committed);
-    self.committed = true;
     let token = unsafe { ManuallyDrop::take(&mut self.token) }.downgrade();
-    MappingToken::new(token, self.selected.parker)
+    {
+      let mut guard = self.selected.shard.l();
+      if let Some((k, h)) = self.evicted {
+        guard.eviction.remove(h, &k, self.hasher);
+      }
+    };
+    let parker = self.selected.parker;
+    let _ = ManuallyDrop::new(self);
+    MappingToken::new(token, parker)
   }
 }
 impl<'a> Drop for EvictionGuard<'a> {
@@ -102,17 +106,15 @@ impl<'a> Drop for EvictionGuard<'a> {
       guard.eviction.remove(h, &k, self.hasher);
     }
 
-    if !self.committed {
-      // rollback
-      guard.aborted.push((self.block_id, self.evicted));
-      guard
-        .node
-        .remove(&self.new_key, self.selected.hash, self.hasher)
-        .unwrap_or_else(|| unreachable!());
-      // No ownership claimed — block is immediately available for eviction.
-      unsafe { ManuallyDrop::drop(&mut self.token) };
-      self.selected.parker.wake_once();
-    }
+    // rollback
+    guard.aborted.push((self.block_id, self.evicted));
+    guard
+      .node
+      .remove(&self.new_key, self.selected.hash, self.hasher)
+      .unwrap_or_else(|| unreachable!());
+    // No ownership claimed — block is immediately available for eviction.
+    unsafe { ManuallyDrop::drop(&mut self.token) };
+    self.selected.parker.wake_once();
   }
 }
 
