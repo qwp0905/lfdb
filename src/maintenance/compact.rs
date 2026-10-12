@@ -518,13 +518,13 @@ impl CompactionWorker {
       return Ok(());
     }
 
-    let (Some(old), Some(new)) = (cycle.old.try_pin(), cycle.new.try_pin()) else {
+    let (Some(_t_old), Some(_t_new)) = (cycle.old.try_pin(), cycle.new.try_pin()) else {
       return Ok(());
     };
 
     let mut snapshotter = match cycle.snapshotter.take() {
       Some(v) => v,
-      None => self.old_index.snapshot(old.handle())?,
+      None => self.old_index.snapshot(&cycle.old)?,
     };
 
     const CAP: usize = 1000;
@@ -533,20 +533,21 @@ impl CompactionWorker {
       if bulk.len() >= CAP {
         let bulk = replace(&mut bulk, Vec::with_capacity(CAP));
         let _guard = cycle.new.free().protect();
-        self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
+        self.new_index.apply_snapshot_bulk(bulk, &cycle.new)?;
       }
       bulk.push(snap);
     }
 
     let guard = cycle.new.free().protect();
-    self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
+    self.new_index.apply_snapshot_bulk(bulk, &cycle.new)?;
     drop(guard);
     self.remove_compaction(&cycle.metadata)?;
     Ok(())
   }
 
   fn execute(&self, current: &mut CompactionCycle, batch_size: usize) -> Result<bool> {
-    let (Some(old), Some(new)) = (current.old.try_pin(), current.new.try_pin()) else {
+    let (Some(_t_old), Some(_t_new)) = (current.old.try_pin(), current.new.try_pin())
+    else {
       return Ok(true);
     };
 
@@ -555,7 +556,7 @@ impl CompactionWorker {
         "table {} compaction start to create snapshot.",
         current.metadata.get_name()
       );
-      current.snapshotter = Some(self.old_index.snapshot(old.handle())?);
+      current.snapshotter = Some(self.old_index.snapshot(&current.old)?);
       return Ok(false);
     };
 
@@ -568,7 +569,7 @@ impl CompactionWorker {
         current.metadata.get_name()
       );
       self.event_bus.publish(DropTableCommitted::new(
-        old.handle().clone(),
+        current.old.clone(),
         owner,
         version,
       ));
@@ -589,7 +590,7 @@ impl CompactionWorker {
     }
 
     let _guard = current.new.free().protect();
-    self.new_index.apply_snapshot_bulk(bulk, new.handle())?;
+    self.new_index.apply_snapshot_bulk(bulk, &current.new)?;
     Ok(false)
   }
 
