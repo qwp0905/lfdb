@@ -4,8 +4,8 @@ use crate::{
   cache::VecRef,
   disk::Pointer,
   objects::{
-    BTreeNode, BTreeNodeView, DataEntryView, NodeFindResult, RecordDataView, StaticKey,
-    StaticKeyRef, TreeHeader, HEADER_POINTER,
+    BTreeNode, BTreeNodeView, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
+    HEADER_POINTER,
   },
   table::TableHandleRef,
   Result,
@@ -13,9 +13,10 @@ use crate::{
 
 use super::{
   append_or_reserve_at_leaf, copy_and_update, drain_snapshot_once, fill_stack_from,
-  propagate_split, read_header, resolve_conflict, AppendOrReserve, BTreeIter,
-  BTreeRevIter, BulkExecutor, BulkOp, CreatablePolicy, KVSnapshot, KeyPair,
-  ReadonlyPolicy, Snapshotter, WritablePolicy, WriteOp,
+  find_record_in_entry, find_record_in_tree, propagate_split, read_header,
+  resolve_conflict, AppendOrReserve, BTreeIter, BTreeRevIter, BulkExecutor, BulkOp,
+  CreatablePolicy, FindRecordInTree, KVSnapshot, KeyPair, ReadonlyPolicy, Snapshotter,
+  WritablePolicy, WriteOp,
 };
 
 /**
@@ -34,56 +35,32 @@ impl<Policy> BTreeIndex<Policy> {
 }
 impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
   pub fn get(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<GetResult> {
-    let mut ptr = read_header(&self.0, table)?.get_root();
-    loop {
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
-        BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(GetResult::Absent),
-          NodeFindResult::Move(next) => ptr = next,
-          NodeFindResult::Found(_, record, entry_ptr) => {
-            if !self.0.is_visible(record.owner, record.version) {
-              match entry_ptr {
-                Some(p) => break ptr = p,
-                None => return Ok(GetResult::Deleted),
-              }
-            }
-            return Ok(match record.data {
-              RecordDataView::Data(range) => {
-                GetResult::Present(VecRef::refed(slot, range))
-              }
-              RecordDataView::Blob(id, offset, len) => {
-                GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
-              }
-              RecordDataView::Tombstone => GetResult::Deleted,
-            });
-          }
-        },
-      }
-    }
-
-    let mut next = Some(ptr);
-    while let Some(ptr) = next.take() {
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      let entry: DataEntryView = slot.as_ref().view()?;
-
-      if let Some(record) =
-        entry.find(|record| self.0.is_visible(record.owner, record.version))?
-      {
+    let ptr = match find_record_in_tree(&self.0, key, table)? {
+      FindRecordInTree::NotFound => return Ok(GetResult::Absent),
+      FindRecordInTree::Found(slot, record) => {
         return Ok(match record.data {
           RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
           RecordDataView::Blob(id, offset, len) => {
             GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
           }
           RecordDataView::Tombstone => GetResult::Deleted,
-        });
+        })
       }
+      FindRecordInTree::Invisible(Some(ptr)) => ptr,
+      FindRecordInTree::Invisible(None) => return Ok(GetResult::Absent),
+    };
 
-      next = entry.get_next();
-    }
+    let Some((slot, record)) = find_record_in_entry(&self.0, ptr, table)? else {
+      return Ok(GetResult::Absent);
+    };
 
-    Ok(GetResult::Absent)
+    Ok(match record.data {
+      RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
+      RecordDataView::Blob(id, offset, len) => {
+        GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
+      }
+      RecordDataView::Tombstone => GetResult::Deleted,
+    })
   }
 
   pub fn lookup(
@@ -91,47 +68,24 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     key: StaticKeyRef,
     table: &TableHandleRef,
   ) -> Result<LookupResult> {
-    let mut ptr = read_header(&self.0, table)?.get_root();
-    loop {
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      match slot.as_ref().view::<BTreeNodeView>()? {
-        BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
-        BTreeNodeView::Leaf(node) => match node.find(key)? {
-          NodeFindResult::NotFound(_) => return Ok(LookupResult::Absent),
-          NodeFindResult::Move(next) => ptr = next,
-          NodeFindResult::Found(_, record, entry_ptr) => {
-            if self.0.is_visible(record.owner, record.version) {
-              if record.data.is_tombstone() {
-                return Ok(LookupResult::Deleted);
-              }
-              return Ok(LookupResult::Present);
-            }
-            match entry_ptr {
-              Some(p) => break ptr = p,
-              None => return Ok(LookupResult::Absent),
-            }
-          }
-        },
+    let ptr = match find_record_in_tree(&self.0, key, table)? {
+      FindRecordInTree::NotFound => return Ok(LookupResult::Absent),
+      FindRecordInTree::Found(_, record) if record.data.is_tombstone() => {
+        return Ok(LookupResult::Deleted)
       }
+      FindRecordInTree::Found(_, _) => return Ok(LookupResult::Present),
+      FindRecordInTree::Invisible(Some(ptr)) => ptr,
+      FindRecordInTree::Invisible(None) => return Ok(LookupResult::Absent),
+    };
+
+    let Some((_, record)) = find_record_in_entry(&self.0, ptr, table)? else {
+      return Ok(LookupResult::Absent);
+    };
+
+    if record.data.is_tombstone() {
+      return Ok(LookupResult::Deleted);
     }
-
-    let mut next = Some(ptr);
-    while let Some(ptr) = next.take() {
-      let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      let entry: DataEntryView = slot.as_ref().view()?;
-      if let Some(record) =
-        entry.find(|record| self.0.is_visible(record.owner, record.version))?
-      {
-        if record.data.is_tombstone() {
-          return Ok(LookupResult::Deleted);
-        }
-        return Ok(LookupResult::Present);
-      };
-
-      next = entry.get_next();
-    }
-
-    Ok(LookupResult::Absent)
+    Ok(LookupResult::Present)
   }
 
   pub fn contains(&self, key: StaticKeyRef, table: &TableHandleRef) -> Result<bool> {
