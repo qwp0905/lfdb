@@ -37,12 +37,12 @@ where
  * usage pattern: keep one value prepared ahead of demand and return it when a
  * request arrives.
  */
-pub struct PreloadThread<T> {
+pub struct PreloadThread<T: Send> {
   queue: Arc<MpscQueue<ExecuteOnlyContext<(), T>>>,
   waker: Thread,
   slot: ThreadSlot,
 }
-impl<T> PreloadThread<T> {
+impl<T: Send> PreloadThread<T> {
   pub fn new<S: ToString + Send + 'static>(
     name: S,
     size: usize,
@@ -84,5 +84,11 @@ impl<T: Send> Execute<(), T> for PreloadThread<T> {
     let (o, f) = oneshot();
     self.register(ExecuteOnlyContext::Work((), f));
     o
+  }
+}
+
+impl<T: Send> Drop for PreloadThread<T> {
+  fn drop(&mut self) {
+    self.close();
   }
 }
