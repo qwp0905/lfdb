@@ -5,9 +5,10 @@ use crossbeam::{
   utils::Backoff,
 };
 
+use crate::utils::ThreadParker;
+
 use super::{
-  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadParker, ThreadSlot,
-  UnwindSpawner,
+  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadSlot, UnwindSpawner,
 };
 
 enum Context {
