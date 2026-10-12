@@ -261,3 +261,8 @@ impl TimeoutThread {
     handle.join().unwrap();
   }
 }
+impl Drop for TimeoutThread {
+  fn drop(&mut self) {
+    self.close();
+  }
+}

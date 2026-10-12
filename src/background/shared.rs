@@ -26,11 +26,11 @@ impl<T, R> Inner<T, R> {
     }
   }
 }
-pub struct SharedWorkThread<T, R> {
+pub struct SharedWorkThread<T: Send + 'static, R: Send + 'static> {
   inner: Arc<Inner<T, R>>,
   slots: Box<[ThreadSlot]>,
 }
-impl<T, R> SharedWorkThread<T, R> {
+impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
   const fn worker_loop(
     inner: Arc<Inner<T, R>>,
     handler: SharedFn<'static, T, R>,
@@ -121,5 +121,10 @@ impl<T: Send + 'static, R: Send + 'static> Close for SharedWorkThread<T, R> {
     for handle in threads {
       handle.join().unwrap();
     }
+  }
+}
+impl<T: Send + 'static, R: Send + 'static> Drop for SharedWorkThread<T, R> {
+  fn drop(&mut self) {
+    self.close();
   }
 }
