@@ -13,9 +13,6 @@ pub use thread::*;
 mod interval;
 pub use interval::*;
 
-mod parker;
-pub use parker::*;
-
 mod preload;
 pub use preload::*;
 
