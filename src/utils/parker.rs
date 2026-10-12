@@ -58,7 +58,7 @@ mod fallback {
     pub fn wake_all(&self) {
       {
         let mut state = self.state.lock().unwrap();
-        state.generation += 1;
+        state.generation = state.generation.wrapping_add(1);
         if state.waiters == 0 {
           return;
         }

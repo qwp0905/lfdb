@@ -23,7 +23,7 @@ impl Semaphore {
     }
     if self
       .permits
-      .compare_exchange_weak(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
+      .compare_exchange(n, n - 1, Ordering::Acquire, Ordering::Relaxed)
       .is_err()
     {
       return false;
