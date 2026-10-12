@@ -2,10 +2,9 @@ use std::{sync::Arc, thread::Builder};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use crate::utils::ThreadParker;
-
 use super::{
-  oneshot, Close, Oneshot, OneshotFulfill, SharedFn, ThreadSlot, UnwindSpawner,
+  oneshot, Close, Oneshot, OneshotFulfill, SharedFn, ThreadParker, ThreadSlot,
+  UnwindSpawner,
 };
 
 enum Context<T, R> {
