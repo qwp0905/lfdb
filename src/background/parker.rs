@@ -79,7 +79,7 @@ impl Waker {
     }
   }
 
-  fn try_park(&self, id: ParkerId) {
+  fn park_by(&self, id: ParkerId) {
     let queued = cast_from(id, STATE_QUEUED);
     let parked = cast_from(id, STATE_PARKED);
     if self
@@ -101,13 +101,42 @@ impl Waker {
     );
   }
 
-  fn try_cancel(&self, id: ParkerId) -> bool {
+  fn cancel_by(&self, id: ParkerId) -> bool {
     let queued = cast_from(id, STATE_QUEUED);
     let canceled = cast_from(id, STATE_CANCELED);
     self
       .state
       .compare_exchange(queued, canceled, Ordering::AcqRel, Ordering::Acquire)
       .is_ok()
+  }
+
+  fn wake_by(&self, parker_id: ParkerId) -> bool {
+    let mut current = self.state.load(Ordering::Acquire);
+    loop {
+      let (id, state) = cast_to(current);
+      if id != parker_id {
+        return false;
+      }
+      if let Err(err) = self.state.compare_exchange_weak(
+        current,
+        cast_from(id, STATE_UNQUEUED),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      ) {
+        current = err;
+        continue;
+      }
+
+      match state {
+        STATE_UNQUEUED | STATE_CANCELED => return false,
+        STATE_QUEUED => return true,
+        STATE_PARKED => {
+          self.thread.unpark();
+          return true;
+        }
+        _ => unreachable!(),
+      };
+    }
   }
 }
 
@@ -156,42 +185,13 @@ impl ThreadParker {
 
   pub fn wake_all(&self) {
     while let Some(waker) = self.queue.pop() {
-      self.wake_one(&waker);
-    }
-  }
-
-  fn wake_one(&self, waker: &Waker) -> bool {
-    let mut current = waker.state.load(Ordering::Acquire);
-    loop {
-      let (id, state) = cast_to(current);
-      if id != self.id {
-        return false;
-      }
-      if let Err(err) = waker.state.compare_exchange_weak(
-        current,
-        cast_from(id, STATE_UNQUEUED),
-        Ordering::AcqRel,
-        Ordering::Acquire,
-      ) {
-        current = err;
-        continue;
-      }
-
-      match state {
-        STATE_UNQUEUED | STATE_CANCELED => return false,
-        STATE_QUEUED => return true,
-        STATE_PARKED => {
-          waker.thread.unpark();
-          return true;
-        }
-        _ => unreachable!(),
-      };
+      waker.wake_by(self.id);
     }
   }
 
   pub fn wake_once(&self) {
     while let Some(waker) = self.queue.pop() {
-      if self.wake_one(&waker) {
+      if waker.wake_by(self.id) {
         return;
       }
     }
@@ -201,10 +201,10 @@ impl ThreadParker {
       let local = v.get_or_init(Default::default);
       self.try_enqueue(&local.waker);
       let Some(next) = has_next() else {
-        local.waker.try_park(self.id);
+        local.waker.park_by(self.id);
         return None;
       };
-      if !local.waker.try_cancel(self.id) {
+      if !local.waker.cancel_by(self.id) {
         self.wake_once();
       }
       Some(next)
