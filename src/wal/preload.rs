@@ -4,7 +4,7 @@ use crossbeam::queue::SegQueue;
 
 use super::WALSegment;
 use crate::{
-  background::{Close, Execute, PreloadThread, ThreadBuilder},
+  background::{PreloadThread, ThreadBuilder},
   disk::{IOPool, Pointer},
   utils::ToBox,
   Result,

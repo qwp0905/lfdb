@@ -1,15 +1,21 @@
-use crate::{background::SingleFn, utils::MpscQueue};
-
-use super::{oneshot, Close, Execute, ExecuteOnlyContext, ThreadSlot, UnwindSpawner};
 use std::{
   sync::Arc,
   thread::{park, Builder, Thread},
 };
 
+use crate::utils::MpscQueue;
+
+use super::{oneshot, OneshotFulfill, SingleFn, ThreadSlot, UnwindSpawner};
+
+enum Context<T, R> {
+  Work(T, OneshotFulfill<R>),
+  Term,
+}
+
 const fn worker_loop<T>(
   mut preload: SingleFn<'static, (), T>,
   mut fallback: SingleFn<'static, T, ()>,
-  queue: Arc<MpscQueue<ExecuteOnlyContext<(), T>>>,
+  queue: Arc<MpscQueue<Context<(), T>>>,
 ) -> impl FnOnce()
 where
   T: Send,
@@ -19,8 +25,8 @@ where
     let loaded = preloaded.take().unwrap_or_else(|| preload.call(()));
     if let Some(ctx) = unsafe { queue.pop() } {
       match ctx {
-        ExecuteOnlyContext::Work(_, done) => done.fulfill(loaded),
-        ExecuteOnlyContext::Term => return fallback.call(loaded),
+        Context::Work(_, done) => done.fulfill(loaded),
+        Context::Term => return fallback.call(loaded),
       };
       continue;
     };
@@ -38,7 +44,7 @@ where
  * request arrives.
  */
 pub struct PreloadThread<T: Send> {
-  queue: Arc<MpscQueue<ExecuteOnlyContext<(), T>>>,
+  queue: Arc<MpscQueue<Context<(), T>>>,
   waker: Thread,
   slot: ThreadSlot,
 }
@@ -65,25 +71,23 @@ impl<T: Send> PreloadThread<T> {
     }
   }
 
-  fn register(&self, ctx: ExecuteOnlyContext<(), T>) {
+  fn register(&self, ctx: Context<(), T>) {
     self.queue.push(ctx);
     self.waker.unpark();
   }
-}
-impl<T: Send> Close for PreloadThread<T> {
-  fn close(&self) {
+
+  pub fn execute(&self, _: ()) -> super::Oneshot<T> {
+    let (o, f) = oneshot();
+    self.register(Context::Work((), f));
+    o
+  }
+
+  pub fn close(&self) {
     if let Some(handle) = self.slot.close() {
-      self.queue.push(ExecuteOnlyContext::Term);
+      self.queue.push(Context::Term);
       handle.thread().unpark();
       handle.join().unwrap();
     }
-  }
-}
-impl<T: Send> Execute<(), T> for PreloadThread<T> {
-  fn execute(&self, _: ()) -> super::Oneshot<T> {
-    let (o, f) = oneshot();
-    self.register(ExecuteOnlyContext::Work((), f));
-    o
   }
 }
 

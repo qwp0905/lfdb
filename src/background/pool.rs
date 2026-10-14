@@ -6,8 +6,7 @@ use crossbeam::{
 };
 
 use super::{
-  into_task, Close, PendingTask, SharedFn, TaskRef, ThreadParker, ThreadSlot,
-  UnwindSpawner,
+  into_task, PendingTask, SharedFn, TaskRef, ThreadParker, ThreadSlot, UnwindSpawner,
 };
 
 enum Context {
@@ -204,9 +203,8 @@ impl ThreadPool {
   {
     ForkStream::new(self.typed_executor(handler))
   }
-}
-impl Close for ThreadPool {
-  fn close(&self) {
+
+  pub fn close(&self) {
     let threads = self
       .threads
       .iter()
