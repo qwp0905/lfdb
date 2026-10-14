@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use lfdb::{Engine, EngineBuilder};
 
@@ -65,7 +65,7 @@ impl BenchmarkDB for Engine {
   }
 
   fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]) {
-    let mut tx = self.new_tx_timeout(Duration::from_mins(10)).unwrap();
+    let mut tx = self.new_tx().unwrap();
     let table = tx.table(table).unwrap();
     for chunk in kvs.chunks(1000) {
       let mut bulk = table.create_bulk();

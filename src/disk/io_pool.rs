@@ -239,7 +239,7 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
-  pub fn fsync(&self) -> PendingIO<usize> {
+  pub fn fsync_async(&self) -> PendingIO<usize> {
     let Some(_token) = self.scheduler.pin_state() else {
       return PendingIO::Fulfilled(Ok(0));
     };

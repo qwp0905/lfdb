@@ -4,9 +4,6 @@ pub use orchestrator::*;
 mod recorder;
 pub use recorder::*;
 
-mod timeout;
-use timeout::*;
-
 mod transaction;
 pub use transaction::*;
 

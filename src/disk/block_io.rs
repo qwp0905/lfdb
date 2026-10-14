@@ -57,7 +57,7 @@ impl<const N: usize> BlockIOHandle<N> {
 
   #[inline]
   pub fn fsync(&self) -> PendingIO<usize> {
-    self.handle.fsync()
+    self.handle.fsync_async()
   }
 
   pub fn truncate(&self) -> Result {

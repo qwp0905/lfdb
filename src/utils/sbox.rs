@@ -1,5 +1,5 @@
 use std::{
-  mem::{forget, offset_of, MaybeUninit},
+  mem::offset_of,
   ops::Deref,
   ptr::NonNull,
   sync::atomic::{fence, AtomicUsize, Ordering},
@@ -40,10 +40,6 @@ impl<T> SBox<T> {
     unsafe { Self::from_inner_ptr(Box::into_raw(Box::new(Inner::new(data)))) }
   }
 
-  pub fn new_uninit() -> SBox<MaybeUninit<T>> {
-    SBox::new(MaybeUninit::uninit())
-  }
-
   pub const unsafe fn from_raw(raw: *mut T) -> Self {
     let offset = offset_of!(Inner<T>, data);
     let ptr = (raw as *mut u8).sub(offset) as *mut Inner<T>;
@@ -54,13 +50,6 @@ impl<T> SBox<T> {
 impl<T: ?Sized> SBox<T> {
   pub const fn as_ptr(&self) -> *mut T {
     unsafe { &raw mut (*self.inner.as_ptr()).data }
-  }
-  pub fn get_mut(this: &mut SBox<T>) -> Option<&mut T> {
-    let inner = unsafe { this.inner.as_mut() };
-    if inner.count.load(Ordering::Acquire) > 1 {
-      return None;
-    }
-    Some(&mut inner.data)
   }
 
   const unsafe fn from_inner_ptr(ptr: *mut Inner<T>) -> Self {
@@ -73,16 +62,6 @@ impl<T: ?Sized> SBox<T> {
     let ptr = unsafe { &raw mut (*this.inner.as_ptr()).data };
     std::mem::forget(this);
     ptr
-  }
-}
-
-impl<T> SBox<MaybeUninit<T>> {
-  pub unsafe fn assume_init(self) -> SBox<T> {
-    let inner = self.inner;
-    forget(self);
-    SBox {
-      inner: inner.cast(),
-    }
   }
 }
 
