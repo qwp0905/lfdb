@@ -9,9 +9,9 @@ use crate::{
 pub struct EngineBuilder(EngineConfig);
 
 impl EngineBuilder {
-  pub fn new<T>(base_path: T) -> Self
+  pub fn new<T>(base_path: &T) -> Self
   where
-    T: AsRef<Path>,
+    T: AsRef<Path> + ?Sized,
   {
     Self(EngineConfig {
       base_path: PathBuf::from(base_path.as_ref()),
@@ -114,11 +114,14 @@ impl EngineBuilder {
     self
   }
 
-  pub fn boot(&self) -> Result<Engine> {
+  pub fn open(&self) -> Result<Engine> {
     Engine::bootstrap(DefaultDiskBackend::new().map_err(Error::IO)?, &self.0)
   }
 
-  pub fn with_backend<B: DiskBackend + 'static>(&self, backend: B) -> Result<Engine> {
+  pub fn open_with_backend<B: DiskBackend + 'static>(
+    &self,
+    backend: B,
+  ) -> Result<Engine> {
     Engine::bootstrap(backend, &self.0)
   }
 }

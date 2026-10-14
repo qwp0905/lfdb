@@ -59,7 +59,7 @@ impl<'a> Cursor<'a> {
     }
   }
 
-  pub fn contains<K: AsRef<[u8]>>(&self, key: &K) -> Result<bool> {
+  pub fn contains<K: AsRef<[u8]> + ?Sized>(&self, key: &K) -> Result<bool> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -92,7 +92,7 @@ impl<'a> Cursor<'a> {
       _ => None,
     })
   }
-  pub fn get<K: AsRef<[u8]>>(&self, key: &K) -> Result<Option<VecRef>> {
+  pub fn get<K: AsRef<[u8]> + ?Sized>(&self, key: &K) -> Result<Option<VecRef>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
@@ -140,7 +140,7 @@ impl<'a> Cursor<'a> {
     }
     self.index.remove_if_matched(key, &self.table)
   }
-  pub fn remove<K: AsRef<[u8]>>(&self, key: &K) -> Result {
+  pub fn remove<K: AsRef<[u8]> + ?Sized>(&self, key: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }

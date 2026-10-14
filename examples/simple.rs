@@ -17,7 +17,7 @@ fn main() {
   log::set_max_level(log::LevelFilter::Trace);
   let engine = EngineBuilder::new("./.local")
     .block_cache_memory_capacity(100 << 20)
-    .boot()
+    .open()
     .expect("bootstrap error");
 
   let mut t = engine.new_tx().unwrap();
