@@ -2,7 +2,7 @@ use std::{
   collections::BTreeMap,
   sync::{
     atomic::{AtomicU8, Ordering},
-    RwLock,
+    LazyLock, RwLock,
   },
 };
 
@@ -13,32 +13,28 @@ use crate::{
 };
 
 const STATUS_AVAILABLE: u8 = 0;
-const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents timeout thread from aborting while WAL write is in progress
+const STATUS_ON_COMMIT: u8 = 1; // Exclusive state during commit attempt — prevents aborting while WAL write is in progress
 const STATUS_ABORTED: u8 = 2;
-const STATUS_TIMEOUT: u8 = 3;
 
 /**
  * Active transaction status transitions.
  *
  * Every transaction starts as `AVAILABLE`.
  * - commit path:  `AVAILABLE -> ON_COMMIT`
- * - timeout path: `AVAILABLE -> TIMEOUT`
- * - abort path:   `AVAILABLE | TIMEOUT -> ABORTED`
+ * - abort path:   `AVAILABLE -> ABORTED`
  *
- * `ON_COMMIT` is terminal for timeout/abort ownership: once commit owns the
- * transaction, timeout code cannot abort it.
+ * `ON_COMMIT` is terminal for abort ownership: once commit owns the
+ * transaction.
  */
 pub struct ActiveState {
   tx_id: TxId,
   status: AtomicU8,
-  parker: OnceParker,
 }
 impl ActiveState {
   pub const fn new(tx_id: TxId) -> Self {
     Self {
       tx_id,
       status: AtomicU8::new(STATUS_AVAILABLE),
-      parker: OnceParker::new(),
     }
   }
   pub fn is_available(&self) -> bool {
@@ -49,29 +45,11 @@ impl ActiveState {
   }
 
   pub fn try_abort(&self) -> bool {
-    let current = self.status.load(Ordering::Relaxed);
-    if !matches!(current, STATUS_AVAILABLE | STATUS_TIMEOUT) {
-      return false;
-    }
-
-    self
-      .status
-      .compare_exchange(
-        current,
-        STATUS_ABORTED,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-      )
-      .is_ok()
-  }
-
-  #[inline]
-  pub fn try_timeout(&self) -> bool {
     self
       .status
       .compare_exchange(
         STATUS_AVAILABLE,
-        STATUS_TIMEOUT,
+        STATUS_ABORTED,
         Ordering::Relaxed,
         Ordering::Relaxed,
       )
@@ -95,13 +73,6 @@ impl ActiveState {
   pub fn make_available(&self) {
     self.status.store(STATUS_AVAILABLE, Ordering::Relaxed)
   }
-
-  pub fn park(&self) {
-    self.parker.park();
-  }
-  pub fn wake_all(&self) {
-    self.parker.wake_all();
-  }
 }
 
 /**
@@ -112,7 +83,7 @@ impl ActiveState {
  * state is removed.
  */
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, SBox<ActiveState>>>,
+  inner: RwLock<BTreeMap<TxId, LazyLock<SBox<OnceParker>>>>,
   last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
@@ -133,21 +104,13 @@ impl ActiveSet {
    * into the active map. Keeping id allocation and insertion in the same critical
    * section prevents a newly issued transaction from being missed by snapshots.
    */
-  pub fn new_state(&self) -> SBox<ActiveState> {
-    // heap allocation first without mutex
-    let mut uninit = SBox::new_uninit();
+  pub fn new_state(&self) -> ActiveState {
     let mut inner = self.inner.wl();
 
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Relaxed);
-    SBox::get_mut(&mut uninit)
-      .unwrap()
-      .write(ActiveState::new(tx_id));
-
-    inner
-      .entry(tx_id)
-      .and_modify(|_| unreachable!())
-      .or_insert(unsafe { uninit.assume_init() })
-      .clone()
+    inner.insert(tx_id, LazyLock::new(Default::default));
+    drop(inner);
+    ActiveState::new(tx_id)
   }
   /**
    * Build a bitmap snapshot of active transaction ids below `max`.
@@ -166,16 +129,16 @@ impl ActiveSet {
     }
     snapshot
   }
-  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.wl().remove(tx_id)
+  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<OnceParker>> {
+    let parker = self.inner.wl().remove(tx_id)?;
+    LazyLock::get(&parker).cloned()
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().first_key_value().map(|(k, _)| *k)
   }
-  pub fn get(&self, tx_id: &TxId) -> Option<SBox<ActiveState>> {
-    self.inner.rl().get(tx_id).cloned()
-  }
-  pub fn get_all(&self) -> Vec<SBox<ActiveState>> {
-    self.inner.rl().values().cloned().collect()
+  pub fn get(&self, tx_id: &TxId) -> Option<SBox<OnceParker>> {
+    let inner = self.inner.rl();
+    let parker = inner.get(tx_id)?;
+    Some(SBox::clone(parker))
   }
 }

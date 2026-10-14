@@ -13,30 +13,34 @@ use crate::{
   background::{binding_events, EventBus, SharedSubscription},
   btree::ResolvedConflict,
   cache::ShrinkMap,
-  utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
+  utils::{error, warn, OffsetBitmap, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
 };
 
 fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
-  let Some(state) = active.remove(tx_id) else {
+  let Some(parker) = active.remove(tx_id) else {
     return;
   };
-  state.wake_all();
+  parker.wake_all();
 }
 
 pub struct TxState<'a> {
-  state: SBox<ActiveState>,
+  state: ActiveState,
   set: &'a ActiveSet,
+  closed: &'a AtomicBool,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: SBox<ActiveState>, set: &'a ActiveSet) -> Self {
-    Self { state, set }
+  const fn new(state: ActiveState, set: &'a ActiveSet, closed: &'a AtomicBool) -> Self {
+    Self { state, set, closed }
   }
   pub fn deactive(&self) {
     remove_and_wake(self.set, &self.state.get_id());
   }
   pub fn current_version(&self) -> TxId {
     self.set.current_version()
+  }
+  pub fn is_available(&self) -> bool {
+    !self.closed.load(Ordering::Relaxed) && self.state.is_available()
   }
 }
 impl<'a> Deref for TxState<'a> {
@@ -60,7 +64,7 @@ pub struct TxSnapshot<'a> {
   aborted: &'a AbortedSet,
 }
 impl<'a> TxSnapshot<'a> {
-  fn new(active: OffsetBitmap, aborted: &'a AbortedSet) -> Self {
+  const fn new(active: OffsetBitmap, aborted: &'a AbortedSet) -> Self {
     Self { active, aborted }
   }
 
@@ -170,14 +174,14 @@ impl VersionController {
   }
 
   pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
-    let Some(state) = self.active.get(&owner) else {
+    let Some(parker) = self.active.get(&owner) else {
       return ResolvedConflict::Closed;
     };
     if !self.wait_graph.get_or_insert(current, owner) {
       warn!("dead lock detected at tx {}.", current);
       return ResolvedConflict::DeadLock;
     }
-    state.park();
+    parker.park();
     self.wait_graph.remove(current);
     ResolvedConflict::Closed
   }
@@ -204,15 +208,8 @@ impl VersionController {
     let state = self.active.new_state();
     Some((
       TxSnapshot::new(self.active.snapshot_until(state.get_id()), &self.aborted),
-      TxState::new(state, &self.active),
+      TxState::new(state, &self.active, &self.closed),
     ))
-  }
-  #[inline]
-  pub fn get_active_state(&self, tx_id: TxId) -> Option<TxState<'_>> {
-    self
-      .active
-      .get(&tx_id)
-      .map(|state| TxState::new(state, &self.active))
   }
 
   /**
@@ -238,10 +235,6 @@ impl SharedSubscription<WALFailed> for VersionController {
   fn handle(&self, _: Arc<WALFailed>) {
     if self.closed.fetch_or(true, Ordering::Relaxed) {
       return;
-    }
-    for state in self.active.get_all().into_iter().filter(|v| v.try_abort()) {
-      self.aborted.insert(state.get_id());
-      remove_and_wake(&self.active, &state.get_id());
     }
     error!("all versions transit to abort since wal failure detected.");
   }
