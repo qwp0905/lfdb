@@ -7,8 +7,8 @@ use std::{
 use super::CompactionTriggered;
 use crate::{
   background::{
-    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
-    SharedSubscription, ThreadBuilder,
+    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   blob::{BlobId, BlobStorage},
   cache::{BlockCache, PreparedSlot},

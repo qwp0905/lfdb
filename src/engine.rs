@@ -12,7 +12,7 @@ use std::{
 
 use super::EngineConfig;
 use crate::{
-  background::{Close, EventBus, ThreadBuilder},
+  background::{EventBus, ThreadBuilder},
   blob::BlobStorage,
   cache::{BlockCache, BlockCacheConfig},
   disk::{DiskBackend, IOPool, Pointer},
@@ -175,7 +175,6 @@ impl Engine {
       .name("bootstrap")
       .multi(thread_count)
       .pool()
-      .into_once()
       .to_arc();
 
     let tables =

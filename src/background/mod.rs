@@ -1,14 +1,8 @@
-mod context;
-pub use context::*;
-
 mod builder;
 pub use builder::*;
 
 mod oneshot;
 pub use oneshot::*;
-
-mod thread;
-pub use thread::*;
 
 mod interval;
 pub use interval::*;
@@ -21,12 +15,6 @@ pub use preload::*;
 
 mod event_bus;
 pub use event_bus::*;
-
-mod slot;
-pub use slot::*;
-
-mod panic;
-pub use panic::*;
 
 mod task;
 pub use task::PendingTask;
@@ -43,3 +31,6 @@ pub use callback::*;
 
 mod shared;
 pub use shared::*;
+
+mod utils;
+pub use utils::*;
