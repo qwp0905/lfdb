@@ -56,14 +56,14 @@ impl<'a> Transaction<'a> {
     Cursor::new(table, compaction, &self.context, self.metrics)
   }
 
-  pub fn table(&self, name: &str) -> Result<Cursor<'_>> {
+  pub fn table<K: AsRef<str> + ?Sized>(&self, name: &K) -> Result<Cursor<'_>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableNameRef::from_str(name)?;
+    let name = TableNameRef::from_str(name.as_ref())?;
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
-    if let Some(bytes) = cursor.get(&name.as_bytes())? {
+    if let Some(bytes) = cursor.get(name.as_bytes())? {
       let metadata = TableMetadataView::from_bytes(&bytes)?;
       if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
         return Ok(
@@ -82,14 +82,14 @@ impl<'a> Transaction<'a> {
     Err(Error::TableNotFound(name.to_string()))
   }
 
-  pub fn open_table(&mut self, name: &str) -> Result<Cursor<'_>> {
+  pub fn open_table<K: AsRef<str> + ?Sized>(&mut self, name: &K) -> Result<Cursor<'_>> {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableNameRef::from_str(name)?;
+    let name = TableNameRef::from_str(name.as_ref())?;
 
     let meta_cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
-    if let Some(bytes) = meta_cursor.get(&name.as_bytes())? {
+    if let Some(bytes) = meta_cursor.get(name.as_bytes())? {
       let metadata = TableMetadataView::from_bytes(&bytes)?;
       if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
         return Ok(
@@ -116,19 +116,19 @@ impl<'a> Transaction<'a> {
     Ok(cursor)
   }
 
-  pub fn drop_table(&mut self, name: &str) -> Result {
+  pub fn drop_table<K: AsRef<str> + ?Sized>(&mut self, name: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableNameRef::from_str(name)?;
+    let name = TableNameRef::from_str(name.as_ref())?;
 
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
-    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+    let Some(bytes) = cursor.get(name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
     let metadata = TableMetadataView::from_bytes(&bytes)?;
-    cursor.remove(&name.as_bytes())?;
+    cursor.remove(name.as_bytes())?;
 
     if let Some(table) = self.orchestrator.get_table(metadata.get_id()) {
       self.dropped_tables.push(table);
@@ -148,14 +148,14 @@ impl<'a> Transaction<'a> {
    * Trigger table compaction.
    * It runs in the background and may result in reduced read performance, but it does not block anything.
    */
-  pub fn compact_table(&mut self, name: &str) -> Result {
+  pub fn compact_table<K: AsRef<str> + ?Sized>(&mut self, name: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableNameRef::from_str(name)?;
+    let name = TableNameRef::from_str(name.as_ref())?;
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
 
-    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+    let Some(bytes) = cursor.get(name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 
@@ -188,14 +188,14 @@ impl<'a> Transaction<'a> {
     Ok(())
   }
 
-  pub fn truncate_table(&mut self, name: &str) -> Result {
+  pub fn truncate_table<K: AsRef<str> + ?Sized>(&mut self, name: &K) -> Result {
     if !self.context.is_available() {
       return Err(Error::TransactionClosed);
     }
-    let name = TableNameRef::from_str(name)?;
+    let name = TableNameRef::from_str(name.as_ref())?;
     let cursor = self.open_cursor(self.orchestrator.get_metadata_table(), None);
 
-    let Some(bytes) = cursor.get(&name.as_bytes())? else {
+    let Some(bytes) = cursor.get(name.as_bytes())? else {
       return Err(Error::TableNotFound(name.to_string()));
     };
 

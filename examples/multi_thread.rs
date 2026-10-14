@@ -24,7 +24,7 @@ fn main() {
       .block_cache_memory_capacity(512 << 20)
       .block_cache_shard_count(1 << 8)
       .wal_file_size(32 << 20)
-      .boot()
+      .open()
       .expect("bootstrap error"),
   );
 

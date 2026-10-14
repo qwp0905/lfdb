@@ -30,7 +30,7 @@ fn engine(dir: &TempDir, controller: &FaultController) -> Engine {
   let _ = log::set_logger(&TestLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())
-    .with_backend(FaultBackend::new(controller.clone()))
+    .open_with_backend(FaultBackend::new(controller.clone()))
     .unwrap()
 }
 
