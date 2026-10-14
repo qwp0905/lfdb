@@ -11,8 +11,8 @@ use super::CheckpointSnapshot;
 
 use crate::{
   background::{
-    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
-    SharedSubscription, ThreadBuilder,
+    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   blob::BlobStorage,
   cache::{BlockCache, CacheFlusher},

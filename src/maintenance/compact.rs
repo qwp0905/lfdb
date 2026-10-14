@@ -5,8 +5,8 @@ use crossbeam::atomic::AtomicCell;
 use super::DropTableCommitted;
 use crate::{
   background::{
-    binding_events, Close, EventBus, IntervalWorkThread, OwnedSubscription,
-    SharedSubscription, ThreadBuilder,
+    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
+    ThreadBuilder,
   },
   blob::BlobStorage,
   btree::{

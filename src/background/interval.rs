@@ -7,7 +7,7 @@ use std::{
   time::Duration,
 };
 
-use super::{Close, SingleFn, ThreadSlot, UnwindSpawner};
+use super::{SingleFn, ThreadSlot, UnwindSpawner};
 
 const fn worker_loop(
   closed: Arc<AtomicBool>,
@@ -54,10 +54,8 @@ impl IntervalWorkThread {
       slot: ThreadSlot::new(handle),
     }
   }
-}
 
-impl Close for IntervalWorkThread {
-  fn close(&self) {
+  pub fn close(&self) {
     let Some(handle) = self.slot.close() else {
       return;
     };

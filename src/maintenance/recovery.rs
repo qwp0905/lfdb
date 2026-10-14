@@ -12,7 +12,7 @@ use std::{
 use crossbeam_skiplist::{SkipMap, SkipSet};
 
 use crate::{
-  background::{OnceThread, PendingTask, ThreadPool},
+  background::{PendingTask, ThreadPool},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   btree::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy},
   cache::BlockCache,
@@ -158,7 +158,7 @@ struct TableRecovery {
   recorder: Arc<PageRecorder>,
   table: TableHandleRef,
   status: Arc<RecoveryStatus>,
-  pool: Arc<OnceThread<ThreadPool>>,
+  pool: Arc<ThreadPool>,
 }
 impl Clone for TableRecovery {
   fn clone(&self) -> Self {
@@ -177,7 +177,7 @@ impl TableRecovery {
     recorder: Arc<PageRecorder>,
     table: TableHandleRef,
     status: Arc<RecoveryStatus>,
-    pool: Arc<OnceThread<ThreadPool>>,
+    pool: Arc<ThreadPool>,
   ) -> Self {
     Self {
       block_cache,
@@ -361,7 +361,7 @@ pub fn recovery(
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
   max_used: HashMap<TableId, Pointer>,
-  pool: Arc<OnceThread<ThreadPool>>,
+  pool: Arc<ThreadPool>,
 ) -> Result {
   let open_handles = tables.get_all();
 
@@ -500,7 +500,7 @@ impl RecoveryResult {
 fn create_tasks(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
-  thread_pool: Arc<OnceThread<ThreadPool>>,
+  thread_pool: Arc<ThreadPool>,
   table: TableHandleRef,
   max_used: &HashMap<TableId, Pointer>,
 ) -> impl FnOnce() -> Result<RecoveryResult> + Send {

@@ -3,8 +3,7 @@ use std::{sync::Arc, thread::Builder};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{
-  oneshot, Close, Oneshot, OneshotFulfill, SharedFn, ThreadParker, ThreadSlot,
-  UnwindSpawner,
+  oneshot, Oneshot, OneshotFulfill, SharedFn, ThreadParker, ThreadSlot, UnwindSpawner,
 };
 
 enum Context<T, R> {
@@ -106,9 +105,7 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
     self.inner.queue.push(ctx);
     self.inner.parker.wake_once();
   }
-}
-impl<T: Send + 'static, R: Send + 'static> Close for SharedWorkThread<T, R> {
-  fn close(&self) {
+  pub fn close(&self) {
     let threads = self
       .slots
       .iter()

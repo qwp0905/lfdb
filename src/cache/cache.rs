@@ -9,7 +9,7 @@ use super::{
   EvictionGuard, MappingTable, MappingToken, PendingFlush,
 };
 use crate::{
-  background::{Close, SharedWorkThread, ThreadBuilder},
+  background::{SharedWorkThread, ThreadBuilder},
   disk::Pointer,
   metrics::{measure, MetricsRegistry},
   page::{PageAllocator, PageRef, PAGE_SIZE},
