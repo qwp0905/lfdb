@@ -106,7 +106,7 @@ pub struct EngineMetrics {
    */
   pub transaction_start_count: u64,
   /**
-   * Number of transactions aborted (explicitly or by timeout).
+   * Number of transactions aborted.
    */
   pub transaction_abort_count: u64,
 

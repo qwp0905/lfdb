@@ -25,6 +25,10 @@ use crate::{
   Result,
 };
 
+pub struct CheckpointConfig {
+  pub flush_factor: f64,
+}
+
 const CHECKPOINT_TICK: Duration = Duration::from_millis(500);
 const BATCH_SIZE: f64 = ((1 << 20) / PAGE_SIZE / 2) as f64; // convert from mib/sec
 
@@ -104,7 +108,7 @@ impl Checkpoint {
     worker: Arc<CheckpointWorker>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
-    flush_factor: f64,
+    config: CheckpointConfig,
   ) -> Arc<Self> {
     let incoming = MpscQueue::new().to_arc();
     let cycle = AtomicCell::new(None).to_arc();
@@ -119,7 +123,7 @@ impl Checkpoint {
           worker.clone(),
           cycle.clone(),
           metrics,
-          flush_factor,
+          config.flush_factor,
         ),
       )
       .to_box();
@@ -141,12 +145,12 @@ impl Checkpoint {
     blob_storage: Arc<BlobStorage>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
-    flush_factor: f64,
+    config: CheckpointConfig,
   ) -> Arc<Self> {
     let worker =
       CheckpointWorker::new(wal, block_cache, version_controller, io_pool, blob_storage)
         .to_arc();
-    Self::with_worker(worker, event_bus, metrics, flush_factor)
+    Self::with_worker(worker, event_bus, metrics, config)
   }
 
   pub fn initial_checkpoint(
@@ -157,13 +161,13 @@ impl Checkpoint {
     blob_storage: Arc<BlobStorage>,
     event_bus: Arc<EventBus>,
     metrics: Arc<MetricsRegistry>,
-    flush_factor: f64,
+    config: CheckpointConfig,
   ) -> Result<Arc<Self>> {
     let worker =
       CheckpointWorker::new(wal, block_cache, version_controller, io_pool, blob_storage)
         .to_arc();
     worker.run_hard()?;
-    Ok(Self::with_worker(worker, event_bus, metrics, flush_factor))
+    Ok(Self::with_worker(worker, event_bus, metrics, config))
   }
 
   fn failover(&self) {

@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use super::{Checkpoint, PageRecorder, TimeoutThread};
+use super::{Checkpoint, PageRecorder};
 
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
@@ -17,11 +17,6 @@ use crate::{
   wal::{DurabilityGuard, TxId, WriteAheadLog},
 };
 
-pub struct TransactionConfig {
-  pub timeout: Duration,
-  pub checkpoint_flush_factor: f64,
-}
-
 /**
  * Composes WAL, block cache, GC, version visibility into a
  * unified interface for the cursor layer. Does not contain business logic —
@@ -37,13 +32,10 @@ pub struct TxOrchestrator {
   recorder: Arc<PageRecorder>,
   compactor: Arc<Compactor>,
   blob: Arc<BlobStorage>,
-  timeout_thread: TimeoutThread,
-  tx_timeout: Duration,
   metrics: Arc<MetricsRegistry>,
 }
 impl TxOrchestrator {
-  pub fn new(
-    config: TransactionConfig,
+  pub const fn new(
     wal: Arc<WriteAheadLog>,
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
@@ -55,7 +47,6 @@ impl TxOrchestrator {
     checkpoint: Arc<Checkpoint>,
     metrics: Arc<MetricsRegistry>,
   ) -> Self {
-    let timeout_thread = TimeoutThread::new(version_controller.clone());
     Self {
       wal,
       tables,
@@ -65,9 +56,7 @@ impl TxOrchestrator {
       gc,
       recorder,
       compactor,
-      timeout_thread,
       blob,
-      tx_timeout: config.timeout,
       metrics,
     }
   }
@@ -107,14 +96,8 @@ impl TxOrchestrator {
   }
 
   #[inline]
-  pub fn start_tx(
-    &self,
-    timeout: Option<Duration>,
-  ) -> Option<(TxState<'_>, TxSnapshot<'_>)> {
+  pub fn start_tx(&self) -> Option<(TxState<'_>, TxSnapshot<'_>)> {
     let (snapshot, state) = self.version_controller.new_transaction()?;
-    self
-      .timeout_thread
-      .register(state.get_id(), timeout.unwrap_or(self.tx_timeout));
     Some((state, snapshot))
   }
 
@@ -174,7 +157,6 @@ impl TxOrchestrator {
     self.compactor.close()?;
     self.gc.close();
     info!("gc closed.");
-    self.timeout_thread.close();
     self.checkpoint.close()?;
 
     self.block_cache.close();
