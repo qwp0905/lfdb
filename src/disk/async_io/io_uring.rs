@@ -331,3 +331,8 @@ impl AsyncIO {
     handle.join().unwrap();
   }
 }
+impl Drop for AsyncIO {
+  fn drop(&mut self) {
+    self.close();
+  }
+}

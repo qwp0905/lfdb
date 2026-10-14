@@ -32,7 +32,7 @@ impl WALSegment {
     // at creation avoids metadata updates on every subsequent write.
     let file_len = max_len << Self::SHIFT;
     let handle = pool.open_static_sized(filename, file_len)?;
-    handle.fsync().wait_flatten()?;
+    handle.fsync_async().wait_flatten()?;
 
     Ok(Self { handle })
   }
