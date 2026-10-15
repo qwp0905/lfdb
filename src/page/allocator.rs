@@ -1,5 +1,5 @@
 use std::{
-  alloc::{alloc_zeroed, dealloc, Layout},
+  alloc::Layout,
   mem::ManuallyDrop,
   ops::{Deref, DerefMut},
   sync::Arc,
@@ -7,54 +7,56 @@ use std::{
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
-use super::{Page, ALIGN};
+use super::{HeapBuffer, Page, ALIGN};
 
-struct OwnedPage<const N: usize>(Page<N>);
-impl<const N: usize> OwnedPage<N> {
-  const LAYOUT: Layout = {
-    assert!(N.is_power_of_two());
-    unsafe { Layout::from_size_align_unchecked(N, ALIGN) }
-  };
-  fn allocate() -> Self {
-    Self(Page::new(unsafe { alloc_zeroed(Self::LAYOUT) }))
+struct GlobalQueue<const N: usize>(ManuallyDrop<ArrayQueue<HeapBuffer>>);
+impl<const N: usize> GlobalQueue<N> {
+  fn new(capacity: usize) -> Self {
+    Self(ManuallyDrop::new(ArrayQueue::new(capacity)))
+  }
+  fn store(&self, buf: HeapBuffer) {
+    if let Err(err) = self.0.push(buf) {
+      unsafe { err.deallocate(PageAllocator::<N>::LAYOUT) };
+    }
+  }
+  fn acquire(&self) -> Option<HeapBuffer> {
+    self.0.pop()
   }
 }
-impl<const N: usize> Drop for OwnedPage<N> {
+impl<const N: usize> Drop for GlobalQueue<N> {
   fn drop(&mut self) {
-    unsafe { dealloc(self.0.as_ptr(), Self::LAYOUT) }
+    for buf in unsafe { ManuallyDrop::take(&mut self.0) } {
+      unsafe { buf.deallocate(PageAllocator::<N>::LAYOUT) };
+    }
   }
 }
-
-type GlobalQueue<const N: usize> = ArrayQueue<OwnedPage<N>>;
 pub struct PageRef<const N: usize> {
-  page: ManuallyDrop<OwnedPage<N>>,
+  page: Page<N>,
   global: Arc<GlobalQueue<N>>,
 }
 impl<const N: usize> PageRef<N> {
-  const fn new(page: OwnedPage<N>, global: Arc<GlobalQueue<N>>) -> Self {
+  const fn new(buf: HeapBuffer, global: Arc<GlobalQueue<N>>) -> Self {
     Self {
-      page: ManuallyDrop::new(page),
+      page: Page::new(buf.as_raw()),
       global,
     }
   }
 }
 impl<const N: usize> Drop for PageRef<N> {
   fn drop(&mut self) {
-    let page = unsafe { ManuallyDrop::take(&mut self.page) };
-    if let Err(err) = self.global.push(page) {
-      drop(err);
-    }
+    let buf = unsafe { HeapBuffer::from_raw(self.page.as_ptr()) };
+    self.global.store(buf);
   }
 }
 impl<const N: usize> Deref for PageRef<N> {
   type Target = Page<N>;
   fn deref(&self) -> &Self::Target {
-    &self.page.0
+    &self.page
   }
 }
 impl<const N: usize> DerefMut for PageRef<N> {
   fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.page.0
+    &mut self.page
   }
 }
 
@@ -62,28 +64,30 @@ pub struct PageAllocator<const N: usize> {
   global: Arc<GlobalQueue<N>>,
 }
 impl<const N: usize> PageAllocator<N> {
+  const LAYOUT: Layout = {
+    assert!(N.is_power_of_two());
+    unsafe { Layout::from_size_align_unchecked(N, ALIGN) }
+  };
   pub fn new(capacity: usize) -> Self {
-    let global = GlobalQueue::new(capacity);
+    let global = Arc::new(GlobalQueue::new(capacity));
     for _ in 0..capacity {
-      let _ = global.push(OwnedPage::allocate());
+      global.store(HeapBuffer::allocate(Self::LAYOUT));
     }
-    Self {
-      global: Arc::new(global),
-    }
+    Self { global }
   }
 
   pub fn allocate_new(&self) -> PageRef<N> {
-    PageRef::new(OwnedPage::allocate(), self.global.clone())
+    PageRef::new(HeapBuffer::allocate(Self::LAYOUT), self.global.clone())
   }
 
   pub fn allocate(&self) -> PageRef<N> {
     let backoff = Backoff::new();
     while !backoff.is_completed() {
-      if let Some(page) = self.global.pop() {
-        return PageRef::new(page, self.global.clone());
+      if let Some(buf) = self.global.acquire() {
+        return PageRef::new(buf, self.global.clone());
       };
       backoff.snooze();
     }
-    PageRef::new(OwnedPage::allocate(), self.global.clone())
+    self.allocate_new()
   }
 }
