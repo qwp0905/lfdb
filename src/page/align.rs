@@ -50,6 +50,28 @@ const fn aligned_len(len: usize) -> usize {
   ((len + ALIGN_MASK) >> ALIGN_BITS) << ALIGN_BITS
 }
 
+#[derive(Clone, Copy)]
+pub struct HeapBuffer(*mut u8);
+impl HeapBuffer {
+  pub const unsafe fn from_raw(ptr: *mut u8) -> Self {
+    Self(ptr)
+  }
+  pub fn allocate(layout: Layout) -> Self {
+    let ptr = unsafe { alloc_zeroed(layout) };
+    if ptr.is_null() {
+      handle_alloc_error(layout);
+    }
+    unsafe { Self::from_raw(ptr) }
+  }
+  pub unsafe fn deallocate(self, layout: Layout) {
+    unsafe { dealloc(self.0, layout) }
+  }
+  pub const fn as_raw(self) -> *mut u8 {
+    self.0
+  }
+}
+unsafe impl Send for HeapBuffer {}
+
 /**
  * Dynamically sized aligned heap buffer.
  *
@@ -58,7 +80,7 @@ const fn aligned_len(len: usize) -> usize {
  * used for direct I/O.
  */
 pub struct AlignedBuf {
-  ptr: *mut u8,
+  buf: HeapBuffer,
   len: usize,
   layout: Layout,
 }
@@ -68,17 +90,11 @@ impl AlignedBuf {
     Self::from_layout(layout, len)
   }
   fn from_layout(layout: Layout, len: usize) -> Self {
-    let ptr = unsafe { alloc_zeroed(layout) };
-    if ptr.is_null() {
-      handle_alloc_error(layout);
-    }
-    Self { ptr, len, layout }
+    let buf = HeapBuffer::allocate(layout);
+    Self { buf, len, layout }
   }
   pub const fn size(&self) -> usize {
     self.layout.size()
-  }
-  pub const fn as_ptr(&self) -> *mut u8 {
-    self.ptr
   }
   pub fn from_vec(data: Vec<u8>) -> Self {
     let mut buf = Self::new(data.len());
@@ -92,10 +108,10 @@ impl AlignedBuf {
    * length, not the padded allocation.
    */
   pub const fn as_slice(&self) -> &[u8] {
-    unsafe { from_raw_parts(self.ptr, self.len) }
+    unsafe { from_raw_parts(self.buf.as_raw(), self.len) }
   }
   pub const fn as_mut_slice(&mut self) -> &mut [u8] {
-    unsafe { from_raw_parts_mut(self.ptr, self.len) }
+    unsafe { from_raw_parts_mut(self.buf.as_raw(), self.len) }
   }
   /**
    * Return the full aligned allocation.
@@ -105,10 +121,10 @@ impl AlignedBuf {
    * zero-filled bytes beyond the logical length.
    */
   pub const fn get_aligned_slice(&self) -> &[u8] {
-    unsafe { from_raw_parts(self.ptr, self.size()) }
+    unsafe { from_raw_parts(self.buf.as_raw(), self.size()) }
   }
   pub const fn get_mut_aligned_slice(&mut self) -> &mut [u8] {
-    unsafe { from_raw_parts_mut(self.ptr, self.size()) }
+    unsafe { from_raw_parts_mut(self.buf.as_raw(), self.size()) }
   }
   pub const fn len(&self) -> usize {
     self.len
@@ -116,7 +132,7 @@ impl AlignedBuf {
 }
 impl Drop for AlignedBuf {
   fn drop(&mut self) {
-    unsafe { dealloc(self.ptr, self.layout) };
+    unsafe { self.buf.deallocate(self.layout) };
   }
 }
 unsafe impl Send for AlignedBuf {}
