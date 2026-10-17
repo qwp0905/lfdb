@@ -1,11 +1,14 @@
-use std::sync::{
-  atomic::{AtomicU64, Ordering},
-  Mutex,
+use std::{
+  mem::take,
+  sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+  },
 };
 
 use crossbeam::queue::SegQueue;
 
-use crate::utils::{ChunkQueue, ShortenedMutex};
+use crate::utils::ShortenedMutex;
 
 use super::Pointer;
 
@@ -63,7 +66,7 @@ impl<'a> Drop for DeallocGuard<'a> {
   fn drop(&mut self) {
     let mut protection = self.0.protection.l();
     debug_assert!(protection.is_protected);
-    while let Some(ptr) = protection.buffered.pop() {
+    for ptr in take(&mut protection.buffered) {
       self.0.released.push(ptr);
     }
     protection.is_protected = false;
@@ -71,13 +74,13 @@ impl<'a> Drop for DeallocGuard<'a> {
 }
 
 struct Protection {
-  buffered: ChunkQueue<Pointer>,
+  buffered: Vec<Pointer>,
   is_protected: bool,
 }
 impl Protection {
   const fn new() -> Self {
     Self {
-      buffered: ChunkQueue::new(),
+      buffered: Vec::new(),
       is_protected: false,
     }
   }

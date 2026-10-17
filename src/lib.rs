@@ -4,7 +4,6 @@ mod transaction;
 pub use transaction::{Bulk, Cursor, CursorIter, Transaction};
 
 mod cache;
-pub use cache::VecRef;
 
 mod background;
 
@@ -43,3 +42,4 @@ mod btree;
 mod maintenance;
 
 mod page;
+pub use page::VecRef;

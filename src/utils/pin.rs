@@ -29,7 +29,6 @@ const EXCLUSIVE: u32 = 1 << (u32::BITS - 1);
 #[derive(Debug)]
 pub struct ExclusivePin(AtomicU32);
 impl ExclusivePin {
-  #[inline]
   pub const fn new() -> Self {
     Self(AtomicU32::new(0))
   }
@@ -63,7 +62,6 @@ impl ExclusivePin {
    * Unlike shared acquisition, there is no range of count values to join. If that
    * single transition fails, the caller must decide whether to retry or give up.
    */
-  #[inline]
   pub fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
     self
       .0
@@ -73,7 +71,7 @@ impl ExclusivePin {
   }
 
   #[inline]
-  #[allow(dead_code)]
+  #[cfg(test)]
   pub fn is_exclusive(&self) -> bool {
     self.0.load(Ordering::Acquire) == EXCLUSIVE
   }

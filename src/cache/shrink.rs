@@ -206,15 +206,16 @@ impl<T> ShrinkQueue<T> {
   pub fn push(&mut self, v: T) {
     self.0.push_back(v);
   }
-  pub fn pop(&mut self) -> Option<T> {
-    let v = self.0.pop_front()?;
-
+  fn shrink(&mut self) {
     let cap = self.0.capacity();
     let threshold = (cap >> 3) * 3;
-    if self.0.len() >= threshold {
-      return Some(v);
+    if self.0.len() < threshold {
+      self.0.shrink_to(cap >> 1);
     }
-    self.0.shrink_to(cap >> 1);
+  }
+  pub fn pop(&mut self) -> Option<T> {
+    let v = self.0.pop_front()?;
+    self.shrink();
     Some(v)
   }
   pub fn len(&self) -> usize {

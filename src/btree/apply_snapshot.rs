@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 
 use crate::{
   blob::{BlobId, BlobLen, BlobOffset},
-  cache::VecRef,
   disk::Pointer,
   objects::{
     BTreeNode, DataEntry, FindSlotResult, LeafNode, RecordData, StaticKey, StaticKeyRef,
     VersionRecord,
   },
+  page::VecRef,
   table::TableHandleRef,
   wal::TxId,
   Result,

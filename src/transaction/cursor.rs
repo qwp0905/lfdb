@@ -13,9 +13,9 @@ use crate::{
     BTreeIndex, BTreeIter, BTreeRevIter, BulkOp, GetResult, LookupResult, MergeSortable,
     MergeSorted, SortDirection, WriteResult,
   },
-  cache::VecRef,
   metrics::{measure, MetricsRegistry},
   objects::{StaticKey, StaticKeyRef, MAX_KEY, MAX_VALUE},
+  page::VecRef,
   table::TableHandleRef,
   Error, Result,
 };

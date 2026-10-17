@@ -1,9 +1,10 @@
 use std::{collections::VecDeque, ops::Bound};
 
 use crate::{
-  cache::{ReadonlySlot, VecRef},
+  cache::ReadonlySlot,
   disk::Pointer,
   objects::{BTreeNodeView, RecordDataView, StaticKey, VersionRecordView},
+  page::VecRef,
   table::TableHandleRef,
   wal::TxId,
   Result,
@@ -42,7 +43,7 @@ impl BufferedRecord {
   fn from(slot: &ReadonlySlot, record: VersionRecordView) -> Option<Self> {
     match record.data {
       RecordDataView::Data(range) => Some(Self::new(
-        SnapshotValue::Data(VecRef::refed(slot.clone(), range)),
+        SnapshotValue::Data(slot.create_ref(range)),
         record.owner,
         record.version,
       )),
@@ -140,7 +141,7 @@ where
           while let Some(e) = iter.try_next()? {
             if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push_back((
-                VecRef::refed(slot.clone(), e.range),
+                slot.create_ref(e.range),
                 BufferedRecord::from(&slot, e.record),
               ));
               continue;
@@ -148,7 +149,7 @@ where
 
             let Some(p) = e.next else { continue };
             if let Some(found) = BufferedRecord::find(&policy, p, table)? {
-              buffered.push_back((VecRef::refed(slot.clone(), e.range), found));
+              buffered.push_back((slot.create_ref(e.range), found));
             };
           }
 
@@ -189,7 +190,7 @@ where
     while let Some(e) = iter.try_next()? {
       if self.policy.is_visible(e.record.owner, e.record.version) {
         self.buffered.push_back((
-          VecRef::refed(slot.clone(), e.range),
+          slot.create_ref(e.range),
           BufferedRecord::from(&slot, e.record),
         ));
         continue;
@@ -197,9 +198,7 @@ where
 
       let Some(p) = e.next else { continue };
       if let Some(found) = self.find_value(p)? {
-        self
-          .buffered
-          .push_back((VecRef::refed(slot.clone(), e.range), found));
+        self.buffered.push_back((slot.create_ref(e.range), found));
       };
     }
 
@@ -335,7 +334,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
           while let Some(e) = iter.try_next()? {
             if policy.is_visible(e.record.owner, e.record.version) {
               buffered.push((
-                VecRef::refed(slot.clone(), e.range),
+                slot.create_ref(e.range),
                 BufferedRecord::from(&slot, e.record),
               ));
               continue;
@@ -343,7 +342,7 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
 
             let Some(p) = e.next else { continue };
             if let Some(found) = BufferedRecord::find(policy, p, table)? {
-              buffered.push((VecRef::refed(slot.clone(), e.range), found));
+              buffered.push((slot.create_ref(e.range), found));
             };
           }
 

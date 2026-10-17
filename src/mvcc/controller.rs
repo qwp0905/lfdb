@@ -131,15 +131,14 @@ impl VersionController {
     aborted_versions: Vec<TxId>,
     event_bus: &EventBus,
   ) -> Arc<Self> {
+    let aborted = active_versions
+      .into_iter()
+      .chain(started)
+      .chain(aborted_versions)
+      .filter(|c| !closed.contains(c))
+      .collect();
     let this = Arc::new(Self {
-      aborted: AbortedSet::from_exists(
-        active_versions
-          .into_iter()
-          .chain(started)
-          .chain(aborted_versions)
-          .filter(|c| !closed.contains(c))
-          .collect(),
-      ),
+      aborted: AbortedSet::from_exists(aborted),
       active: ActiveSet::new(last_tx_id),
       wait_graph: WaitGraph::new(),
       closed: AtomicBool::new(false),

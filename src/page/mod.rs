@@ -6,3 +6,6 @@ pub use page::*;
 
 mod align;
 pub use align::*;
+
+mod vec_ref;
+pub use vec_ref::*;

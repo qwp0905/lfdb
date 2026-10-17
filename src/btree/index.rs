@@ -1,12 +1,12 @@
 use std::{collections::VecDeque, mem::replace, ops::Bound};
 
 use crate::{
-  cache::VecRef,
   disk::Pointer,
   objects::{
     BTreeNode, BTreeNodeView, RecordDataView, StaticKey, StaticKeyRef, TreeHeader,
     HEADER_POINTER,
   },
+  page::VecRef,
   table::TableHandleRef,
   Result,
 };
@@ -39,7 +39,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       FindRecordInTree::NotFound => return Ok(GetResult::Absent),
       FindRecordInTree::Found(slot, record) => {
         return Ok(match record.data {
-          RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
+          RecordDataView::Data(range) => GetResult::Present(slot.create_ref(range)),
           RecordDataView::Blob(id, offset, len) => {
             GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
           }
@@ -55,7 +55,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     };
 
     Ok(match record.data {
-      RecordDataView::Data(range) => GetResult::Present(VecRef::refed(slot, range)),
+      RecordDataView::Data(range) => GetResult::Present(slot.create_ref(range)),
       RecordDataView::Blob(id, offset, len) => {
         GetResult::Present(VecRef::copied(self.0.read_blob(id, offset, len)?))
       }
