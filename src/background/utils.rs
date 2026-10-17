@@ -22,12 +22,12 @@ impl<'a, T, R> SharedFn<'a, T, R> {
   }
   #[inline]
   pub fn call(&self, v: T) -> R {
-    self.0(v)
+    (self.0)(v)
   }
 }
 impl<'a, T, R> Clone for SharedFn<'a, T, R> {
   fn clone(&self) -> Self {
-    Self(self.0.clone())
+    Self(Arc::clone(&self.0))
   }
 }
 
@@ -42,7 +42,7 @@ impl<'a, T, R> SingleFn<'a, T, R> {
 
   #[inline]
   pub fn call(&mut self, v: T) -> R {
-    self.0(v)
+    (self.0)(v)
   }
 }
 

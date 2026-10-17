@@ -1,10 +1,10 @@
-use std::mem::ManuallyDrop;
+use std::{mem::ManuallyDrop, ops::Range};
 
 use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks, MappingToken};
 use crate::{
   cache::dirty::DirtyTables,
   disk::Pointer,
-  page::{Page, PageAllocator, PageRef, PAGE_SIZE},
+  page::{Page, PageAllocator, PageRef, VecRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::{create_static_ref, SBox},
   Result,
@@ -75,6 +75,11 @@ impl<'a> CachedSlot<'a> {
  */
 pub struct ReadonlySlot {
   page: SBox<PageRef<PAGE_SIZE>>,
+}
+impl ReadonlySlot {
+  pub fn create_ref(&self, range: Range<usize>) -> VecRef {
+    VecRef::refed(self.page.clone(), range)
+  }
 }
 impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
   fn as_ref(&self) -> &Page<PAGE_SIZE> {
