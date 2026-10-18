@@ -219,14 +219,14 @@ impl MappingTable {
     let backoff = Backoff::new();
     let try_evict = |bid: &BlockId| self.pins[*bid].try_exclusive();
     loop {
-      let mut guard = selected.shard.l();
-      if guard.eviction.contains(selected.hash, &key) {
-        drop(guard);
+      let mut shard = selected.shard.l();
+      if shard.eviction.contains(selected.hash, &key) {
+        drop(shard);
         backoff.snooze();
         continue;
       }
 
-      let Ok(result) = guard
+      let Ok(result) = shard
         .node
         .get_or_evict(&key, selected.hash, hasher, try_evict)
       else {
@@ -240,14 +240,14 @@ impl MappingTable {
               MappingToken::new(token, selected.parker),
             ));
           }
-          drop(guard);
+          drop(shard);
           backoff.snooze();
           continue;
         }
         GetOrEvicted::Evicted(evicted) => evicted,
       };
 
-      if let Some(guard) = self.handle_reserved(evicted, key, guard, selected) {
+      if let Some(guard) = self.handle_reserved(evicted, key, shard, selected) {
         return Some(Acquired::Evicted(guard));
       };
       backoff.snooze();
@@ -305,7 +305,7 @@ impl MappingTable {
     &'a self,
     mut evicted: Evicted<Key, BlockId, ExclusiveToken<'a>>,
     key: Key,
-    mut guard: MutexGuard<'a, Shard>,
+    mut shard: MutexGuard<'a, Shard>,
     selected: SelectedShard<'a>,
   ) -> Option<EvictionGuard<'a>> {
     let toward = evicted.toward();
@@ -313,10 +313,10 @@ impl MappingTable {
       // Reuse the evicted cache slot for the new key. The mapping is reserved now,
       // but the slot may still contain the old page until the caller finishes the
       // eviction/load work, so keep the old key blocked during the transition.
-      guard
+      shard
         .node
         .insert_to(key, selected.hash, bid, &self.hasher, toward);
-      guard
+      shard
         .eviction
         .insert_unchecked(evicted, evicted_hash, &self.hasher);
       return Some(EvictionGuard::new(
@@ -329,16 +329,16 @@ impl MappingTable {
       ));
     }
 
-    let (bid, evicted) = guard.aborted.pop().unwrap_or_else(|| {
-      let id = guard.allocated;
-      guard.allocated += 1;
+    let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
+      let id = shard.allocated;
+      shard.allocated += 1;
       debug_assert!(
-        guard.allocated <= guard.node.capacity(),
+        shard.allocated <= shard.node.capacity(),
         "capacity exceeded"
       );
       (id + selected.offset, None)
     });
-    guard
+    shard
       .node
       .insert_to(key, selected.hash, bid, &self.hasher, toward);
 
@@ -355,7 +355,7 @@ impl MappingTable {
     };
 
     if let Some(token) = self.pins[bid].try_exclusive() {
-      guard
+      shard
         .eviction
         .insert_unchecked(evicted, evicted_hash, &self.hasher);
       return Some(EvictionGuard::new(
@@ -371,18 +371,18 @@ impl MappingTable {
     // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights
     // due to contention with checkpoints or other reads.
     // However, since this occurs very rarely due to reasons such as disk failure, it is fine to proceed with deleting the hash table.
-    guard.node.remove(&key, selected.hash, &self.hasher);
-    guard.aborted.push((bid, Some((evicted, evicted_hash))));
-
+    shard.node.remove(&key, selected.hash, &self.hasher);
+    shard.aborted.push((bid, Some((evicted, evicted_hash))));
     None
   }
 
-  pub fn len_per_shard(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+  pub fn get_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
     self
       .shards
       .iter()
       .enumerate()
-      .map(|(i, s)| (s.l().allocated, self.offsets[i]))
+      .map(|(i, shard)| (shard.l().allocated, self.offsets[i]))
+      .flat_map(|(len, offset)| offset..offset + len)
   }
 }
 

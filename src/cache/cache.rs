@@ -347,12 +347,7 @@ impl BlockCache {
 
 impl Drop for BlockCache {
   fn drop(&mut self) {
-    for i in self
-      .core
-      .mapping
-      .len_per_shard()
-      .flat_map(|(len, offset)| offset..offset + len)
-    {
+    for i in self.core.mapping.get_block_ids() {
       unsafe { self.core.get_block(i).drop_in_place() };
     }
   }
