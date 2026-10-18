@@ -10,19 +10,19 @@ unsafe fn drop_box<T, VTable>(ptr: NonNull<Header<VTable>>) {
 }
 struct Header<VTable: 'static> {
   vtable: &'static VTable,
-  drop: Option<unsafe fn(NonNull<Self>)>,
+  drop_in_place: unsafe fn(NonNull<Self>),
 }
 impl<VTable> Header<VTable> {
   const fn new_pair<T>(vtable: &'static VTable) -> Self {
     Self {
       vtable,
-      drop: Some(drop_pair::<T, VTable>),
+      drop_in_place: drop_pair::<T, VTable>,
     }
   }
   const fn new_box<T>(vtable: &'static VTable) -> Self {
     Self {
       vtable,
-      drop: Some(drop_box::<T, VTable>),
+      drop_in_place: drop_box::<T, VTable>,
     }
   }
 }
@@ -75,15 +75,15 @@ impl<VTable> VPtr<VTable> {
     let raw = ptr.cast::<VObject<T, VTable>>();
     &raw.as_ref().payload
   }
+  pub const unsafe fn get_mut<'a, T>(ptr: NonNull<()>) -> &'a mut T {
+    let mut raw = ptr.cast::<VObject<T, VTable>>();
+    &mut raw.as_mut().payload
+  }
 }
 impl<VTable> Drop for VPtr<VTable> {
   fn drop(&mut self) {
     let ptr = self.0;
-    unsafe {
-      if let Some(drop_fn) = self.0.as_ref().drop {
-        drop_fn(ptr);
-      };
-    };
+    unsafe { (self.0.as_ref().drop_in_place)(ptr) };
   }
 }
 

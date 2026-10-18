@@ -1,6 +1,6 @@
 use std::{
   cell::UnsafeCell,
-  mem::MaybeUninit,
+  mem::{ManuallyDrop, MaybeUninit},
   sync::{Mutex, MutexGuard, RwLock},
 };
 
@@ -31,21 +31,31 @@ impl<'a> BlockLatch<'a> {
   }
 }
 
-pub struct PendingFlush {
-  handle: Option<PendingIO>,
+struct PendingFlushInner {
+  pending: PendingIO,
   _page: SBox<PageRef<PAGE_SIZE>>,
 }
+impl PendingFlushInner {
+  const fn new(pending: PendingIO, _page: SBox<PageRef<PAGE_SIZE>>) -> Self {
+    Self { pending, _page }
+  }
+}
+
+pub struct PendingFlush(ManuallyDrop<PendingFlushInner>);
 impl PendingFlush {
-  pub fn finalize(mut self) -> Result {
-    self.handle.take().unwrap().wait_flatten()
+  const fn new(pending: PendingIO, page: SBox<PageRef<PAGE_SIZE>>) -> Self {
+    Self(ManuallyDrop::new(PendingFlushInner::new(pending, page)))
+  }
+  pub fn finalize(self) -> Result {
+    let mut this = ManuallyDrop::new(self);
+    let inner = unsafe { ManuallyDrop::take(&mut this.0) };
+    inner.pending.wait_flatten()
   }
 }
 impl Drop for PendingFlush {
   fn drop(&mut self) {
-    let Some(handle) = self.handle.take() else {
-      return;
-    };
-    let _ = handle.wait();
+    let inner = unsafe { ManuallyDrop::take(&mut self.0) };
+    let _ = inner.pending.wait();
   }
 }
 
@@ -108,14 +118,11 @@ impl CachedBlock {
     // is dropped. Therefore the submitted page remains alive until the worker is
     // done with the slice.
     let static_ref = unsafe { create_static_ref::<Page>(&**page) };
-    let handle = metadata
+    let pending = metadata
       .handle
       .disk()
       .write_async(metadata.pointer, static_ref);
-    PendingFlush {
-      handle: Some(handle),
-      _page: page,
-    }
+    PendingFlush::new(pending, page)
   }
 
   pub unsafe fn drop_in_place(&self) {
