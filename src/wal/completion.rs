@@ -9,8 +9,8 @@ use crossbeam::{queue::SegQueue, utils::Backoff};
 use crossbeam_skiplist::SkipSet;
 
 use super::{
-  AtomicLogId, BatchedWrite, FsyncResult, LogId, LogRecord, SegmentGeneration,
-  WAL_BLOCK_SIZE,
+  AppendOrder, AtomicLogId, BatchedWrite, FsyncResult, LogId, LogRecord,
+  SegmentGeneration, WAL_BLOCK_SIZE,
 };
 use crate::{
   disk::Pointer,
@@ -21,17 +21,17 @@ const MAX_RECORD: usize = WAL_BLOCK_SIZE.div_ceil(LogRecord::MIN_BYTES);
 const CAP: usize = AtomicSizedBitmap::<MAX_RECORD>::calc_capacity();
 
 pub struct AppendCompletion {
-  frontier: Cell<u32>,
+  frontier: Cell<AppendOrder>,
   completed: AtomicSizedBitmap<CAP>,
 }
 impl AppendCompletion {
-  pub const fn new(frontier: u32) -> Self {
+  pub const fn new(frontier: AppendOrder) -> Self {
     Self {
       frontier: Cell::new(frontier),
       completed: AtomicSizedBitmap::new(),
     }
   }
-  pub fn wait_until(&self, threshold: u32) {
+  pub fn wait_until(&self, threshold: AppendOrder) {
     let backoff = Backoff::new();
     loop {
       let ready = self.frontier.get();
@@ -46,7 +46,7 @@ impl AppendCompletion {
     }
   }
 
-  pub fn complete(&self, order: u32) {
+  pub fn complete(&self, order: AppendOrder) {
     self.completed.insert(order as u64);
   }
 }

@@ -17,8 +17,9 @@ use crate::{
 };
 
 use super::{
-  AppendCompletion, AppendTicket, BookingResult, FsyncResult, LogId, OffsetBooking,
-  SegmentGeneration, SyncCompletion, WALSegment, WriteCompletion, WAL_BLOCK_SIZE,
+  AppendCompletion, AppendOrder, AppendTicket, BookingResult, FsyncResult, LogId,
+  OffsetBooking, SegmentGeneration, SyncCompletion, WALSegment, WriteCompletion,
+  WAL_BLOCK_SIZE,
 };
 
 pub struct WALSegmentRotated {
@@ -200,7 +201,7 @@ impl LogBuffer {
     entry: PageRef<WAL_BLOCK_SIZE>,
     log_id_offset: LogId,
     offset: usize,
-    order: u32,
+    order: AppendOrder,
   ) -> Self {
     Self {
       pointer,

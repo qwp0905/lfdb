@@ -1,17 +1,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crossbeam::utils::Backoff;
+
 use super::WAL_BLOCK_SIZE;
 
-pub type AppendOrder = u32;
+pub type AppendOrder = u16;
 
-const BITS: u32 = 40;
+const BITS: u32 = u64::BITS - AppendOrder::BITS;
 const MASK: u64 = (1 << BITS) - 1;
 
 /**
- * append order (24bit) + offset (40bit), packed into one AtomicU64.
- * A single fetch_add atomically reserves a position in the block and increments
- * the in-flight writer count. The offset portion can grow up to ~4000 bytes per
- * record, so 40 bits is sufficient; 24 bits accommodates the concurrent writer count.
+ * append order (16bit) + offset (48bit), packed into one AtomicU64.
  */
 pub struct OffsetBooking(AtomicU64);
 impl OffsetBooking {
@@ -29,29 +28,38 @@ impl OffsetBooking {
    * record count header and to wait for all prior writers to finish.
    */
   pub fn reserve(&self, len: usize) -> BookingResult {
-    let high = 1 << BITS;
-    let low = len as u64;
-    let old = self.0.fetch_add(high | low, Ordering::Relaxed);
+    let backoff = Backoff::new();
+    let desired = (1 << BITS) | (len as u64);
+    let mut current = self.0.load(Ordering::Relaxed);
+    loop {
+      let offset = (current & MASK) as usize;
+      if offset > WAL_BLOCK_SIZE {
+        return BookingResult::Overflow;
+      }
 
-    let order = (old >> BITS) as AppendOrder;
-    let offset = (old & MASK) as usize;
+      if let Err(err) = self.0.compare_exchange_weak(
+        current,
+        current + desired,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+      ) {
+        current = err;
+        backoff.spin();
+        continue;
+      }
 
-    debug_assert!((offset + len) as u64 <= MASK);
-    debug_assert!(order < 1 << (u64::BITS - BITS));
+      let order = (current >> BITS) as AppendOrder;
+      if offset + len <= WAL_BLOCK_SIZE {
+        return BookingResult::Available(AppendTicket::new(offset, len, order));
+      }
 
-    if offset > WAL_BLOCK_SIZE {
-      return BookingResult::Overflow;
-    }
-    if offset + len <= WAL_BLOCK_SIZE {
-      return BookingResult::Available(AppendTicket::new(offset, len, order));
-    }
-
-    let available_len = WAL_BLOCK_SIZE - offset;
-    let available = AppendTicket::new(offset, available_len, order);
-    let overflow = AppendTicket::new(0, len - available_len, 0);
-    BookingResult::Splitted {
-      available,
-      overflow,
+      let available_len = WAL_BLOCK_SIZE - offset;
+      let available = AppendTicket::new(offset, available_len, order);
+      let overflow = AppendTicket::new(0, len - available_len, 0);
+      return BookingResult::Splitted {
+        available,
+        overflow,
+      };
     }
   }
 }
