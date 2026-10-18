@@ -365,7 +365,7 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  *
  * A flusher owns a snapshot of dirty block ids. `advance` writes a bounded
  * number of dirty blocks so flushing can be spread across multiple calls.
- * `finish` completes the durability phase by fsyncing tables whose dirty pages
+ * `finish` completes the durability phase by fsync tables whose dirty pages
  * have been written.
  */
 pub struct CacheFlusher {
