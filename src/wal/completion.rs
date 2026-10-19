@@ -129,7 +129,7 @@ impl SyncCompletion {
   }
 
   /**
-   * Wait until enough rotated segment fsyncs have completed.
+   * Wait until enough rotated segment fsync has completed.
    *
    * `generation` is used as a count-based durability barrier, not as an identity
    * lookup for a particular fsync result. When this returns successfully, at least
@@ -148,7 +148,11 @@ impl SyncCompletion {
       };
 
       let result = pending.wait();
-      self.completed.insert(gen);
+      if current == gen {
+        self.frontier.store(gen + 1, Ordering::Release);
+      } else {
+        self.completed.insert(gen);
+      };
       self.try_advance(current);
       result?;
     }
@@ -192,7 +196,7 @@ impl LogCompletion {
   pub fn complete(&self, log_id: LogId) {
     if self
       .frontier
-      .compare_exchange(log_id, log_id + 1, Ordering::Release, Ordering::Acquire)
+      .compare_exchange(log_id, log_id + 1, Ordering::Release, Ordering::Relaxed)
       .is_err()
     {
       self.completed.insert(log_id);

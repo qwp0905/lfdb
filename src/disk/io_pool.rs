@@ -260,11 +260,9 @@ impl IOHandle {
   }
 
   pub fn rename(&self, new_filename: PathBuf) -> IOResult<()> {
-    {
-      let mut filename = self.filename.l();
-      self.base_dir.rename(&filename, &new_filename)?;
-      *filename = new_filename;
-    }
+    let mut filename = self.filename.l();
+    self.base_dir.rename(&filename, &new_filename)?;
+    *filename = new_filename;
     Ok(())
   }
 }
