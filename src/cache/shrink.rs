@@ -175,6 +175,20 @@ impl<K, V> ShrinkMap<K, V> {
     Some(v)
   }
 
+  pub fn get_or_insert_with(&mut self, key: K, default: impl FnOnce() -> V) -> &mut V
+  where
+    K: Hash + Eq,
+  {
+    let hash = self.hasher.hash_one(&key);
+    let eq = Self::equivalent(&key);
+    let hasher = Self::make_hasher(&self.hasher);
+    let entry = self
+      .table
+      .entry(hash, eq, hasher)
+      .or_insert_with(|| (key, default()));
+    &mut entry.into_mut().1
+  }
+
   pub fn get<Q>(&self, key: &Q) -> Option<&'_ V>
   where
     Q: Equivalent<K> + Hash + ?Sized,

@@ -168,15 +168,21 @@ impl OffsetBitmap {
     }
   }
 
-  pub fn advance_offset(&mut self, n: u64) {
-    if self.bits.is_empty() {
-      return;
-    }
+  fn remove(&mut self, n: u64) -> bool {
     let Some(diff) = n.checked_sub(self.offset) else {
-      return;
+      return false;
     };
 
-    let move_count = (diff >> SHIFT) as usize;
+    let i = (diff >> SHIFT) as usize;
+    if i >= self.bits.len() {
+      return false;
+    };
+    let old = self.bits[i];
+    self.bits[i] &= !(1 << (diff & MASK));
+    old != self.bits[i]
+  }
+
+  fn move_and_shrink(&mut self, move_count: usize) {
     if move_count >= self.bits.len() {
       self.bits.clear();
       return;
@@ -189,9 +195,49 @@ impl OffsetBitmap {
       }
       self.offset += (move_count as u64) << SHIFT;
     }
+  }
+
+  pub fn remove_and_shrink(&mut self, n: u64) -> bool {
+    if !self.remove(n) {
+      return false;
+    }
+
+    let move_count = self.bits.iter().take_while(|&&bit| bit == 0).count();
+    self.move_and_shrink(move_count);
+    true
+  }
+
+  pub fn advance_offset(&mut self, n: u64) {
+    if self.bits.is_empty() {
+      return;
+    }
+    let Some(diff) = n.checked_sub(self.offset) else {
+      return;
+    };
+
+    let move_count = (diff >> SHIFT) as usize;
+    self.move_and_shrink(move_count);
 
     debug_assert!(n - self.offset < u64::BITS.into());
     self.bits[0] &= u64::MAX << (n - self.offset);
+  }
+
+  pub fn front(&self) -> Option<u64> {
+    if self.bits.is_empty() {
+      return None;
+    };
+    if self.bits[0] == 0 {
+      return None;
+    }
+    Some(self.bits[0].trailing_zeros() as u64 + self.offset)
+  }
+}
+impl Clone for OffsetBitmap {
+  fn clone(&self) -> Self {
+    Self {
+      offset: self.offset,
+      bits: self.bits.clone(),
+    }
   }
 }
 

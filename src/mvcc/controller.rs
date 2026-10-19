@@ -10,31 +10,42 @@ use std::{
 use super::{AbortedSet, ActiveSet, ActiveState};
 
 use crate::{
-  background::{binding_events, EventBus, SharedSubscription},
+  background::{binding_events, EventBus, OnceParker, SharedSubscription},
   btree::ResolvedConflict,
   cache::ShrinkMap,
-  utils::{error, warn, OffsetBitmap, ShortenedMutex},
+  utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
 };
 
-fn remove_and_wake(active: &ActiveSet, tx_id: &TxId) {
-  let Some(parker) = active.remove(tx_id) else {
-    return;
-  };
-  parker.wake_all();
+fn remove_and_wake(active: &ActiveSet, conflicted: &ConflictSet, tx_id: &TxId) {
+  active.remove(tx_id);
+  if let Some(parker) = conflicted.l().remove(tx_id) {
+    parker.wake_all();
+  }
 }
 
 pub struct TxState<'a> {
   state: ActiveState,
   set: &'a ActiveSet,
+  conflicted: &'a ConflictSet,
   closed: &'a AtomicBool,
 }
 impl<'a> TxState<'a> {
-  const fn new(state: ActiveState, set: &'a ActiveSet, closed: &'a AtomicBool) -> Self {
-    Self { state, set, closed }
+  const fn new(
+    state: ActiveState,
+    set: &'a ActiveSet,
+    conflicted: &'a ConflictSet,
+    closed: &'a AtomicBool,
+  ) -> Self {
+    Self {
+      state,
+      set,
+      conflicted,
+      closed,
+    }
   }
   pub fn deactive(&self) {
-    remove_and_wake(self.set, &self.state.get_id());
+    remove_and_wake(self.set, self.conflicted, &self.state.get_id());
   }
   pub fn current_version(&self) -> TxId {
     self.set.current_version()
@@ -101,6 +112,8 @@ impl WaitGraph {
   }
 }
 
+type ConflictSet = Mutex<ShrinkMap<TxId, SBox<OnceParker>>>;
+
 /**
  * Tracks MVCC visibility for transactions.
  *
@@ -112,6 +125,7 @@ pub struct VersionController {
   aborted: AbortedSet,
   active: ActiveSet,
   wait_graph: WaitGraph,
+  conflicted: ConflictSet,
   closed: AtomicBool,
 }
 impl VersionController {
@@ -141,6 +155,7 @@ impl VersionController {
       aborted: AbortedSet::from_exists(aborted),
       active: ActiveSet::new(last_tx_id),
       wait_graph: WaitGraph::new(),
+      conflicted: Mutex::new(ShrinkMap::new()),
       closed: AtomicBool::new(false),
     });
     event_bus.register(&this);
@@ -151,6 +166,7 @@ impl VersionController {
       aborted: AbortedSet::empty(),
       active: ActiveSet::new(RESERVED_TX + 1),
       wait_graph: WaitGraph::new(),
+      conflicted: Mutex::new(ShrinkMap::new()),
       closed: AtomicBool::new(false),
     });
     event_bus.register(&this);
@@ -173,14 +189,23 @@ impl VersionController {
   }
 
   pub fn resolve_conflict(&self, owner: TxId, current: TxId) -> ResolvedConflict {
-    let Some(parker) = self.active.get(&owner) else {
+    if !self.active.is_active(&owner) {
       return ResolvedConflict::Closed;
     };
     if !self.wait_graph.get_or_insert(current, owner) {
       warn!("dead lock detected at tx {}.", current);
       return ResolvedConflict::DeadLock;
-    }
-    parker.park();
+    };
+    let parker = self
+      .conflicted
+      .l()
+      .get_or_insert_with(owner, Default::default)
+      .clone();
+    if self.active.is_active(&owner) {
+      parker.park();
+    } else if let Some(parker) = self.conflicted.l().remove(&owner) {
+      parker.wake_all();
+    };
     self.wait_graph.remove(current);
     ResolvedConflict::Closed
   }
@@ -206,8 +231,8 @@ impl VersionController {
     }
     let state = self.active.new_state();
     Some((
-      TxSnapshot::new(self.active.snapshot_until(state.get_id()), &self.aborted),
-      TxState::new(state, &self.active, &self.closed),
+      TxSnapshot::new(self.active.snapshot_until(), &self.aborted),
+      TxState::new(state, &self.active, &self.conflicted, &self.closed),
     ))
   }
 
@@ -217,11 +242,14 @@ impl VersionController {
    */
   pub fn snapshot(&self) -> (TxId, Vec<TxId>, Vec<TxId>) {
     let tx_id = self.active.current_version();
-    (
-      tx_id,
-      self.active.snapshot_until(tx_id).iter().collect(),
-      self.aborted.snapshot_until(tx_id),
-    )
+    let active = self
+      .active
+      .snapshot_until()
+      .iter()
+      .take_while(|&id| id < tx_id)
+      .collect();
+    let aborted = self.aborted.snapshot_until(tx_id);
+    (tx_id, active, aborted)
   }
 }
 impl SharedSubscription<WALFailed> for VersionController {
