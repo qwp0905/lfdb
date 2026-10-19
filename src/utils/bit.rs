@@ -132,7 +132,9 @@ impl OffsetBitmap {
     };
 
     let i = (diff >> SHIFT) as usize;
-    self.bits.resize((i + 1).max(self.bits.len()), 0);
+    if i >= self.bits.len() {
+      self.bits.resize(i + 1, 0);
+    }
     let old = self.bits[i];
     self.bits[i] |= 1 << (diff & MASK);
     old != self.bits[i]
