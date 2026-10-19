@@ -35,7 +35,7 @@ impl AbortedSet {
 
   pub fn remove_until(&self, tx_id: TxId) {
     let mut bitmap = self.0.wl();
-    bitmap.advance_offset(tx_id);
+    bitmap.remove_until(tx_id);
   }
 
   pub fn snapshot_until(&self, max: TxId) -> Vec<TxId> {

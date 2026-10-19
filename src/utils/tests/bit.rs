@@ -98,7 +98,7 @@ fn test_offset_bitmap_dynamic() {
     assert!(bits.insert(i));
   }
 
-  bits.advance_offset(333);
+  bits.remove_until(333);
   for i in 100..333 {
     assert!(!bits.contains(i))
   }

@@ -207,7 +207,7 @@ impl OffsetBitmap {
     true
   }
 
-  pub fn advance_offset(&mut self, n: u64) {
+  pub fn remove_until(&mut self, n: u64) {
     if self.bits.is_empty() {
       return;
     }
