@@ -26,7 +26,7 @@ pub struct CachedSlot<'a> {
   allocator: &'a PageAllocator<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
-  pub fn new(
+  pub const fn new(
     block: &'a CachedBlock,
     dirty: &'a DirtyBlocks,
     block_id: BlockId,
