@@ -167,7 +167,11 @@ impl Core {
     dirty
   }
 
-  fn create_slot<'a>(&'a self, id: BlockId, token: MappingToken<'a>) -> CachedSlot<'a> {
+  const fn create_slot<'a>(
+    &'a self,
+    id: BlockId,
+    token: MappingToken<'a>,
+  ) -> CachedSlot<'a> {
     CachedSlot::new(
       self.get_block(id),
       &self.dirty_blocks,
@@ -231,11 +235,6 @@ impl BlockCache {
     })
   }
 
-  #[inline]
-  fn cache_slot<'a>(&'a self, id: usize, token: MappingToken<'a>) -> CachedSlot<'a> {
-    self.core.create_slot(id, token)
-  }
-
   /**
    * Allocate a cache slot for a newly allocated disk block.
    *
@@ -258,7 +257,7 @@ impl BlockCache {
     };
     let guard = match acquired {
       Acquired::Hit(block_id, token) => {
-        let slot = self.cache_slot(block_id, token).for_write();
+        let slot = self.core.create_slot(block_id, token).for_write();
         return Ok(AllocatedSlot::Hit(slot));
       }
       Acquired::Evicted(guard) => guard,
@@ -283,7 +282,9 @@ impl BlockCache {
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
     let guard = match self.core.mapping.acquire(table_id, pointer) {
-      Acquired::Hit(block_id, token) => return Ok(self.cache_slot(block_id, token)),
+      Acquired::Hit(block_id, token) => {
+        return Ok(self.core.create_slot(block_id, token))
+      }
       Acquired::Evicted(guard) => guard,
     };
 
@@ -304,7 +305,7 @@ impl BlockCache {
     self
       .core
       .resolve_eviction(pending, &guard, new, pointer, table)?;
-    Ok(self.cache_slot(guard.get_block_id(), guard.commit()))
+    Ok(self.core.create_slot(guard.get_block_id(), guard.commit()))
   }
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
@@ -312,7 +313,7 @@ impl BlockCache {
     let guard = match self.core.mapping.acquire(table_id, pointer) {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
-        return Ok(self.cache_slot(block_id, token));
+        return Ok(self.core.create_slot(block_id, token));
       }
       Acquired::Evicted(guard) => guard,
     };

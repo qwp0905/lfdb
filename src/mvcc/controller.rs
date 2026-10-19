@@ -231,7 +231,7 @@ impl VersionController {
     }
     let state = self.active.new_state();
     Some((
-      TxSnapshot::new(self.active.snapshot_until(), &self.aborted),
+      TxSnapshot::new(self.active.snapshot(), &self.aborted),
       TxState::new(state, &self.active, &self.conflicted, &self.closed),
     ))
   }
@@ -244,7 +244,7 @@ impl VersionController {
     let tx_id = self.active.current_version();
     let active = self
       .active
-      .snapshot_until()
+      .snapshot()
       .iter()
       .take_while(|&id| id < tx_id)
       .collect();

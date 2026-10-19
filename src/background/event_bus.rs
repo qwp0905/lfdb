@@ -307,30 +307,30 @@ const fn handle_thread(queue: Arc<MpscQueue<EventMsg>>) -> impl FnOnce() {
     let backoff = Backoff::new();
 
     loop {
-      while !backoff.is_completed() {
-        let Some(msg) = queue.pop() else {
-          backoff.snooze();
-          continue;
-        };
-
-        match msg {
-          EventMsg::Publish(event) => router.route(event),
-          EventMsg::SubOwned(id, handler) => {
-            if !router.register_owned(id, handler) {
-              panic!("error to register {:?} as owned event subscriber", id);
-            };
-          }
-          EventMsg::SubShared(id, handler) => {
-            if !router.register_shared(id, handler) {
-              panic!("error to register {:?} as owned event subscriber", id);
-            };
-          }
-          EventMsg::Terminate => return,
-        }
+      if backoff.is_completed() {
+        park();
         backoff.reset();
-      }
+      };
 
-      park();
+      let Some(msg) = queue.pop() else {
+        backoff.snooze();
+        continue;
+      };
+
+      match msg {
+        EventMsg::Publish(event) => router.route(event),
+        EventMsg::SubOwned(id, handler) => {
+          if !router.register_owned(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
+        }
+        EventMsg::SubShared(id, handler) => {
+          if !router.register_shared(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
+        }
+        EventMsg::Terminate => return,
+      }
       backoff.reset();
     }
   }
