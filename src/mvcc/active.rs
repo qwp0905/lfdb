@@ -111,12 +111,9 @@ impl ActiveSet {
     self.inner.rl().contains(tx_id)
   }
   /**
-   * Build a bitmap snapshot of active transaction ids below `max`.
-   *
-   * The snapshot is offset-based so visibility checks can test active ids without
-   * storing every possible transaction id up to `max`.
+   * Create a snapshot of active transaction ids.
    */
-  pub fn snapshot_until(&self) -> OffsetBitmap {
+  pub fn snapshot(&self) -> OffsetBitmap {
     self.inner.rl().clone()
   }
   pub fn remove(&self, &tx_id: &TxId) {
