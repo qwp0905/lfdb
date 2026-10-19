@@ -8,15 +8,14 @@ use crate::{
 pub struct AbortedSet(RwLock<OffsetBitmap>);
 impl AbortedSet {
   pub fn empty() -> Self {
-    Self(RwLock::new(OffsetBitmap::new(0, 0)))
+    Self(RwLock::new(OffsetBitmap::new(0)))
   }
 
   pub fn from_exists(exists: BTreeSet<TxId>) -> Self {
     let Some(offset) = exists.first().copied() else {
       return Self::empty();
     };
-    let max = exists.last().copied().unwrap_or_else(|| unreachable!());
-    let mut bitmap = OffsetBitmap::new(offset, max - offset + 1);
+    let mut bitmap = OffsetBitmap::new(offset);
     for i in exists {
       bitmap.insert(i);
     }
@@ -28,14 +27,11 @@ impl AbortedSet {
   }
 
   pub fn insert(&self, tx_id: TxId) {
-    let mut bitmap = self.0.wl();
-    bitmap.ensure_capacity(tx_id);
-    bitmap.insert(tx_id);
+    self.0.wl().insert(tx_id);
   }
 
   pub fn remove_until(&self, tx_id: TxId) {
-    let mut bitmap = self.0.wl();
-    bitmap.advance_offset(tx_id);
+    self.0.wl().remove_until(tx_id);
   }
 
   pub fn snapshot_until(&self, max: TxId) -> Vec<TxId> {

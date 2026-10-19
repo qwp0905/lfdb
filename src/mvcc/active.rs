@@ -1,14 +1,10 @@
-use std::{
-  collections::BTreeMap,
-  sync::{
-    atomic::{AtomicU8, Ordering},
-    LazyLock, RwLock,
-  },
+use std::sync::{
+  atomic::{AtomicU8, Ordering},
+  RwLock,
 };
 
 use crate::{
-  background::OnceParker,
-  utils::{OffsetBitmap, SBox, ShortenedRwLock},
+  utils::{OffsetBitmap, ShortenedRwLock},
   wal::{AtomicTxId, TxId},
 };
 
@@ -83,13 +79,13 @@ impl ActiveState {
  * state is removed.
  */
 pub struct ActiveSet {
-  inner: RwLock<BTreeMap<TxId, LazyLock<SBox<OnceParker>>>>,
+  inner: RwLock<OffsetBitmap>,
   last_tx_id: AtomicTxId,
 }
 impl ActiveSet {
-  pub const fn new(last_tx_id: TxId) -> Self {
+  pub fn new(last_tx_id: TxId) -> Self {
     Self {
-      inner: RwLock::new(BTreeMap::new()),
+      inner: RwLock::new(OffsetBitmap::new(last_tx_id)),
       last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
@@ -106,11 +102,13 @@ impl ActiveSet {
    */
   pub fn new_state(&self) -> ActiveState {
     let mut inner = self.inner.wl();
-
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Relaxed);
-    inner.insert(tx_id, LazyLock::new(Default::default));
-    drop(inner);
+    inner.insert(tx_id);
     ActiveState::new(tx_id)
+  }
+
+  pub fn is_active(&self, &tx_id: &TxId) -> bool {
+    self.inner.rl().contains(tx_id)
   }
   /**
    * Build a bitmap snapshot of active transaction ids below `max`.
@@ -118,27 +116,13 @@ impl ActiveSet {
    * The snapshot is offset-based so visibility checks can test active ids without
    * storing every possible transaction id up to `max`.
    */
-  pub fn snapshot_until(&self, max: TxId) -> OffsetBitmap {
-    let inner = self.inner.rl();
-    let Some((&offset, _)) = inner.first_key_value() else {
-      return OffsetBitmap::new(0, 0);
-    };
-    let mut snapshot = OffsetBitmap::new(offset, max - offset + 1);
-    for (id, _) in inner.range(..max) {
-      snapshot.insert(*id);
-    }
-    snapshot
+  pub fn snapshot_until(&self) -> OffsetBitmap {
+    self.inner.rl().clone()
   }
-  pub fn remove(&self, tx_id: &TxId) -> Option<SBox<OnceParker>> {
-    let parker = self.inner.wl().remove(tx_id)?;
-    LazyLock::get(&parker).cloned()
+  pub fn remove(&self, &tx_id: &TxId) {
+    self.inner.wl().remove_and_shrink(tx_id);
   }
   pub fn min_version(&self) -> Option<TxId> {
-    self.inner.rl().first_key_value().map(|(k, _)| *k)
-  }
-  pub fn get(&self, tx_id: &TxId) -> Option<SBox<OnceParker>> {
-    let inner = self.inner.rl();
-    let parker = inner.get(tx_id)?;
-    Some(SBox::clone(parker))
+    self.inner.rl().front()
   }
 }

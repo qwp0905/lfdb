@@ -36,9 +36,7 @@ fn test_remove() {
   assert!(bits.insert(63));
   assert!(bits.insert(64));
   assert!(bits.insert(65));
-  // assert_eq!(bits.len(), 5);
   assert!(bits.remove(0));
-  // assert_eq!(bits.len(), 4);
   assert!(!bits.contains(0));
 }
 
@@ -61,18 +59,19 @@ fn test_iter() {
 
 #[test]
 fn test_offset_bit() {
-  let mut bits = OffsetBitmap::new(100, 10);
+  let mut bits = OffsetBitmap::new(100);
   assert!(!bits.insert(0));
   assert!(bits.insert(100));
   assert!(!bits.insert(100));
   assert!(bits.contains(100),);
   assert!(!bits.contains(101),);
-  assert!(!bits.insert(200),);
+  assert!(bits.insert(200));
+  assert!(bits.contains(200));
 }
 
 #[test]
 fn test_offset_iter() {
-  let mut bits = OffsetBitmap::new(123, 100);
+  let mut bits = OffsetBitmap::new(123);
   bits.insert(123);
   bits.insert(124);
   bits.insert(134);
@@ -89,16 +88,14 @@ fn test_offset_iter() {
 
 #[test]
 fn test_offset_bitmap_dynamic() {
-  let mut bits = OffsetBitmap::new(0, 0);
-  bits.ensure_capacity(100);
+  let mut bits = OffsetBitmap::new(0);
   assert!(bits.insert(100));
 
-  bits.ensure_capacity(983);
   for i in 101..983 {
     assert!(bits.insert(i));
   }
 
-  bits.advance_offset(333);
+  bits.remove_until(333);
   for i in 100..333 {
     assert!(!bits.contains(i))
   }
