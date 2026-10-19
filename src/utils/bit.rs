@@ -118,10 +118,11 @@ pub struct OffsetBitmap {
   bits: Vec<u64>,
 }
 impl OffsetBitmap {
-  pub fn new(offset: u64, capacity: u64) -> Self {
-    let cap = ((capacity + MASK) >> SHIFT) as usize;
-    let bits = vec![0; cap];
-    Self { offset, bits }
+  pub const fn new(offset: u64) -> Self {
+    Self {
+      offset,
+      bits: Vec::new(),
+    }
   }
 
   #[inline]
@@ -131,9 +132,7 @@ impl OffsetBitmap {
     };
 
     let i = (diff >> SHIFT) as usize;
-    if i >= self.bits.len() {
-      return false;
-    };
+    self.bits.resize((i + 1).max(self.bits.len()), 0);
     let old = self.bits[i];
     self.bits[i] |= 1 << (diff & MASK);
     old != self.bits[i]
@@ -154,18 +153,6 @@ impl OffsetBitmap {
 
   pub fn iter(&self) -> BitmapIter<impl Iterator<Item = u64> + '_> {
     BitmapIter::new(self.bits.iter().copied(), self.offset)
-  }
-
-  pub fn ensure_capacity(&mut self, max: u64) {
-    if self.bits.is_empty() {
-      self.bits.push(0);
-      self.offset = max;
-      return;
-    }
-
-    while ((self.bits.len() as u64) << SHIFT) + self.offset <= max {
-      self.bits.push(0);
-    }
   }
 
   fn remove(&mut self, n: u64) -> bool {

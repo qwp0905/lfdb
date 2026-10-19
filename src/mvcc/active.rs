@@ -85,7 +85,7 @@ pub struct ActiveSet {
 impl ActiveSet {
   pub fn new(last_tx_id: TxId) -> Self {
     Self {
-      inner: RwLock::new(OffsetBitmap::new(last_tx_id, 0)),
+      inner: RwLock::new(OffsetBitmap::new(last_tx_id)),
       last_tx_id: AtomicTxId::new(last_tx_id),
     }
   }
@@ -103,7 +103,6 @@ impl ActiveSet {
   pub fn new_state(&self) -> ActiveState {
     let mut inner = self.inner.wl();
     let tx_id = self.last_tx_id.fetch_add(1, Ordering::Relaxed);
-    inner.ensure_capacity(tx_id);
     inner.insert(tx_id);
     ActiveState::new(tx_id)
   }
