@@ -151,9 +151,9 @@ impl<T> MpscQueue<T> {
   }
 
   pub unsafe fn pop(&self) -> Option<T> {
-    let mut block_ref = self.head.block.borrow_mut();
+    let mut head_block = self.head.block.borrow_mut();
 
-    let block = *block_ref;
+    let block = *head_block;
     let head = unsafe { *self.head.index.as_ptr() };
 
     let offset = (head >> SHIFT) % LAP;
@@ -169,10 +169,8 @@ impl<T> MpscQueue<T> {
       }
     }
 
+    self.head.index.store(new_head, Ordering::Release);
     unsafe {
-      self.head.index.store(new_head, Ordering::Release);
-
-      // If we've reached the end of the block, move to the next one.
       if offset + 1 == BLOCK_CAP {
         let next = block.as_ref().wait_next();
         let mut next_index = (new_head & !HAS_NEXT).wrapping_add(1 << SHIFT);
@@ -180,7 +178,7 @@ impl<T> MpscQueue<T> {
           next_index |= HAS_NEXT;
         }
 
-        *block_ref = next;
+        *head_block = next;
         self.head.index.store(next_index, Ordering::Release);
       }
 

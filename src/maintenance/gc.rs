@@ -599,7 +599,7 @@ impl TableSteps {
   }
 }
 
-fn gc_main_loop(
+const fn gc_main_loop(
   worker: Arc<GcWorker>,
   event_bus: Arc<EventBus>,
   release_queue: Arc<MpscQueue<DropTableCommitted>>,
