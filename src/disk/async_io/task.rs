@@ -1,12 +1,13 @@
 use std::cell::UnsafeCell;
 use std::fs::File;
 use std::io::{IoSlice, Result};
-use std::mem::{forget, MaybeUninit};
+use std::mem::{forget, ManuallyDrop, MaybeUninit};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::background::{Callback, OneshotBehavior, VPtr};
 
+#[derive(Clone, Copy)]
 pub enum TaskType {
   Pwrite {
     offset: u64,
@@ -24,12 +25,6 @@ pub enum TaskType {
   },
 }
 
-pub struct FullTask {
-  pub toward: Arc<File>,
-  pub task_type: TaskType,
-  pub done: AsyncTask<usize>,
-}
-
 type AddCallback<T> = unsafe fn(
   NonNull<()>,
   Callback<Result<T>>,
@@ -41,8 +36,13 @@ struct VTable<T> {
   add_callback: AddCallback<T>,
   drop_sender: unsafe fn(NonNull<()>),
   drop_receiver: unsafe fn(NonNull<()>),
+  get_type: unsafe fn(NonNull<()>) -> TaskType,
+  toward: unsafe fn(NonNull<()>) -> NonNull<File>,
+  set_toward: unsafe fn(NonNull<()>, Arc<File>),
 }
 struct Payload<T, F> {
+  task_type: TaskType,
+  toward: UnsafeCell<Option<Arc<File>>>,
   callback: UnsafeCell<Option<F>>,
   behavior: OneshotBehavior<Result<T>>,
 }
@@ -53,9 +53,14 @@ impl<T: 'static, F: FnOnce(&Result<T>)> Payload<T, F> {
     add_callback: Self::add_callback,
     drop_receiver: Self::drop_receiver,
     drop_sender: Self::drop_sender,
+    get_type: Self::get_type,
+    toward: Self::toward,
+    set_toward: Self::set_toward,
   };
-  fn new(callback: Option<F>) -> Self {
+  fn new(callback: Option<F>, task_type: TaskType) -> Self {
     Self {
+      task_type,
+      toward: UnsafeCell::new(None),
       callback: UnsafeCell::new(callback),
       behavior: OneshotBehavior::new(),
     }
@@ -86,19 +91,73 @@ impl<T: 'static, F: FnOnce(&Result<T>)> Payload<T, F> {
     let this = VPtr::<VTable<T>>::get_ref::<Self>(ptr);
     this.behavior.drop_receiver();
   }
+  const unsafe fn get_type(ptr: NonNull<()>) -> TaskType {
+    let this = VPtr::<VTable<T>>::get_ref::<Self>(ptr);
+    this.task_type
+  }
+  unsafe fn toward(ptr: NonNull<()>) -> NonNull<File> {
+    let this = VPtr::<VTable<T>>::get_ref::<Self>(ptr);
+    NonNull::from_ref(unsafe { (*this.toward.get()).as_deref().unwrap() })
+  }
+  unsafe fn set_toward(ptr: NonNull<()>, toward: Arc<File>) {
+    let this = VPtr::<VTable<T>>::get_ref::<Self>(ptr);
+    (*this.toward.get()) = Some(toward);
+  }
 }
-pub struct AsyncTask<T: 'static>(VPtr<VTable<T>>);
-impl<T> AsyncTask<T> {
-  pub fn new<F>(callback: Option<F>) -> (Self, PendingAsync<T>)
+
+pub struct TaskUninit<T: 'static>(VPtr<VTable<T>>);
+impl<T> TaskUninit<T> {
+  pub fn new<F>(callback: Option<F>, task_type: TaskType) -> (Self, PendingAsync<T>)
   where
     T: Send,
     F: FnOnce(&Result<T>) + Send + 'static,
   {
-    let payload = Payload::new(callback);
+    let payload = Payload::new(callback, task_type);
     let vtable = &Payload::<T, F>::VTABLE;
 
     let (p1, p2) = VPtr::new_pair(payload, vtable);
     (Self(p1), PendingAsync(p2))
+  }
+
+  pub fn init(self, toward: Arc<File>) -> AsyncIOTask<T> {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.set_toward)(ptr, toward) };
+    AsyncIOTask(unsafe { (&raw const ManuallyDrop::new(self).0).read() })
+  }
+
+  pub fn get_type(&self) -> TaskType {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.get_type)(ptr) }
+  }
+
+  pub fn fulfill(self, result: Result<T>) {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.fulfill)(ptr, result) };
+  }
+}
+impl<T> Drop for TaskUninit<T> {
+  fn drop(&mut self) {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.drop_sender)(ptr) };
+  }
+}
+
+pub struct AsyncIOTask<T: 'static>(VPtr<VTable<T>>);
+impl<T> AsyncIOTask<T> {
+  pub fn get_type(&self) -> TaskType {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.get_type)(ptr) }
+  }
+
+  pub fn toward(&self) -> &'_ File {
+    let vtable = self.0.vtable();
+    let ptr = self.0.erased();
+    unsafe { (vtable.toward)(ptr).as_ref() }
   }
 
   pub const fn into_raw(this: Self) -> *mut () {
@@ -117,7 +176,7 @@ impl<T> AsyncTask<T> {
     unsafe { (vtable.fulfill)(ptr, result) };
   }
 }
-impl<T> Drop for AsyncTask<T> {
+impl<T> Drop for AsyncIOTask<T> {
   fn drop(&mut self) {
     let vtable = self.0.vtable();
     let ptr = self.0.erased();
