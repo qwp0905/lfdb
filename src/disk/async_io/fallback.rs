@@ -2,22 +2,22 @@ use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{SharedWorkThread, ThreadBuilder};
 
-use super::super::{fallocate, pwrite, pwritev};
-use super::{FullTask, TaskType};
+use super::super::{fallocate, pwrite, pwritev, AsyncIOTask};
+use super::TaskType;
 
-fn handle_task(task: FullTask) {
-  let file = task.toward;
-  let result = match task.task_type {
-    TaskType::Pwrite { offset, buf } => pwrite(&file, buf, offset),
-    TaskType::Pwritev { offset, bufs } => pwritev(&file, bufs, offset),
+fn handle_task(task: AsyncIOTask<usize>) {
+  let file = task.toward();
+  let result = match task.get_type() {
+    TaskType::Pwrite { offset, buf } => pwrite(file, buf, offset),
+    TaskType::Pwritev { offset, bufs } => pwritev(file, bufs, offset),
     TaskType::Fsync => file.sync_all().map(|_| 0),
     TaskType::Fdatasync => file.sync_data().map(|_| 0),
-    TaskType::Fallocate { offset, len } => fallocate(&file, offset, len).map(|_| 0),
+    TaskType::Fallocate { offset, len } => fallocate(file, offset, len).map(|_| 0),
   };
-  task.done.fulfill(result);
+  task.fulfill(result);
 }
 pub struct AsyncIO {
-  thread: SharedWorkThread<FullTask, ()>,
+  thread: SharedWorkThread<AsyncIOTask<usize>, ()>,
 }
 impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {
@@ -29,7 +29,7 @@ impl AsyncIO {
     Ok(Self { thread })
   }
 
-  pub fn submit(&self, task: FullTask) {
+  pub fn submit(&self, task: AsyncIOTask<usize>) {
     self.thread.dispatch(task);
   }
 
