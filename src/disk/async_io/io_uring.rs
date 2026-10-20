@@ -16,10 +16,10 @@ use io_uring::{
 
 use crate::{
   background::{ThreadSlot, UnwindSpawner},
-  utils::{warn, MpscQueue},
+  utils::{warn, ChunkQueue, MpscQueue},
 };
 
-use super::{AsyncTask, FullTask, TaskType};
+use super::{AsyncIOTask, TaskType};
 
 struct EventFd(File);
 impl EventFd {
@@ -72,9 +72,9 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
-fn to_entry(task: FullTask) -> squeue::Entry {
-  let fd = types::Fd(task.toward.as_raw_fd());
-  let mut entry = match task.task_type {
+fn to_entry(task: AsyncIOTask<usize>) -> squeue::Entry {
+  let fd = types::Fd(task.toward().as_raw_fd());
+  let mut entry = match task.get_type() {
     TaskType::Pwrite { offset, buf } => {
       opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
         .offset(offset)
@@ -93,12 +93,13 @@ fn to_entry(task: FullTask) -> squeue::Entry {
       opcode::Fallocate::new(fd, len).offset(offset).build()
     }
   };
-  entry.set_user_data(AsyncTask::into_raw(task.done) as u64);
+  entry.set_user_data(AsyncIOTask::into_raw(task) as u64);
   entry
 }
 
 fn drain_completion(
   cq: &mut CompletionQueue,
+  retry: &mut ChunkQueue<AsyncIOTask<usize>>,
   mut maybe_waker: Option<&EventFd>,
 ) -> (usize, bool) {
   cq.sync();
@@ -109,8 +110,16 @@ fn drain_completion(
     let result = cvt(cqe.result());
     let user_data = cqe.user_data();
     if user_data != POLL {
-      let done = unsafe { AsyncTask::from_raw((user_data as usize) as *mut ()) };
-      done.fulfill(result);
+      let task = unsafe { AsyncIOTask::from_raw((user_data as usize) as *mut ()) };
+      if result
+        .as_ref()
+        .is_err_and(|err| err.kind() == ErrorKind::Interrupted)
+      {
+        retry.push(task);
+        continue;
+      }
+
+      task.fulfill(result);
       continue;
     }
     let Some(waker) = maybe_waker.as_mut() else {
@@ -123,6 +132,27 @@ fn drain_completion(
     found = true;
   }
   (count, found)
+}
+
+fn drain_retry(
+  submitter: &Submitter,
+  sq: &mut SubmissionQueue,
+  retry: &mut ChunkQueue<AsyncIOTask<usize>>,
+) -> usize {
+  let mut count = 0;
+  loop {
+    if sq.is_full() && is_ebusy(submitter.submit()) {
+      break;
+    };
+    sq.sync();
+    let Some(task) = retry.pop() else {
+      break;
+    };
+    let entry = to_entry(task);
+    let _ = unsafe { sq.push(&entry) };
+    count += 1;
+  }
+  count
 }
 
 fn drain_input(
@@ -153,14 +183,16 @@ fn shutdown_gracefully(
   submitter: Submitter,
   mut sq: SubmissionQueue,
   mut cq: CompletionQueue,
+  mut retry: ChunkQueue<AsyncIOTask<usize>>,
   mut submitted: usize,
 ) {
   sq.sync();
-  while submitted > 0 {
+  while submitted > 0 || !retry.is_empty() {
     cq.sync();
     ignore_ebusy(submitter.submit_and_wait(submitted.min(cq.capacity())));
-    let (count, _) = drain_completion(&mut cq, None);
+    let (count, _) = drain_completion(&mut cq, &mut retry, None);
     submitted -= count;
+    submitted += drain_retry(&submitter, &mut sq, &mut retry);
   }
 }
 
@@ -185,11 +217,13 @@ fn ignore_ebusy<T>(result: Result<T>) {
   is_ebusy(result);
 }
 fn is_ebusy<T>(result: Result<T>) -> bool {
-  match result {
-    Ok(_) => false,
-    Err(ref err) if err.raw_os_error() == Some(libc::EBUSY) => true,
-    Err(err) => panic!("{err}"),
-  }
+  let Err(ref err) = result else {
+    return false;
+  };
+  if err.raw_os_error() == Some(libc::EBUSY) || err.kind() == ErrorKind::Interrupted {
+    return true;
+  };
+  panic!("{err}")
 }
 fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
   if sq.is_empty() && !sq.taskrun() {
@@ -199,23 +233,23 @@ fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
 }
 
 struct InputQueue {
-  queue: Arc<MpscQueue<Context<FullTask>>>,
-  peeked: Option<Context<FullTask>>,
+  queue: Arc<MpscQueue<Context<AsyncIOTask<usize>>>>,
+  peeked: Option<Context<AsyncIOTask<usize>>>,
 }
 impl InputQueue {
-  const fn new(queue: Arc<MpscQueue<Context<FullTask>>>) -> Self {
+  const fn new(queue: Arc<MpscQueue<Context<AsyncIOTask<usize>>>>) -> Self {
     Self {
       queue,
       peeked: None,
     }
   }
-  fn peek(&mut self) -> Option<&Context<FullTask>> {
+  fn peek(&mut self) -> Option<&Context<AsyncIOTask<usize>>> {
     if self.peeked.is_none() {
       self.peeked = unsafe { self.queue.pop() };
     }
     self.peeked.as_ref()
   }
-  fn pop(&mut self) -> Option<Context<FullTask>> {
+  fn pop(&mut self) -> Option<Context<AsyncIOTask<usize>>> {
     self.peeked.take().or_else(|| unsafe { self.queue.pop() })
   }
 }
@@ -228,7 +262,7 @@ enum Context<T> {
 const POLL: u64 = 0;
 
 pub struct AsyncIO {
-  queue: Arc<MpscQueue<Context<FullTask>>>,
+  queue: Arc<MpscQueue<Context<AsyncIOTask<usize>>>>,
   parked: Arc<AtomicBool>,
   waker: EventFd,
   slot: ThreadSlot,
@@ -236,7 +270,7 @@ pub struct AsyncIO {
 impl AsyncIO {
   const fn worker_loop(
     entries: u32,
-    queue: Arc<MpscQueue<Context<FullTask>>>,
+    queue: Arc<MpscQueue<Context<AsyncIOTask<usize>>>>,
     waker_fd: RawFd,
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
@@ -255,15 +289,17 @@ impl AsyncIO {
         .user_data(POLL);
       let waker = ManuallyDrop::new(unsafe { EventFd::from_raw_fd(waker_fd) });
       let mut pending = false;
+      let mut retry = ChunkQueue::new();
 
       loop {
-        let (count, found) = drain_completion(&mut cq, Some(&waker));
+        let (count, found) = drain_completion(&mut cq, &mut retry, Some(&waker));
         submitted -= count;
         pending &= !found;
+        submitted += drain_retry(&submitter, &mut sq, &mut retry);
         let (count, terminated) = drain_input(&submitter, &mut sq, &mut input);
         submitted += count;
         if terminated {
-          return shutdown_gracefully(submitter, sq, cq, submitted);
+          return shutdown_gracefully(submitter, sq, cq, retry, submitted);
         }
 
         if !pending {
@@ -276,7 +312,7 @@ impl AsyncIO {
 
         sq.sync();
         cq.sync();
-        if !cq.is_empty() || input.peek().is_some() {
+        if !cq.is_empty() || !retry.is_empty() || input.peek().is_some() {
           submit_if_not_empty(&submitter, &sq);
           continue;
         }
@@ -315,7 +351,7 @@ impl AsyncIO {
     })
   }
 
-  pub fn submit(&self, task: FullTask) {
+  pub fn submit(&self, task: AsyncIOTask<usize>) {
     self.queue.push(Context::Task(task));
     if self.parked.swap(false, Ordering::Relaxed) {
       self.waker.wake();
