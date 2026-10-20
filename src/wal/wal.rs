@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
 use crossbeam::{atomic::AtomicCell, utils::Backoff};
 
@@ -21,6 +21,8 @@ use super::{
 pub struct WALConfig {
   pub max_file_size: usize,
   pub max_buffer_size: usize,
+  pub segment_expiration: Duration,
+  pub segment_min_count: usize,
 }
 impl WALConfig {
   pub const MIN_BUFFER_SIZE: usize = WAL_BLOCK_SIZE * 3;
@@ -97,7 +99,12 @@ impl WriteAheadLog {
 
     let buffer_allocator = PageAllocator::new(config.max_buffer_size / WAL_BLOCK_SIZE);
     let max_len = max_len as Pointer;
-    let preloader = SegmentPreload::new(max_len, io_pool);
+    let preloader = SegmentPreload::new(
+      max_len,
+      config.segment_expiration,
+      config.segment_min_count,
+      io_pool,
+    );
     let sync_completion = Arc::new(SyncCompletion::new());
 
     let buffer = SegmentBuffer::new(

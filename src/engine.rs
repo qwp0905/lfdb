@@ -67,6 +67,8 @@ impl Engine {
     let wal_config = WALConfig {
       max_file_size: config.wal_file_size,
       max_buffer_size: config.wal_buffer_size,
+      segment_expiration: config.wal_segment_expiration,
+      segment_min_count: config.wal_segment_min_count,
     };
     let block_cache_config = BlockCacheConfig {
       shard_count: config.block_cache_shard_count,

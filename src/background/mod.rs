@@ -10,9 +10,6 @@ pub use interval::*;
 mod parker;
 pub use parker::*;
 
-mod preload;
-pub use preload::*;
-
 mod event_bus;
 pub use event_bus::*;
 
