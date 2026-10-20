@@ -15,7 +15,7 @@ use std::{
 };
 
 #[cfg(unix)]
-fn retry_if<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+fn retry_with<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
   loop {
     match f() {
       Ok(v) => return Ok(v),
@@ -27,7 +27,7 @@ fn retry_if<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
 
 #[cfg(unix)]
 pub fn pread(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
-  retry_if(|| file.read_at(buf, offset))
+  retry_with(|| file.read_at(buf, offset))
 }
 #[cfg(windows)]
 pub fn pread(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
@@ -37,7 +37,7 @@ pub fn pread(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
 #[cfg(unix)]
 #[allow(unused)]
 pub fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
-  retry_if(|| file.write_at(buf, offset))
+  retry_with(|| file.write_at(buf, offset))
 }
 #[cfg(windows)]
 pub fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
@@ -47,7 +47,7 @@ pub fn pwrite(file: &File, buf: &[u8], offset: u64) -> Result<usize> {
 #[cfg(unix)]
 #[allow(unused)]
 pub fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {
-  retry_if(|| unsafe {
+  retry_with(|| unsafe {
     let ret = libc::pwritev(
       file.as_raw_fd(),
       bufs.as_ptr() as *const libc::iovec,
@@ -75,7 +75,7 @@ pub fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {
 #[cfg(target_os = "linux")]
 #[allow(unused)]
 pub fn fallocate(file: &File, offset: u64, len: u64) -> Result<()> {
-  retry_if(|| unsafe {
+  retry_with(|| unsafe {
     let ret = libc::fallocate(
       file.as_raw_fd(),
       0,
@@ -106,7 +106,7 @@ pub fn fallocate(file: &File, offset: u64, len: u64) -> Result<()> {
     fst_bytesalloc: 0,
   };
 
-  retry_if(|| unsafe {
+  retry_with(|| unsafe {
     let ret = libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore);
     if ret == -1 {
       return Err(Error::last_os_error());
@@ -125,7 +125,7 @@ pub fn direct_io(options: &mut OpenOptions, path: &Path) -> Result<File> {
   let file = options.open(path)?;
   let fd = file.as_raw_fd();
 
-  retry_if(|| unsafe {
+  retry_with(|| unsafe {
     let ret = libc::fcntl(fd, libc::F_NOCACHE, 1);
     if ret == -1 {
       return Err(Error::last_os_error());
