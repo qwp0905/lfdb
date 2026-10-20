@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use super::{
-  IntervalWorkThread, PreloadThread, SharedFn, SharedWorkThread, SingleFn, ThreadPool,
-};
+use super::{IntervalWorkThread, SharedFn, SharedWorkThread, SingleFn, ThreadPool};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -58,20 +56,6 @@ impl SingleThreadBuilder {
       self.builder.stack_size,
       timeout,
       SingleFn::new(move |_| f()),
-    )
-  }
-
-  pub fn preload<T, F, G>(self, preload: F, fallback: G) -> PreloadThread<T>
-  where
-    T: Send + 'static,
-    F: FnMut(()) -> T + Send + 'static,
-    G: FnMut(T) + Send + 'static,
-  {
-    PreloadThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      SingleFn::new(preload),
-      SingleFn::new(fallback),
     )
   }
 }
