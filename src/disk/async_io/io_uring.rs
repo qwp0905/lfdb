@@ -220,7 +220,10 @@ fn is_ebusy<T>(result: Result<T>) -> bool {
   let Err(ref err) = result else {
     return false;
   };
-  if err.raw_os_error() == Some(libc::EBUSY) || err.kind() == ErrorKind::Interrupted {
+  if err
+    .raw_os_error()
+    .is_some_and(|ret| matches!(ret, libc::EBUSY | libc::EINTR))
+  {
     return true;
   };
   panic!("{err}")
