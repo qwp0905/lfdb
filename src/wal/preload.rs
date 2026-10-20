@@ -144,6 +144,11 @@ enum Context {
   Term,
 }
 
+fn create_new(io_pool: &IOPool, max_len: Pointer) -> Result<WALSegment> {
+  let segment = WALSegment::open(max_len, io_pool)?;
+  io_pool.sync_dir()?;
+  Ok(segment)
+}
 const fn worker_loop(
   ready: Arc<MpscQueue<(Instant, WALSegment)>>,
   request: Arc<MpscQueue<Context>>,
@@ -152,27 +157,18 @@ const fn worker_loop(
   expiration: Duration,
   min_count: usize,
 ) -> impl FnOnce() {
-  move || unsafe {
+  move || {
     let mut preloaded = None;
-    loop {
-      let (entered_at, segment) = match preloaded.take() {
-        Some(v) => v,
-        None => match ready.pop() {
-          Some((e, s)) => (e, Ok(s)),
-          None => {
-            let segment = WALSegment::open(max_len, &io_pool)
-              .and_then(|segment| io_pool.sync_dir().map(|_| segment));
-            (Instant::now(), segment)
-          }
-        },
-      };
-      if let Some(ctx) = request.pop() {
+    let segment = loop {
+      let (entered_at, segment) = preloaded
+        .take()
+        .or_else(|| unsafe { ready.pop() }.map(|(e, s)| (e, Ok(s))))
+        .unwrap_or_else(|| (Instant::now(), create_new(&io_pool, max_len)));
+
+      if let Some(ctx) = unsafe { request.pop() } {
         match ctx {
           Context::Request(done) => done.fulfill(segment),
-          Context::Term => {
-            let _ = segment.and_then(|seg| seg.truncate());
-            return;
-          }
+          Context::Term => break segment,
         }
         continue;
       };
@@ -191,6 +187,8 @@ const fn worker_loop(
       }
 
       let _ = segment.and_then(|seg| seg.truncate());
-    }
+    };
+
+    let _ = segment.and_then(|seg| seg.truncate());
   }
 }
