@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+  path::{Path, PathBuf},
+  time::Duration,
+};
 
 use super::{Engine, EngineConfig, Result};
 use crate::{
@@ -17,6 +20,8 @@ impl EngineBuilder {
       base_path: PathBuf::from(base_path.as_ref()),
       wal_file_size: DEFAULT_WAL_FILE_SIZE,
       wal_buffer_size: DEFAULT_WAL_BUFFER_SIZE,
+      wal_segment_expiration: DEFAULT_WAL_SEGMENT_EXPIRATION,
+      wal_segment_min_count: DEFAULT_WAL_SEGMENT_MIN_COUNT,
       checkpoint_flush_factor: DEFAULT_FLUSH_FACTOR,
       gc_batch_size: DEFAULT_GC_BATCH_SIZE,
       compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
@@ -42,6 +47,27 @@ impl EngineBuilder {
    */
   pub const fn wal_buffer_size(mut self, size: usize) -> Self {
     self.0.wal_buffer_size = size;
+    self
+  }
+
+  /**
+   * The expiration time for a WAL segment.
+   * WAL segments that have been persisted to disk via a checkpoint
+   * are held for a configured duration before being discarded.
+   */
+  pub const fn wal_segment_expiration(mut self, expr: Duration) -> Self {
+    self.0.wal_segment_expiration = expr;
+    self
+  }
+
+  /**
+   * The minimum number of segments that the WAL preloader will maintain.
+   * Even if there are segments whose expiration time has passed,
+   * they will not be discarded as long as the count remains at
+   * or below this number.
+   */
+  pub const fn wal_segment_min_count(mut self, count: usize) -> Self {
+    self.0.wal_segment_min_count = count;
     self
   }
 
@@ -133,6 +159,8 @@ impl Clone for EngineBuilder {
 
 const DEFAULT_WAL_FILE_SIZE: usize = 128 << 20; // 128 mib
 const DEFAULT_WAL_BUFFER_SIZE: usize = 16 << 20; // 16 mib
+const DEFAULT_WAL_SEGMENT_EXPIRATION: Duration = Duration::from_mins(5);
+const DEFAULT_WAL_SEGMENT_MIN_COUNT: usize = 5;
 const DEFAULT_FLUSH_FACTOR: f64 = 1.25;
 const DEFAULT_GC_BATCH_SIZE: usize = 32;
 const DEFAULT_BLOCK_CACHE_SHARD_COUNT: usize = 1 << 6; // 64

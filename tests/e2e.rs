@@ -36,6 +36,8 @@ fn default_options(dir: &TempDir) -> EngineBuilder {
   EngineBuilder::new(dir.path())
     .wal_file_size(8 << 20)
     .wal_buffer_size(64 << 10)
+    .wal_segment_expiration(Duration::from_millis(1))
+    .wal_segment_min_count(1)
     .block_cache_memory_capacity(64 << 10)
     .block_cache_shard_count(1)
     .block_cache_buffer_size(32 << 10)

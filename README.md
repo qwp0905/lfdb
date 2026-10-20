@@ -146,6 +146,8 @@ println!("get p99: {}µs", m.operation_get_latency_micros_p99);
 |--------|-------------|
 | `wal_file_size` | Size limit of a single WAL segment file. When exceeded, a new segment is created. Larger segments improve write throughput by reducing rotation/checkpoint frequency, but extend recovery time on crash since more records must be replayed before the engine becomes available. |
 | `wal_buffer_size` | Hard limit of WAL buffer size. |
+|`wal_segment_expiration`| The expiration time for a WAL segment. WAL segments that have been persisted to disk via a checkpoint are held for a configured duration before being discarded. |
+|`wal_segment_min_count`| The minimum number of segments that the WAL preloader will maintain. Even if there are segments whose expiration time has passed, they will not be discarded as long as the count remains at or below this number. |
 | `checkpoint_flush_factor` | Determines the growth factor at which to flush the block cache at the checkpoint. In environments with frequent WAL segment replacement, such as write-heavy workloads, pressure increases exponentially at the set ratio. |
 | `block_cache_memory_capacity` | Total memory allocated to the block cache. Since the engine uses Direct I/O and bypasses the OS page cache, a larger block cache is critical for performance. |
 | `block_cache_shard_count` | Number of block cache shards. More shards reduce lock contention but shrink each shard's capacity, increasing eviction frequency. |

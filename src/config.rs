@@ -1,7 +1,7 @@
 use crate::wal::WALConfig;
 
 use super::{Error, Result};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 #[clippy::format_args]
 macro_rules! invalid {
@@ -14,6 +14,8 @@ pub struct EngineConfig {
   pub base_path: PathBuf,
   pub wal_file_size: usize,
   pub wal_buffer_size: usize,
+  pub wal_segment_expiration: Duration,
+  pub wal_segment_min_count: usize,
   pub checkpoint_flush_factor: f64,
   pub gc_batch_size: usize,
   pub compaction_threshold: f64,
@@ -31,6 +33,10 @@ impl EngineConfig {
 
     if self.wal_buffer_size < WALConfig::MIN_BUFFER_SIZE {
       return invalid!("wal_buffer_size must be greater than 0.");
+    }
+
+    if self.wal_segment_expiration == Duration::ZERO {
+      return invalid!("wal_segment_expiration must be greater than 0.");
     }
 
     if !self.checkpoint_flush_factor.is_finite() {
@@ -78,6 +84,8 @@ impl Clone for EngineConfig {
       base_path: self.base_path.clone(),
       wal_file_size: self.wal_file_size,
       wal_buffer_size: self.wal_buffer_size,
+      wal_segment_expiration: self.wal_segment_expiration,
+      wal_segment_min_count: self.wal_segment_min_count,
       checkpoint_flush_factor: self.checkpoint_flush_factor,
       gc_batch_size: self.gc_batch_size,
       compaction_threshold: self.compaction_threshold,
