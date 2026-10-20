@@ -1,12 +1,14 @@
-use std::sync::Arc;
-
-use crossbeam::queue::SegQueue;
+use std::{
+  sync::Arc,
+  thread::{park, park_timeout, Builder, Thread},
+  time::{Duration, Instant},
+};
 
 use super::WALSegment;
 use crate::{
-  background::{PreloadThread, ThreadBuilder},
+  background::{oneshot, Oneshot, OneshotFulfill, ThreadSlot, UnwindSpawner},
   disk::{IOPool, Pointer},
-  utils::ToBox,
+  utils::{MpscQueue, ToBox},
   Result,
 };
 
@@ -14,23 +16,31 @@ use crate::{
  * Pre-allocates the next WAL segment in the background so rotation never blocks.
  * Reuses old segments via rename instead of creating new files.
  *
- * When idle (no rotation request within SEGMENT_MAX_LIFE), leftover segments in
+ * When idle leftover segments in
  * the reuse queue are truncated — no reason to hold pre-allocated disk space
  * when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  preload: Box<PreloadThread<Result<WALSegment>>>,
+  preload: Box<PreloadThread>,
   io_pool: Arc<IOPool>,
-  ready: SegQueue<WALSegment>,
+  ready: Arc<MpscQueue<(Instant, WALSegment)>>,
 }
 impl SegmentPreload {
-  pub fn new(max_len: Pointer, io_pool: Arc<IOPool>) -> Self {
-    let ready = SegQueue::new();
-    let preload = ThreadBuilder::new()
-      .name("wal segment preload")
-      .single()
-      .preload(handle_preload(io_pool.clone(), max_len), handle_fallback())
-      .to_box();
+  pub fn new(
+    max_len: Pointer,
+    segment_expiration: Duration,
+    segment_min_count: usize,
+    io_pool: Arc<IOPool>,
+  ) -> Self {
+    let ready = Arc::new(MpscQueue::new());
+    let preload = PreloadThread::new(
+      ready.clone(),
+      io_pool.clone(),
+      max_len,
+      segment_expiration,
+      segment_min_count,
+    )
+    .to_box();
     Self {
       preload,
       ready,
@@ -39,10 +49,7 @@ impl SegmentPreload {
   }
 
   pub fn load(&self) -> Result<WALSegment> {
-    if let Some(segment) = self.ready.pop() {
-      return Ok(segment);
-    }
-    self.preload.execute(()).wait().unwrap()
+    self.preload.request().wait().unwrap()
   }
 
   /**
@@ -54,7 +61,7 @@ impl SegmentPreload {
    */
   pub fn failover(&self) {
     self.preload.close();
-    while self.ready.pop().is_some() {}
+    while unsafe { self.ready.pop() }.is_some() {}
   }
 
   /**
@@ -62,7 +69,7 @@ impl SegmentPreload {
    */
   pub fn close(&self) {
     self.preload.close();
-    while let Some(segment) = self.ready.pop() {
+    while let Some((_, segment)) = unsafe { self.ready.pop() } {
       let _ = segment.truncate();
     }
   }
@@ -70,35 +77,120 @@ impl SegmentPreload {
   pub fn reuse(&self, reused: Vec<WALSegment>) -> Result {
     reused.iter().try_for_each(|seg| seg.reuse())?;
     self.io_pool.sync_dir()?;
+    let now = Instant::now();
     for segment in reused {
-      self.ready.push(segment);
+      self.ready.push((now, segment));
     }
+    self.preload.wake();
     Ok(())
   }
 }
 
-const fn handle_preload(
-  io_pool: Arc<IOPool>,
-  max_len: Pointer,
-) -> impl FnMut(()) -> Result<WALSegment> {
-  move |_| {
-    let segment = WALSegment::open(max_len, &io_pool)?;
-    io_pool.sync_dir()?;
-    Ok(segment)
+struct PreloadThread {
+  queue: Arc<MpscQueue<Context>>,
+  waker: Thread,
+  slot: ThreadSlot,
+}
+impl PreloadThread {
+  fn new(
+    ready: Arc<MpscQueue<(Instant, WALSegment)>>,
+    io_pool: Arc<IOPool>,
+    max_len: Pointer,
+    segment_expiration: Duration,
+    segment_min_count: usize,
+  ) -> Self {
+    let queue = Arc::new(MpscQueue::new());
+    let handle = Builder::new()
+      .name("wal segment preload".to_string())
+      .stack_size(2 << 20)
+      .spawn_unwind(worker_loop(
+        ready,
+        queue.clone(),
+        io_pool,
+        max_len,
+        segment_expiration,
+        segment_min_count,
+      ));
+    Self {
+      queue,
+      waker: handle.thread().clone(),
+      slot: ThreadSlot::new(handle),
+    }
+  }
+
+  fn wake(&self) {
+    self.waker.unpark();
+  }
+
+  fn request(&self) -> Oneshot<Result<WALSegment>> {
+    let (o, f) = oneshot();
+    self.queue.push(Context::Request(f));
+    self.wake();
+    o
+  }
+
+  fn close(&self) {
+    let Some(handle) = self.slot.close() else {
+      return;
+    };
+    self.queue.push(Context::Term);
+    self.waker.unpark();
+    handle.join().unwrap();
   }
 }
 
-/**
- * Drop an unused preloaded segment when segment demand is low.
- *
- * The preload fallback runs when no caller consumed the prepared segment within
- * the idle window. That implies low WAL write pressure, so keeping preallocated
- * disk space is unnecessary; the segment is truncated instead.
- */
-const fn handle_fallback() -> impl FnMut(Result<WALSegment>) {
-  move |finalize| {
-    if let Ok(segment) = finalize {
-      let _ = segment.truncate();
-    };
+enum Context {
+  Request(OneshotFulfill<Result<WALSegment>>),
+  Term,
+}
+
+const fn worker_loop(
+  ready: Arc<MpscQueue<(Instant, WALSegment)>>,
+  request: Arc<MpscQueue<Context>>,
+  io_pool: Arc<IOPool>,
+  max_len: Pointer,
+  expiration: Duration,
+  min_count: usize,
+) -> impl FnOnce() {
+  move || unsafe {
+    let mut preloaded = None;
+    loop {
+      let (entered_at, segment) = match preloaded.take() {
+        Some(v) => v,
+        None => match ready.pop() {
+          Some((e, s)) => (e, Ok(s)),
+          None => {
+            let segment = WALSegment::open(max_len, &io_pool)
+              .and_then(|segment| io_pool.sync_dir().map(|_| segment));
+            (Instant::now(), segment)
+          }
+        },
+      };
+      if let Some(ctx) = request.pop() {
+        match ctx {
+          Context::Request(done) => done.fulfill(segment),
+          Context::Term => {
+            let _ = segment.and_then(|seg| seg.truncate());
+            return;
+          }
+        }
+        continue;
+      };
+
+      if ready.len() < min_count {
+        park();
+        preloaded = Some((entered_at, segment));
+        continue;
+      }
+
+      let elapsed = entered_at.elapsed();
+      if elapsed < expiration {
+        park_timeout(expiration - elapsed);
+        preloaded = Some((entered_at, segment));
+        continue;
+      }
+
+      let _ = segment.and_then(|seg| seg.truncate());
+    }
   }
 }
