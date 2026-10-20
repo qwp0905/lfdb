@@ -4,61 +4,52 @@ use std::{
   path::Path,
 };
 
-use super::{AsyncTask, PendingAsync, TaskType};
+use super::{PendingAsync, TaskType, TaskUninit};
 
 pub const IO_RETRY: u8 = 3;
 
 type None = fn(&Result<usize>);
 pub const NO_CALLBACK: Option<None> = None;
 
-pub struct IOTask {
-  pub task_type: TaskType,
-  pub done: AsyncTask<usize>,
-}
+pub type IOTask = TaskUninit<usize>;
 impl IOTask {
-  fn new<F: FnOnce(&Result<usize>) + Send + 'static>(
+  fn create<F: FnOnce(&Result<usize>) + Send + 'static>(
     task_type: TaskType,
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    let (task, done) = AsyncTask::new(callback);
-    (
-      Self {
-        task_type,
-        done: task,
-      },
-      done,
-    )
+    let (task, done) = Self::new(callback, task_type);
+    (task, done)
   }
   pub fn new_pwrite<F: FnOnce(&Result<usize>) + Send + 'static>(
     buf: &'static [u8],
     offset: u64,
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    Self::new(TaskType::Pwrite { offset, buf }, callback)
+    Self::create(TaskType::Pwrite { offset, buf }, callback)
   }
   pub fn new_pwritev<F: FnOnce(&Result<usize>) + Send + 'static>(
     bufs: &'static [IoSlice<'static>],
     offset: u64,
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    Self::new(TaskType::Pwritev { offset, bufs }, callback)
+    Self::create(TaskType::Pwritev { offset, bufs }, callback)
   }
   pub fn new_fsync<F: FnOnce(&Result<usize>) + Send + 'static>(
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    Self::new(TaskType::Fsync, callback)
+    Self::create(TaskType::Fsync, callback)
   }
   pub fn new_fdatasync<F: FnOnce(&Result<usize>) + Send + 'static>(
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    Self::new(TaskType::Fdatasync, callback)
+    Self::create(TaskType::Fdatasync, callback)
   }
   pub fn new_fallocate<F: FnOnce(&Result<usize>) + Send + 'static>(
     offset: u64,
     len: u64,
     callback: Option<F>,
   ) -> (Self, PendingAsync<usize>) {
-    Self::new(TaskType::Fallocate { offset, len }, callback)
+    Self::create(TaskType::Fallocate { offset, len }, callback)
   }
 }
 

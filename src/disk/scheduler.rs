@@ -302,7 +302,7 @@ fn finish_write(
   let offset = start;
   let batched = BatchedWrite::new(offset, bufs, waiting, guard);
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
-  let callback = create_write_callback(batched, 1);
+  let callback = create_write_callback(batched, 0);
   let (task, _) = if static_ref.len() == 1 {
     IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
   } else {
@@ -329,7 +329,7 @@ fn retry_write(mut batched: BatchedWrite, trial: u8) {
   let backend = batched.guard.backend.clone();
   let offset = batched.offset;
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
-  let callback = create_write_callback(batched, trial + 1);
+  let callback = create_write_callback(batched, trial);
   let (task, _) = if static_ref.len() == 1 {
     IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
   } else {

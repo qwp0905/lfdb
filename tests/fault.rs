@@ -70,7 +70,7 @@ impl IOBackend for FaultIO {
     if !self.is_wal {
       return self.inner.submit(task);
     }
-    let flag = match task.task_type {
+    let flag = match task.get_type() {
       lfdb::TaskType::Pwrite { .. } => &self.controller.fill_wal_on_next_write,
       lfdb::TaskType::Pwritev { .. } => &self.controller.fill_wal_on_next_write,
       lfdb::TaskType::Fsync => return self.inner.submit(task),
@@ -78,9 +78,7 @@ impl IOBackend for FaultIO {
       lfdb::TaskType::Fallocate { .. } => return self.inner.submit(task),
     };
     if flag.swap(false, Ordering::AcqRel) {
-      task
-        .done
-        .fulfill(Err(IoError::from(ErrorKind::StorageFull)));
+      task.fulfill(Err(IoError::from(ErrorKind::StorageFull)));
       return;
     }
 
