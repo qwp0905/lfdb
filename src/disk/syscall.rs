@@ -4,15 +4,13 @@ use std::{
   path::Path,
 };
 
-#[cfg(target_vendor = "apple")]
-use std::io::ErrorKind;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::{
-  io::Error,
+  io::{Error, ErrorKind},
   os::{fd::AsRawFd, unix::fs::FileExt},
 };
 
@@ -78,11 +76,11 @@ pub fn pwritev(file: &File, bufs: &[IoSlice], offset: u64) -> Result<usize> {
 #[allow(unused)]
 pub fn fallocate(file: &File, offset: u64, len: u64) -> Result<()> {
   retry_if(|| unsafe {
-    let ret = libc::pwritev(
+    let ret = libc::fallocate(
       file.as_raw_fd(),
-      bufs.as_ptr() as *const libc::iovec,
-      bufs.len() as libc::c_int,
-      offset as _,
+      0,
+      offset as libc::off_t,
+      len as libc::off_t,
     );
     if ret == -1 {
       return Err(Error::last_os_error());
