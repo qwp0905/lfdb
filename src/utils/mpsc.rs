@@ -1,13 +1,14 @@
-use std::{
-  cell::{RefCell, UnsafeCell},
-  mem::MaybeUninit,
-  ptr::NonNull,
-  sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
-};
+use std::{cell::RefCell, mem::MaybeUninit, ptr::NonNull, sync::atomic::Ordering};
 
-use crossbeam::utils::{Backoff, CachePadded};
+use crossbeam::utils::CachePadded;
 
+use super::loom::{AtomicBool, AtomicPtr, AtomicUsize, Backoff, UnsafeCell};
+
+#[cfg(not(loom))]
 const LAP: usize = 32;
+// Loom has to cross a block boundary within the few pushes it can explore.
+#[cfg(loom)]
+const LAP: usize = 4;
 const BLOCK_CAP: usize = LAP - 1;
 const SHIFT: usize = 1;
 const HAS_NEXT: usize = 1;
@@ -17,8 +18,16 @@ struct Slot<T> {
   written: AtomicBool,
 }
 impl<T> Slot<T> {
+  #[cfg(loom)]
+  fn new() -> Self {
+    Self {
+      value: UnsafeCell::new(MaybeUninit::uninit()),
+      written: AtomicBool::new(false),
+    }
+  }
+
   fn write(&self, value: T) {
-    unsafe { (*self.value.get()).write(value) };
+    self.value.with_mut(|v| unsafe { (*v).write(value) });
     self.written.store(true, Ordering::Release);
   }
 
@@ -27,11 +36,11 @@ impl<T> Slot<T> {
     while !self.written.load(Ordering::Acquire) {
       backoff.snooze();
     }
-    unsafe { (*self.value.get()).assume_init_read() }
+    self.value.with(|v| unsafe { (*v).assume_init_read() })
   }
 
   unsafe fn drop_in_place(&mut self) {
-    unsafe { self.value.get_mut().assume_init_drop() };
+    self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 }
 
@@ -40,8 +49,18 @@ struct Block<T> {
   slots: [Slot<T>; BLOCK_CAP],
 }
 impl<T> Block<T> {
+  #[cfg(not(loom))]
   fn alloc() -> Box<Self> {
     unsafe { Box::<Self>::new_zeroed().assume_init() }
+  }
+
+  // Loom objects carry model state, so an all-zero block is not a valid one.
+  #[cfg(loom)]
+  fn alloc() -> Box<Self> {
+    Box::new(Self {
+      next: AtomicPtr::new(std::ptr::null_mut()),
+      slots: std::array::from_fn(|_| Slot::new()),
+    })
   }
 
   fn write(&self, value: T, index: usize) {
@@ -69,7 +88,7 @@ struct Tail<T> {
   block: AtomicPtr<Block<T>>,
 }
 impl<T> Tail<T> {
-  const fn new(ptr: *mut Block<T>, index: usize) -> Self {
+  fn new(ptr: *mut Block<T>, index: usize) -> Self {
     Self {
       index: AtomicUsize::new(index),
       block: AtomicPtr::new(ptr),
@@ -81,7 +100,7 @@ struct Head<T> {
   block: RefCell<NonNull<Block<T>>>,
 }
 impl<T> Head<T> {
-  const fn new(ptr: *mut Block<T>, index: usize) -> Self {
+  fn new(ptr: *mut Block<T>, index: usize) -> Self {
     Self {
       index: AtomicUsize::new(index),
       block: RefCell::new(unsafe { NonNull::new_unchecked(ptr) }),
@@ -154,7 +173,7 @@ impl<T> MpscQueue<T> {
     let mut head_block = self.head.block.borrow_mut();
 
     let block = *head_block;
-    let head = unsafe { *self.head.index.as_ptr() };
+    let head = self.head.index.load(Ordering::Relaxed);
 
     let offset = (head >> SHIFT) % LAP;
     let mut new_head = head + (1 << SHIFT);
@@ -230,8 +249,8 @@ unsafe impl<T: Send> Sync for MpscQueue<T> {}
 
 impl<T> Drop for MpscQueue<T> {
   fn drop(&mut self) {
-    let mut head = *self.head.index.get_mut();
-    let mut tail = *self.tail.index.get_mut();
+    let mut head = self.head.index.load(Ordering::Relaxed);
+    let mut tail = self.tail.index.load(Ordering::Relaxed);
     let mut block = self.head.block.get_mut().as_ptr();
 
     head &= !((1 << SHIFT) - 1);
@@ -244,7 +263,7 @@ impl<T> Drop for MpscQueue<T> {
         if offset < BLOCK_CAP {
           (*block).slots[offset].drop_in_place()
         } else {
-          block = *Box::from_raw(block).next.get_mut();
+          block = Box::from_raw(block).next.load(Ordering::Relaxed);
         }
         head = head.wrapping_add(1 << SHIFT);
       }
@@ -258,4 +277,8 @@ impl<T> Drop for MpscQueue<T> {
 
 #[cfg(all(test, not(loom)))]
 #[path = "tests/mpsc.rs"]
+mod tests;
+
+#[cfg(all(test, loom))]
+#[path = "tests/mpsc_loom.rs"]
 mod tests;
