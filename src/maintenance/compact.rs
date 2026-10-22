@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::LinkedList, mem::replace, sync::Arc, time::Duration};
+use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
 
 use crossbeam::atomic::AtomicCell;
 
@@ -513,7 +513,7 @@ impl CompactionWorker {
     Ok(Some((new_table, tx.current_version(), table_meta)))
   }
 
-  fn finalize_cycle(&self, cycle: &mut CompactionCycle) -> Result {
+  fn finalize_cycle(&self, cycle: &mut CompactionCycle, batch_size: usize) -> Result {
     if !self.check_compaction(cycle.metadata.get_name())? {
       return Ok(());
     }
@@ -527,21 +527,28 @@ impl CompactionWorker {
       None => self.old_index.snapshot(&cycle.old)?,
     };
 
-    const CAP: usize = 1000;
-    let mut bulk = Vec::with_capacity(CAP);
-    while let Some(snap) = snapshotter.next_snapshot()? {
-      if bulk.len() >= CAP {
-        let bulk = replace(&mut bulk, Vec::with_capacity(CAP));
-        let _guard = cycle.new.free().protect();
-        self.new_index.apply_snapshot_bulk(bulk, &cycle.new)?;
-      }
-      bulk.push(snap);
+    while !snapshotter.is_done() {
+      self.apply_snapshot_once(&mut snapshotter, &cycle.new, batch_size)?;
     }
-
-    let guard = cycle.new.free().protect();
-    self.new_index.apply_snapshot_bulk(bulk, &cycle.new)?;
-    drop(guard);
     self.remove_compaction(&cycle.metadata)?;
+    Ok(())
+  }
+
+  fn apply_snapshot_once(
+    &self,
+    snapshotter: &mut Snapshotter<Arc<CompactionReadPolicy>>,
+    new_table: &TableHandleRef,
+    batch_size: usize,
+  ) -> Result {
+    let mut bulk = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+      let Some(snapshot) = snapshotter.next_snapshot()? else {
+        break;
+      };
+      bulk.push(snapshot);
+    }
+    let _guard = new_table.free().protect();
+    self.new_index.apply_snapshot_bulk(bulk, new_table)?;
     Ok(())
   }
 
@@ -580,17 +587,7 @@ impl CompactionWorker {
       warn!("table {} already dropped.", current.metadata.get_name());
       return Ok(true);
     }
-
-    let mut bulk = Vec::new();
-    for _ in 0..batch_size {
-      let Some(snap) = snapshotter.next_snapshot()? else {
-        break;
-      };
-      bulk.push(snap);
-    }
-
-    let _guard = current.new.free().protect();
-    self.new_index.apply_snapshot_bulk(bulk, &current.new)?;
+    self.apply_snapshot_once(snapshotter, &current.new, batch_size)?;
     Ok(false)
   }
 
@@ -660,6 +657,7 @@ pub struct Compactor {
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   ticker: Box<IntervalWorkThread>,
   worker: Arc<CompactionWorker>,
+  batch_size: usize,
 }
 impl Compactor {
   pub fn new(
@@ -709,6 +707,7 @@ impl Compactor {
       cycle,
       ticker,
       worker,
+      batch_size: config.batch_size,
     });
     event_bus.register(&this);
     this
@@ -741,7 +740,7 @@ impl Compactor {
 
     while let Some(mut cycle) = cycle.take().or_else(|| unsafe { self.in_progress.pop() })
     {
-      self.worker.finalize_cycle(&mut cycle)?;
+      self.worker.finalize_cycle(&mut cycle, self.batch_size)?;
     }
     Ok(())
   }
