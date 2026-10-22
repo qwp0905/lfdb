@@ -95,8 +95,13 @@ impl Engine {
       let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
 
       let tables = tables.to_arc();
-      let wal =
-        WriteAheadLog::init(wal_config, event_bus.clone(), io_pool.clone())?.to_arc();
+      let wal = WriteAheadLog::init(
+        wal_config,
+        event_bus.clone(),
+        io_pool.clone(),
+        metrics_registry.clone(),
+      )?
+      .to_arc();
       let blob = BlobStorage::init(io_pool.clone(), wal.clone()).to_arc();
       let recorder = PageRecorder::new(wal.clone()).to_arc();
       let version_controller = VersionController::init(&event_bus);
@@ -154,7 +159,6 @@ impl Engine {
         compactor,
         blob,
         checkpoint,
-        metrics_registry.clone(),
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
@@ -185,6 +189,7 @@ impl Engine {
       wal_config,
       event_bus.clone(),
       io_pool.clone(),
+      metrics_registry.clone(),
       &init_thread,
       manifest.wal_version,
     )?;
@@ -359,7 +364,6 @@ impl Engine {
       compactor,
       blob,
       checkpoint.clone(),
-      metrics_registry.clone(),
     );
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
