@@ -9,7 +9,6 @@ use crate::{
   disk::Pointer,
   error::Result,
   maintenance::{Compactor, GarbageCollector},
-  metrics::{measure, MetricsRegistry},
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableNameRef},
@@ -32,7 +31,6 @@ pub struct TxOrchestrator {
   recorder: Arc<PageRecorder>,
   compactor: Arc<Compactor>,
   blob: Arc<BlobStorage>,
-  metrics: Arc<MetricsRegistry>,
 }
 impl TxOrchestrator {
   pub const fn new(
@@ -45,7 +43,6 @@ impl TxOrchestrator {
     compactor: Arc<Compactor>,
     blob: Arc<BlobStorage>,
     checkpoint: Arc<Checkpoint>,
-    metrics: Arc<MetricsRegistry>,
   ) -> Self {
     Self {
       wal,
@@ -57,7 +54,6 @@ impl TxOrchestrator {
       recorder,
       compactor,
       blob,
-      metrics,
     }
   }
 
@@ -103,14 +99,12 @@ impl TxOrchestrator {
 
   #[inline]
   pub fn commit_tx(&self, tx_id: TxId) -> Result<DurabilityGuard<'_>> {
-    let metrics = &self.metrics.transaction_commit;
-    measure!(metrics, self.wal.commit_and_flush(tx_id))
+    self.wal.commit_and_flush(tx_id)
   }
 
   #[inline]
   pub fn abort_tx(&self, tx_id: TxId) {
     self.version_controller.set_abort(tx_id);
-    self.metrics.transaction_abort_count.inc();
   }
 
   #[inline]

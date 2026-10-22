@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use super::{Counter, Gauge, Histogram, TimeHistogram};
+use super::{Counter, Histogram, TimeHistogram};
 
 /**
  * A point-in-time snapshot of engine metrics. Obtain via Engine::metrics().
@@ -97,16 +97,12 @@ pub struct EngineMetrics {
   pub disk_sync_batch_p50: f64,
 
   /**
-   * Number of active IO threads processing disk requests.
-   */
-  pub active_io_threads: u64,
-
-  /**
    * Number of transactions started.
    */
   pub transaction_start_count: u64,
   /**
-   * Number of transactions aborted.
+   * Number of transactions aborted after modifying data. Transactions that end
+   * without any modification are counted as committed.
    */
   pub transaction_abort_count: u64,
 
@@ -128,25 +124,32 @@ pub struct EngineMetrics {
   pub transaction_duration_ms_p99: f64,
 
   /**
-   * Number of successfully committed transactions.
+   * Number of committed transactions, including transactions that ended without
+   * any modification.
    */
   pub transaction_commit_count: u64,
+
   /**
-   * Average commit latency (WAL flush) in milliseconds.
+   * Number of commit records flushed to the WAL.
    */
-  pub transaction_commit_latency_ms_avg: f64,
+  pub wal_commit_count: u64,
   /**
-   * p50 commit latency in milliseconds.
+   * Average WAL commit latency, from appending the commit record until it is
+   * durable, in milliseconds.
    */
-  pub transaction_commit_latency_ms_p50: f64,
+  pub wal_commit_latency_ms_avg: f64,
   /**
-   * p95 commit latency in milliseconds.
+   * p50 WAL commit latency in milliseconds.
    */
-  pub transaction_commit_latency_ms_p95: f64,
+  pub wal_commit_latency_ms_p50: f64,
   /**
-   * p99 commit latency in milliseconds.
+   * p95 WAL commit latency in milliseconds.
    */
-  pub transaction_commit_latency_ms_p99: f64,
+  pub wal_commit_latency_ms_p95: f64,
+  /**
+   * p99 WAL commit latency in milliseconds.
+   */
+  pub wal_commit_latency_ms_p99: f64,
 
   /**
    * Number of get operations.
@@ -220,11 +223,7 @@ impl std::fmt::Display for EngineMetrics {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     let uptime = Duration::from_millis(self.uptime_ms);
 
-    writeln!(
-      f,
-      "engine: uptime {:.1?} | active io threads {}",
-      uptime, self.active_io_threads,
-    )?;
+    writeln!(f, "engine: uptime {:.1?}", uptime)?;
     writeln!(
       f,
       "transactions: start {} | commit {} | abort {}",
@@ -242,11 +241,12 @@ impl std::fmt::Display for EngineMetrics {
     )?;
     writeln!(
       f,
-      "tx commit: avg {:.3} ms | p50 {:.3} | p95 {:.3} | p99 {:.3}",
-      self.transaction_commit_latency_ms_avg,
-      self.transaction_commit_latency_ms_p50,
-      self.transaction_commit_latency_ms_p95,
-      self.transaction_commit_latency_ms_p99,
+      "wal commit: count {} | avg {:.3} ms | p50 {:.3} | p95 {:.3} | p99 {:.3}",
+      self.wal_commit_count,
+      self.wal_commit_latency_ms_avg,
+      self.wal_commit_latency_ms_p50,
+      self.wal_commit_latency_ms_p95,
+      self.wal_commit_latency_ms_p99,
     )?;
     writeln!(
       f,
@@ -329,14 +329,15 @@ pub struct MetricsRegistry {
 
   pub disk_read: TimeHistogram,
   pub disk_write: TimeHistogram,
-  pub active_io_threads: Gauge,
 
   pub disk_write_batch: Histogram,
   pub disk_sync_batch: Histogram,
 
   pub transaction_start: TimeHistogram,
-  pub transaction_commit: TimeHistogram,
+  pub transaction_commit_count: Counter,
   pub transaction_abort_count: Counter,
+
+  pub wal_commit: TimeHistogram,
 
   pub operation_get: TimeHistogram,
   pub operation_insert: TimeHistogram,
@@ -359,14 +360,15 @@ impl MetricsRegistry {
       checkpoint_cycle: TimeHistogram::new(10, Duration::from_millis(1)),
 
       transaction_start: TimeHistogram::new(1000, Duration::from_micros(10)),
-      transaction_commit: TimeHistogram::new(1000, Duration::from_micros(10)),
+      transaction_commit_count: Counter::new(),
       transaction_abort_count: Counter::new(),
+
+      wal_commit: TimeHistogram::new(1000, Duration::from_micros(10)),
 
       disk_read: TimeHistogram::new(1000, Duration::from_nanos(100)),
       disk_write: TimeHistogram::new(1000, Duration::from_nanos(100)),
       disk_write_batch: Histogram::new(1000),
       disk_sync_batch: Histogram::new(1000),
-      active_io_threads: Gauge::new(),
 
       operation_get: TimeHistogram::new(1000, Duration::from_nanos(100)),
       operation_insert: TimeHistogram::new(1000, Duration::from_nanos(100)),
@@ -380,7 +382,7 @@ impl MetricsRegistry {
 
   pub fn snapshot(&self) -> EngineMetrics {
     let transaction_start = self.transaction_start.snapshot_with(MILLIS);
-    let transaction_commit = self.transaction_commit.snapshot_with(MILLIS);
+    let wal_commit = self.wal_commit.snapshot_with(MILLIS);
     let block_cache_read = self.block_cache_read.snapshot_with(MICROS);
     let checkpoint_cycle = self.checkpoint_cycle.snapshot_with(MILLIS);
     let disk_read = self.disk_read.snapshot_with(MICROS);
@@ -422,8 +424,6 @@ impl MetricsRegistry {
       disk_sync_batch_avg: sync_batch.average(),
       disk_sync_batch_p50: sync_batch.percentile(0.5),
 
-      active_io_threads: self.active_io_threads.load(),
-
       transaction_start_count: transaction_start.total_count(),
       transaction_abort_count: self.transaction_abort_count.load(),
 
@@ -432,11 +432,13 @@ impl MetricsRegistry {
       transaction_duration_ms_p95: transaction_start.percentile(0.95),
       transaction_duration_ms_p99: transaction_start.percentile(0.99),
 
-      transaction_commit_count: transaction_commit.total_count(),
-      transaction_commit_latency_ms_avg: transaction_commit.average(),
-      transaction_commit_latency_ms_p50: transaction_commit.percentile(0.5),
-      transaction_commit_latency_ms_p95: transaction_commit.percentile(0.95),
-      transaction_commit_latency_ms_p99: transaction_commit.percentile(0.99),
+      transaction_commit_count: self.transaction_commit_count.load(),
+
+      wal_commit_count: wal_commit.total_count(),
+      wal_commit_latency_ms_avg: wal_commit.average(),
+      wal_commit_latency_ms_p50: wal_commit.percentile(0.5),
+      wal_commit_latency_ms_p95: wal_commit.percentile(0.95),
+      wal_commit_latency_ms_p99: wal_commit.percentile(0.99),
 
       operation_get_count: operation_get.total_count(),
       operation_get_latency_micros_avg: operation_get.average(),
@@ -460,7 +462,3 @@ impl MetricsRegistry {
     }
   }
 }
-
-#[cfg(all(test, not(loom)))]
-#[path = "tests/registry.rs"]
-mod tests;

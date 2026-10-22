@@ -213,3 +213,7 @@ macro_rules! measure {
   }};
 }
 pub(crate) use measure;
+
+#[cfg(test)]
+#[path = "tests/histogram.rs"]
+mod tests;

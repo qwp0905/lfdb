@@ -7,4 +7,5 @@ fn test_counter() {
   for _ in 0..c {
     counter.inc();
   }
+  assert_eq!(counter.load(), c);
 }
