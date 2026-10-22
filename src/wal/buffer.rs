@@ -1,19 +1,10 @@
-use std::{
-  cell::Cell,
-  io,
-  iter::repeat,
-  mem::ManuallyDrop,
-  sync::{
-    atomic::{fence, AtomicBool, Ordering},
-    Arc,
-  },
-};
+use std::{cell::Cell, io, mem::ManuallyDrop, sync::Arc};
 
 use crate::{
   background::{oneshot, EventBus, Oneshot, OneshotFulfill},
   disk::Pointer,
   page::{Page, PageAllocator, PageRef},
-  utils::{create_static_ref, AtomicRef, AtomicSBox, MpscQueue, SBox},
+  utils::{create_static_ref, AtomicRef, AtomicSBox, BatchQueue, SBox},
 };
 
 use super::{
@@ -121,59 +112,6 @@ impl Drop for SegmentBuffer {
   }
 }
 
-struct LogBufferBatch {
-  occupied: AtomicBool,
-  queue: MpscQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
-  max_offset: Cell<usize>,
-}
-impl LogBufferBatch {
-  fn new() -> Self {
-    Self {
-      occupied: AtomicBool::new(false),
-      queue: MpscQueue::new(),
-      max_offset: Cell::new(0),
-    }
-  }
-
-  fn push_and_compete(
-    &self,
-    done: OneshotFulfill<io::Result<()>>,
-    ticket: AppendTicket,
-  ) -> bool {
-    self.queue.push((ticket, done));
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
-      return false;
-    }
-    fence(Ordering::Acquire);
-    true
-  }
-
-  fn try_release(&self) -> bool {
-    self.occupied.fetch_and(false, Ordering::Release);
-    if self.queue.is_empty() {
-      return true;
-    }
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
-      return true;
-    }
-    fence(Ordering::Acquire);
-    false
-  }
-
-  fn drain_all(
-    &self,
-  ) -> impl Iterator<Item = (AppendTicket, OneshotFulfill<io::Result<()>>)> + '_ {
-    repeat(()).map_while(|_| unsafe { self.queue.pop() })
-  }
-
-  const fn get_max_offset(&self) -> usize {
-    self.max_offset.get()
-  }
-  fn set_max_offset(&self, offset: usize) {
-    self.max_offset.set(offset);
-  }
-}
-
 pub struct BatchedWrite {
   current: Oneshot<io::Result<()>>,
 }
@@ -191,7 +129,8 @@ pub struct LogBuffer {
   pointer: Pointer,
   entry: PageRef<WAL_BLOCK_SIZE>,
   reserved_offset: OffsetBooking,
-  batch: LogBufferBatch,
+  batch: BatchQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
+  max_offset: Cell<usize>,
   append_completion: AppendCompletion,
   log_id_offset: LogId,
 }
@@ -207,7 +146,8 @@ impl LogBuffer {
       pointer,
       entry,
       reserved_offset: OffsetBooking::new(offset, order),
-      batch: LogBufferBatch::new(),
+      batch: BatchQueue::new(),
+      max_offset: Cell::new(0),
       append_completion: AppendCompletion::new(order),
       log_id_offset,
     }
@@ -242,21 +182,21 @@ impl LogBuffer {
     let (o, f) = oneshot();
     let batched = BatchedWrite::new(o);
 
-    if !self.batch.push_and_compete(f, ticket) {
+    if !self.batch.push_and_compete((ticket, f)) {
       return batched;
     };
 
     loop {
       let mut page = allocator.allocate();
 
-      let mut max_offset = self.batch.get_max_offset();
+      let mut max_offset = self.max_offset.get();
       let mut waiting = Vec::new();
-      for (ticket, done) in self.batch.drain_all() {
+      for (ticket, done) in unsafe { self.batch.drain_all() } {
         self.append_completion.wait_until(ticket.get_order());
         max_offset = max_offset.max(ticket.get_len() + ticket.get_offset());
         waiting.push(done);
       }
-      self.batch.set_max_offset(max_offset);
+      self.max_offset.set(max_offset);
 
       page.copy_from(self.entry.range(0..max_offset), 0);
 
