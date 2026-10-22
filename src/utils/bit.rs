@@ -1,5 +1,5 @@
 use std::{
-  iter::Enumerate,
+  iter::{repeat_n, Enumerate},
   sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -109,9 +109,9 @@ impl<T: Iterator<Item = u64>> Iterator for BitmapIter<T> {
  * interesting range is narrow. `OffsetBitmap` stores bits relative to a base
  * offset, so values in `offset..offset + capacity` can be represented compactly.
  *
- * The represented range is fixed when the bitmap is created. Callers do not
- * need to pre-check whether a value belongs to that range; values outside the
- * range simply cannot be inserted or found.
+ * The represented window grows on insert and shrinks from the front on removal.
+ * An empty bitmap has no meaningful offset, so the next insert re-anchors the
+ * window at the word of the inserted value.
  */
 pub struct OffsetBitmap {
   offset: u64,
@@ -126,31 +126,47 @@ impl OffsetBitmap {
   }
 
   #[inline]
-  pub fn insert(&mut self, n: u64) -> bool {
-    let Some(diff) = n.checked_sub(self.offset) else {
-      return false;
-    };
-
+  fn locate(&self, n: u64) -> Option<(usize, u64)> {
+    let diff = n.checked_sub(self.offset)?;
     let i = (diff >> SHIFT) as usize;
-    if i >= self.bits.len() {
-      self.bits.resize(i + 1, 0);
+    (i < self.bits.len()).then(|| (i, 1 << (diff & MASK)))
+  }
+
+  #[inline]
+  fn locate_or_extend(&mut self, n: u64) -> (usize, u64) {
+    if self.bits.is_empty() {
+      self.offset = n & !MASK;
+      self.bits.push(0);
+      return (0, 1 << (n & MASK));
     }
+    if let Some(diff) = n.checked_sub(self.offset) {
+      let i = (diff >> SHIFT) as usize;
+      if i >= self.bits.len() {
+        self.bits.resize(i + 1, 0);
+      }
+      return (i, 1 << (diff & MASK));
+    }
+
+    let offset = n & !MASK;
+    let count = ((self.offset - offset) >> SHIFT) as usize;
+    self.bits.splice(0..0, repeat_n(0, count));
+    self.offset = offset;
+    (0, 1 << (n & MASK))
+  }
+
+  #[inline]
+  pub fn insert(&mut self, n: u64) -> bool {
+    let (i, bit) = self.locate_or_extend(n);
     let old = self.bits[i];
-    self.bits[i] |= 1 << (diff & MASK);
-    old != self.bits[i]
+    self.bits[i] |= bit;
+    old & bit == 0
   }
 
   #[inline]
   pub fn contains(&self, n: u64) -> bool {
-    let Some(diff) = n.checked_sub(self.offset) else {
-      return false;
-    };
-
-    let i = (diff >> SHIFT) as usize;
-    if i >= self.bits.len() {
-      return false;
-    }
-    self.bits[i] & (1 << (diff & MASK)) != 0
+    self
+      .locate(n)
+      .is_some_and(|(i, bit)| self.bits[i] & bit != 0)
   }
 
   pub fn iter(&self) -> BitmapIter<impl Iterator<Item = u64> + '_> {
@@ -158,17 +174,12 @@ impl OffsetBitmap {
   }
 
   fn remove(&mut self, n: u64) -> bool {
-    let Some(diff) = n.checked_sub(self.offset) else {
-      return false;
-    };
-
-    let i = (diff >> SHIFT) as usize;
-    if i >= self.bits.len() {
+    let Some((i, bit)) = self.locate(n) else {
       return false;
     };
     let old = self.bits[i];
-    self.bits[i] &= !(1 << (diff & MASK));
-    old != self.bits[i]
+    self.bits[i] &= !bit;
+    old & bit != 0
   }
 
   fn move_and_shrink(&mut self, move_count: usize) {
@@ -197,18 +208,22 @@ impl OffsetBitmap {
   }
 
   pub fn remove_until(&mut self, n: u64) {
-    if self.bits.is_empty() {
-      return;
-    }
     let Some(diff) = n.checked_sub(self.offset) else {
       return;
     };
 
     let move_count = (diff >> SHIFT) as usize;
-    self.move_and_shrink(move_count);
+    if move_count >= self.bits.len() {
+      self.bits.clear();
+      return;
+    }
 
-    debug_assert!(n - self.offset < u64::BITS.into());
-    self.bits[0] &= u64::MAX << (n - self.offset);
+    self.bits[move_count] &= u64::MAX << (diff & MASK);
+    let zeros = self.bits[move_count..]
+      .iter()
+      .take_while(|&&bit| bit == 0)
+      .count();
+    self.move_and_shrink(move_count + zeros);
   }
 
   pub fn front(&self) -> Option<u64> {
