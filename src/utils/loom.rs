@@ -1,14 +1,14 @@
 #[cfg(not(loom))]
 pub use crossbeam::utils::Backoff;
 #[cfg(not(loom))]
-pub use std::sync::atomic::AtomicU32;
+pub use std::sync::atomic::{fence, AtomicU32, AtomicUsize};
 
 #[cfg(loom)]
-pub use ::loom::sync::atomic::AtomicU32;
+pub use ::loom::sync::atomic::{fence, AtomicU32, AtomicUsize};
 
 /*
- * Spinning and yielding differ only in cost, so every backoff step is modeled
- * as a wait; `loom::hint::spin_loop` yields to the model scheduler.
+ * Spinning and yielding differ only in cost, not in correctness, so the model
+ * can treat every backoff step as a wait for other threads.
  */
 #[cfg(loom)]
 pub struct Backoff;
