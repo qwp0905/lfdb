@@ -505,7 +505,7 @@ struct State {
   closed: AtomicBool,
 }
 impl State {
-  const fn new() -> Self {
+  fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),

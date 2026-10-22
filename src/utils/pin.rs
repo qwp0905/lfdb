@@ -1,9 +1,9 @@
 use std::{
   mem::{forget, ManuallyDrop},
-  sync::atomic::{AtomicU32, Ordering},
+  sync::atomic::Ordering,
 };
 
-use crossbeam::utils::Backoff;
+use super::loom::{AtomicU32, Backoff};
 
 /*
  * The high bit is the exclusive marker; the remaining bits store the shared
@@ -29,7 +29,7 @@ const EXCLUSIVE: u32 = 1 << (u32::BITS - 1);
 #[derive(Debug)]
 pub struct ExclusivePin(AtomicU32);
 impl ExclusivePin {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self(AtomicU32::new(0))
   }
 
@@ -128,4 +128,8 @@ impl<'a> Drop for ExclusiveToken<'a> {
 
 #[cfg(all(test, not(loom)))]
 #[path = "tests/pin.rs"]
+mod tests;
+
+#[cfg(all(test, loom))]
+#[path = "tests/pin_loom.rs"]
 mod tests;
