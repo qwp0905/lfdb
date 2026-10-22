@@ -162,6 +162,6 @@ impl<'a> Drop for Permit<'a> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/semaphore.rs"]
 mod tests;

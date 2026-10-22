@@ -292,6 +292,6 @@ impl Clone for TableMetadata {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/metadata.rs"]
 mod test;

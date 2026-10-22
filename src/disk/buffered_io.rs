@@ -152,6 +152,6 @@ impl ScanIOHandle {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/buffered_io.rs"]
 mod tests;

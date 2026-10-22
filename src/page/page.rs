@@ -186,6 +186,6 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/page.rs"]
 mod tests;

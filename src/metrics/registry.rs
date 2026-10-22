@@ -461,6 +461,6 @@ impl MetricsRegistry {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/registry.rs"]
 mod tests;

@@ -125,7 +125,7 @@ impl<'a> DataEntryView<'a> {
     }
   }
 
-  #[cfg(test)]
+  #[cfg(all(test, not(loom)))]
   pub const fn len(&self) -> usize {
     self.len
   }
@@ -167,6 +167,6 @@ impl<'a> DataEntryIter<'a> {
     Ok(Some(record))
   }
 }
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/entry.rs"]
 mod tests;

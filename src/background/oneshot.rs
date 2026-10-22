@@ -362,6 +362,6 @@ impl<T> Drop for OneshotFulfill<T> {
 unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
 unsafe impl<T: Send> Send for OneshotBehavior<T> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/oneshot.rs"]
 mod tests;

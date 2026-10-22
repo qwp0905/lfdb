@@ -129,6 +129,6 @@ impl<A> Extend<A> for ChunkQueue<A> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/chunk_queue.rs"]
 mod tests;

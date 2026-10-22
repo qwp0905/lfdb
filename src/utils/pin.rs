@@ -71,7 +71,7 @@ impl ExclusivePin {
   }
 
   #[inline]
-  #[cfg(test)]
+  #[cfg(all(test, not(loom)))]
   pub fn is_exclusive(&self) -> bool {
     self.0.load(Ordering::Acquire) == EXCLUSIVE
   }
@@ -126,6 +126,6 @@ impl<'a> Drop for ExclusiveToken<'a> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/pin.rs"]
 mod tests;

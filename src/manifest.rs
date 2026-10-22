@@ -148,7 +148,7 @@ pub fn save_manifest(io_pool: &IOPool, manifest: &Manifest) -> Result {
   Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
   use std::sync::Arc;
 

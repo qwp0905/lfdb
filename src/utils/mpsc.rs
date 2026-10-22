@@ -256,6 +256,6 @@ impl<T> Drop for MpscQueue<T> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/mpsc.rs"]
 mod tests;

@@ -22,6 +22,6 @@ impl Gauge {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/gauge.rs"]
 mod tests;

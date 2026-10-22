@@ -96,6 +96,6 @@ impl hash::Hash for VecRef {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/vec_ref.rs"]
 mod tests;

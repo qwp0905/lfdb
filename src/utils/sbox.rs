@@ -140,6 +140,6 @@ impl<T: Default> Default for SBox<T> {
 //   }
 // }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/sbox.rs"]
 mod tests;

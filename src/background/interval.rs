@@ -71,6 +71,6 @@ impl Drop for IntervalWorkThread {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/interval.rs"]
 mod tests;

@@ -421,6 +421,6 @@ impl Drop for EventBus {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/event_bus.rs"]
 mod tests;

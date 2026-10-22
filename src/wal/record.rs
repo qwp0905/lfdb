@@ -253,6 +253,6 @@ impl LogRecordUninit {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/record.rs"]
 mod tests;
