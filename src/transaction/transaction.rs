@@ -228,6 +228,7 @@ impl<'a> Transaction<'a> {
     }
     if !self.context.is_modified() {
       state.deactive();
+      self.metrics.transaction_commit_count.inc();
       return Ok(());
     }
 
@@ -239,6 +240,7 @@ impl<'a> Transaction<'a> {
         return Err(err);
       }
     }
+    self.metrics.transaction_commit_count.inc();
     let version = self.context.state().current_version();
 
     let events = self
@@ -264,12 +266,14 @@ impl<'a> Transaction<'a> {
     }
     if !self.context.is_modified() {
       state.deactive();
+      self.metrics.transaction_commit_count.inc();
       return Ok(());
     }
 
     let id = state.get_id();
     self.orchestrator.abort_tx(id);
     state.deactive();
+    self.metrics.transaction_abort_count.inc();
 
     self.clear();
     Ok(())

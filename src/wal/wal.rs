@@ -6,6 +6,7 @@ use crate::{
   background::{EventBus, ThreadPool},
   blob::BlobMetadata,
   disk::{IOPool, Pointer},
+  metrics::{measure, MetricsRegistry},
   page::PageAllocator,
   table::TableId,
   utils::{error, info, AtomicRef, AtomicSBox},
@@ -87,12 +88,14 @@ pub struct WriteAheadLog {
   allocator: PageAllocator<WAL_BLOCK_SIZE>,
 
   event_bus: Arc<EventBus>,
+  metrics: Arc<MetricsRegistry>,
 }
 impl WriteAheadLog {
   fn new(
     config: WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    metrics: Arc<MetricsRegistry>,
     last_log_id: LogId,
   ) -> Result<Self> {
     let max_len = config.max_file_size / WAL_BLOCK_SIZE;
@@ -126,19 +129,22 @@ impl WriteAheadLog {
       state: AtomicCell::new(State::Available),
       max_len,
       event_bus,
+      metrics,
     })
   }
   pub fn init(
     config: WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    metrics: Arc<MetricsRegistry>,
   ) -> Result<Self> {
-    Self::new(config, event_bus, io_pool, 0)
+    Self::new(config, event_bus, io_pool, metrics, 0)
   }
   pub fn replay(
     config: WALConfig,
     event_bus: Arc<EventBus>,
     io_pool: Arc<IOPool>,
+    metrics: Arc<MetricsRegistry>,
     init_thread: &ThreadPool,
     replay_version: WALFormatVersion,
   ) -> Result<(Self, ReplayResult)> {
@@ -154,7 +160,13 @@ impl WriteAheadLog {
       replay_result.segments.len(),
       replay_result.last_snapshot,
     );
-    let this = Self::new(config, event_bus, io_pool, replay_result.last_log_id)?;
+    let this = Self::new(
+      config,
+      event_bus,
+      io_pool,
+      metrics,
+      replay_result.last_log_id,
+    )?;
     Ok((this, replay_result))
   }
 
@@ -374,8 +386,11 @@ impl WriteAheadLog {
     )
   }
 
-  pub fn commit_and_flush(&self, tx_id: TxId) -> Result<DurabilityGuard<'_>> {
+  fn __commit_and_flush(&self, tx_id: TxId) -> Result<DurabilityGuard<'_>> {
     self.append(LogRecordUninit::new_commit(tx_id), true)
+  }
+  pub fn commit_and_flush(&self, tx_id: TxId) -> Result<DurabilityGuard<'_>> {
+    measure!(self.metrics.wal_commit, self.__commit_and_flush(tx_id))
   }
 
   pub fn is_available(&self) -> bool {
