@@ -33,8 +33,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check lint
         run: cargo clippy --all-targets -- -D warnings
+      - name: Check loom lint
+        run: cargo clippy --lib --tests --release --config "build.rustflags=['--cfg','loom']" -- -D warnings
       - name: Run tests
         run: cargo test:cov
+      - name: Run loom tests
+        run: cargo test:loom
 
   benchmark_ycsb:
     runs-on: ubuntu-latest
