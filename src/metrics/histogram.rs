@@ -214,6 +214,6 @@ macro_rules! measure {
 }
 pub(crate) use measure;
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/histogram.rs"]
 mod tests;
