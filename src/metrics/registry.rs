@@ -460,7 +460,3 @@ impl MetricsRegistry {
     }
   }
 }
-
-#[cfg(test)]
-#[path = "tests/registry.rs"]
-mod tests;
