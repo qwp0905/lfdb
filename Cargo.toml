@@ -28,6 +28,9 @@ libc = "0.2.182"
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3.9"
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.2"
+
 [dev-dependencies]
 tempfile = "3.10.1"
 rand = "0.9.4"
@@ -45,5 +48,6 @@ clippy.too_many_arguments = "allow"
 clippy.big_endian_bytes = "forbid"
 
 [workspace.lints.rust]
-unused = "deny"
+unused = { level = "deny", priority = -1 }
 dead_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

@@ -2,3 +2,4 @@
 "test:cov:html" = "llvm-cov --package lfdb --html --open --tests"
 "test:cov" = "llvm-cov --package lfdb --fail-under-functions 80 --fail-under-lines 80 --fail-under-regions 80 --tests"
 "benchmark" = "bench --package bench"
+"test:loom" = "test --package lfdb --lib --release --config build.rustflags=['--cfg','loom']"
