@@ -1,9 +1,6 @@
-use std::{
-  mem::offset_of,
-  ops::Deref,
-  ptr::NonNull,
-  sync::atomic::{fence, AtomicUsize, Ordering},
-};
+use std::{mem::offset_of, ops::Deref, ptr::NonNull, sync::atomic::Ordering};
+
+use super::loom::{fence, AtomicUsize};
 
 #[repr(C, align(2))]
 struct Inner<T: ?Sized> {
@@ -11,7 +8,7 @@ struct Inner<T: ?Sized> {
   data: T,
 }
 impl<T> Inner<T> {
-  const fn new(data: T) -> Self {
+  fn new(data: T) -> Self {
     Self {
       count: AtomicUsize::new(1),
       data,
@@ -20,17 +17,7 @@ impl<T> Inner<T> {
 }
 
 /**
- * Strong-only variant of `Arc`.
- *
- * `SBox` is intentionally modeled after `std::sync::Arc`: it uses the same
- * strong reference-counting flow, the same clone/drop ordering pattern, and the
- * same `get_mut` semantics. The main difference is that `SBox` has no weak
- * reference count, so the allocation is reclaimed as soon as the last strong
- * owner is dropped.
- *
- * Use `Arc` as the reference model for the safety and memory-ordering rules;
- * this type exists only to remove weak-reference overhead in engine-internal
- * paths that do not need `Weak`.
+ * `std::sync::Arc` without weak references.
  */
 pub struct SBox<T: ?Sized> {
   inner: NonNull<Inner<T>>,
@@ -140,6 +127,10 @@ impl<T: Default> Default for SBox<T> {
 //   }
 // }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/sbox.rs"]
+mod tests;
+
+#[cfg(all(test, loom))]
+#[path = "tests/sbox_loom.rs"]
 mod tests;

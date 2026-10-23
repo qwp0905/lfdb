@@ -123,6 +123,6 @@ impl InternalNode {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/node.rs"]
 mod tests;

@@ -280,6 +280,6 @@ impl<const N: usize> AtomicSizedBitmap<N> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/bit.rs"]
 mod tests;

@@ -305,6 +305,6 @@ impl Drop for ThreadPool {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/pool.rs"]
 mod tests;

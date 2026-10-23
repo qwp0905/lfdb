@@ -55,6 +55,6 @@ impl Deserializable for TreeHeader {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/header.rs"]
 mod tests;

@@ -3,7 +3,7 @@ use std::{
   io::{Error, ErrorKind, IoSlice, Result},
   mem::{forget, replace},
   sync::{
-    atomic::{fence, AtomicBool, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
   },
   time::Instant,
@@ -16,14 +16,14 @@ use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
   utils::{
-    create_static_ref, ExclusivePin, ExclusiveToken, MpscQueue, SBox, SharedToken,
+    create_static_ref, BatchQueue, ExclusivePin, ExclusiveToken, SBox, SharedToken,
   },
 };
 
 type WriteTask = (u64, IoSlice<'static>);
 
-type WriteBatch = Arc<BatchQueue<WriteTask, Result<()>>>;
-type SyncBatch = Arc<BatchQueue<(), Result<()>>>;
+type WriteBatch = Arc<BatchQueue<(WriteTask, OneshotFulfill<Result<()>>)>>;
+type SyncBatch = Arc<BatchQueue<OneshotFulfill<Result<()>>>>;
 
 pub struct SyncScheduler {
   backend: Arc<dyn IOBackend>,
@@ -40,8 +40,8 @@ impl SyncScheduler {
   }
 
   pub fn publish(&self, metrics: &Arc<MetricsRegistry>) -> Oneshot<Result<()>> {
-    let (o, occupied) = self.sync.push_and_compete(());
-    if occupied {
+    let (o, f) = oneshot();
+    if self.sync.push_and_compete(f) {
       let guard = RecursiveSync::new(
         self.sync.clone(),
         self.state.clone(),
@@ -98,8 +98,11 @@ impl IOScheduler {
     offset: u64,
     metrics: &Arc<MetricsRegistry>,
   ) -> Oneshot<Result<()>> {
-    let (o, occupied) = self.write.push_and_compete((offset, IoSlice::new(buf)));
-    if occupied {
+    let (o, f) = oneshot();
+    if self
+      .write
+      .push_and_compete(((offset, IoSlice::new(buf)), f))
+    {
       let guard = RecursiveWrite::new(
         self.write.clone(),
         self.inner.state.clone(),
@@ -116,53 +119,10 @@ impl IOScheduler {
   }
 }
 
-pub struct BatchQueue<T, R> {
-  queue: MpscQueue<(T, OneshotFulfill<R>)>,
-  occupied: AtomicBool,
-}
-impl<T, R> Default for BatchQueue<T, R> {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-impl<T, R> BatchQueue<T, R> {
-  fn new() -> Self {
-    Self {
-      queue: MpscQueue::new(),
-      occupied: AtomicBool::new(false),
-    }
-  }
-  fn try_release(&self) -> bool {
-    self.occupied.fetch_and(false, Ordering::Release);
-    if self.queue.is_empty() {
-      return true;
-    }
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
-      return true;
-    }
-    fence(Ordering::Acquire);
-    false
-  }
-
-  fn push_and_compete(&self, v: T) -> (Oneshot<R>, bool) {
-    let (o, f) = oneshot();
-    self.queue.push((v, f));
-    if self.occupied.fetch_or(true, Ordering::Relaxed) {
-      return (o, false);
-    }
-    fence(Ordering::Acquire);
-    (o, true)
-  }
-
-  fn drain_n(&self, count: usize) -> impl Iterator<Item = (T, OneshotFulfill<R>)> + '_ {
-    (0..count).map_while(|_| unsafe { self.queue.pop() })
-  }
-}
-
 fn drain_write(guard: RecursiveWrite) {
   let count = max_iov();
   let mut buffered = Vec::with_capacity(count);
-  for task in guard.queue.drain_n(count) {
+  for task in unsafe { guard.queue.drain_n(count) } {
     buffered.push(task);
   }
   if buffered.is_empty() {
@@ -365,7 +325,7 @@ fn create_fallocate_callback(
 }
 
 struct RecursiveWrite {
-  queue: Arc<BatchQueue<WriteTask, Result<()>>>,
+  queue: WriteBatch,
   state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
@@ -373,7 +333,7 @@ struct RecursiveWrite {
 }
 impl RecursiveWrite {
   const fn new(
-    queue: Arc<BatchQueue<WriteTask, Result<()>>>,
+    queue: WriteBatch,
     state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
@@ -407,14 +367,14 @@ impl Drop for RecursiveWrite {
 const EXTENT_SIZE: u64 = 1 << 20;
 
 struct RecursiveSync {
-  queue: Arc<BatchQueue<(), Result<()>>>,
+  queue: SyncBatch,
   state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
 }
 impl RecursiveSync {
   const fn new(
-    queue: Arc<BatchQueue<(), Result<()>>>,
+    queue: SyncBatch,
     state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
@@ -444,7 +404,7 @@ impl Drop for RecursiveSync {
 fn drain_sync(guard: RecursiveSync) {
   const COUNT: usize = 512;
   let mut waiting = Vec::with_capacity(COUNT);
-  for (_, done) in guard.queue.drain_n(COUNT) {
+  for done in unsafe { guard.queue.drain_n(COUNT) } {
     waiting.push(done);
   }
 
@@ -505,7 +465,7 @@ struct State {
   closed: AtomicBool,
 }
 impl State {
-  const fn new() -> Self {
+  fn new() -> Self {
     Self {
       pin: ExclusivePin::new(),
       closed: AtomicBool::new(false),

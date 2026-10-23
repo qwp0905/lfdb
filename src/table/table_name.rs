@@ -106,6 +106,6 @@ impl<'a> PartialEq for TableNameRef<'a> {
 }
 impl<'a> Eq for TableNameRef<'a> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/table_name.rs"]
 mod tests;

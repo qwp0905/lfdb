@@ -168,6 +168,6 @@ impl<'a> OffsetWriter<'a> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/buffer.rs"]
 mod tests;

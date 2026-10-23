@@ -106,6 +106,6 @@ impl Drop for DefaultDiskBackend {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/default.rs"]
 mod tests;

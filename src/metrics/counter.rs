@@ -15,6 +15,6 @@ impl Counter {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[path = "tests/counter.rs"]
 mod tests;

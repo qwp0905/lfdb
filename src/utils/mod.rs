@@ -36,3 +36,8 @@ pub use lifetime::*;
 
 mod mpsc;
 pub use mpsc::*;
+
+mod batch;
+pub use batch::*;
+
+pub mod loom;
