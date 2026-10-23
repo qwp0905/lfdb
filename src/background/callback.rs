@@ -2,8 +2,10 @@ use std::{
   marker::PhantomData,
   mem::ManuallyDrop,
   ptr::{null_mut, NonNull},
-  sync::atomic::{AtomicPtr, Ordering},
+  sync::atomic::Ordering,
 };
+
+use crate::utils::loom::AtomicPtr;
 
 use super::VPtr as VPtrRaw;
 
@@ -86,7 +88,7 @@ const SENTINEL: *mut () = &raw const NOTHING as *mut ();
 
 pub struct CallbackSlot<R>(AtomicPtr<()>, PhantomData<Callback<R>>);
 impl<R> CallbackSlot<R> {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self(AtomicPtr::new(null_mut()), PhantomData)
   }
 
@@ -102,7 +104,7 @@ impl<R> CallbackSlot<R> {
     let raw = Callback::into_raw(callback);
     let mut current = self.0.load(Ordering::Acquire);
     loop {
-      if !current.is_null() || current == SENTINEL {
+      if !current.is_null() {
         return Err(unsafe { Callback::from_raw(raw) });
       }
       let Err(err) =

@@ -35,7 +35,7 @@ where
     drop_in_place: Self::drop_in_place,
   };
 
-  const fn new(function: F) -> Self {
+  fn new(function: F) -> Self {
     Self {
       function: UnsafeCell::new(ManuallyDrop::new(function)),
       behavior: OneshotBehavior::new(),
