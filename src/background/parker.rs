@@ -1,15 +1,18 @@
 use std::{
   cell::OnceCell,
-  sync::{
-    atomic::{AtomicU64, Ordering},
-    Once,
-  },
-  thread::{current, park, Thread},
+  sync::{atomic::Ordering, Once},
 };
 
 use crossbeam::queue::SegQueue;
 
-use crate::utils::SBox;
+use crate::utils::{
+  loom::{
+    fence,
+    thread::{current, park, Thread},
+    thread_local, AtomicU64,
+  },
+  SBox,
+};
 
 /**
  * A tiny one-shot wake-all primitive.
@@ -52,7 +55,8 @@ const STATE_CANCELED: u64 = 3;
 const STATE_BITS: u32 = 2;
 const STATE_MASK: u64 = (1 << STATE_BITS) - 1;
 
-static PARKER_ID: AtomicU64 = AtomicU64::new(1);
+// Ids only have to be unique, so the counter stays outside the loom model.
+static PARKER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 type ParkerId = u64;
 
 const MAX_PARKER_ID: ParkerId = ParkerId::MAX >> STATE_BITS;
@@ -64,9 +68,12 @@ const fn cast_from(id: ParkerId, state: u64) -> u64 {
   (id << STATE_BITS) | state
 }
 
-struct Waker {
+pub(crate) struct Waker {
   /**
    * 62 bits parker id + 2bit state.
+   *
+   * Transitions only decide who owns a wake; visibility of the work is carried
+   * by the fences in `ThreadParker`.
    */
   state: AtomicU64,
   thread: Thread,
@@ -84,7 +91,7 @@ impl Waker {
     let parked = cast_from(id, STATE_PARKED);
     if self
       .state
-      .compare_exchange(queued, parked, Ordering::AcqRel, Ordering::Acquire)
+      .compare_exchange(queued, parked, Ordering::Relaxed, Ordering::Relaxed)
       .is_err()
     {
       return;
@@ -96,8 +103,8 @@ impl Waker {
     let _ = self.state.compare_exchange(
       parked,
       cast_from(id, STATE_CANCELED),
-      Ordering::AcqRel,
-      Ordering::Acquire,
+      Ordering::Relaxed,
+      Ordering::Relaxed,
     );
   }
 
@@ -106,12 +113,12 @@ impl Waker {
     let canceled = cast_from(id, STATE_CANCELED);
     self
       .state
-      .compare_exchange(queued, canceled, Ordering::AcqRel, Ordering::Acquire)
+      .compare_exchange(queued, canceled, Ordering::Relaxed, Ordering::Relaxed)
       .is_ok()
   }
 
   fn wake_by(&self, parker_id: ParkerId) -> bool {
-    let mut current = self.state.load(Ordering::Acquire);
+    let mut current = self.state.load(Ordering::Relaxed);
     loop {
       let (id, state) = cast_to(current);
       if id != parker_id {
@@ -120,8 +127,8 @@ impl Waker {
       if let Err(err) = self.state.compare_exchange_weak(
         current,
         cast_from(id, STATE_UNQUEUED),
-        Ordering::AcqRel,
-        Ordering::Acquire,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
       ) {
         current = err;
         continue;
@@ -156,27 +163,50 @@ impl Default for LocalState {
   }
 }
 
+#[cfg(not(loom))]
 thread_local! {
   static LOCAL_STATE: OnceCell<LocalState> = const { OnceCell::new() };
 }
+// Loom's thread_local does not accept a const initializer.
+#[cfg(loom)]
+thread_local! {
+  static LOCAL_STATE: OnceCell<LocalState> = OnceCell::new();
+}
 
-pub struct ThreadParker {
-  queue: SegQueue<SBox<Waker>>,
+/**
+ * The parker relies on the queue only for happens-before from push to the pop
+ * that returns the value, so it stays correct regardless of the implementation.
+ */
+pub(crate) trait WakerQueue<T>: Default {
+  fn push(&self, value: T);
+  fn pop(&self) -> Option<T>;
+}
+impl<T> WakerQueue<T> for SegQueue<T> {
+  fn push(&self, value: T) {
+    SegQueue::push(self, value);
+  }
+  fn pop(&self) -> Option<T> {
+    SegQueue::pop(self)
+  }
+}
+
+pub struct ThreadParker<Q: WakerQueue<SBox<Waker>> = SegQueue<SBox<Waker>>> {
+  queue: Q,
   id: ParkerId,
 }
-impl ThreadParker {
+impl<Q: WakerQueue<SBox<Waker>>> ThreadParker<Q> {
   pub fn new() -> Self {
     let id = PARKER_ID.fetch_add(1, Ordering::Relaxed);
     assert!(id <= MAX_PARKER_ID, "parker id overflowed.");
     Self {
-      queue: SegQueue::new(),
+      queue: Q::default(),
       id,
     }
   }
   fn try_enqueue(&self, waker: &SBox<Waker>) {
     let prev = waker
       .state
-      .swap(cast_from(self.id, STATE_QUEUED), Ordering::AcqRel);
+      .swap(cast_from(self.id, STATE_QUEUED), Ordering::Relaxed);
     let (id, state) = cast_to(prev);
     if id != self.id || state == STATE_UNQUEUED {
       self.queue.push(waker.clone());
@@ -184,12 +214,14 @@ impl ThreadParker {
   }
 
   pub fn wake_all(&self) {
+    fence(Ordering::SeqCst);
     while let Some(waker) = self.queue.pop() {
       waker.wake_by(self.id);
     }
   }
 
   pub fn wake_once(&self) {
+    fence(Ordering::SeqCst);
     while let Some(waker) = self.queue.pop() {
       if waker.wake_by(self.id) {
         return;
@@ -200,6 +232,9 @@ impl ThreadParker {
     LOCAL_STATE.with(|v| {
       let local = v.get_or_init(Default::default);
       self.try_enqueue(&local.waker);
+      // Pairs with the fence in wake, so either the waker finds this entry or
+      // has_next sees the work published before the wake.
+      fence(Ordering::SeqCst);
       let Some(next) = has_next() else {
         local.waker.park_by(self.id);
         return None;
@@ -211,8 +246,12 @@ impl ThreadParker {
     })
   }
 }
-impl Drop for ThreadParker {
+impl<Q: WakerQueue<SBox<Waker>>> Drop for ThreadParker<Q> {
   fn drop(&mut self) {
     self.wake_all();
   }
 }
+
+#[cfg(all(test, loom))]
+#[path = "tests/parker_loom.rs"]
+mod tests;
