@@ -69,6 +69,13 @@ impl WriteCompletion {
     (current..).take_while(|&i| self.completed.contains(i))
   }
 
+  fn try_advance(&self, current: Pointer) {
+    let Some(i) = self.completed_from(current).last() else {
+      return;
+    };
+    self.frontier.fetch_max(i + 1, Ordering::Release);
+  }
+
   pub fn wait_until(&self, threshold: Pointer) -> io::Result<()> {
     loop {
       let current = self.frontier.load(Ordering::Acquire);
@@ -76,14 +83,13 @@ impl WriteCompletion {
         return Ok(());
       }
       let Some((ptr, batched)) = self.queue.pop() else {
+        self.try_advance(current);
         yield_now();
         continue;
       };
       let result = batched.wait();
       self.completed.insert(ptr);
-      if let Some(i) = self.completed_from(current).last() {
-        self.frontier.fetch_max(i + 1, Ordering::Release);
-      }
+      self.try_advance(current);
       result?;
     }
   }
@@ -96,11 +102,7 @@ impl WriteCompletion {
     while let Some((ptr, batched)) = self.queue.pop() {
       let _ = batched.wait();
       self.completed.insert(ptr);
-
-      let current = self.frontier.load(Ordering::Acquire);
-      if let Some(i) = self.completed_from(current).last() {
-        self.frontier.fetch_max(i + 1, Ordering::Release);
-      }
+      self.try_advance(self.frontier.load(Ordering::Acquire));
     }
   }
 }
