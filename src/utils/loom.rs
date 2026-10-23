@@ -6,17 +6,30 @@
 #[cfg(not(loom))]
 pub use crossbeam::utils::Backoff;
 #[cfg(not(loom))]
-pub use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicU32, AtomicUsize};
+pub use std::sync::atomic::{
+  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize,
+};
+#[cfg(not(loom))]
+pub use std::{thread, thread_local};
 
 #[cfg(loom)]
 pub use ::loom::cell::UnsafeCell;
 #[cfg(loom)]
-pub use ::loom::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicU32, AtomicUsize};
+pub use ::loom::sync::atomic::{
+  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize,
+};
+#[cfg(loom)]
+pub use ::loom::{thread, thread_local};
 
 #[cfg(not(loom))]
 pub struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
 #[cfg(not(loom))]
 impl<T> UnsafeCell<T> {
+  #[inline]
+  pub const fn new(value: T) -> Self {
+    Self(std::cell::UnsafeCell::new(value))
+  }
+
   #[inline]
   pub fn with<R>(&self, f: impl FnOnce(*const T) -> R) -> R {
     f(self.0.get())
