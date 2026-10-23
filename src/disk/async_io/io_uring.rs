@@ -356,7 +356,7 @@ impl AsyncIO {
 
   pub fn submit(&self, task: AsyncIOTask<usize>) {
     self.queue.push(Context::Task(task));
-    if self.parked.swap(false, Ordering::Relaxed) {
+    if self.parked.swap(false, Ordering::Release) {
       self.waker.wake();
     }
   }
