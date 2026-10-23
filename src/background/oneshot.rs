@@ -1,77 +1,16 @@
 use std::{
-  cell::{OnceCell, UnsafeCell},
-  mem::{forget, offset_of, MaybeUninit},
-  ops::Deref,
-  ptr::{without_provenance_mut, NonNull},
-  sync::atomic::{fence, AtomicBool, AtomicPtr, Ordering},
-  thread::{current, park, yield_now, Thread},
+  cell::OnceCell, mem::MaybeUninit, ptr::without_provenance_mut, sync::atomic::Ordering,
 };
 
-use crossbeam::utils::Backoff;
-
-use crate::utils::SBox;
+use crate::utils::{
+  loom::{
+    thread::{current, park, yield_now, Thread},
+    thread_local, AtomicPtr, Backoff, UnsafeCell,
+  },
+  SBox, TwBox,
+};
 
 use super::{Callback, CallbackSlot};
-
-#[repr(C)]
-struct PairInner<T: ?Sized> {
-  dropped: AtomicBool,
-  value: T,
-}
-impl<T> PairInner<T> {
-  const fn new(value: T) -> Self {
-    Self {
-      dropped: AtomicBool::new(false),
-      value,
-    }
-  }
-}
-
-pub struct Pair<T: ?Sized>(NonNull<PairInner<T>>);
-impl<T> Pair<T> {
-  pub fn new(value: T) -> (Self, Self) {
-    let inner = PairInner::new(value);
-    let ptr = NonNull::from_mut(Box::leak(Box::new(inner)));
-    (Self(ptr), Self(ptr))
-  }
-
-  pub const fn into_raw(this: Self) -> *mut T {
-    let ptr = this.as_ptr();
-    forget(this);
-    ptr
-  }
-
-  pub const unsafe fn from_raw(ptr: *mut T) -> Self {
-    let offset = offset_of!(PairInner<T>, value);
-    let ptr = (ptr as *mut u8).sub(offset) as *mut PairInner<T>;
-    Self(NonNull::new_unchecked(ptr))
-  }
-
-  const fn as_ptr(&self) -> *mut T {
-    unsafe { &raw mut (*self.0.as_ptr()).value }
-  }
-}
-impl<T: ?Sized> Drop for Pair<T> {
-  fn drop(&mut self) {
-    if !unsafe { self.0.as_ref() }
-      .dropped
-      .fetch_or(true, Ordering::Release)
-    {
-      return;
-    }
-    fence(Ordering::Acquire);
-    let _ = unsafe { Box::from_raw(self.0.as_ptr()) };
-  }
-}
-impl<T: ?Sized> Deref for Pair<T> {
-  type Target = T;
-
-  fn deref(&self) -> &Self::Target {
-    unsafe { &self.0.as_ref().value }
-  }
-}
-unsafe impl<T: Send + Sync + ?Sized> Send for Pair<T> {}
-unsafe impl<T: Send + Sync + ?Sized> Sync for Pair<T> {}
 
 pub enum TryWaitError<T> {
   Disconnected,
@@ -86,7 +25,7 @@ pub struct WaitDisconnectedError;
  * The receiver parks until the sender fulfills the value or disconnects.
  */
 pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = Pair::new(OneshotBehavior::new());
+  let inner = TwBox::new(OneshotBehavior::new());
   (Oneshot(inner.0), OneshotFulfill(inner.1))
 }
 
@@ -102,8 +41,14 @@ impl ThreadWaker {
   }
 }
 
+#[cfg(not(loom))]
 thread_local! {
   static CURRENT: OnceCell<SBox<ThreadWaker>> = const { OnceCell::new() };
+}
+// Loom's thread_local does not accept a const initializer.
+#[cfg(loom)]
+thread_local! {
+  static CURRENT: OnceCell<SBox<ThreadWaker>> = OnceCell::new();
 }
 
 struct WakerRef {
@@ -142,7 +87,7 @@ const STATE_DISCONNECTED: *mut ThreadWaker = without_provenance_mut(2);
 
 struct Atomic<T>(AtomicPtr<T>);
 impl<T> Atomic<T> {
-  const fn new(ptr: *mut T) -> Self {
+  fn new(ptr: *mut T) -> Self {
     Self(AtomicPtr::new(ptr))
   }
   fn load(&self) -> *mut T {
@@ -163,20 +108,13 @@ impl<T> Atomic<T> {
   }
 }
 
-/**
- * Two-owner shared allocation used by the oneshot pair.
- *
- * A oneshot always has exactly two handles: the waiter and the fulfiller. The
- * first dropped handle only marks the allocation as disconnected; the second
- * dropped handle reclaims the heap allocation.
- */
 pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
   callback: CallbackSlot<T>,
 }
 impl<T> OneshotBehavior<T> {
-  pub const fn new() -> Self {
+  pub fn new() -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
       state: Atomic::new(STATE_WAITING),
@@ -192,7 +130,7 @@ impl<T> OneshotBehavior<T> {
     if let Some(callback) = self.callback.take() {
       callback.call(&result);
     }
-    unsafe { (*self.value.get()).write(result) };
+    self.value.with_mut(|v| unsafe { (*v).write(result) });
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -231,11 +169,11 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
-  const unsafe fn read_value(&self) -> T {
-    unsafe { (*self.value.get()).assume_init_read() }
+  unsafe fn read_value(&self) -> T {
+    self.value.with(|v| unsafe { (*v).assume_init_read() })
   }
   unsafe fn drop_value(&self) {
-    unsafe { (*self.value.get()).assume_init_drop() };
+    self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
   fn try_park_with(&self, waker: &mut WakerRef) -> Result<bool, WaitDisconnectedError> {
@@ -264,7 +202,12 @@ impl<T> OneshotBehavior<T> {
     }
   }
 
+  #[cfg(not(loom))]
   const MAX_YIELD: u8 = 10;
+  // Loom keeps scheduling the other thread while one yields, so a long yield
+  // phase lets the sender always finish before the waiter reaches park.
+  #[cfg(loom)]
+  const MAX_YIELD: u8 = 1;
   pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
     let mut waker = WakerRef::new();
     loop {
@@ -322,7 +265,7 @@ impl<T> OneshotBehavior<T> {
  * pair shared by the waiter and fulfiller to keep the synchronization surface
  * small and predictable.
  */
-pub struct Oneshot<T>(Pair<OneshotBehavior<T>>);
+pub struct Oneshot<T>(TwBox<OneshotBehavior<T>>);
 impl<T> Oneshot<T> {
   pub fn wait(self) -> Result<T, WaitDisconnectedError> {
     self.0.wait()
@@ -347,7 +290,7 @@ impl<T> Drop for Oneshot<T> {
   }
 }
 
-pub struct OneshotFulfill<T>(Pair<OneshotBehavior<T>>);
+pub struct OneshotFulfill<T>(TwBox<OneshotBehavior<T>>);
 impl<T> OneshotFulfill<T> {
   pub fn fulfill(self, result: T) {
     self.0.fulfill_and_wake(result);
@@ -364,4 +307,8 @@ unsafe impl<T: Send> Send for OneshotBehavior<T> {}
 
 #[cfg(all(test, not(loom)))]
 #[path = "tests/oneshot.rs"]
+mod tests;
+
+#[cfg(all(test, loom))]
+#[path = "tests/oneshot_loom.rs"]
 mod tests;
