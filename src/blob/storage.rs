@@ -2,7 +2,7 @@ use crate::{
   cache::ShrinkMap,
   disk::IOPool,
   page::AlignedBuf,
-  utils::{debug, uuid_simple, Semaphore, ShortenedRwLock},
+  utils::{debug, uuid_simple, Permit, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
   Result,
 };
@@ -131,42 +131,45 @@ impl BlobStorage {
       .or_else(|| self.writable.rl().get(&blob_id).cloned())
   }
 
+  fn try_append(
+    &self,
+    buf: &AlignedBuf,
+    permit: &mut Option<Permit<'_>>,
+  ) -> Result<Option<BlobAppendGuard<'_>>> {
+    let size = buf.size() as BlobOffset;
+    for handle in self.writable_handles() {
+      let (offset, sealing) = match handle.reserve(size) {
+        BlobReserved::Ok(offset) => (offset, None),
+        BlobReserved::Last(offset) => (offset, Some((handle.clone(), self))),
+        BlobReserved::Eof => continue,
+      };
+      drop(permit.take());
+      handle.write(buf, offset)?;
+      // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
+      // before returning a reference that may be persisted into the tree.
+      handle.sync().wait_flatten()?;
+      return Ok(Some(BlobAppendGuard::new(
+        handle.metadata().get_id(),
+        offset,
+        buf.len() as BlobLen,
+        sealing,
+      )));
+    }
+    Ok(None)
+  }
+
   pub fn append(&self, buf: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
     let buf = AlignedBuf::from_vec(buf);
-    let len = buf.len();
-    let size = buf.size() as BlobOffset;
-
     loop {
-      let permit = self.append_gate.acquire();
+      if let Some(guard) = self.try_append(&buf, &mut None)? {
+        return Ok(guard);
+      }
 
-      for handle in self.writable_handles() {
-        match handle.reserve(size) {
-          BlobReserved::Ok(offset) => {
-            drop(permit);
-            handle.write(&buf, offset)?;
-            // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
-            // before returning a reference that may be persisted into the tree.
-            handle.sync().wait_flatten()?;
-            return Ok(BlobAppendGuard::new(
-              handle.metadata().get_id(),
-              offset,
-              len as BlobLen,
-              None,
-            ));
-          }
-          BlobReserved::Last(offset) => {
-            drop(permit);
-            handle.write(&buf, offset)?;
-            handle.sync().wait_flatten()?;
-            return Ok(BlobAppendGuard::new(
-              handle.metadata().get_id(),
-              offset,
-              len as BlobLen,
-              Some((handle, self)),
-            ));
-          }
-          BlobReserved::Eof => continue,
-        }
+      // Only creating a segment is gated, so the reservation is retried once the
+      // permit is held in case another appender has already created one.
+      let mut permit = Some(self.append_gate.acquire());
+      if let Some(guard) = self.try_append(&buf, &mut permit)? {
+        return Ok(guard);
       }
 
       let new = self.open_new_handle()?;
