@@ -390,3 +390,7 @@ impl MappingTable {
 // is guarded by a Mutex, and all public methods take &self.
 unsafe impl Sync for MappingTable {}
 unsafe impl Send for MappingTable {}
+
+#[cfg(all(test, not(loom)))]
+#[path = "tests/table.rs"]
+mod tests;
