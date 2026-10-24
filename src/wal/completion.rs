@@ -1,5 +1,6 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, UnsafeCell},
+  collections::BTreeSet,
   io,
   sync::atomic::{AtomicU64, Ordering},
   thread::yield_now,
@@ -14,7 +15,7 @@ use super::{
 };
 use crate::{
   disk::Pointer,
-  utils::{AtomicBitmap, AtomicSizedBitmap},
+  utils::{AtomicBitmap, AtomicSizedBitmap, BatchQueue},
 };
 
 const MAX_RECORD: usize = WAL_BLOCK_SIZE.div_ceil(LogRecord::MIN_BYTES);
@@ -179,15 +180,21 @@ impl SyncCompletion {
   }
 }
 
+/**
+ * Only the batch owner advances the frontier, so completions never race on it
+ * and the completed set needs no synchronization of its own.
+ */
 pub struct LogCompletion {
   frontier: AtomicLogId,
-  completed: SkipSet<LogId>,
+  batch: BatchQueue<LogId>,
+  completed: UnsafeCell<BTreeSet<LogId>>,
 }
 impl LogCompletion {
   pub fn new(last_log_id: LogId) -> Self {
     Self {
       frontier: AtomicLogId::new(last_log_id),
-      completed: SkipSet::new(),
+      batch: BatchQueue::new(),
+      completed: UnsafeCell::new(BTreeSet::new()),
     }
   }
 
@@ -196,17 +203,35 @@ impl LogCompletion {
   }
 
   pub fn complete(&self, log_id: LogId) {
-    if self
-      .frontier
-      .compare_exchange(log_id, log_id + 1, Ordering::Release, Ordering::Relaxed)
-      .is_err()
-    {
-      self.completed.insert(log_id);
+    if !self.batch.push_and_compete(log_id) {
+      return;
     }
 
-    let current = self.frontier.load(Ordering::Acquire);
-    for i in (current..).take_while(|i| self.completed.remove(i).is_some()) {
-      self.frontier.fetch_max(i + 1, Ordering::Release);
+    loop {
+      // Another owner may have advanced the frontier while ownership was released.
+      let mut frontier = self.frontier.load(Ordering::Relaxed);
+      let completed = unsafe { &mut *self.completed.get() };
+      completed.extend(unsafe { self.batch.drain_all() });
+
+      let advanced = completed
+        .iter()
+        .zip(frontier..)
+        .take_while(|&(&id, expected)| id == expected)
+        .count();
+      if advanced > 0 {
+        frontier += advanced as LogId;
+        *completed = completed.split_off(&frontier);
+        self.frontier.store(frontier, Ordering::Release);
+      }
+
+      if self.batch.try_release() {
+        return;
+      }
     }
   }
 }
+unsafe impl Sync for LogCompletion {}
+
+#[cfg(all(test, not(loom)))]
+#[path = "tests/completion.rs"]
+mod tests;
