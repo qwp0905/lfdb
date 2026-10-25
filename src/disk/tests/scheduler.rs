@@ -68,14 +68,14 @@ impl Fixture {
   }
 
   fn write(&self, offset: u64, data: &'static [u8]) -> Oneshot<Result<()>> {
-    let pin = self.scheduler.try_pin().unwrap();
+    let pin = self.scheduler.try_pin_owned().unwrap();
     self
       .scheduler
       .publish_write(data, offset, pin, &self.metrics)
   }
 
   fn sync(&self) -> Oneshot<Result<()>> {
-    let pin = self.scheduler.try_pin().unwrap();
+    let pin = self.scheduler.try_pin_owned().unwrap();
     self.scheduler.publish_sync(pin, &self.metrics)
   }
 }

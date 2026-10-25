@@ -12,7 +12,9 @@ use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
-  utils::{create_static_ref, BatchQueue, ExclusivePin, OwnedSharedToken, SBox},
+  utils::{
+    create_static_ref, BatchQueue, ExclusivePin, OwnedSharedToken, SBox, SharedToken,
+  },
 };
 
 type WriteTask = (u64, IoSlice<'static>);
@@ -64,10 +66,10 @@ impl SyncScheduler {
  * preallocated end is allocated before the first write reaches it, and a short
  * write is retried before it is reported as failed.
  *
- * Callers publish while holding a pin from `try_pin`; once `close` returns, no
- * published request is still in flight and nothing further reaches the backend.
- * Writes must not partially overlap each other, a sync only covers writes that
- * have already completed, and a buffer must outlive its write.
+ * Callers publish while holding a pin from `try_pin_owned`; once `close`
+ * returns, no published request is still in flight and nothing further reaches
+ * the backend. Writes must not partially overlap each other, a sync only covers
+ * writes that have already completed, and a buffer must outlive its write.
  */
 pub struct IOScheduler {
   inner: SyncScheduler,
@@ -87,7 +89,10 @@ impl IOScheduler {
   pub fn backend(&self) -> &dyn IOBackend {
     &*self.inner.backend
   }
-  pub fn try_pin(&self) -> Option<OwnedSharedToken> {
+  pub fn try_pin(&self) -> Option<SharedToken<'_>> {
+    self.pin.try_shared()
+  }
+  pub fn try_pin_owned(&self) -> Option<OwnedSharedToken> {
     self.pin.try_shared_owned()
   }
 

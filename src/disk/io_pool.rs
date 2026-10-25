@@ -199,8 +199,7 @@ pub struct IOHandle {
 }
 impl IOHandle {
   pub fn read(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
-    // SAFETY: Since the removed table cannot access this path, a pin guarantee is not required.
-    // If a path for read access to the removed table is established, pin guarantees are required.
+    let _pin = self.scheduler.try_pin().expect("read from a closed handle");
     measure!(
       self.metrics.disk_read,
       self.scheduler.backend().pread_exact(buf, offset)
@@ -215,6 +214,7 @@ impl IOHandle {
    * `UnexpectedEof`.
    */
   pub unsafe fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
+    let _pin = self.scheduler.try_pin().expect("read from a closed handle");
     match self.scheduler.backend().pread(buf, offset) {
       Ok(0) => Ok(()),
       Ok(n) if n == buf.len() => Ok(()),
@@ -224,7 +224,7 @@ impl IOHandle {
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    let Some(pin) = self.scheduler.try_pin() else {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
     let done = self
@@ -234,7 +234,7 @@ impl IOHandle {
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
-    let Some(pin) = self.scheduler.try_pin() else {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
     let done = self.scheduler.publish_sync(pin, &self.metrics);
@@ -242,7 +242,7 @@ impl IOHandle {
   }
 
   pub fn fsync_async(&self) -> PendingIO<usize> {
-    let Some(pin) = self.scheduler.try_pin() else {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(0));
     };
     let (task, done) = IOTask::new_fsync(Some(move |_: &IOResult<usize>| drop(pin)));
