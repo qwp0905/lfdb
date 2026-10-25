@@ -224,26 +224,28 @@ impl IOHandle {
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
-    if self.scheduler.is_closed() {
+    let Some(pin) = self.scheduler.try_pin() else {
       return PendingIO::Fulfilled(Ok(()));
-    }
-    let done = self.scheduler.publish_write(buf, offset, &self.metrics);
+    };
+    let done = self
+      .scheduler
+      .publish_write(buf, offset, pin, &self.metrics);
     PendingIO::Scheduled(done)
   }
 
   pub fn fdatasync_async(&self) -> PendingIO {
-    if self.scheduler.is_closed() {
+    let Some(pin) = self.scheduler.try_pin() else {
       return PendingIO::Fulfilled(Ok(()));
-    }
-    let done = self.scheduler.publish_sync(&self.metrics);
+    };
+    let done = self.scheduler.publish_sync(pin, &self.metrics);
     PendingIO::Scheduled(done)
   }
 
   pub fn fsync_async(&self) -> PendingIO<usize> {
-    let Some(_token) = self.scheduler.pin_state() else {
+    let Some(pin) = self.scheduler.try_pin() else {
       return PendingIO::Fulfilled(Ok(0));
     };
-    let (task, done) = IOTask::new_fsync(NO_CALLBACK);
+    let (task, done) = IOTask::new_fsync(Some(move |_: &IOResult<usize>| drop(pin)));
     self.scheduler.backend().submit(task);
     PendingIO::Direct(done)
   }
@@ -251,8 +253,9 @@ impl IOHandle {
   /**
    * Remove the file represented by this handle.
    *
-   * The method waits until in-flight asynchronous file operations are no longer
-   * using the handle, then removes the file from the base directory.
+   * Requests keep the backend pinned until they complete, so closing first waits
+   * out the operations already in flight and rejects any later ones before the
+   * file is removed.
    */
   pub fn truncate(&self) -> IOResult<()> {
     self.scheduler.close();

@@ -1,11 +1,8 @@
 use std::{
   cell::Cell,
   io::{Error, ErrorKind, IoSlice, Result},
-  mem::{forget, replace},
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-  },
+  mem::{forget, replace, ManuallyDrop},
+  sync::Arc,
   time::Instant,
 };
 
@@ -15,9 +12,7 @@ use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
-  utils::{
-    create_static_ref, BatchQueue, ExclusivePin, ExclusiveToken, SBox, SharedToken,
-  },
+  utils::{create_static_ref, BatchQueue, ExclusivePin, OwnedSharedToken, SBox},
 };
 
 type WriteTask = (u64, IoSlice<'static>);
@@ -28,33 +23,31 @@ type SyncBatch = Arc<BatchQueue<OneshotFulfill<Result<()>>>>;
 pub struct SyncScheduler {
   backend: Arc<dyn IOBackend>,
   sync: SyncBatch,
-  state: Arc<State>,
 }
 impl SyncScheduler {
   pub fn new(backend: Arc<dyn IOBackend>) -> Self {
     Self {
       backend,
       sync: SyncBatch::default(),
-      state: Arc::new(State::new()),
     }
   }
 
-  pub fn publish(&self, metrics: &Arc<MetricsRegistry>) -> Oneshot<Result<()>> {
+  pub fn publish(
+    &self,
+    pin: Option<OwnedSharedToken>,
+    metrics: &Arc<MetricsRegistry>,
+  ) -> Oneshot<Result<()>> {
     let (o, f) = oneshot();
     if self.sync.push_and_compete(f) {
       let guard = RecursiveSync::new(
         self.sync.clone(),
-        self.state.clone(),
         self.backend.clone(),
         metrics.clone(),
+        pin,
       );
       drain_sync(guard);
     }
     o
-  }
-
-  pub fn is_closed(&self) -> bool {
-    self.state.is_closed()
   }
 
   pub fn backend(&self) -> &dyn IOBackend {
@@ -62,10 +55,25 @@ impl SyncScheduler {
   }
 }
 
+/**
+ * Write and sync scheduling for one file backend.
+ *
+ * Requests published around the same time are combined: adjacent block writes
+ * go out as one vectored write, a later write to the same block replaces an
+ * earlier one, and concurrent syncs share one fdatasync. Space past the
+ * preallocated end is allocated before the first write reaches it, and a short
+ * write is retried before it is reported as failed.
+ *
+ * Callers publish while holding a pin from `try_pin`; once `close` returns, no
+ * published request is still in flight and nothing further reaches the backend.
+ * Writes must not partially overlap each other, a sync only covers writes that
+ * have already completed, and a buffer must outlive its write.
+ */
 pub struct IOScheduler {
   inner: SyncScheduler,
   write: WriteBatch,
   alloc: Option<Arc<AllocState>>,
+  pin: Arc<ExclusivePin>,
 }
 impl IOScheduler {
   pub fn new(backend: Arc<dyn IOBackend>, alloc: Option<AllocState>) -> Self {
@@ -73,21 +81,19 @@ impl IOScheduler {
       inner: SyncScheduler::new(backend),
       write: WriteBatch::default(),
       alloc: alloc.map(Arc::new),
+      pin: Arc::new(ExclusivePin::new()),
     }
   }
   pub fn backend(&self) -> &dyn IOBackend {
     &*self.inner.backend
   }
-  pub fn pin_state(&self) -> Option<SharedToken<'_>> {
-    self.inner.state.try_shared()
+  pub fn try_pin(&self) -> Option<OwnedSharedToken> {
+    self.pin.try_shared_owned()
   }
 
-  pub fn is_closed(&self) -> bool {
-    self.inner.is_closed()
-  }
   pub fn close(&self) {
     let backoff = Backoff::new();
-    while self.inner.state.try_exclusive().map(forget).is_none() {
+    while self.pin.try_exclusive().map(forget).is_none() {
       backoff.snooze();
     }
   }
@@ -96,6 +102,7 @@ impl IOScheduler {
     &self,
     buf: &'static [u8],
     offset: u64,
+    pin: OwnedSharedToken,
     metrics: &Arc<MetricsRegistry>,
   ) -> Oneshot<Result<()>> {
     let (o, f) = oneshot();
@@ -105,17 +112,21 @@ impl IOScheduler {
     {
       let guard = RecursiveWrite::new(
         self.write.clone(),
-        self.inner.state.clone(),
         self.inner.backend.clone(),
         metrics.clone(),
         self.alloc.clone(),
+        pin,
       );
       drain_write(guard);
     };
     o
   }
-  pub fn publish_sync(&self, metrics: &Arc<MetricsRegistry>) -> Oneshot<Result<()>> {
-    self.inner.publish(metrics)
+  pub fn publish_sync(
+    &self,
+    pin: OwnedSharedToken,
+    metrics: &Arc<MetricsRegistry>,
+  ) -> Oneshot<Result<()>> {
+    self.inner.publish(Some(pin), metrics)
   }
 }
 
@@ -128,13 +139,6 @@ fn drain_write(guard: RecursiveWrite) {
   if buffered.is_empty() {
     return;
   }
-  let state = guard.state.clone();
-  let Some(_token) = state.try_shared() else {
-    state.closed.fetch_or(true, Ordering::Relaxed);
-    return buffered
-      .into_iter()
-      .for_each(|(_, done)| done.fulfill(Ok(())));
-  };
   guard.metrics.disk_write_batch.record(buffered.len() as f64);
 
   buffered.sort_by_key(|((i, _), _)| *i);
@@ -311,55 +315,47 @@ fn create_fallocate_callback(
         .for_each(|(_, done)| done.fulfill(Err(Error::from(kind))));
     };
     unsafe { guard.alloc.as_deref().unwrap().set(allocated) };
-
-    let state = guard.state.clone();
-    let Some(_token) = state.try_shared() else {
-      state.closed.fetch_or(true, Ordering::Relaxed);
-      return buffered
-        .into_iter()
-        .for_each(|(_, done)| done.fulfill(Ok(())));
-    };
-
     finish_write(guard, buffered);
   }
 }
 
 struct RecursiveWrite {
   queue: WriteBatch,
-  state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
   alloc: Option<Arc<AllocState>>,
+  pin: ManuallyDrop<OwnedSharedToken>,
 }
 impl RecursiveWrite {
   const fn new(
     queue: WriteBatch,
-    state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
     alloc: Option<Arc<AllocState>>,
+    pin: OwnedSharedToken,
   ) -> Self {
     Self {
       queue,
-      state,
       backend,
       metrics,
       alloc,
+      pin: ManuallyDrop::new(pin),
     }
   }
 }
 impl Drop for RecursiveWrite {
   fn drop(&mut self) {
+    let pin = unsafe { ManuallyDrop::take(&mut self.pin) };
     if self.queue.try_release() {
       return;
     }
 
     drain_write(Self::new(
       self.queue.clone(),
-      self.state.clone(),
       self.backend.clone(),
       self.metrics.clone(),
       self.alloc.clone(),
+      pin,
     ));
   }
 }
@@ -368,22 +364,22 @@ const EXTENT_SIZE: u64 = 1 << 20;
 
 struct RecursiveSync {
   queue: SyncBatch,
-  state: Arc<State>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
+  pin: Option<OwnedSharedToken>,
 }
 impl RecursiveSync {
   const fn new(
     queue: SyncBatch,
-    state: Arc<State>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
+    pin: Option<OwnedSharedToken>,
   ) -> Self {
     Self {
       queue,
-      state,
       backend,
       metrics,
+      pin,
     }
   }
 }
@@ -394,9 +390,9 @@ impl Drop for RecursiveSync {
     }
     drain_sync(Self::new(
       self.queue.clone(),
-      self.state.clone(),
       self.backend.clone(),
       self.metrics.clone(),
+      self.pin.take(),
     ));
   }
 }
@@ -411,12 +407,6 @@ fn drain_sync(guard: RecursiveSync) {
   if waiting.is_empty() {
     return;
   }
-
-  let state = guard.state.clone();
-  let Some(_token) = state.pin.try_shared() else {
-    state.closed.fetch_or(true, Ordering::Relaxed);
-    return waiting.into_iter().for_each(|done| done.fulfill(Ok(())));
-  };
 
   guard.metrics.disk_sync_batch.record(waiting.len() as f64);
   let backend = guard.backend.clone();
@@ -436,7 +426,7 @@ fn drain_sync(guard: RecursiveSync) {
  *
  * `AllocState` uses `Cell` because it is only accessed by the single worker that
  * owns the corresponding write flush pass. The value is stored in an
- * `Arc` and can move across threads, but `BatchExecutor` serializes
+ * `Arc` and can move across threads, but the write batch serializes
  * execution so the state is logically single-threaded.
  */
 pub struct AllocState(Cell<u64>);
@@ -454,32 +444,6 @@ impl AllocState {
 unsafe impl Send for AllocState {}
 unsafe impl Sync for AllocState {}
 
-struct State {
-  /**
-   * Pin to protect file I/O from truncate.
-   */
-  pin: ExclusivePin,
-  /**
-   * Flag to check for file existence a little faster.
-   */
-  closed: AtomicBool,
-}
-impl State {
-  fn new() -> Self {
-    Self {
-      pin: ExclusivePin::new(),
-      closed: AtomicBool::new(false),
-    }
-  }
-
-  fn is_closed(&self) -> bool {
-    self.closed.load(Ordering::Relaxed)
-  }
-
-  fn try_shared(&self) -> Option<SharedToken<'_>> {
-    self.pin.try_shared()
-  }
-  fn try_exclusive(&self) -> Option<ExclusiveToken<'_>> {
-    self.pin.try_exclusive()
-  }
-}
+#[cfg(all(test, not(loom)))]
+#[path = "tests/scheduler.rs"]
+mod tests;

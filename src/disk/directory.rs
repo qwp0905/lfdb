@@ -42,11 +42,7 @@ impl DirHandle {
     })
   }
   pub fn fdatasync(&self) -> PendingIO {
-    if self.scheduler.is_closed() {
-      return PendingIO::Fulfilled(Ok(()));
-    }
-    let done = self.scheduler.publish(&self.metrics);
-    PendingIO::Scheduled(done)
+    PendingIO::Scheduled(self.scheduler.publish(None, &self.metrics))
   }
   pub fn get_path(&self) -> &Path {
     self.path.as_path()
