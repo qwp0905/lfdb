@@ -126,7 +126,7 @@ pub fn workload_a<F, E>(
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
@@ -179,7 +179,7 @@ pub fn workload_b<E, F>(
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.95) {
             Op::Get(key)
@@ -364,7 +364,7 @@ pub fn workload_f<E, F>(
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
