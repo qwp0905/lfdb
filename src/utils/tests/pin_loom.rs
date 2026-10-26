@@ -172,3 +172,34 @@ fn shared_never_fails_without_exclusive() {
     assert!(guarded.is_released());
   });
 }
+
+#[test]
+fn owned_shared_released_on_another_thread() {
+  struct Owned {
+    pin: std::sync::Arc<ExclusivePin>,
+    value: UnsafeCell<usize>,
+  }
+  unsafe impl Sync for Owned {}
+
+  loom::model(|| {
+    let owned = Arc::new(Owned {
+      pin: std::sync::Arc::new(ExclusivePin::new()),
+      value: UnsafeCell::new(0),
+    });
+    let token = owned.pin.try_shared_owned().unwrap();
+    let reader = {
+      let owned = owned.clone();
+      thread::spawn(move || {
+        owned.value.with(|v| unsafe { *v });
+        drop(token);
+      })
+    };
+
+    if let Some(_token) = owned.pin.try_exclusive() {
+      owned.value.with_mut(|v| unsafe { *v += 1 });
+    }
+    reader.join().unwrap();
+
+    assert!(owned.pin.try_exclusive().is_some());
+  });
+}

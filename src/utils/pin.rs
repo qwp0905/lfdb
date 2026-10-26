@@ -1,6 +1,6 @@
 use std::{
   mem::{forget, ManuallyDrop},
-  sync::atomic::Ordering,
+  sync::{atomic::Ordering, Arc},
 };
 
 use super::loom::{AtomicU32, Backoff};
@@ -57,6 +57,11 @@ impl ExclusivePin {
     }
   }
 
+  pub fn try_shared_owned(self: &Arc<Self>) -> Option<OwnedSharedToken> {
+    forget(self.try_shared()?);
+    Some(OwnedSharedToken(self.clone()))
+  }
+
   /*
    * Exclusive acquisition has only one valid transition: 0 -> EXCLUSIVE.
    * Unlike shared acquisition, there is no range of count values to join. If that
@@ -95,6 +100,14 @@ impl<'a> Drop for SharedToken<'a> {
   #[inline]
   fn drop(&mut self) {
     self.0.fetch_sub(1, Ordering::Release);
+  }
+}
+
+pub struct OwnedSharedToken(Arc<ExclusivePin>);
+impl Drop for OwnedSharedToken {
+  #[inline]
+  fn drop(&mut self) {
+    drop(SharedToken(&self.0 .0));
   }
 }
 
