@@ -115,18 +115,17 @@ pub fn workload_a<F, E>(
 
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
-
   let mut records = (0..record_count).collect::<Vec<_>>();
-  records.shuffle(rng);
 
   group
     .throughput(Throughput::Elements(op_count as u64))
     .sampling_mode(SamplingMode::Flat)
     .bench_function("50read-50update", |b| {
+      records.shuffle(rng);
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
@@ -168,18 +167,17 @@ pub fn workload_b<E, F>(
 
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
-
   let mut records = (0..record_count).collect::<Vec<_>>();
-  records.shuffle(rng);
 
   group
     .throughput(Throughput::Elements(op_count as u64))
     .sampling_mode(SamplingMode::Flat)
     .bench_function("95read-5update", |b| {
+      records.shuffle(rng);
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.95) {
             Op::Get(key)
@@ -269,7 +267,6 @@ pub fn workload_e<E, F>(
 
   let rng = &mut rand::rng();
   let mut ids = (0..(u8::MAX as usize)).collect::<Vec<_>>();
-  ids.shuffle(rng);
   let insert_counters = (0..ids.len())
     .map(|_| AtomicUsize::new(record_count / ids.len()))
     .collect::<Vec<_>>();
@@ -302,6 +299,7 @@ pub fn workload_e<E, F>(
     .throughput(Throughput::Elements(op_count as u64))
     .sampling_mode(SamplingMode::Flat)
     .bench_function("95scan-5insert", |b| {
+      ids.shuffle(rng);
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
@@ -353,18 +351,17 @@ pub fn workload_f<E, F>(
 
   let zipf = Zipf::new(record_count as f64, ZIPF_EXPONENT).unwrap();
   let rng = &mut rand::rng();
-
   let mut records = (0..record_count).collect::<Vec<_>>();
-  records.shuffle(rng);
 
   group
     .throughput(Throughput::Elements(op_count as u64))
     .sampling_mode(SamplingMode::Flat)
     .bench_function("50read-50rmw", |b| {
+      records.shuffle(rng);
       b.iter(|| {
         counter.store(op_count, Ordering::Release);
         for _ in 0..op_count {
-          let idx = zipfian_index(rng, &zipf, record_count);
+          let idx = records[zipfian_index(rng, &zipf, record_count)];
           let key = make_key(idx);
           let op = if rng.random_bool(0.50) {
             Op::Get(key)
