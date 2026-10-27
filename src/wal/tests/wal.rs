@@ -195,7 +195,9 @@ fn commit_returns_wal_failed_when_fdatasync_fails() {
   commit(&wal, 1).unwrap();
 
   insert(&wal, 2).unwrap();
-  fixture.controller.fail_next_fdatasync(ErrorKind::StorageFull);
+  fixture
+    .controller
+    .fail_next_fdatasync(ErrorKind::StorageFull);
   assert!(matches!(
     commit(&wal, 2),
     Err(Error::WALFailed(ErrorKind::StorageFull))
