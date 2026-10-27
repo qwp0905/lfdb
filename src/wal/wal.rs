@@ -31,10 +31,10 @@ impl WALConfig {
 
 pub struct WALFailed;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
   Available,
-  Failed,
+  Failed(io::ErrorKind),
 }
 impl State {
   fn is_available(&self) -> bool {
@@ -173,13 +173,15 @@ impl WriteAheadLog {
   /**
    * Transition WAL to failed state and publish the failure.
    *
-   * WAL I/O failure is terminal for this WAL instance. After the first failure,
-   * later callers see `WALUnavailable`; the failure event only reports that this
-   * transition happened.
+   * WAL I/O failure is terminal for this WAL instance. Later callers receive
+   * `WALFailed` with the kind that caused the transition, not their own; the
+   * failure event only reports that this transition happened.
    */
   fn failover(&self, err: io::ErrorKind) -> Error {
-    if !self.state.swap(State::Failed).is_available() {
-      return Error::WALUnavailable;
+    if let Err(State::Failed(prev)) =
+      self.state.compare_exchange(State::Available, State::Failed(err))
+    {
+      return Error::WALFailed(prev);
     }
 
     error!("error occurs in wal: {err}");
@@ -290,13 +292,10 @@ impl WriteAheadLog {
       segment.init_next(new, self.allocator.allocate(), log_id, self.max_len);
     self.buffer.store(replacement);
 
-    let pending = buffer.flush_block_with(ticket, &segment, &self.allocator);
+    buffer.flush_and_forget(ticket, &segment, &self.allocator);
     drop(buffer);
 
-    if let Err(err) = pending
-      .wait()
-      .and_then(|_| segment.wait_completion(pointer))
-    {
+    if let Err(err) = segment.wait_completion(pointer + 1) {
       return Err(self.failover(err.kind()));
     };
     segment.set_last_log_id(log_id);
@@ -308,8 +307,8 @@ impl WriteAheadLog {
     let backoff = Backoff::new();
 
     loop {
-      if !self.state.load().is_available() {
-        return Err(Error::WALUnavailable);
+      if let State::Failed(kind) = self.state.load() {
+        return Err(Error::WALFailed(kind));
       }
 
       let segment = self.buffer.load();

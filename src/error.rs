@@ -51,9 +51,6 @@ pub enum Error {
   #[error("exceeded maximum value length. maximum {0}, received {1}")]
   ValueExceeded(usize, usize),
 
-  #[error("wal unavailable to write. please drop engine and restart.")]
-  WALUnavailable,
-
   #[error("wal failed since {0}. please drop engine and restart.")]
   WALFailed(io::ErrorKind),
 
