@@ -330,7 +330,11 @@ fn verify(dir: &TempDir, wal_file_size: usize, outcomes: &[Outcome]) {
   for outcome in outcomes {
     if outcome.after_wal_failed {
       assert!(!outcome.wrote, "write accepted after wal failed");
-      assert_ne!(outcome.result, TxResult::Committed, "commit accepted after wal failed");
+      assert_ne!(
+        outcome.result,
+        TxResult::Committed,
+        "commit accepted after wal failed"
+      );
       continue;
     }
     if outcome.after_other_failure {
@@ -383,7 +387,10 @@ fn run_scenario(
 
   controller.arm(target, op, nth);
   let outcomes = run_workload(Arc::new(engine), &controller, concurrent);
-  assert!(controller.fired(), "fault was not injected within the tx limit");
+  assert!(
+    controller.fired(),
+    "fault was not injected within the tx limit"
+  );
   verify(&dir, wal_file_size, &outcomes);
 }
 
