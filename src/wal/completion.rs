@@ -6,7 +6,7 @@ use std::{
   thread::yield_now,
 };
 
-use crossbeam::{queue::SegQueue, utils::Backoff};
+use crossbeam::{atomic::AtomicCell, queue::SegQueue, utils::Backoff};
 use crossbeam_skiplist::SkipSet;
 
 use super::{
@@ -52,10 +52,16 @@ impl AppendCompletion {
   }
 }
 
+/**
+ * A failed write is never marked completed, so the frontier cannot step over it.
+ * Waiters do not know where their records landed, so once the completed prefix is
+ * broken every later wait must fail.
+ */
 pub struct WriteCompletion {
   queue: SegQueue<(Pointer, BatchedWrite)>,
   frontier: AtomicU64,
   completed: AtomicBitmap,
+  error: AtomicCell<Option<io::ErrorKind>>,
 }
 impl WriteCompletion {
   pub fn new(capacity: usize) -> Self {
@@ -63,7 +69,12 @@ impl WriteCompletion {
       queue: SegQueue::new(),
       frontier: AtomicU64::new(0),
       completed: AtomicBitmap::new(capacity),
+      error: AtomicCell::new(None),
     }
+  }
+
+  pub fn error(&self) -> Option<io::ErrorKind> {
+    self.error.load()
   }
 
   fn completed_from(&self, current: Pointer) -> impl Iterator<Item = Pointer> + '_ {
@@ -79,6 +90,9 @@ impl WriteCompletion {
 
   pub fn wait_until(&self, threshold: Pointer) -> io::Result<()> {
     loop {
+      if let Some(kind) = self.error.load() {
+        return Err(kind.into());
+      }
       let current = self.frontier.load(Ordering::Acquire);
       if threshold <= current {
         return Ok(());
@@ -88,10 +102,12 @@ impl WriteCompletion {
         yield_now();
         continue;
       };
-      let result = batched.wait();
+      if let Err(err) = batched.wait() {
+        let _ = self.error.compare_exchange(None, Some(err.kind()));
+        return Err(err);
+      }
       self.completed.insert(ptr);
       self.try_advance(current);
-      result?;
     }
   }
 
@@ -113,10 +129,15 @@ impl Drop for WriteCompletion {
   }
 }
 
+/**
+ * Like `WriteCompletion`, a failure is kept instead of advancing the frontier, and
+ * it covers every later generation because the prefix across segments is broken.
+ */
 pub struct SyncCompletion {
   queue: SegQueue<(SegmentGeneration, FsyncResult)>,
   frontier: AtomicU64,
   completed: SkipSet<SegmentGeneration>,
+  error: AtomicCell<Option<io::ErrorKind>>,
 }
 impl SyncCompletion {
   pub fn new() -> Self {
@@ -124,11 +145,16 @@ impl SyncCompletion {
       queue: SegQueue::new(),
       frontier: AtomicU64::new(0),
       completed: SkipSet::new(),
+      error: AtomicCell::new(None),
     }
   }
 
   pub fn register(&self, generation: SegmentGeneration, fsync: FsyncResult) {
     self.queue.push((generation, fsync));
+  }
+
+  pub fn failover(&self, kind: io::ErrorKind) {
+    let _ = self.error.compare_exchange(None, Some(kind));
   }
 
   /**
@@ -140,6 +166,9 @@ impl SyncCompletion {
    */
   pub fn wait_until(&self, generation: SegmentGeneration) -> io::Result<()> {
     loop {
+      if let Some(kind) = self.error.load() {
+        return Err(kind.into());
+      }
       let current = self.frontier.load(Ordering::Acquire);
       if generation <= current {
         return Ok(());
@@ -150,14 +179,16 @@ impl SyncCompletion {
         continue;
       };
 
-      let result = pending.wait();
+      if let Err(err) = pending.wait() {
+        let _ = self.error.compare_exchange(None, Some(err.kind()));
+        return Err(err);
+      }
       if current == gen {
         self.frontier.store(gen + 1, Ordering::Release);
       } else {
         self.completed.insert(gen);
       };
       self.try_advance(current);
-      result?;
     }
   }
 
