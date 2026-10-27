@@ -178,8 +178,9 @@ impl WriteAheadLog {
    * failure event only reports that this transition happened.
    */
   fn failover(&self, err: io::ErrorKind) -> Error {
-    if let Err(State::Failed(prev)) =
-      self.state.compare_exchange(State::Available, State::Failed(err))
+    if let Err(State::Failed(prev)) = self
+      .state
+      .compare_exchange(State::Available, State::Failed(err))
     {
       return Error::WALFailed(prev);
     }
@@ -445,3 +446,7 @@ impl<'a> Drop for DurabilityGuard<'a> {
     self.completion.complete(self.log_id);
   }
 }
+
+#[cfg(all(test, not(loom)))]
+#[path = "tests/wal.rs"]
+mod tests;
