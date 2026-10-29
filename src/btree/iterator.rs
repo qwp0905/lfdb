@@ -3,7 +3,7 @@ use std::{collections::VecDeque, ops::Bound};
 use crate::{
   cache::ReadonlySlot,
   disk::Pointer,
-  objects::{BTreeNodeView, RecordDataView, StaticKey, VersionRecordView},
+  objects::{BTreeNodeView, RecordDataView, StaticKey, StaticKeyRef, VersionRecordView},
   page::VecRef,
   table::TableHandleRef,
   wal::TxId,
@@ -66,8 +66,15 @@ impl BufferedRecord {
  */
 pub struct Snapshotter<Policy>(BTreeIter<Policy>);
 impl<Policy: ReadonlyPolicy> Snapshotter<Policy> {
-  pub fn open(policy: Policy, table: &TableHandleRef) -> Result<Self> {
-    BTreeIter::open(policy, table, &Bound::Unbounded, &Bound::Unbounded).map(Self)
+  pub fn open(
+    policy: Policy,
+    table: &TableHandleRef,
+    from: Option<StaticKeyRef>,
+  ) -> Result<Self> {
+    let start = from
+      .map(|key| Bound::Included(key.to_vec()))
+      .unwrap_or(Bound::Unbounded);
+    BTreeIter::open(policy, table, &start, &Bound::Unbounded).map(Self)
   }
 
   /**

@@ -97,6 +97,9 @@ impl IOScheduler {
   }
 
   pub fn close(&self) {
+    if self.pin.is_exclusive() {
+      return;
+    }
     let backoff = Backoff::new();
     while self.pin.try_exclusive().map(forget).is_none() {
       backoff.snooze();

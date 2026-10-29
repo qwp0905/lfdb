@@ -236,7 +236,8 @@ engine unavailable and rejects further operations to preserve the last
 recoverable WAL state. The application is responsible for resolving the
 underlying storage failure and restarting the engine. After recovery, the
 application must verify whether the transaction was committed before retrying
-it.
+it. Once the WAL has failed, every later write or commit returns the same
+`WALFailed` error, carrying the kind of the I/O error that caused the failure.
 
 ### Logging
 

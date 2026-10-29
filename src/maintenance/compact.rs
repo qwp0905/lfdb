@@ -1,4 +1,12 @@
-use std::{cell::Cell, collections::LinkedList, sync::Arc, time::Duration};
+use std::{
+  cell::Cell,
+  collections::LinkedList,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
+  time::Duration,
+};
 
 use crossbeam::atomic::AtomicCell;
 
@@ -16,7 +24,7 @@ use crate::{
   cache::{BlockCache, PreparedSlot},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState, VersionController},
-  objects::Serializable,
+  objects::{Serializable, StaticKey},
   table::{TableHandleRef, TableMapper, TableMetadata, TableMetadataView, TableNameRef},
   transaction::PageRecorder,
   utils::{error, info, trace, warn, MpscQueue, ToArc, ToBox},
@@ -506,10 +514,19 @@ impl CompactionWorker {
     };
 
     let new_table = self.tables.create_handle(&table_meta)?;
-    index.initialize(&new_table)?;
+    if let Err(err) = index.initialize(&new_table) {
+      let event = DropTableCommitted::new(new_table, tx.current_owner(), 0);
+      self.event_bus.publish(event);
+      return Err(err);
+    };
     self.tables.insert(new_table.clone());
+    if let Err(err) = tx.commit() {
+      self.tables.remove(new_table.get_id());
+      let event = DropTableCommitted::new(new_table, tx.current_owner(), 0);
+      self.event_bus.publish(event);
+      return Err(err);
+    };
 
-    tx.commit()?;
     Ok(Some((new_table, tx.current_version(), table_meta)))
   }
 
@@ -524,11 +541,13 @@ impl CompactionWorker {
 
     let mut snapshotter = match cycle.snapshotter.take() {
       Some(v) => v,
-      None => self.old_index.snapshot(&cycle.old)?,
+      None => self
+        .old_index
+        .snapshot_from(&cycle.old, cycle.resume_key.as_deref())?,
     };
 
     while !snapshotter.is_done() {
-      self.apply_snapshot_once(&mut snapshotter, &cycle.new, batch_size)?;
+      self.apply_snapshot_once(&mut snapshotter, &cycle.new, &mut None, batch_size)?;
     }
     self.remove_compaction(&cycle.metadata)?;
     Ok(())
@@ -538,15 +557,21 @@ impl CompactionWorker {
     &self,
     snapshotter: &mut Snapshotter<Arc<CompactionReadPolicy>>,
     new_table: &TableHandleRef,
+    resume_from: &mut Option<StaticKey>,
     batch_size: usize,
   ) -> Result {
     let mut bulk = Vec::with_capacity(batch_size);
+    let mut start = None;
     for _ in 0..batch_size {
       let Some(snapshot) = snapshotter.next_snapshot()? else {
         break;
       };
+      start.get_or_insert_with(|| snapshot.key.clone());
       bulk.push(snapshot);
     }
+    if let Some(key) = start {
+      *resume_from = Some(key.to_vec());
+    };
     let _guard = new_table.free().protect();
     self.new_index.apply_snapshot_bulk(bulk, new_table)?;
     Ok(())
@@ -563,7 +588,11 @@ impl CompactionWorker {
         "table {} compaction start to create snapshot.",
         current.metadata.get_name()
       );
-      current.snapshotter = Some(self.old_index.snapshot(&current.old)?);
+      current.snapshotter = Some(
+        self
+          .old_index
+          .snapshot_from(&current.old, current.resume_key.as_deref())?,
+      );
       return Ok(false);
     };
 
@@ -587,7 +616,15 @@ impl CompactionWorker {
       warn!("table {} already dropped.", current.metadata.get_name());
       return Ok(true);
     }
-    self.apply_snapshot_once(snapshotter, &current.new, batch_size)?;
+    if let Err(err) = self.apply_snapshot_once(
+      snapshotter,
+      &current.new,
+      &mut current.resume_key,
+      batch_size,
+    ) {
+      current.snapshotter = None;
+      return Err(err);
+    };
     Ok(false)
   }
 
@@ -613,16 +650,19 @@ impl CompactionWorker {
           committed.commit_version,
         )),
         CompactTask::New(trigger) => {
-          let old = trigger.old;
+          let old = &trigger.old;
           let table_name = old.get_name();
-          let Some((new_table, wait_until, metadata)) =
-            self.create_compaction(table_name)?
-          else {
-            continue;
+          match self.create_compaction(table_name) {
+            Ok(Some((new_table, wait_until, metadata))) => {
+              info!("table {table_name} compacting wait until another tx close.");
+              waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
+            }
+            Ok(None) => continue,
+            Err(err) => {
+              incoming.push(CompactTask::New(trigger));
+              return Err(err);
+            }
           };
-
-          info!("table {table_name} compacting wait until another tx close.");
-          waiting_publish.push_back((old.clone(), new_table, metadata, wait_until));
         }
       }
     }
@@ -642,11 +682,9 @@ impl CompactionWorker {
     else {
       return Ok(());
     };
-
-    if !self.execute(current, batch_size)? {
-      return Ok(());
+    if self.execute(current, batch_size)? {
+      *cycle_ref = None;
     }
-    *cycle_ref = None;
     Ok(())
   }
 }
@@ -657,6 +695,7 @@ pub struct Compactor {
   cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
   ticker: Box<IntervalWorkThread>,
   worker: Arc<CompactionWorker>,
+  failed: AtomicBool,
   batch_size: usize,
 }
 impl Compactor {
@@ -707,6 +746,7 @@ impl Compactor {
       cycle,
       ticker,
       worker,
+      failed: AtomicBool::new(false),
       batch_size: config.batch_size,
     });
     event_bus.register(&this);
@@ -724,6 +764,9 @@ impl Compactor {
   pub fn close(&self) -> Result {
     if !self.worker.wal.is_available() {
       self.failover();
+      return Ok(());
+    }
+    if self.failed.fetch_or(true, Ordering::Relaxed) {
       return Ok(());
     }
     self.ticker.close();
@@ -746,6 +789,9 @@ impl Compactor {
   }
 
   fn failover(&self) {
+    if self.failed.fetch_or(true, Ordering::Relaxed) {
+      return;
+    }
     self.ticker.close();
     let _ = self.cycle.take();
     while unsafe { self.in_progress.pop() }.is_some() {}
@@ -797,6 +843,7 @@ struct CompactionCycle {
   new: TableHandleRef,
   metadata: TableMetadata,
   snapshotter: Option<Snapshotter<Arc<CompactionReadPolicy>>>,
+  resume_key: Option<StaticKey>,
 }
 impl CompactionCycle {
   const fn new(
@@ -809,6 +856,7 @@ impl CompactionCycle {
       new,
       metadata,
       snapshotter: None,
+      resume_key: None,
     }
   }
 }
@@ -827,14 +875,18 @@ fn compaction_loop(
   // observe the old/new table-segment pair from metadata.
   let mut waiting_publish = LinkedList::new();
   move || {
-    worker
-      .run_tick(
-        &incoming,
-        &in_progress,
-        &cycle,
-        batch_size,
-        &mut waiting_publish,
-      )
-      .unwrap()
+    let Err(err) = worker.run_tick(
+      &incoming,
+      &in_progress,
+      &cycle,
+      batch_size,
+      &mut waiting_publish,
+    ) else {
+      return;
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("compaction failed: {err}");
   }
 }

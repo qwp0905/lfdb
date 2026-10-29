@@ -100,6 +100,11 @@ impl SegmentBuffer {
 impl Drop for SegmentBuffer {
   fn drop(&mut self) {
     let segment = unsafe { ManuallyDrop::take(&mut self.segment) };
+    // Checked before `last_log_id` because a failed rotation never sets it, and
+    // the next segment's commits would otherwise wait for this fsync forever.
+    if let Some(kind) = self.write_completion.error() {
+      return self.sync_completion.failover(kind);
+    }
     let Some(last_log_id) = self.last_log_id.get() else {
       return;
     };

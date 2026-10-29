@@ -1,4 +1,5 @@
 use std::{
+  collections::BTreeMap,
   hash::{BuildHasher, RandomState},
   mem::ManuallyDrop,
   sync::{Mutex, MutexGuard},
@@ -11,7 +12,9 @@ use crate::{
   background::ThreadParker,
   disk::Pointer,
   table::TableId,
-  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{
+    ChunkQueue, ExclusivePin, ExclusiveToken, OffsetBitmap, SharedToken, ShortenedMutex,
+  },
 };
 
 type Key = (TableId, Pointer);
@@ -26,12 +29,16 @@ struct Shard {
   allocated: BlockId,
 
   /**
-   * Slots from eviction/install attempts that did not commit. The BlockId can be
-   * reused by a later miss. `Some(key)` means the slot still belongs to an old
-   * logical key and must go through eviction again before reuse; `None` means it
-   * is an uncommitted fresh slot with no live key.
+   * Uncommitted fresh slots with no live key, reusable by a later miss.
    */
-  aborted: ChunkQueue<(BlockId, Option<(Key, u64)>)>,
+  free: ChunkQueue<BlockId>,
+  /**
+   * Slots whose eviction did not commit. They still hold the evicted key's latest
+   * page, so the key is served from here instead of reading a stale disk block,
+   * while a miss for another key must evict it again before reuse. Kept out of
+   * the node so a failed eviction does not put the key back into the cache.
+   */
+  aborted: BTreeMap<Key, (BlockId, u64)>,
 }
 
 /**
@@ -45,7 +52,7 @@ struct Shard {
  *
  * Call `commit` after the caller has populated the cache slot for the new key.
  * Dropping without commit rolls the mapping back and returns the slot to the
- * aborted-slot queue.
+ * free slots, or to the aborted slots if an old key was evicted.
  */
 pub struct EvictionGuard<'a> {
   evicted: Option<(Key, u64)>,
@@ -107,7 +114,12 @@ impl<'a> Drop for EvictionGuard<'a> {
     }
 
     // rollback
-    guard.aborted.push((self.block_id, self.evicted));
+    match self.evicted {
+      Some((k, h)) => {
+        guard.aborted.insert(k, (self.block_id, h));
+      }
+      None => guard.free.push(self.block_id),
+    }
     guard
       .node
       .remove(&self.new_key, self.selected.hash, self.hasher)
@@ -180,7 +192,8 @@ impl MappingTable {
         node: CacheNode::new(cap_per_shard),
         eviction: ShrinkSet::new(),
         allocated: 0,
-        aborted: ChunkQueue::new(),
+        free: ChunkQueue::new(),
+        aborted: BTreeMap::new(),
       };
       shards.push(Mutex::new(shard));
       offset.push(i * cap_per_shard);
@@ -247,8 +260,8 @@ impl MappingTable {
         GetOrEvicted::Evicted(evicted) => evicted,
       };
 
-      if let Some(guard) = self.handle_reserved(evicted, key, shard, selected) {
-        return Some(Acquired::Evicted(guard));
+      if let Some(acquired) = self.handle_reserved(evicted, key, shard, selected) {
+        return Some(acquired);
       };
       backoff.snooze();
     }
@@ -307,8 +320,22 @@ impl MappingTable {
     key: Key,
     mut shard: MutexGuard<'a, Shard>,
     selected: SelectedShard<'a>,
-  ) -> Option<EvictionGuard<'a>> {
+  ) -> Option<Acquired<'a>> {
     let toward = evicted.toward();
+    if let Some((bid, _)) = shard.aborted.remove(&key) {
+      // An aborted slot sits outside the node, so the node had room for this key
+      // and must not have evicted anything to make it.
+      debug_assert!(evicted.take_evicted().is_none());
+      shard
+        .node
+        .insert_to(key, selected.hash, bid, &self.hasher, toward);
+      let token = self.pins[bid].try_shared().unwrap();
+      return Some(Acquired::Hit(
+        bid,
+        MappingToken::new(token, selected.parker),
+      ));
+    }
+
     if let Some((evicted, bid, token, evicted_hash)) = evicted.take_evicted() {
       // Reuse the evicted cache slot for the new key. The mapping is reserved now,
       // but the slot may still contain the old page until the caller finishes the
@@ -319,70 +346,83 @@ impl MappingTable {
       shard
         .eviction
         .insert_unchecked(evicted, evicted_hash, &self.hasher);
-      return Some(EvictionGuard::new(
+      return Some(Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,
         token,
         selected,
         key,
         &self.hasher,
-      ));
+      )));
     }
 
-    let (bid, evicted) = shard.aborted.pop().unwrap_or_else(|| {
-      let id = shard.allocated;
-      shard.allocated += 1;
-      debug_assert!(
-        shard.allocated <= shard.node.capacity(),
-        "capacity exceeded"
-      );
-      (id + selected.offset, None)
-    });
+    let (bid, evicted) = match shard.free.pop() {
+      Some(bid) => (bid, None),
+      None => match shard.aborted.pop_first() {
+        Some((k, (bid, h))) => (bid, Some((k, h))),
+        None => {
+          let id = shard.allocated;
+          shard.allocated += 1;
+          debug_assert!(shard.allocated <= shard.node.capacity());
+          (id + selected.offset, None)
+        }
+      },
+    };
     shard
       .node
       .insert_to(key, selected.hash, bid, &self.hasher, toward);
 
     let Some((evicted, evicted_hash)) = evicted else {
       let token = self.pins[bid].try_exclusive().unwrap();
-      return Some(EvictionGuard::new(
+      return Some(Acquired::Evicted(EvictionGuard::new(
         None,
         bid,
         token,
         selected,
         key,
         &self.hasher,
-      ));
+      )));
     };
 
     if let Some(token) = self.pins[bid].try_exclusive() {
       shard
         .eviction
         .insert_unchecked(evicted, evicted_hash, &self.hasher);
-      return Some(EvictionGuard::new(
+      return Some(Acquired::Evicted(EvictionGuard::new(
         Some((evicted, evicted_hash)),
         bid,
         token,
         selected,
         key,
         &self.hasher,
-      ));
+      )));
     }
 
-    // It is not certain whether an eviction block in the aborted queue can acquire exclusive rights
-    // due to contention with checkpoints or other reads.
-    // However, since this occurs very rarely due to reasons such as disk failure, it is fine to proceed with deleting the hash table.
+    // An aborted slot can still be pinned, for example by a checkpoint flush. Undo
+    // the reservation and keep the slot aborted so the evicted page stays
+    // reachable, and retry once the pin is released.
     shard.node.remove(&key, selected.hash, &self.hasher);
-    shard.aborted.push((bid, Some((evicted, evicted_hash))));
+    shard.aborted.insert(evicted, (bid, evicted_hash));
     None
   }
 
+  /**
+   * Free slots never received a page, so they are left out of the slots whose
+   * metadata must be dropped. This drains the free slots and is only for teardown.
+   */
   pub fn get_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
     self
       .shards
       .iter()
-      .enumerate()
-      .map(|(i, shard)| (shard.l().allocated, self.offsets[i]))
-      .flat_map(|(len, offset)| offset..offset + len)
+      .zip(self.offsets.iter())
+      .flat_map(|(shard, &offset)| {
+        let mut shard = shard.l();
+        let mut free = OffsetBitmap::new(offset as u64);
+        while let Some(bid) = shard.free.pop() {
+          free.insert(bid as u64);
+        }
+        (offset..offset + shard.allocated).filter(move |&id| !free.contains(id as u64))
+      })
   }
 }
 

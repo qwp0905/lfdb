@@ -76,7 +76,6 @@ impl ExclusivePin {
   }
 
   #[inline]
-  #[cfg(all(test, not(loom)))]
   pub fn is_exclusive(&self) -> bool {
     self.0.load(Ordering::Acquire) == EXCLUSIVE
   }

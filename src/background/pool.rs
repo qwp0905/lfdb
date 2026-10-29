@@ -1,4 +1,8 @@
-use std::{iter::repeat_with, sync::Arc, thread::Builder};
+use std::{
+  iter::repeat_with,
+  sync::Arc,
+  thread::{current, Builder},
+};
 
 use crossbeam::{
   deque::{Injector, Steal, Stealer, Worker},
@@ -220,6 +224,11 @@ impl ThreadPool {
 
     self.core.parker.wake_all();
     for handle in threads {
+      debug_assert_ne!(
+        handle.thread().id(),
+        current().id(),
+        "a worker must not close its own pool"
+      );
       handle.join().unwrap();
     }
 
