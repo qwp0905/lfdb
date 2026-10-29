@@ -153,23 +153,19 @@ pub fn open_tables(
   })
 }
 
+enum RecoveryJob {
+  ScanNode(Pointer, u16),
+  ScanEntry(Pointer),
+  CompleteTable,
+  RecoverySplit(Option<StaticKey>, Pointer, u16),
+}
+
+#[derive(Clone)]
 struct TableRecovery {
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
   table: TableHandleRef,
   status: Arc<RecoveryStatus>,
-  pool: Arc<ThreadPool>,
-}
-impl Clone for TableRecovery {
-  fn clone(&self) -> Self {
-    Self {
-      block_cache: self.block_cache.clone(),
-      recorder: self.recorder.clone(),
-      table: self.table.clone(),
-      status: self.status.clone(),
-      pool: self.pool.clone(),
-    }
-  }
 }
 impl TableRecovery {
   const fn new(
@@ -177,39 +173,40 @@ impl TableRecovery {
     recorder: Arc<PageRecorder>,
     table: TableHandleRef,
     status: Arc<RecoveryStatus>,
-    pool: Arc<ThreadPool>,
   ) -> Self {
     Self {
       block_cache,
       recorder,
       table,
       status,
-      pool,
     }
   }
 
-  fn fetch_job(
-    &self,
-    closure: impl FnOnce() -> Result<RecoveryResult> + Send + 'static,
-  ) -> PendingTask<Result<RecoveryResult>> {
-    self.status.inc_remaining();
-    self.pool.spawn(closure)
+  fn run(&self, job: RecoveryJob) -> Result<Vec<RecoveryJob>> {
+    match job {
+      RecoveryJob::ScanNode(ptr, level) => self.scan_node(ptr, level),
+      RecoveryJob::ScanEntry(ptr) => self.scan_entry(ptr),
+      RecoveryJob::CompleteTable => self.complete_table(),
+      RecoveryJob::RecoverySplit(key, ptr, level) => {
+        self.recovery_split(key, ptr, level).map(|_| Vec::new())
+      }
+    }
   }
 
-  fn complete_job(&self) -> Option<PendingTask<Result<RecoveryResult>>> {
+  fn complete_job(&self) -> Option<RecoveryJob> {
     if self.status.dec_remaining() > 1 {
       return None;
     }
-    Some(self.fetch_job(self.complete_table()))
+    Some(RecoveryJob::CompleteTable)
   }
 
-  fn scan_node_internal(&self, ptr: Pointer, level: u16) -> Result<RecoveryResult> {
+  fn scan_node(&self, ptr: Pointer, level: u16) -> Result<Vec<RecoveryJob>> {
     if !self.status.set_visited(ptr) {
-      return Ok(RecoveryResult(self.complete_job().map(|r| vec![r])));
+      return Ok(self.complete_job().into_iter().collect());
     };
     self.status.set_max_used(ptr);
 
-    let mut pendings = Vec::new();
+    let mut jobs = Vec::new();
 
     match self
       .block_cache
@@ -220,44 +217,36 @@ impl TableRecovery {
     {
       BTreeNodeView::Internal(node) => {
         if let Some((k, p)) = node.get_right() {
-          pendings.push(self.fetch_job(self.scan_node(p, level)));
+          jobs.push(RecoveryJob::ScanNode(p, level));
           self.status.set_half_split(p, Some(k.to_vec()), level);
         }
         for c in node.get_all_child()? {
-          pendings.push(self.fetch_job(self.scan_node(c, level - 1)));
+          jobs.push(RecoveryJob::ScanNode(c, level - 1));
           self.status.set_child_reachable(c);
         }
       }
       BTreeNodeView::Leaf(node) => {
         if let Some(p) = node.get_next() {
-          pendings.push(self.fetch_job(self.scan_node(p, level)));
+          jobs.push(RecoveryJob::ScanNode(p, level));
           self.status.set_half_split(p, None, level);
         }
         let mut iter = node.get_entries();
         while let Some(e) = iter.try_next()? {
           if let Some(p) = e.next {
-            pendings.push(self.fetch_job(self.scan_entry(p)));
+            jobs.push(RecoveryJob::ScanEntry(p));
           }
         }
       }
     };
 
-    if let Some(pending) = self.complete_job() {
-      pendings.push(pending);
-    }
-    Ok(RecoveryResult(Some(pendings)))
+    // Count the children before releasing this job, so the table cannot look
+    // complete while they are still outstanding.
+    self.status.add_remaining(jobs.len());
+    jobs.extend(self.complete_job());
+    Ok(jobs)
   }
 
-  fn scan_node(
-    &self,
-    ptr: Pointer,
-    level: u16,
-  ) -> impl FnOnce() -> Result<RecoveryResult> + Send {
-    let this = self.clone();
-    move || this.scan_node_internal(ptr, level)
-  }
-
-  fn scan_entry_internal(&self, ptr: Pointer) -> Result<RecoveryResult> {
+  fn scan_entry(&self, ptr: Pointer) -> Result<Vec<RecoveryJob>> {
     let mut next = Some(ptr);
     while let Some(ptr) = next.take() {
       if !self.status.set_visited(ptr) {
@@ -272,15 +261,10 @@ impl TableRecovery {
         .view::<DataEntryView>()?
         .get_next();
     }
-    Ok(RecoveryResult(self.complete_job().map(|r| vec![r])))
+    Ok(self.complete_job().into_iter().collect())
   }
 
-  fn scan_entry(&self, ptr: Pointer) -> impl FnOnce() -> Result<RecoveryResult> + Send {
-    let this = self.clone();
-    move || this.scan_entry_internal(ptr)
-  }
-
-  fn complete_table_internal(&self) -> Result<RecoveryResult> {
+  fn complete_table(&self) -> Result<Vec<RecoveryJob>> {
     let name = self.table.get_name();
     debug!("table {name} completed to collect orphaned blocks.",);
 
@@ -298,35 +282,19 @@ impl TableRecovery {
       .filter(|(p, _)| !self.status.is_child_reachable(p))
       .map(|(p, (k, l))| (p, k, l))
       .collect::<Vec<_>>();
-    if half_split.is_empty() {
-      return Ok(RecoveryResult(None));
+    if !half_split.is_empty() {
+      info!("{} half split detected at table {name}", half_split.len());
     }
 
-    info!("{} half split detected at table {name}", half_split.len());
-
-    let mut pending = Vec::with_capacity(half_split.len());
-    for (split_ptr, split_key, level) in half_split {
-      let task = self.recovery_split(split_key, split_ptr, level);
-      pending.push(self.pool.spawn(task));
-    }
-    Ok(RecoveryResult(Some(pending)))
+    Ok(
+      half_split
+        .into_iter()
+        .map(|(ptr, key, level)| RecoveryJob::RecoverySplit(key, ptr, level))
+        .collect(),
+    )
   }
 
   fn recovery_split(
-    &self,
-    split_key: Option<StaticKey>,
-    split_ptr: Pointer,
-    level: u16,
-  ) -> impl FnOnce() -> Result<RecoveryResult> {
-    let this = self.clone();
-    move || {
-      this
-        .recovery_split_internal(split_key, split_ptr, level)
-        .map(|_| RecoveryResult(None))
-    }
-  }
-
-  fn recovery_split_internal(
     &self,
     split_key: Option<StaticKey>,
     split_ptr: Pointer,
@@ -349,11 +317,15 @@ impl TableRecovery {
     index.recovery_half_split(key, split_ptr, level, &self.table)?;
     Ok(())
   }
+}
 
-  fn complete_table(&self) -> impl FnOnce() -> Result<RecoveryResult> {
-    let this = self.clone();
-    move || this.complete_table_internal()
-  }
+fn spawn_job(
+  pool: &ThreadPool,
+  recovery: &TableRecovery,
+  job: RecoveryJob,
+) -> (TableRecovery, PendingTask<Result<Vec<RecoveryJob>>>) {
+  let this = recovery.clone();
+  (recovery.clone(), pool.spawn(move || this.run(job)))
 }
 
 pub fn recovery(
@@ -361,24 +333,31 @@ pub fn recovery(
   recorder: Arc<PageRecorder>,
   tables: &TableMapper,
   max_used: HashMap<TableId, Pointer>,
-  pool: Arc<ThreadPool>,
+  pool: &ThreadPool,
 ) -> Result {
-  let open_handles = tables.get_all();
+  let initializing = tables
+    .get_all()
+    .into_iter()
+    .map(|table| {
+      pool.spawn(init_table(
+        block_cache.clone(),
+        recorder.clone(),
+        table,
+        &max_used,
+      ))
+    })
+    .collect::<Vec<_>>();
 
   let mut pending = ChunkQueue::new();
-  for table in open_handles {
-    let task = pool.spawn(create_tasks(
-      block_cache.clone(),
-      recorder.clone(),
-      pool.clone(),
-      table,
-      &max_used,
-    ));
-    pending.push(task);
+  for task in initializing {
+    let (recovery, job) = task.wait().unwrap()?;
+    pending.push(spawn_job(pool, &recovery, job));
   }
 
-  while let Some(task) = pending.pop() {
-    pending.extend(task.wait().unwrap()?.flatten());
+  while let Some((recovery, task)) = pending.pop() {
+    for job in task.wait().unwrap()? {
+      pending.push(spawn_job(pool, &recovery, job));
+    }
   }
 
   info!("orphaned block has released successfully.");
@@ -481,8 +460,8 @@ impl RecoveryStatus {
   fn is_child_reachable(&self, ptr: &Pointer) -> bool {
     self.child_reachable.contains(ptr)
   }
-  fn inc_remaining(&self) {
-    self.remaining.fetch_add(1, Ordering::Release);
+  fn add_remaining(&self, count: usize) {
+    self.remaining.fetch_add(count, Ordering::Release);
   }
   fn dec_remaining(&self) -> usize {
     self.remaining.fetch_sub(1, Ordering::AcqRel)
@@ -490,20 +469,12 @@ impl RecoveryStatus {
 }
 unsafe impl Sync for RecoveryStatus {}
 
-struct RecoveryResult(Option<Vec<PendingTask<Result<RecoveryResult>>>>);
-impl RecoveryResult {
-  fn flatten(self) -> impl Iterator<Item = PendingTask<Result<Self>>> {
-    self.0.into_iter().flatten()
-  }
-}
-
-fn create_tasks(
+fn init_table(
   block_cache: Arc<BlockCache>,
   recorder: Arc<PageRecorder>,
-  thread_pool: Arc<ThreadPool>,
   table: TableHandleRef,
   max_used: &HashMap<TableId, Pointer>,
-) -> impl FnOnce() -> Result<RecoveryResult> + Send {
+) -> impl FnOnce() -> Result<(TableRecovery, RecoveryJob)> + Send {
   let max_used = max_used
     .get(&table.get_id())
     .copied()
@@ -531,15 +502,7 @@ fn create_tasks(
       remaining: AtomicUsize::new(1),
     };
 
-    let recovery = TableRecovery::new(
-      block_cache,
-      recorder,
-      table,
-      Arc::new(status),
-      thread_pool.clone(),
-    );
-
-    let pending = thread_pool.spawn(recovery.scan_node(root, height));
-    Ok(RecoveryResult(Some(vec![pending])))
+    let recovery = TableRecovery::new(block_cache, recorder, table, Arc::new(status));
+    Ok((recovery, RecoveryJob::ScanNode(root, height)))
   }
 }
