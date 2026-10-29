@@ -8,7 +8,7 @@ use super::WALSegment;
 use crate::{
   background::{oneshot, Oneshot, OneshotFulfill, ThreadSlot, UnwindSpawner},
   disk::{IOPool, Pointer},
-  utils::{MpscQueue, ToBox},
+  utils::{error, MpscQueue, ToBox},
   Result,
 };
 
@@ -74,15 +74,35 @@ impl SegmentPreload {
     }
   }
 
-  pub fn reuse(&self, reused: Vec<WALSegment>) -> Result {
-    reused.iter().try_for_each(|seg| seg.reuse())?;
-    self.io_pool.sync_dir()?;
-    let now = Instant::now();
+  pub fn reuse(&self, reused: Vec<WALSegment>) {
+    let mut succeeded = Vec::with_capacity(reused.len());
+    let mut failed = Vec::new();
     for segment in reused {
+      if segment.reuse().is_ok() {
+        succeeded.push(segment);
+      } else {
+        failed.push(segment);
+      };
+    }
+    if succeeded.is_empty() {
+      return;
+    }
+    if let Err(err) = self.io_pool.sync_dir() {
+      error!("wal segment reuse failed: {err}");
+      for segment in succeeded.into_iter().chain(failed) {
+        let _ = segment.truncate();
+      }
+      return;
+    }
+
+    let now = Instant::now();
+    for segment in succeeded {
       self.ready.push((now, segment));
     }
     self.preload.wake();
-    Ok(())
+    for segment in failed {
+      let _ = segment.truncate();
+    }
   }
 }
 
