@@ -37,33 +37,30 @@ const TX_AFTER_FIRED: usize = 10;
 const THREAD_COUNT: usize = 4;
 const KEYS_PER_TX: usize = 4;
 const VALUE_SIZE: usize = 1 << 10;
+const WAL_FILE_SIZE: usize = 64 << 10;
+const SEED_TX_COUNT: usize = 50;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Target {
-  Wal,
-  Data,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
+  Read,
   Write,
-  Fdatasync,
   Fsync,
+  Fdatasync,
+  Fallocate,
 }
 impl Op {
-  fn of(task: &IOTask) -> Option<Self> {
+  fn of(task: &IOTask) -> Self {
     match task.get_type() {
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Some(Self::Write),
-      TaskType::Fdatasync => Some(Self::Fdatasync),
-      TaskType::Fsync => Some(Self::Fsync),
-      TaskType::Fallocate { .. } => None,
+      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
+      TaskType::Fsync => Self::Fsync,
+      TaskType::Fdatasync => Self::Fdatasync,
+      TaskType::Fallocate { .. } => Self::Fallocate,
     }
   }
 }
 
 struct Armed {
-  target: Target,
   op: Op,
   remain: usize,
 }
@@ -77,24 +74,20 @@ struct FaultState {
 #[derive(Clone, Default)]
 struct FaultController(Arc<FaultState>);
 impl FaultController {
-  fn arm(&self, target: Target, op: Op, nth: usize) {
-    *self.0.armed.lock().unwrap() = Some(Armed {
-      target,
-      op,
-      remain: nth,
-    });
+  fn arm(&self, op: Op, nth: usize) {
+    *self.0.armed.lock().unwrap() = Some(Armed { op, remain: nth });
   }
 
   fn fired(&self) -> bool {
     self.0.fired.load(Ordering::Acquire)
   }
 
-  fn should_fail(&self, target: Target, op: Op) -> bool {
+  fn should_fail(&self, op: Op) -> bool {
     let mut armed = self.0.armed.lock().unwrap();
     let Some(current) = armed.as_mut() else {
       return false;
     };
-    if current.target != target || current.op != op {
+    if current.op != op {
       return false;
     }
     current.remain -= 1;
@@ -110,21 +103,20 @@ impl FaultController {
 struct FaultIO {
   inner: Box<dyn IOBackend>,
   controller: FaultController,
-  target: Target,
 }
 impl IOBackend for FaultIO {
   fn pread(&self, buf: &mut [u8], offset: u64) -> IoResult<usize> {
+    if self.controller.should_fail(Op::Read) {
+      return Err(IoError::from(ErrorKind::Other));
+    }
     self.inner.pread(buf, offset)
   }
 
   fn submit(&self, task: IOTask) {
-    let Some(op) = Op::of(&task) else {
-      return self.inner.submit(task);
-    };
-    if !self.controller.should_fail(self.target, op) {
+    if !self.controller.should_fail(Op::of(&task)) {
       return self.inner.submit(task);
     }
-    task.fulfill(Err(IoError::from(ErrorKind::StorageFull)));
+    task.fulfill(Err(IoError::from(ErrorKind::Other)));
   }
 
   fn metadata(&self) -> IoResult<Metadata> {
@@ -150,24 +142,16 @@ impl FaultBackend {
     }
   }
 
-  fn wrap(&self, path: &Path, inner: Box<dyn IOBackend>) -> Box<dyn IOBackend> {
-    let target = match path.extension().is_some_and(|ext| ext == "log") {
-      true => Target::Wal,
-      false => Target::Data,
-    };
+  fn wrap(&self, inner: Box<dyn IOBackend>) -> Box<dyn IOBackend> {
     Box::new(FaultIO {
       inner,
       controller: self.controller.clone(),
-      target,
     })
   }
 }
 impl DiskBackend for FaultBackend {
   fn open(&self, options: &mut OpenOptions, path: &Path) -> IoResult<Box<dyn IOBackend>> {
-    self
-      .inner
-      .open(options, path)
-      .map(|inner| self.wrap(path, inner))
+    self.inner.open(options, path).map(|inner| self.wrap(inner))
   }
 
   fn open_direct_io(
@@ -178,7 +162,7 @@ impl DiskBackend for FaultBackend {
     self
       .inner
       .open_direct_io(options, path)
-      .map(|inner| self.wrap(path, inner))
+      .map(|inner| self.wrap(inner))
   }
 
   fn read_dir(&self, path: &Path) -> IoResult<ReadDir> {
@@ -202,11 +186,11 @@ impl DiskBackend for FaultBackend {
   }
 }
 
-fn options(dir: &TempDir, wal_file_size: usize) -> EngineBuilder {
+fn options(dir: &TempDir) -> EngineBuilder {
   let _ = log::set_logger(&TestLogger);
   log::set_max_level(log::LevelFilter::Trace);
   EngineBuilder::new(dir.path())
-    .wal_file_size(wal_file_size)
+    .wal_file_size(WAL_FILE_SIZE)
     .wal_buffer_size(64 << 10)
     .wal_segment_expiration(Duration::from_millis(1))
     .wal_segment_min_count(1)
@@ -326,7 +310,7 @@ fn run_workload(
   outcomes
 }
 
-fn verify(dir: &TempDir, wal_file_size: usize, outcomes: &[Outcome]) {
+fn verify(dir: &TempDir, outcomes: &[Outcome]) {
   for outcome in outcomes {
     if outcome.after_wal_failed {
       assert!(!outcome.wrote, "write accepted after wal failed");
@@ -347,7 +331,7 @@ fn verify(dir: &TempDir, wal_file_size: usize, outcomes: &[Outcome]) {
     }
   }
 
-  let engine = options(dir, wal_file_size).open().unwrap();
+  let engine = options(dir).open().unwrap();
   let tx = engine.new_tx().unwrap();
   let table = tx.table(TABLE).unwrap();
   for outcome in outcomes {
@@ -367,64 +351,94 @@ fn verify(dir: &TempDir, wal_file_size: usize, outcomes: &[Outcome]) {
   }
 }
 
-fn run_scenario(
-  target: Target,
-  op: Op,
-  nth: usize,
-  wal_file_size: usize,
-  concurrent: bool,
-) {
+fn create_table(engine: &Engine) {
+  let mut tx = engine.new_tx().unwrap();
+  tx.open_table(TABLE).unwrap();
+  tx.commit().unwrap();
+}
+
+fn run_scenario(op: Op, nth: usize, concurrent: bool) -> bool {
   let dir = tempdir_in(".").unwrap();
   let controller = FaultController::default();
-  let engine = options(&dir, wal_file_size)
+  let engine = options(&dir)
     .open_with_backend(FaultBackend::new(controller.clone()))
     .unwrap();
-  {
-    let mut tx = engine.new_tx().unwrap();
-    tx.open_table(TABLE).unwrap();
-    tx.commit().unwrap();
-  }
+  create_table(&engine);
 
-  controller.arm(target, op, nth);
+  controller.arm(op, nth);
   let outcomes = run_workload(Arc::new(engine), &controller, concurrent);
-  assert!(
-    controller.fired(),
-    "fault was not injected within the tx limit"
-  );
-  verify(&dir, wal_file_size, &outcomes);
+  verify(&dir, &outcomes);
+  controller.fired()
 }
 
-fn sweep(target: Target, op: Op, wal_file_size: usize) {
+/**
+ * Committed data must survive an open that fails, and the next open must
+ * succeed. An open that does not fail is closed right away, so the fault may
+ * also land in its shutdown.
+ */
+fn open_scenario(op: Op, nth: usize) -> bool {
+  let dir = tempdir_in(".").unwrap();
+  let outcomes = {
+    let engine = options(&dir).open().unwrap();
+    create_table(&engine);
+    let failures = Failures::default();
+    (0..SEED_TX_COUNT)
+      .map(|id| run_tx(&engine, id, &failures))
+      .collect::<Vec<_>>()
+  };
+  assert!(outcomes.iter().all(|o| o.result == TxResult::Committed));
+
+  let controller = FaultController::default();
+  controller.arm(op, nth);
+  drop(options(&dir).open_with_backend(FaultBackend::new(controller.clone())));
+  verify(&dir, &outcomes);
+  controller.fired()
+}
+
+/**
+ * Larger positions are only meaningful while the fault is still reached, so the
+ * sweep stops at the first position that never fires. The first one must fire,
+ * otherwise the scenario does not exercise the operation at all.
+ */
+fn sweep_until_unreached(mut scenario: impl FnMut(usize) -> bool) {
   for nth in 1..=MAX_NTH {
-    run_scenario(target, op, nth, wal_file_size, false);
-    run_scenario(target, op, nth, wal_file_size, true);
+    let fired = scenario(nth);
+    if nth == 1 {
+      assert!(fired, "fault was not injected");
+    }
+    if !fired {
+      break;
+    }
   }
 }
 
-#[test]
-fn wal_write_failure_keeps_policy() {
-  sweep(Target::Wal, Op::Write, 256 << 10);
+fn sweep(op: Op) {
+  // Non-short-circuiting so the concurrent run always executes.
+  sweep_until_unreached(|nth| run_scenario(op, nth, false) | run_scenario(op, nth, true));
+  sweep_until_unreached(|nth| open_scenario(op, nth));
 }
 
 #[test]
-fn wal_fdatasync_failure_keeps_policy() {
-  sweep(Target::Wal, Op::Fdatasync, 256 << 10);
+fn read_failure_keeps_policies() {
+  sweep(Op::Read);
 }
 
 #[test]
-#[ignore = "checkpoint failover from the event bus races with engine close on the incoming queue"]
-fn wal_segment_creation_failure_keeps_policy() {
-  sweep(Target::Wal, Op::Fsync, 64 << 10);
+fn write_failure_keeps_policies() {
+  sweep(Op::Write);
 }
 
 #[test]
-#[ignore = "block cache eviction rollback does not restore the evicted key mapping"]
-fn data_write_failure_keeps_policy() {
-  sweep(Target::Data, Op::Write, 256 << 10);
+fn fsync_failure_keeps_policies() {
+  sweep(Op::Fsync);
 }
 
 #[test]
-#[ignore = "background workers abort on io failure"]
-fn data_fsync_failure_keeps_policy() {
-  sweep(Target::Data, Op::Fsync, 256 << 10);
+fn fdatasync_failure_keeps_policies() {
+  sweep(Op::Fdatasync);
+}
+
+#[test]
+fn fallocate_failure_keeps_policies() {
+  sweep(Op::Fallocate);
 }
