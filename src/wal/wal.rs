@@ -397,7 +397,7 @@ impl WriteAheadLog {
     self.state.load().is_available()
   }
 
-  pub fn reuse_segments(&self, segments: Vec<WALSegment>) -> Result {
+  pub fn reuse_segments(&self, segments: Vec<WALSegment>) {
     self.preloader.reuse(segments)
   }
 

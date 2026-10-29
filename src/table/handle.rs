@@ -79,7 +79,7 @@ impl TableHandle {
    */
   #[inline]
   pub fn try_close(&self) -> bool {
-    self.pin.try_exclusive().map(forget).is_some()
+    self.pin.is_exclusive() || self.pin.try_exclusive().map(forget).is_some()
   }
 
   #[inline]

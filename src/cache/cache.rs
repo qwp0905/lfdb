@@ -14,7 +14,7 @@ use crate::{
   metrics::{measure, MetricsRegistry},
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{error, ToArc},
+  utils::ToArc,
   Result,
 };
 
@@ -125,18 +125,24 @@ impl Core {
       pending.push((table.disk().fsync(), table));
     }
 
+    let mut failed = None;
     for (pending, table) in pending {
       let Err(err) = pending.wait_flatten() else {
         continue;
       };
 
-      // Preserve the unfinished fsync marker for a future caller. This flusher
-      // reports the failure; retry policy belongs to the caller.
-      error!("error occurs in flush table: {err}");
-      self.dirty_tables.mark(&table);
-      return Err(err);
+      failed
+        .get_or_insert_with(|| (err, Vec::new()))
+        .1
+        .push(table);
     }
-    Ok(())
+    let Some((err, failed)) = failed else {
+      return Ok(());
+    };
+    for table in failed {
+      self.dirty_tables.mark(&table);
+    }
+    Err(err)
   }
 
   fn aggregate_dirty_blocks(&self) -> Vec<BlockId> {

@@ -23,7 +23,7 @@ use crate::{
   transaction::PageRecorder,
   utils::{error, ChunkQueue, MpscQueue, ToArc, ToBox},
   wal::{TxId, WALFailed, RESERVED_TX},
-  Result,
+  Error, Result,
 };
 
 pub struct GarbageCollectionConfig {
@@ -98,9 +98,11 @@ binding_events!(GarbageCollector {
   shared: [WALFailed]
 });
 
-struct EntryRelease {
+struct TrimEntry {
   min_version: TxId,
   blob_refs: Vec<BlobId>,
+  tail: Option<Pointer>,
+  found: bool,
 }
 
 pub struct DropTableCommitted {
@@ -161,15 +163,13 @@ impl GcWorker {
     &self,
     ptr: Pointer,
     table: &TableHandleRef,
-    next: &mut Option<Pointer>,
     blob_refs: &mut Vec<BlobId>,
     min_version: TxId,
-  ) -> Result<bool> {
+  ) -> Result<(bool, Option<Pointer>)> {
     let mut found = false;
     let mut need_trim = false;
     let slot = self.block_cache.read(ptr, table)?.for_read();
     let entry = slot.as_ref().view::<DataEntryView>()?;
-    *next = entry.get_next();
 
     let mut iter = entry.get_versions();
     while let Some(record) = iter.try_next()? {
@@ -186,7 +186,8 @@ impl GcWorker {
       found = true;
     }
 
-    Ok(need_trim || (found && entry.get_next().is_some()))
+    let next = entry.get_next();
+    Ok((need_trim || (found && next.is_some()), next))
   }
 
   /**
@@ -196,76 +197,73 @@ impl GcWorker {
    * this point. GC may remove older history, but it must keep at least one record
    * below that threshold so future reads still have a stable version boundary.
    */
-  fn check_and_release_entry(
-    &self,
-    pointer: Pointer,
-    table: &TableHandleRef,
-  ) -> Result<EntryRelease> {
+  fn trim_entry(&self, pointer: Pointer, table: &TableHandleRef) -> Result<TrimEntry> {
     let table_id = table.get_id();
-    let mut next = Some(pointer);
-    let mut max_found = None;
     let mut blob_refs = Vec::new();
     let min_version = self.version_controller.min_version();
 
-    while let Some(ptr) = next.take() {
-      if max_found.is_some() {
-        next = self
-          .block_cache
-          .read(ptr, table)?
-          .for_read()
-          .as_ref()
-          .view::<DataEntryView>()?
-          .get_next();
-        table.free().dealloc(ptr);
+    let (need_trim, tail) =
+      self.check_entry(pointer, table, &mut blob_refs, min_version)?;
+    if !need_trim {
+      return Ok(TrimEntry {
+        min_version,
+        blob_refs,
+        tail,
+        found: false,
+      });
+    };
+
+    let mut max_found = None;
+    let mut slot = self.block_cache.read(pointer, table)?.for_write();
+    let mut entry: DataEntry = slot.as_ref().deserialize()?;
+    let mut new_versions = VecDeque::new();
+    let tail = entry.get_next();
+
+    for record in entry.take_versions() {
+      let version = record.version;
+      new_versions.push_back(record);
+      if version >= min_version {
         continue;
       }
 
-      if !self.check_entry(ptr, table, &mut next, &mut blob_refs, min_version)? {
-        continue;
-      }
-
-      let mut slot = self.block_cache.read(ptr, table)?.for_write();
-      let mut entry: DataEntry = slot.as_ref().deserialize()?;
-      let mut new_versions = VecDeque::new();
-
-      for record in entry.take_versions() {
-        let version = record.version;
-        new_versions.push_back(record);
-        if version >= min_version {
-          continue;
-        }
-        max_found = Some(version);
-        break;
-      }
-
-      if max_found.is_none() {
-        continue;
-      }
-
-      entry.set_versions(new_versions);
-      entry.clear_next();
-      self.serialize_and_log(slot.as_prepared(), &entry, table_id)?;
+      max_found = Some(version);
+      break;
     }
 
-    Ok(EntryRelease {
-      min_version: max_found.unwrap_or(min_version),
+    let Some(max_found) = max_found else {
+      return Ok(TrimEntry {
+        min_version,
+        blob_refs,
+        tail,
+        found: false,
+      });
+    };
+
+    entry.set_versions(new_versions);
+    entry.clear_next();
+    self.serialize_and_log(slot.as_prepared(), &entry, table_id)?;
+    Ok(TrimEntry {
+      min_version: max_found,
       blob_refs,
+      tail,
+      found: true,
     })
   }
 
-  fn release_entry(&self, pointer: Pointer, table: &TableHandleRef) -> Result {
-    let mut next = Some(pointer);
-    while let Some(ptr) = next.take() {
-      next = self
-        .block_cache
-        .read(ptr, table)?
-        .for_read()
-        .as_ref()
-        .view::<DataEntryView>()?
-        .get_next();
-      table.free().dealloc(ptr);
-    }
-    Ok(())
+  fn release_entry(
+    &self,
+    pointer: Pointer,
+    table: &TableHandleRef,
+  ) -> Result<Option<Pointer>> {
+    let next = self
+      .block_cache
+      .read(pointer, table)?
+      .for_read()
+      .as_ref()
+      .view::<DataEntryView>()?
+      .get_next();
+    table.free().dealloc(pointer);
+    Ok(next)
   }
 
   fn create_cycle(&self) -> GcCycle {
@@ -317,10 +315,11 @@ impl GcWorker {
     mut candidates: HashSet<StaticKey>,
     ptr: Pointer,
     task_queue: &mut ChunkQueue<GcTask>,
-  ) -> Result {
+  ) -> Result<Vec<GcTask>> {
+    let mut buffered_task = Vec::new();
     let count = candidates.len();
     if count == 0 {
-      return Ok(());
+      return Ok(buffered_task);
     }
 
     let min_version = self.version_controller.min_version();
@@ -342,8 +341,8 @@ impl GcWorker {
             || entry.record.version >= min_version
             || self.version_controller.is_aborted(entry.record.owner)
           {
-            let task = GcTask::new(TaskType::CheckEntry(ptr), table.clone());
-            task_queue.push(task);
+            let task = GcTask::trim_entry(ptr, table.clone());
+            buffered_task.push(task);
             continue;
           }
 
@@ -360,11 +359,123 @@ impl GcWorker {
         }
       };
       for ptr in targets {
-        let task = GcTask::new(TaskType::ReleaseEntry(ptr), table.clone());
+        let task = GcTask::release_entry(ptr, table.clone());
         task_queue.push(task);
       }
     }
 
+    Ok(buffered_task)
+  }
+
+  fn handle_task(
+    &self,
+    current: &mut GcCycle,
+    task: &GcTask,
+    event_bus: &EventBus,
+    compact_threshold: f64,
+    compact_min_size: Pointer,
+  ) -> Result {
+    let Some(_token) = task.table.try_pin() else {
+      return Ok(());
+    };
+
+    let inner = match &task.inner {
+      TaskType::Uninit => {
+        let ptr = self.get_predecessor(&task.table)?;
+        let task = GcTask::check_leaf_init(ptr, task.table.clone());
+        current.tasks.push(task);
+        return Ok(());
+      }
+      TaskType::TrimEntry(ptr) => {
+        let result = self.trim_entry(*ptr, &task.table)?;
+        current.apply_release(result, &task.table);
+        return Ok(());
+      }
+      TaskType::ReleaseEntry(ptr) => {
+        if let Some(ptr) = self.release_entry(*ptr, &task.table)? {
+          let task = GcTask::release_entry(ptr, task.table.clone());
+          current.tasks.push(task);
+        };
+        return Ok(());
+      }
+      TaskType::CheckLeaf(inner) => inner,
+    };
+
+    let mut total = inner.total;
+    let mut dead = inner.dead;
+    let mut tasks = Vec::new();
+
+    let mut release_candidates = HashSet::new();
+    let has_next = {
+      let min_version = self.version_controller.min_version();
+      let slot = self
+        .block_cache
+        .read(inner.pointer, &task.table)?
+        .for_read();
+      let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+      let mut iter = node.get_entries();
+      while let Some(e) = iter.try_next()? {
+        current.min_version = current.min_version.min(e.record.version);
+        total += 1;
+
+        if self.version_controller.is_aborted(e.record.owner) {
+          dead += 1;
+          if let Some(p) = e.next {
+            let task = GcTask::trim_entry(p, task.table.clone());
+            tasks.push(task);
+          }
+          continue;
+        }
+
+        match e.record.data {
+          RecordDataView::Blob(id, _, _) => {
+            current.blob_refs.insert(id);
+          }
+          RecordDataView::Tombstone => dead += 1,
+          _ => {}
+        }
+
+        let Some(p) = e.next else {
+          continue;
+        };
+        if e.record.version < min_version {
+          release_candidates.insert(slot.as_ref().copy_range(e.range));
+          continue;
+        }
+
+        let task = GcTask::trim_entry(p, task.table.clone());
+        tasks.push(task);
+      }
+
+      node.get_next()
+    };
+
+    let buffered = self.release_leaf(
+      &task.table,
+      release_candidates,
+      inner.pointer,
+      &mut current.tasks,
+    )?;
+    for task in tasks.into_iter().chain(buffered) {
+      current.tasks.push(task);
+    }
+
+    if let Some(p) = has_next {
+      let task = GcTask::check_leaf_resume(p, task.table.clone(), total, dead);
+      current.tasks.push(task);
+      return Ok(());
+    }
+
+    if task.table.get_id() == self.mapper.meta_table_id() {
+      return Ok(());
+    }
+    if task.table.free().file_len() <= compact_min_size {
+      return Ok(());
+    }
+    if total != 0 && (dead as f64 / total as f64 <= compact_threshold) {
+      return Ok(());
+    }
+    event_bus.publish(CompactionTriggered::new(task.table.clone()));
     Ok(())
   }
 
@@ -382,108 +493,22 @@ impl GcWorker {
     };
 
     for _ in 0..batch_size {
-      let Some(mut task) = current.tasks.pop() else {
+      let Some(task) = current.tasks.pop() else {
         self.finalize_cycle(current)?;
         *cycle = None;
         return Ok(());
       };
 
-      let Some(token) = task.table.try_pin() else {
-        continue;
-      };
-
-      let mut inner = match task.inner {
-        TaskType::Uninit => {
-          let ptr = self.get_predecessor(&task.table)?;
-          task.inner = TaskType::CheckLeaf(CheckLeafTask::new(ptr));
-          drop(token);
-          current.tasks.push(task);
-          continue;
-        }
-        TaskType::CheckEntry(ptr) => {
-          let result = self.check_and_release_entry(ptr, &task.table)?;
-          current.apply_release(result);
-          continue;
-        }
-        TaskType::ReleaseEntry(ptr) => {
-          self.release_entry(ptr, &task.table)?;
-          continue;
-        }
-        TaskType::CheckLeaf(inner) => inner,
-      };
-
-      let mut release_candidates = HashSet::new();
-      let has_next = {
-        let min_version = self.version_controller.min_version();
-        let slot = self
-          .block_cache
-          .read(inner.pointer, &task.table)?
-          .for_read();
-        let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
-        let mut iter = node.get_entries();
-        while let Some(e) = iter.try_next()? {
-          current.min_version = current.min_version.min(e.record.version);
-          inner.total += 1;
-
-          if self.version_controller.is_aborted(e.record.owner) {
-            inner.dead += 1;
-            if let Some(p) = e.next {
-              let task = GcTask::new(TaskType::CheckEntry(p), task.table.clone());
-              current.tasks.push(task);
-            }
-            continue;
-          }
-
-          match e.record.data {
-            RecordDataView::Blob(id, _, _) => {
-              current.blob_refs.insert(id);
-            }
-            RecordDataView::Tombstone => inner.dead += 1,
-            _ => {}
-          }
-
-          let Some(p) = e.next else {
-            continue;
-          };
-          if e.record.version < min_version {
-            release_candidates.insert(slot.as_ref().copy_range(e.range));
-            continue;
-          }
-
-          let task = GcTask::new(TaskType::CheckEntry(p), task.table.clone());
-          current.tasks.push(task);
-        }
-
-        node.get_next()
-      };
-
-      self.release_leaf(
-        &task.table,
-        release_candidates,
-        inner.pointer,
-        &mut current.tasks,
-      )?;
-
-      if let Some(p) = has_next {
-        inner.pointer = p;
-        task.inner = TaskType::CheckLeaf(inner);
-        drop(token);
+      if let Err(err) = self.handle_task(
+        current,
+        &task,
+        event_bus,
+        compact_threshold,
+        compact_min_size,
+      ) {
         current.tasks.push(task);
-        continue;
-      }
-
-      if task.table.get_id() == self.mapper.meta_table_id() {
-        continue;
-      }
-      if task.table.free().file_len() <= compact_min_size {
-        continue;
-      }
-      if inner.dead as f64 / inner.total as f64 <= compact_threshold {
-        continue;
-      }
-
-      drop(token);
-      event_bus.publish(CompactionTriggered::new(task.table));
+        return Err(err);
+      };
     }
 
     Ok(())
@@ -493,18 +518,27 @@ impl GcWorker {
     &self,
     release_queue: &MpscQueue<DropTableCommitted>,
     steps: &mut TableSteps,
-  ) -> Result {
+  ) {
     steps.ingest(release_queue);
 
     let min_version = self.version_controller.min_version();
     steps.move_unreachable(min_version, |&tx_id| {
       self.version_controller.is_aborted(tx_id)
     });
+
+    let mut failed = Vec::new();
     for table in steps.extract_unpinned() {
-      table.truncate()?;
+      if let Err(err) = table.truncate() {
+        error!("gc release table failed: {err}");
+        failed.push(table);
+        continue;
+      };
+
       self.mapper.remove(table.get_id());
     }
-    Ok(())
+    for table in failed {
+      steps.abort_unpinned(table);
+    }
   }
 }
 
@@ -521,12 +555,20 @@ impl CheckLeafTask {
       dead: 0,
     }
   }
+
+  const fn resume(pointer: Pointer, total: u64, dead: u64) -> Self {
+    Self {
+      pointer,
+      total,
+      dead,
+    }
+  }
 }
 
 enum TaskType {
   Uninit,
   CheckLeaf(CheckLeafTask),
-  CheckEntry(Pointer),
+  TrimEntry(Pointer),
   ReleaseEntry(Pointer),
 }
 
@@ -540,6 +582,26 @@ impl GcTask {
   }
   const fn new(inner: TaskType, table: TableHandleRef) -> Self {
     Self { inner, table }
+  }
+  const fn check_leaf_init(ptr: Pointer, table: TableHandleRef) -> Self {
+    Self::new(TaskType::CheckLeaf(CheckLeafTask::new(ptr)), table)
+  }
+  const fn check_leaf_resume(
+    ptr: Pointer,
+    table: TableHandleRef,
+    total: u64,
+    dead: u64,
+  ) -> Self {
+    Self::new(
+      TaskType::CheckLeaf(CheckLeafTask::resume(ptr, total, dead)),
+      table,
+    )
+  }
+  const fn release_entry(ptr: Pointer, table: TableHandleRef) -> Self {
+    Self::new(TaskType::ReleaseEntry(ptr), table)
+  }
+  const fn trim_entry(ptr: Pointer, table: TableHandleRef) -> Self {
+    Self::new(TaskType::TrimEntry(ptr), table)
   }
 }
 
@@ -559,9 +621,18 @@ impl GcCycle {
     }
   }
 
-  fn apply_release(&mut self, result: EntryRelease) {
+  fn apply_release(&mut self, result: TrimEntry, table: &TableHandleRef) {
     self.min_version = self.min_version.min(result.min_version);
     self.blob_refs.extend(result.blob_refs);
+    let Some(ptr) = result.tail else {
+      return;
+    };
+    let task = if result.found {
+      GcTask::release_entry(ptr, table.clone())
+    } else {
+      GcTask::trim_entry(ptr, table.clone())
+    };
+    self.tasks.push(task);
   }
 }
 
@@ -597,6 +668,9 @@ impl TableSteps {
   fn extract_unpinned(&mut self) -> impl Iterator<Item = TableHandleRef> + '_ {
     self.unreachable.extract_if(|table| table.try_close())
   }
+  fn abort_unpinned(&mut self, table: TableHandleRef) {
+    self.unreachable.push_back(table);
+  }
 }
 
 const fn gc_main_loop(
@@ -611,15 +685,18 @@ const fn gc_main_loop(
   let mut steps = TableSteps::new();
 
   move || {
-    worker
-      .run_tick(
-        &mut cycle,
-        &event_bus,
-        batch_size,
-        compact_threshold,
-        compact_min_size,
-      )
-      .and_then(|_| worker.release_tables(&release_queue, &mut steps))
-      .unwrap();
+    let Err(err) = worker.run_tick(
+      &mut cycle,
+      &event_bus,
+      batch_size,
+      compact_threshold,
+      compact_min_size,
+    ) else {
+      return worker.release_tables(&release_queue, &mut steps);
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("gc failed: {err}");
   }
 }

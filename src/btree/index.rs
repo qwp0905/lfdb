@@ -144,8 +144,12 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
 }
 
 impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
-  pub fn snapshot(&self, table: &TableHandleRef) -> Result<Snapshotter<Policy>> {
-    Snapshotter::open(self.0.clone(), table)
+  pub fn snapshot_from(
+    &self,
+    table: &TableHandleRef,
+    from: Option<StaticKeyRef>,
+  ) -> Result<Snapshotter<Policy>> {
+    Snapshotter::open(self.0.clone(), table, from)
   }
 }
 
