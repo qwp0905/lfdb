@@ -12,7 +12,9 @@ use crate::{
   background::ThreadParker,
   disk::Pointer,
   table::TableId,
-  utils::{ChunkQueue, ExclusivePin, ExclusiveToken, SharedToken, ShortenedMutex},
+  utils::{
+    ChunkQueue, ExclusivePin, ExclusiveToken, OffsetBitmap, SharedToken, ShortenedMutex,
+  },
 };
 
 type Key = (TableId, Pointer);
@@ -404,13 +406,23 @@ impl MappingTable {
     None
   }
 
+  /**
+   * Free slots never received a page, so they are left out of the slots whose
+   * metadata must be dropped. This drains the free slots and is only for teardown.
+   */
   pub fn get_block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
     self
       .shards
       .iter()
-      .enumerate()
-      .map(|(i, shard)| (shard.l().allocated, self.offsets[i]))
-      .flat_map(|(len, offset)| offset..offset + len)
+      .zip(self.offsets.iter())
+      .flat_map(|(shard, &offset)| {
+        let mut shard = shard.l();
+        let mut free = OffsetBitmap::new(offset as u64);
+        while let Some(bid) = shard.free.pop() {
+          free.insert(bid as u64);
+        }
+        (offset..offset + shard.allocated).filter(move |&id| !free.contains(id as u64))
+      })
   }
 }
 
