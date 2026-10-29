@@ -158,6 +158,11 @@ impl PreloadThread {
     handle.join().unwrap();
   }
 }
+impl Drop for PreloadThread {
+  fn drop(&mut self) {
+    self.close();
+  }
+}
 
 enum Context {
   Request(OneshotFulfill<Result<WALSegment>>),
