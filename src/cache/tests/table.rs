@@ -124,6 +124,17 @@ fn test_mapping_table_rollback_keeps_evicted_key_reachable() {
 }
 
 #[test]
+fn test_mapping_table_block_ids_skip_free_slots() {
+  let table = MappingTable::new(1, 2);
+  let Outcome::Evicted { block_id, .. } = Outcome::commit(table.acquire(TABLE, 0)) else {
+    panic!("first acquire must miss");
+  };
+  drop(reserve(&table, 1));
+
+  assert_eq!(table.get_block_ids().collect::<Vec<_>>(), vec![block_id]);
+}
+
+#[test]
 fn test_mapping_table_no_evictable_slot() {
   let table = MappingTable::new(1, 1);
   let _guard = reserve(&table, 0);
