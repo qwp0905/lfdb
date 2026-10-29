@@ -178,8 +178,7 @@ impl Engine {
     let init_thread = ThreadBuilder::new()
       .name("bootstrap")
       .multi(thread_count)
-      .pool()
-      .to_arc();
+      .pool();
 
     let tables =
       TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
@@ -305,7 +304,7 @@ impl Engine {
       recorder.clone(),
       &tables,
       max_used,
-      init_thread.clone(),
+      &init_thread,
     )?;
 
     let gc = GarbageCollector::new(
@@ -349,10 +348,10 @@ impl Engine {
     // Restart may use a different WAL segment size/configuration. Rather than
     // validating and resizing old segment files for reuse, boot removes the replayed
     // files and lets the new WAL/preload configuration create fresh segments.
-    replay
-      .segments
-      .into_iter()
-      .try_for_each(|seg| seg.truncate())?;
+    init_thread
+      .fork(replay.segments.into_iter(), |seg| seg.truncate())
+      .join()
+      .collect::<Result>()?;
 
     let orchestrator = TxOrchestrator::new(
       wal,
@@ -365,6 +364,7 @@ impl Engine {
       blob,
       checkpoint.clone(),
     );
+    init_thread.close();
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
     Ok(Self {
