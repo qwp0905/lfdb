@@ -106,6 +106,24 @@ fn test_mapping_table_rollback_evicted_slot() {
 }
 
 #[test]
+fn test_mapping_table_rollback_keeps_evicted_key_reachable() {
+  let table = Arc::new(MappingTable::new(1, 1));
+  let Outcome::Evicted { block_id, .. } = Outcome::commit(table.acquire(TABLE, 0)) else {
+    panic!("first acquire must miss");
+  };
+  drop(reserve(&table, 1));
+
+  assert_eq!(acquire_within(&table, 0), Outcome::Hit(block_id));
+  assert_eq!(
+    acquire_within(&table, 1),
+    Outcome::Evicted {
+      block_id,
+      evicted: true
+    }
+  );
+}
+
+#[test]
 fn test_mapping_table_no_evictable_slot() {
   let table = MappingTable::new(1, 1);
   let _guard = reserve(&table, 0);
