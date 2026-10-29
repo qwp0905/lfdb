@@ -1,7 +1,10 @@
 use std::{
   mem::take,
   path::PathBuf,
-  sync::Arc,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
   time::{Duration, Instant},
 };
 
@@ -22,7 +25,7 @@ use crate::{
   page::PAGE_SIZE,
   utils::{debug, error, info, trace, uuid_simple, MpscQueue, ToArc, ToBox},
   wal::{LogId, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog},
-  Result,
+  Error, Result,
 };
 
 pub struct CheckpointConfig {
@@ -102,6 +105,7 @@ pub struct Checkpoint {
    */
   cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
   worker: Arc<CheckpointWorker>,
+  failed: AtomicBool,
 }
 impl Checkpoint {
   fn with_worker(
@@ -133,6 +137,7 @@ impl Checkpoint {
       ticker,
       cycle,
       worker,
+      failed: AtomicBool::new(false),
     });
     event_bus.register(&this);
     this
@@ -171,6 +176,9 @@ impl Checkpoint {
   }
 
   fn failover(&self) {
+    if self.failed.fetch_or(true, Ordering::Relaxed) {
+      return;
+    }
     self.ticker.close();
     let _ = self.cycle.take();
     while unsafe { self.incoming.pop() }.is_some() {}
@@ -189,8 +197,10 @@ impl Checkpoint {
       self.failover();
       return Ok(());
     }
+    if self.failed.fetch_or(true, Ordering::Relaxed) {
+      return Ok(());
+    }
     self.ticker.close();
-
     if self.incoming.is_empty() {
       let Some(mut cycle) = self.cycle.take() else {
         return Ok(());
@@ -376,7 +386,7 @@ impl CheckpointWorker {
     metrics.checkpoint_cycle.record(current.take_start());
     info!("checkpoint complete id {}", current.get_log_id());
 
-    self.wal.reuse_segments(current.take_segments())?;
+    self.wal.reuse_segments(current.take_segments());
     *cycle = None;
     Ok(())
   }
@@ -410,8 +420,12 @@ fn checkpoint_loop(
   };
 
   move || {
-    worker
-      .run_tick(&incoming, &cycle, &metrics, &calc_batch_size)
-      .unwrap()
+    let Err(err) = worker.run_tick(&incoming, &cycle, &metrics, &calc_batch_size) else {
+      return;
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("checkpoint failed: {err}");
   }
 }
