@@ -24,6 +24,7 @@ pub struct Transaction<'a> {
   created_tables: Vec<TableHandleRef>,
   dropped_tables: Vec<TableHandleRef>,
   compacted_tables: Vec<(TableHandleRef, TableHandleRef, TableMetadata)>,
+  orphaned_tables: Vec<TableHandleRef>,
 }
 impl<'a> Transaction<'a> {
   pub(crate) fn new(
@@ -44,6 +45,7 @@ impl<'a> Transaction<'a> {
       created_tables: Vec::new(),
       dropped_tables: Vec::new(),
       compacted_tables: Vec::new(),
+      orphaned_tables: Vec::new(),
     }
   }
 
@@ -106,10 +108,19 @@ impl<'a> Transaction<'a> {
     }
 
     let table_meta = self.orchestrator.create_table_metadata(name);
-    meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec())?;
-
     let table = self.orchestrator.open_table(&table_meta)?;
-    let cursor = Cursor::initialize(table.clone(), &self.context, self.metrics)?;
+    let cursor = match Cursor::initialize(table.clone(), &self.context, self.metrics) {
+      Ok(c) => c,
+      Err(err) => {
+        self.orphaned_tables.push(table);
+        return Err(err);
+      }
+    };
+    if let Err(err) = meta_cursor.insert(name.as_bytes().to_vec(), table_meta.to_vec()) {
+      self.orphaned_tables.push(table);
+      return Err(err);
+    }
+
     self.orchestrator.register_table(table.clone());
     self.created_tables.push(table);
 
@@ -172,16 +183,14 @@ impl<'a> Transaction<'a> {
     let table_meta = self.orchestrator.create_table_metadata(name);
     metadata.set_compaction(&table_meta);
 
-    if let Err(err) = cursor.insert(name.as_bytes().to_vec(), metadata.to_vec()) {
-      if matches!(err, Error::WriteConflict) {
-        return Ok(());
-      }
+    let new_table = self.orchestrator.open_table(&table_meta)?;
+    if let Err(err) = Cursor::initialize(new_table.clone(), &self.context, self.metrics)
+      .and_then(|_| cursor.insert(name.as_bytes().to_vec(), metadata.to_vec()))
+    {
+      self.orphaned_tables.push(new_table);
       return Err(err);
     };
 
-    let new_table = self.orchestrator.open_table(&table_meta)?;
-
-    Cursor::initialize(new_table.clone(), &self.context, self.metrics)?;
     self.orchestrator.register_table(new_table.clone());
     self.compacted_tables.push((old, new_table, table_meta));
 
@@ -201,12 +210,15 @@ impl<'a> Transaction<'a> {
 
     let old = TableMetadataView::from_bytes(&bytes)?;
     let new = self.orchestrator.create_table_metadata(name);
-    cursor.insert(name.as_bytes().to_vec(), new.to_vec())?;
-
-    let table = self.orchestrator.open_table(&new)?;
-    Cursor::initialize(table.clone(), &self.context, self.metrics)?;
-    self.orchestrator.register_table(table.clone());
-    self.created_tables.push(table);
+    let new_table = self.orchestrator.open_table(&new)?;
+    if let Err(err) = Cursor::initialize(new_table.clone(), &self.context, self.metrics)
+      .and_then(|_| cursor.insert(name.as_bytes().to_vec(), new.to_vec()))
+    {
+      self.orphaned_tables.push(new_table);
+      return Err(err);
+    };
+    self.orchestrator.register_table(new_table.clone());
+    self.created_tables.push(new_table);
 
     if let Some(table) = self.orchestrator.get_table(old.get_id()) {
       self.dropped_tables.push(table);
@@ -246,6 +258,7 @@ impl<'a> Transaction<'a> {
     let events = self
       .dropped_tables
       .drain(..)
+      .chain(self.orphaned_tables.drain(..))
       .map(|table| DropTableCommitted::new(table, id, version));
     self.event_bus.batch_publish(events);
 
@@ -291,13 +304,9 @@ impl<'a> Transaction<'a> {
     let events = self
       .created_tables
       .drain(..)
+      .chain(self.compacted_tables.drain(..).map(|(_, new, _)| new))
+      .chain(self.orphaned_tables.drain(..))
       .map(|table| DropTableCommitted::new(table, id, version));
-    self.event_bus.batch_publish(events);
-
-    let events = self
-      .compacted_tables
-      .drain(..)
-      .map(|(_, new, _)| DropTableCommitted::new(new, id, version));
     self.event_bus.batch_publish(events);
   }
 }
