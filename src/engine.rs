@@ -235,8 +235,8 @@ impl Engine {
     };
 
     let mut redo = HashMap::<(TableId, Pointer), Vec<u8>>::new();
-    for (table_id, ptr, data) in replay.redo {
-      redo.insert((table_id, ptr), data);
+    for image in replay.redo {
+      redo.insert((image.table_id, image.pointer), image.data);
     }
 
     for ((_, ptr), data) in redo.extract_if(|(table_id, _), _| *table_id == meta_table_id)

@@ -372,7 +372,7 @@ fn replay_keeps_tx_atomic_when_rotated_segment_write_fails() {
     result
       .redo
       .iter()
-      .any(|(table_id, pointer, _)| *table_id == TABLE && *pointer == ptr)
+      .any(|image| image.table_id == TABLE && image.pointer == ptr)
   };
   assert!(has(DURABLE));
   assert!(
