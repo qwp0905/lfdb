@@ -34,6 +34,15 @@ pub const RESERVED_TX: TxId = 0;
  * state is available through the version snapshot. Those older logs may be
  * replayable, but they are no longer needed for startup recovery.
  *
+ * Replay keeps only the logs from the checkpoint's `last_log_id` up to the first
+ * missing log id. A failed write or a crash can leave a hole while later
+ * segments persist, and the records past the hole may complete a transaction
+ * whose earlier records were lost.
+ *
+ * A checkpoint is trusted only when every log from its `last_log_id` to its own
+ * record is present, because one written past a hole carries a snapshot that may
+ * treat such a transaction as committed.
+ *
  * WAL replay is redo-only.
  *
  * Insert records are replayed regardless of whether their transaction later
@@ -45,10 +54,25 @@ pub struct ReplayResult {
   pub last_tx_id: TxId,
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
-  pub redo: Vec<(TableId, Pointer, Vec<u8>)>,
+  pub redo: Vec<RedoImage>,
   pub segments: Vec<ScanIOHandle>,
   pub last_snapshot: Option<PathBuf>,
   pub blob_handles: Vec<BlobMetadata>,
+}
+
+pub struct RedoImage {
+  pub table_id: TableId,
+  pub pointer: Pointer,
+  pub data: Vec<u8>,
+}
+impl RedoImage {
+  const fn new(table_id: TableId, pointer: Pointer, data: Vec<u8>) -> Self {
+    Self {
+      table_id,
+      pointer,
+      data,
+    }
+  }
 }
 
 pub fn replay(
@@ -66,31 +90,122 @@ pub fn replay(
     files.push(filename)
   }
 
-  let len = files.len();
-  debug!("trying to replay {len} segments.");
+  debug!("trying to replay {} segments.", files.len());
 
   let (tx, rx) = unbounded();
   let forked = init_thread.fork(files.into_iter(), scan_segment(io_pool, tx));
 
-  let mut tx_id = RESERVED_TX;
-  let mut log_id = 0;
-  let mut redo = BTreeMap::<LogId, (TableId, Pointer, Vec<u8>)>::new();
-  let mut started = BTreeMap::<LogId, TxId>::new();
-  let mut closed = BTreeMap::<LogId, TxId>::new();
-  let mut blob_handles = BTreeMap::<LogId, BlobMetadata>::new();
-  let mut last_snapshot = None;
-  let mut segments = Vec::with_capacity(len);
-
-  let mut last_checkpoint: Option<(LogId, LogId)> = None;
-
+  let mut state = ReplayState::new();
   while let Ok(record) = rx.recv() {
-    tx_id = tx_id.max(record.tx_id + 1);
+    state.apply(record)?;
+  }
 
-    if last_checkpoint.is_some_and(|(_, c)| c > record.log_id) {
-      continue;
+  let segments = forked.join().collect::<Result<Vec<_>>>()?;
+  Ok(state.into_result(segments))
+}
+
+struct CheckpointState {
+  start: LogId,
+  snapshot: PathBuf,
+  missing: usize,
+}
+impl CheckpointState {
+  const fn new(start: LogId, snapshot: PathBuf, missing: usize) -> Self {
+    Self {
+      start,
+      snapshot,
+      missing,
     }
-    log_id = log_id.max(record.log_id + 1);
+  }
+  const fn is_complete(&self) -> bool {
+    self.missing == 0
+  }
 
+  const fn covers(&self, id: LogId, log_id: LogId) -> bool {
+    self.start <= log_id && log_id <= id
+  }
+
+  const fn fill(&mut self) -> bool {
+    self.missing -= 1;
+    self.is_complete()
+  }
+
+  const fn track(&mut self, id: LogId, log_id: LogId) -> bool {
+    !self.is_complete() && self.covers(id, log_id) && self.fill()
+  }
+}
+
+struct ReplayState {
+  last_log_id: LogId,
+  last_tx_id: TxId,
+  redo: BTreeMap<LogId, RedoImage>,
+  started: BTreeMap<LogId, TxId>,
+  closed: BTreeMap<LogId, TxId>,
+  blob_handles: BTreeMap<LogId, BlobMetadata>,
+  checkpoints: BTreeMap<LogId, CheckpointState>,
+}
+impl ReplayState {
+  const fn new() -> Self {
+    Self {
+      last_log_id: 0,
+      last_tx_id: RESERVED_TX,
+      redo: BTreeMap::new(),
+      started: BTreeMap::new(),
+      closed: BTreeMap::new(),
+      blob_handles: BTreeMap::new(),
+      checkpoints: BTreeMap::new(),
+    }
+  }
+
+  fn base(&self) -> Option<(&LogId, &CheckpointState)> {
+    self
+      .checkpoints
+      .iter()
+      .rev()
+      .find(|(_, state)| state.is_complete())
+  }
+
+  fn floor(&self) -> LogId {
+    self.base().map(|(_, state)| state.start).unwrap_or(0)
+  }
+
+  fn apply(&mut self, record: LogRecord) -> Result {
+    self.last_tx_id = self.last_tx_id.max(record.tx_id + 1);
+    self.last_log_id = self.last_log_id.max(record.log_id + 1);
+    if record.log_id < self.floor() || self.contains(&record.log_id) {
+      return Ok(());
+    }
+
+    self.track(record.log_id);
+    self.insert(record)
+  }
+
+  fn track(&mut self, log_id: LogId) {
+    let mut settled = None;
+    for (id, state) in self.checkpoints.iter_mut() {
+      if state.track(*id, log_id) {
+        settled = Some(*id);
+      }
+    }
+    let Some(id) = settled else {
+      return;
+    };
+    self.settle(id);
+  }
+
+  fn settle(&mut self, id: LogId) {
+    if self.base().is_some_and(|(base, _)| *base > id) {
+      return;
+    }
+    let start = self.checkpoints[&id].start;
+    self.checkpoints = self.checkpoints.split_off(&start);
+    self.redo = self.redo.split_off(&start);
+    self.started = self.started.split_off(&start);
+    self.closed = self.closed.split_off(&start);
+    self.blob_handles = self.blob_handles.split_off(&start);
+  }
+
+  fn insert(&mut self, record: LogRecord) -> Result {
     match record.operation {
       Operation::Insert {
         table_id,
@@ -103,51 +218,85 @@ pub fn replay(
         let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
           return Err(Error::CompressionCrashed(encoding));
         };
-        redo.insert(record.log_id, (table_id, pointer, decoded));
-        started.insert(record.log_id, record.tx_id);
-        tx_id = tx_id.max(current_version);
+        let image = RedoImage::new(table_id, pointer, decoded);
+        self.redo.insert(record.log_id, image);
+        self.started.insert(record.log_id, record.tx_id);
+        self.last_tx_id = self.last_tx_id.max(current_version);
       }
       Operation::Commit => {
-        closed.insert(record.log_id, record.tx_id);
+        self.closed.insert(record.log_id, record.tx_id);
       }
       Operation::Checkpoint {
         last_log_id,
         current_version,
         snapshot,
       } => {
-        if last_checkpoint.is_some_and(|(id, _)| id > record.log_id) {
-          continue;
-        };
-        tx_id = tx_id.max(current_version);
-
-        redo = redo.split_off(&last_log_id);
-        started = started.split_off(&last_log_id);
-        closed = closed.split_off(&last_log_id);
-        blob_handles = blob_handles.split_off(&last_log_id);
-
-        last_checkpoint = Some((record.log_id, last_log_id));
-        last_snapshot = Some(snapshot);
+        self.last_tx_id = self.last_tx_id.max(current_version);
+        let missing = (last_log_id..record.log_id)
+          .filter(|id| !self.contains(id))
+          .count();
+        let state = CheckpointState::new(last_log_id, snapshot, missing);
+        self.checkpoints.insert(record.log_id, state);
+        if missing == 0 {
+          self.settle(record.log_id);
+        }
       }
       Operation::BlobCreated(metadata) => {
-        blob_handles.insert(record.log_id, metadata);
+        self.blob_handles.insert(record.log_id, metadata);
       }
     };
+    Ok(())
   }
 
-  for segment in forked.join() {
-    segments.push(segment?);
+  fn contains(&self, id: &LogId) -> bool {
+    self.redo.contains_key(id)
+      || self.closed.contains_key(id)
+      || self.blob_handles.contains_key(id)
+      || self.checkpoints.contains_key(id)
   }
 
-  Ok(ReplayResult {
-    last_log_id: log_id,
-    last_tx_id: tx_id,
-    started: started.into_values().collect(),
-    closed: closed.into_values().collect(),
-    redo: redo.into_values().collect::<Vec<_>>(),
-    segments,
-    last_snapshot,
-    blob_handles: blob_handles.into_values().collect(),
-  })
+  fn first_missing(&self, start: LogId) -> LogId {
+    (start..).find(|id| !self.contains(id)).unwrap()
+  }
+
+  fn first_log_id(&self) -> LogId {
+    let first = [
+      self.redo.keys().next(),
+      self.closed.keys().next(),
+      self.blob_handles.keys().next(),
+      self.checkpoints.keys().next(),
+    ];
+    first.into_iter().flatten().min().copied().unwrap_or(0)
+  }
+
+  fn into_result(self, segments: Vec<ScanIOHandle>) -> ReplayResult {
+    let (start, last_snapshot) = match self.base() {
+      Some((_, state)) => (state.start, Some(state.snapshot.clone())),
+      None => (self.first_log_id(), None),
+    };
+    let end = self.first_missing(start);
+
+    ReplayResult {
+      last_log_id: self.last_log_id,
+      last_tx_id: self.last_tx_id,
+      started: within(self.started, start, end).collect(),
+      closed: within(self.closed, start, end).collect(),
+      redo: within(self.redo, start, end).collect(),
+      segments,
+      last_snapshot,
+      blob_handles: within(self.blob_handles, start, end).collect(),
+    }
+  }
+}
+
+fn within<V>(
+  mut logs: BTreeMap<LogId, V>,
+  start: LogId,
+  end: LogId,
+) -> impl Iterator<Item = V> {
+  let mut kept = logs.split_off(&start);
+  kept.split_off(&end);
+  kept.into_values()
 }
 
 const fn scan_segment(
@@ -156,7 +305,7 @@ const fn scan_segment(
 ) -> impl Fn(PathBuf) -> Result<ScanIOHandle> {
   move |path| {
     let mut segment = io_pool.open_scan_io(path)?;
-    let len = segment.len();
+    let len = segment.len()?;
 
     while segment.get_offset() + (LogRecord::LEN_BYTES as u64) < len {
       let byte_len = u16::from_le_bytes(segment.read_array()?) as usize;

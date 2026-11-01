@@ -86,7 +86,6 @@ pub struct ScanIOHandle {
   buffer: AlignedArray,
   buffer_offset: usize,
   file_offset: u64,
-  file_len: u64,
   base_dir: Arc<DirHandle>,
   filename: PathBuf,
 }
@@ -95,14 +94,12 @@ impl ScanIOHandle {
     file: Box<dyn IOBackend>,
     base_dir: Arc<DirHandle>,
     filename: PathBuf,
-    file_len: u64,
   ) -> Self {
     Self {
       file,
       buffer: AlignedArray::new(),
       buffer_offset: ALIGN,
       file_offset: 0,
-      file_len,
       base_dir,
       filename,
     }
@@ -141,8 +138,9 @@ impl ScanIOHandle {
     }
     Ok(())
   }
-  pub const fn len(&self) -> u64 {
-    self.file_len
+  pub fn len(&self) -> Result<u64> {
+    let metadata = self.file.metadata().map_err(Error::IO)?;
+    Ok(metadata.len())
   }
   pub fn truncate(&self) -> Result {
     self.base_dir.remove(&self.filename).map_err(Error::IO)

@@ -103,13 +103,7 @@ impl IOPool {
       .base_dir
       .open_direct_io(options.read(true), &path)
       .map_err(Error::IO)?;
-    let len = file.metadata().map_err(Error::IO)?.len();
-    Ok(ScanIOHandle::new(
-      file,
-      self.base_dir.clone(),
-      filename,
-      len,
-    ))
+    Ok(ScanIOHandle::new(file, self.base_dir.clone(), filename))
   }
 
   fn open_direct(&self, filename: &PathBuf) -> Result<Arc<dyn IOBackend>> {
