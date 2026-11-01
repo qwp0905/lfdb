@@ -156,7 +156,7 @@ const fn scan_segment(
 ) -> impl Fn(PathBuf) -> Result<ScanIOHandle> {
   move |path| {
     let mut segment = io_pool.open_scan_io(path)?;
-    let len = segment.len();
+    let len = segment.len()?;
 
     while segment.get_offset() + (LogRecord::LEN_BYTES as u64) < len {
       let byte_len = u16::from_le_bytes(segment.read_array()?) as usize;
