@@ -355,12 +355,12 @@ pub enum AppendOrReserve<'a> {
     resume: KeyPair,
     copy_old: Vec<(StaticKey, CopyOld<'a>)>,
     splitted: Vec<(StaticKey, Pointer)>,
-    _guards: Vec<MaybeBlobGuard<'a>>,
+    _guards: Vec<BlobAppendGuard<'a>>,
   },
   Done {
     copy_old: Vec<(StaticKey, CopyOld<'a>)>,
     splitted: Vec<(StaticKey, Pointer)>,
-    _guards: Vec<MaybeBlobGuard<'a>>,
+    _guards: Vec<BlobAppendGuard<'a>>,
   },
 }
 
@@ -457,12 +457,12 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       MaybeOwned::Borrowed(l)
     }
     TryAppendAtLeafInit::Break(g, l) => {
-      guards.push(g);
+      guards.extend(g);
       MaybeOwned::Owned(l)
     }
     TryAppendAtLeafInit::Split(k, p, g, l) => {
       splitted.push((k, p));
-      guards.push(g);
+      guards.extend(g);
       MaybeOwned::Owned(l)
     }
   };
@@ -487,7 +487,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
     match try_append_at_leaf_once(policy, &mut leaf, table, &key, op, create)? {
       TryAppendAtLeaf::NotFound => {}
       TryAppendAtLeaf::Break(g) => {
-        guards.push(g);
+        guards.extend(g);
         modified = true;
       }
       TryAppendAtLeaf::Conflict(i, op) => {
@@ -504,7 +504,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       }
       TryAppendAtLeaf::Split(k, p, g) => {
         splitted.push((k, p));
-        guards.push(g);
+        guards.extend(g);
         modified = true;
       }
       TryAppendAtLeaf::CopyOld(cmd) => copy_old.push((key, cmd)),
