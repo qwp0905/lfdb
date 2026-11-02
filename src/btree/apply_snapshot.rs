@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
 use crate::{
-  blob::{BlobId, BlobLen, BlobOffset},
+  blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
   disk::Pointer,
   objects::{
     BTreeNode, DataEntry, FindSlotResult, LeafNode, RecordData, StaticKey, StaticKeyRef,
-    VersionRecord,
+    VersionRecord, LARGE_VALUE,
   },
   page::VecRef,
   table::TableHandleRef,
@@ -84,14 +84,26 @@ fn apply_snapshot_once<Policy: WritablePolicy + Sync>(
   Ok(ApplySnapshotOnce::Split(mid_key, split_ptr))
 }
 
-fn into_record(snapshot: KVSnapshot) -> (VecRef, VersionRecord) {
+fn into_record<'a, Policy: WritablePolicy>(
+  policy: &'a Policy,
+  snapshot: KVSnapshot,
+) -> Result<(VecRef, VersionRecord, Option<BlobAppendGuard<'a>>)> {
   let key = snapshot.key;
-  let data = match snapshot.value {
-    SnapshotValue::Data(data) => RecordData::Data(data.to_vec()),
-    SnapshotValue::Blob(id, offset, len) => RecordData::Blob(id, offset, len),
+  let (data, guard) = match snapshot.value {
+    SnapshotValue::Data(data) if data.len() > LARGE_VALUE => {
+      let guard = policy.write_blob(data.to_vec())?;
+      let data = RecordData::Blob(guard.get_id(), guard.get_offset(), guard.get_len());
+      (data, Some(guard))
+    }
+    SnapshotValue::Data(data) => (RecordData::Data(data.to_vec()), None),
+    SnapshotValue::Blob(id, offset, len) if len as usize <= LARGE_VALUE => {
+      let data = policy.read_blob(id, offset, len)?;
+      (RecordData::Data(data.as_slice().to_vec()), None)
+    }
+    SnapshotValue::Blob(id, offset, len) => (RecordData::Blob(id, offset, len), None),
   };
   let record = VersionRecord::new(snapshot.owner, snapshot.version, data);
-  (key, record)
+  Ok((key, record, guard))
 }
 
 pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
@@ -102,7 +114,9 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
   stack: Vec<Pointer>,
   bulk: &mut VecDeque<KVSnapshot>,
 ) -> Result {
-  let (mut key, mut record) = into_record(must_apply);
+  let mut guards = Vec::new();
+  let (mut key, mut record, guard) = into_record(policy, must_apply)?;
+  guards.extend(guard);
   let mut splitted = Vec::new();
   let mut apply = Vec::new();
   let mut ptr = leaf_ptr;
@@ -128,7 +142,8 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
     while let Some(snapshot) =
       bulk.pop_front_if(|s| leaf.get_next_key().is_none_or(|r| r > &*s.key))
     {
-      let (k, r) = into_record(snapshot);
+      let (k, r, guard) = into_record(policy, snapshot)?;
+      guards.extend(guard);
       match apply_snapshot_once(policy, leaf, &k, ptr, r, table)? {
         ApplySnapshotOnce::Move(p, r) => {
           if modified {

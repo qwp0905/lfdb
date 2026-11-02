@@ -228,16 +228,11 @@ impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
   }
 }
 
-/**
- * Write policy for applying snapshot records into the new table.
- *
- * Snapshot application preserves existing blob references. It must not create
- * new blob payloads, so `write_blob` is unreachable for this policy.
- */
 struct CompactionWritePolicy {
   block_cache: Arc<BlockCache>,
   version_controller: Arc<VersionController>,
   recorder: Arc<PageRecorder>,
+  blob: Arc<BlobStorage>,
 }
 impl ReadonlyPolicy for CompactionWritePolicy {
   fn fetch_slot(
@@ -261,11 +256,15 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   }
   fn read_blob(
     &self,
-    _: crate::blob::BlobId,
-    _: crate::blob::BlobOffset,
-    _: crate::blob::BlobLen,
+    blob_id: crate::blob::BlobId,
+    offset: crate::blob::BlobOffset,
+    len: crate::blob::BlobLen,
   ) -> Result<crate::page::AlignedBuf> {
-    unreachable!()
+    let blob = self
+      .blob
+      .get(blob_id)
+      .unwrap_or_else(|| unreachable!("blob id {blob_id} must exists"));
+    blob.read_at(offset, len)
   }
 }
 impl WritablePolicy for CompactionWritePolicy {
@@ -295,8 +294,8 @@ impl WritablePolicy for CompactionWritePolicy {
   ) -> Result<crate::cache::AllocatedSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
-  fn write_blob(&self, _: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
-    unreachable!()
+  fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
+    self.blob.append(data)
   }
 }
 
@@ -399,6 +398,7 @@ impl CompactionWorker {
       block_cache: block_cache.clone(),
       version_controller: version_controller.clone(),
       recorder: recorder.clone(),
+      blob: blob.clone(),
     });
     Self {
       block_cache,
