@@ -5,8 +5,8 @@ use std::{
 };
 
 use super::{
-  Acquired, AllocatedSlot, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables,
-  EvictionGuard, MappingTable, MappingToken, PendingFlush,
+  Acquired, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables, EvictionGuard,
+  MappingTable, MappingToken, PendingFlush, WritableSlot,
 };
 use crate::{
   background::{SharedWorkThread, ThreadBuilder},
@@ -251,10 +251,10 @@ impl BlockCache {
     &self,
     pointer: Pointer,
     handle: &TableHandleRef,
-  ) -> Result<AllocatedSlot<'_>> {
+  ) -> Result<WritableSlot<'_>> {
     let table_id = handle.get_id();
     let Some(acquired) = self.core.mapping.try_acquire(table_id, pointer) else {
-      return Ok(AllocatedSlot::new_temp(
+      return Ok(WritableSlot::new_temp(
         handle.clone(),
         self.core.allocator.allocate(),
         pointer,
@@ -263,15 +263,14 @@ impl BlockCache {
     };
     let guard = match acquired {
       Acquired::Hit(block_id, token) => {
-        let slot = self.core.create_slot(block_id, token).for_write();
-        return Ok(AllocatedSlot::Hit(slot));
+        return Ok(self.core.create_slot(block_id, token).for_write());
       }
       Acquired::Evicted(guard) => guard,
     };
     let pending = self.core.submit_eviction(&guard);
     let new = self.core.acquire_page_with(&guard);
     let slot = self.resolve_eviction(pending, guard, new, pointer, handle.clone())?;
-    Ok(AllocatedSlot::Hit(slot.for_write()))
+    Ok(slot.for_write())
   }
 
   /**
@@ -430,3 +429,7 @@ const PRE_FLUSH_CONCURRENCY: usize = 3;
 const fn handle_flush_blocks(core: Arc<Core>) -> impl Fn(BlockId) -> Result {
   move |id| core.flush_block(id)
 }
+
+#[cfg(all(test, not(loom)))]
+#[path = "tests/cache.rs"]
+mod tests;

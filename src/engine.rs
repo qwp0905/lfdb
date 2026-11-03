@@ -226,10 +226,10 @@ impl Engine {
         move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
           unsafe { block_cache.read_unchecked(ptr, &table)? }
             .for_write()
-            .as_prepared()
-            .as_mut()
-            .copy_from(&data, 0);
-          Ok(())
+            .commit_with(|page| {
+              page.copy_from(&data, 0);
+              Ok(())
+            })
         },
       )
     };
