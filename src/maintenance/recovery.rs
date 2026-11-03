@@ -69,9 +69,9 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
 }
 
 impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
-  fn serialize_and_log<T: crate::objects::Serializable>(
+  fn commit_write<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::PreparedSlot,
+    slot: crate::cache::WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -84,7 +84,7 @@ impl<'a> WritablePolicy for TableOpenPolicy<'a, &'a PageRecorder> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::AllocatedSlot<'_>> {
+  ) -> Result<crate::cache::WritableSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
 
@@ -396,9 +396,9 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
   fn write_blob(&self, _: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
     unreachable!()
   }
-  fn serialize_and_log<T: crate::objects::Serializable>(
+  fn commit_write<T: crate::objects::Serializable>(
     &self,
-    slot: &mut crate::cache::PreparedSlot,
+    slot: crate::cache::WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -410,7 +410,7 @@ impl<'a> WritablePolicy for RecoveryPolicy<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::AllocatedSlot<'_>> {
+  ) -> Result<crate::cache::WritableSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
 }

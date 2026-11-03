@@ -21,7 +21,7 @@ use crate::{
     BTreeIndex, CreatablePolicy, GetResult, ReadonlyPolicy, ResolvedConflict,
     Snapshotter, WritablePolicy,
   },
-  cache::{BlockCache, PreparedSlot},
+  cache::{BlockCache, WritableSlot},
   disk::Pointer,
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::{Serializable, StaticKey},
@@ -143,9 +143,9 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
   }
 }
 impl<'a> WritablePolicy for MiniTx<'a> {
-  fn serialize_and_log<T: Serializable>(
+  fn commit_write<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -164,7 +164,7 @@ impl<'a> WritablePolicy for MiniTx<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::AllocatedSlot<'_>> {
+  ) -> Result<crate::cache::WritableSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
@@ -276,9 +276,9 @@ impl WritablePolicy for CompactionWritePolicy {
    * still committed through `MiniTx`; the copied pages themselves are written as
    * non-abortable reserved-transaction records.
    */
-  fn serialize_and_log<T: Serializable>(
+  fn commit_write<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -291,7 +291,7 @@ impl WritablePolicy for CompactionWritePolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::AllocatedSlot<'_>> {
+  ) -> Result<crate::cache::WritableSlot<'_>> {
     self.block_cache.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {

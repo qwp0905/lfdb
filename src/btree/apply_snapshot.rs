@@ -61,7 +61,7 @@ fn apply_snapshot_once<Policy: WritablePolicy + Sync>(
           return Ok(ApplySnapshotOnce::Move(ptr, record));
         }
 
-        let entry_ptr = policy.alloc_and_log(&DataEntry::init(record, None), table)?;
+        let entry_ptr = policy.commit_alloc(&DataEntry::init(record, None), table)?;
         leaf.alloc_entry_at(pos, entry_ptr);
         return Ok(ApplySnapshotOnce::Break);
       }
@@ -78,7 +78,7 @@ fn apply_snapshot_once<Policy: WritablePolicy + Sync>(
   };
 
   let mid_key = split.top().clone();
-  let split_ptr = policy.alloc_and_log(&split.into_node(), table)?;
+  let split_ptr = policy.commit_alloc(&split.into_node(), table)?;
 
   leaf.set_next(mid_key.clone(), split_ptr);
   Ok(ApplySnapshotOnce::Split(mid_key, split_ptr))
@@ -122,7 +122,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
   let mut ptr = leaf_ptr;
 
   'outer: loop {
-    let mut slot = policy.fetch_slot(ptr, table)?.for_write();
+    let slot = policy.fetch_slot(ptr, table)?.for_write();
     let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
     let leaf = node.as_leaf_mut()?;
     let mut modified = false;
@@ -147,7 +147,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
       match apply_snapshot_once(policy, leaf, &k, ptr, r, table)? {
         ApplySnapshotOnce::Move(p, r) => {
           if modified {
-            policy.serialize_and_log(slot.as_prepared(), &node, table)?;
+            policy.commit_write(slot, &node, table)?;
           }
           (key, ptr, record) = (k, p, r);
           continue 'outer;
@@ -161,7 +161,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
       };
     }
     if modified {
-      policy.serialize_and_log(slot.as_prepared(), &node, table)?;
+      policy.commit_write(slot, &node, table)?;
     }
     break 'outer;
   }
@@ -189,11 +189,11 @@ fn apply_snapshot_at_entry<Policy: WritablePolicy + Sync>(
 ) -> Result {
   let mut ptr = entry_ptr;
   loop {
-    let mut slot = policy.fetch_slot(ptr, table)?.for_write();
+    let slot = policy.fetch_slot(ptr, table)?.for_write();
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     if entry.is_available(&record) {
       entry.attach_back(record);
-      policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
+      policy.commit_write(slot, &entry, table)?;
       return Ok(());
     }
 
@@ -203,8 +203,8 @@ fn apply_snapshot_at_entry<Policy: WritablePolicy + Sync>(
     }
 
     let new_entry = DataEntry::init(record, None);
-    entry.set_next(policy.alloc_and_log(&new_entry, table)?);
-    policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
+    entry.set_next(policy.commit_alloc(&new_entry, table)?);
+    policy.commit_write(slot, &entry, table)?;
     return Ok(());
   }
 }
