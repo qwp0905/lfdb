@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
   btree::{CreatablePolicy, ReadonlyPolicy, ResolvedConflict, WritablePolicy},
-  cache::PreparedSlot,
+  cache::WritableSlot,
   disk::Pointer,
   mvcc::{TxSnapshot, TxState},
   objects::Serializable,
@@ -97,9 +97,9 @@ impl<'a> WritablePolicy for TxContext<'a> {
    * during WAL replay. Reads and non-WAL work do not make the transaction
    * replay-visible.
    */
-  fn serialize_and_log<T: Serializable>(
+  fn commit_write<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
@@ -118,7 +118,7 @@ impl<'a> WritablePolicy for TxContext<'a> {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<crate::cache::AllocatedSlot<'_>> {
+  ) -> Result<crate::cache::WritableSlot<'_>> {
     self.orchestrator.alloc(pointer, table)
   }
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {

@@ -11,7 +11,7 @@ use crate::{
     ThreadBuilder,
   },
   blob::{BlobId, BlobStorage},
-  cache::{BlockCache, PreparedSlot},
+  cache::{BlockCache, WritableSlot},
   disk::Pointer,
   mvcc::VersionController,
   objects::{
@@ -145,7 +145,7 @@ impl GcWorker {
   }
   fn serialize_and_log<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table_id: TableId,
   ) -> Result {
@@ -214,7 +214,7 @@ impl GcWorker {
     };
 
     let mut max_found = None;
-    let mut slot = self.block_cache.read(pointer, table)?.for_write();
+    let slot = self.block_cache.read(pointer, table)?.for_write();
     let mut entry: DataEntry = slot.as_ref().deserialize()?;
     let mut new_versions = VecDeque::new();
     let tail = entry.get_next();
@@ -241,7 +241,7 @@ impl GcWorker {
 
     entry.set_versions(new_versions);
     entry.clear_next();
-    self.serialize_and_log(slot.as_prepared(), &entry, table_id)?;
+    self.serialize_and_log(slot, &entry, table_id)?;
     Ok(TrimEntry {
       min_version: max_found,
       blob_refs,
@@ -327,7 +327,7 @@ impl GcWorker {
     while let Some(ptr) = next.take() {
       let mut targets = Vec::new();
       {
-        let mut slot = self.block_cache.read(ptr, table)?.for_write();
+        let slot = self.block_cache.read(ptr, table)?.for_write();
 
         let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
         let leaf = node.as_leaf_mut()?;
@@ -355,7 +355,7 @@ impl GcWorker {
         }
 
         if !targets.is_empty() {
-          self.serialize_and_log(slot.as_prepared(), &node, table.get_id())?;
+          self.serialize_and_log(slot, &node, table.get_id())?;
         }
       };
       for ptr in targets {

@@ -26,7 +26,7 @@ fn apply_split<Policy: WritablePolicy + Sync>(
 ) -> Result<Option<(StaticKey, Pointer)>> {
   let mut ptr = current;
   loop {
-    let mut slot = policy.fetch_slot(ptr, table)?.for_write();
+    let slot = policy.fetch_slot(ptr, table)?.for_write();
     let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
     let internal = node.as_internal_mut()?;
     if let Err(p) = internal.insert_or_next(&evicted_key, evicted_ptr) {
@@ -35,13 +35,13 @@ fn apply_split<Policy: WritablePolicy + Sync>(
     };
 
     let Some((split_node, split_key)) = internal.split_if_needed() else {
-      policy.serialize_and_log(slot.as_prepared(), &node, table)?;
+      policy.commit_write(slot, &node, table)?;
       return Ok(None);
     };
 
-    let split_ptr = policy.alloc_and_log(&split_node.into_node(), table)?;
+    let split_ptr = policy.commit_alloc(&split_node.into_node(), table)?;
     internal.set_right(&split_key, split_ptr);
-    policy.serialize_and_log(slot.as_prepared(), &node, table)?;
+    policy.commit_write(slot, &node, table)?;
 
     return Ok(Some((split_key, split_ptr)));
   }
@@ -61,7 +61,7 @@ fn update_header<Policy: WritablePolicy + Sync>(
   split_pointer: Pointer,
   old_height: usize,
 ) -> Result<Option<UpdateFailed>> {
-  let mut slot = policy.fetch_slot(HEADER_POINTER, table)?.for_write();
+  let slot = policy.fetch_slot(HEADER_POINTER, table)?.for_write();
   let mut header: TreeHeader = slot.as_ref().deserialize()?;
   let current_height = header.get_height() as usize;
   let root = header.get_root();
@@ -75,11 +75,11 @@ fn update_header<Policy: WritablePolicy + Sync>(
   }
 
   let new_root = InternalNode::initialize(split_key, root, split_pointer);
-  let new_root_ptr = policy.alloc_and_log(&new_root.into_node(), table)?;
+  let new_root_ptr = policy.commit_alloc(&new_root.into_node(), table)?;
 
   header.set_root(new_root_ptr);
   header.increase_height();
-  policy.serialize_and_log(slot.as_prepared(), &header, table)?;
+  policy.commit_write(slot, &header, table)?;
   Ok(None)
 }
 
