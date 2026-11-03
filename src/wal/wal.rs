@@ -209,14 +209,13 @@ impl WriteAheadLog {
     let pointer = buffer.get_pointer();
     let log_id = buffer.get_log_id_offset() + ticket.get_order() as LogId;
     buffer.append_at(&record.init(log_id), &ticket);
-    if !flush {
-      return Ok(log_id);
-    }
-
     let pending = buffer.flush_block_with(ticket, &segment, &self.allocator);
     drop(buffer);
-    pending.wait()?;
 
+    if !flush {
+      return Ok(log_id);
+    };
+    pending.wait()?;
     segment.wait_completion(pointer)?;
     self.wait_sync(segment)?;
     Ok(log_id)
