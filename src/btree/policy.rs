@@ -1,6 +1,6 @@
 use crate::{
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset},
-  cache::{AllocatedSlot, CachedSlot, PreparedSlot},
+  cache::{CachedSlot, WritableSlot},
   disk::Pointer,
   objects::Serializable,
   page::AlignedBuf,
@@ -85,9 +85,9 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
  */
 pub trait WritablePolicy: ReadonlyPolicy {
   fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>>;
-  fn serialize_and_log<T: Serializable>(
+  fn commit_write<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result;
@@ -95,14 +95,14 @@ pub trait WritablePolicy: ReadonlyPolicy {
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<AllocatedSlot<'_>>;
+  ) -> Result<WritableSlot<'_>>;
 
   /**
    * Reused pointers may still have existing disk contents, so fetch through the
    * normal read path. Newly allocated file-end pointers have no meaningful old
    * contents and can be allocated in cache without a disk read.
    */
-  fn alloc_and_log<T: Serializable + Sync>(
+  fn commit_alloc<T: Serializable + Sync>(
     &self,
     data: &T,
     table: &TableHandleRef,
@@ -111,29 +111,33 @@ pub trait WritablePolicy: ReadonlyPolicy {
     Self: Sync,
   {
     let ptr = table.free().alloc();
-    let mut slot = self.alloc_slot(ptr, table)?;
-    self.serialize_and_log(slot.as_prepared(), data, table)?;
-    slot.finalize()?;
-    Ok(slot.get_pointer())
+    let Err(err) = self
+      .alloc_slot(ptr, table)
+      .and_then(|slot| self.commit_write(slot, data, table))
+    else {
+      return Ok(ptr);
+    };
+    table.free().dealloc(ptr);
+    Err(err)
   }
 }
 impl<Policy: WritablePolicy> WritablePolicy for &Policy {
   fn write_blob(&self, data: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
     (*self).write_blob(data)
   }
-  fn serialize_and_log<T: Serializable>(
+  fn commit_write<T: Serializable>(
     &self,
-    slot: &mut PreparedSlot,
+    slot: WritableSlot<'_>,
     data: &T,
     table: &TableHandleRef,
   ) -> Result {
-    (*self).serialize_and_log(slot, data, table)
+    (*self).commit_write(slot, data, table)
   }
   fn alloc_slot(
     &self,
     pointer: Pointer,
     table: &TableHandleRef,
-  ) -> Result<AllocatedSlot<'_>> {
+  ) -> Result<WritableSlot<'_>> {
     (*self).alloc_slot(pointer, table)
   }
 }

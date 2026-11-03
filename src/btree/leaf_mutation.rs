@@ -32,17 +32,17 @@ fn copy_old_record<Policy: WritablePolicy + Sync>(
   old: VersionRecord,
   table: &TableHandleRef,
 ) -> Result {
-  let mut slot = policy.fetch_slot(entry_ptr, table)?.for_write();
+  let slot = policy.fetch_slot(entry_ptr, table)?.for_write();
   let mut entry = slot.as_ref().deserialize::<DataEntry>()?;
   if entry.is_available(&old) {
     entry.attach_front(old);
-    policy.serialize_and_log(slot.as_prepared(), &entry, table)?;
+    policy.commit_write(slot, &entry, table)?;
     return Ok(());
   }
 
-  let new_entry_ptr = policy.alloc_and_log(&entry, table)?;
+  let new_entry_ptr = policy.commit_alloc(&entry, table)?;
   let new_entry = DataEntry::init(old, Some(new_entry_ptr));
-  policy.serialize_and_log(slot.as_prepared(), &new_entry, table)?;
+  policy.commit_write(slot, &new_entry, table)?;
   Ok(())
 }
 
@@ -98,7 +98,7 @@ fn complete_leaf_once<'a, Policy: CreatablePolicy + Sync>(
   };
 
   let mid_key = split.top().clone();
-  let split_ptr = policy.alloc_and_log(&split.into_node(), table)?;
+  let split_ptr = policy.commit_alloc(&split.into_node(), table)?;
 
   leaf.set_next(mid_key.clone(), split_ptr);
   Ok(CompleteLeafOnce::Split(mid_key, split_ptr, guard))
@@ -143,7 +143,7 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
 
   loop {
     let mut guards = Vec::new();
-    let mut slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
+    let slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
     let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
     let leaf = node.as_leaf_mut()?;
     match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
@@ -176,7 +176,7 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
         }
       };
     }
-    policy.serialize_and_log(slot.as_prepared(), &node, table)?;
+    policy.commit_write(slot, &node, table)?;
     return Ok((splitted, leaf_ptr));
   }
 }
@@ -198,7 +198,7 @@ pub fn copy_and_update<'a, Policy: CreatablePolicy + Sync>(
     } = copy_old;
     let entry_ptr = match entry_ptr {
       Some(p) => copy_old_record(policy, p, old, table).map(|_| p)?,
-      None => policy.alloc_and_log(&DataEntry::init(old, None), table)?,
+      None => policy.commit_alloc(&DataEntry::init(old, None), table)?,
     };
     records.push_back(LeafCompletion::new(insert_guard, entry_ptr, key, operation));
   }
@@ -295,7 +295,7 @@ fn apply_operation<'a, Policy: CreatablePolicy + Sync>(
   };
 
   let mid_key = split.top().clone();
-  let split_ptr = policy.alloc_and_log(&split.into_node(), table)?;
+  let split_ptr = policy.commit_alloc(&split.into_node(), table)?;
 
   node.set_next(mid_key.clone(), split_ptr);
   Ok((Some((mid_key, split_ptr)), guard))
@@ -432,7 +432,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   let mut copy_old = Vec::new();
   let mut guards = Vec::new();
 
-  let mut slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
+  let slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
   let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
   let KeyPair(key, op, create) = must_apply;
 
@@ -468,7 +468,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   };
   let Some(others) = others else {
     if let MaybeOwned::Owned(leaf) = maybe_owned {
-      policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
+      policy.commit_write(slot, &leaf.into_node(), table)?;
     }
     return Ok(AppendOrReserve::Done {
       copy_old,
@@ -492,7 +492,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       }
       TryAppendAtLeaf::Conflict(i, op) => {
         if modified {
-          policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
+          policy.commit_write(slot, &leaf.into_node(), table)?;
         }
         return Ok(AppendOrReserve::Conflict {
           owner: i,
@@ -511,7 +511,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
     };
   }
   if modified {
-    policy.serialize_and_log(slot.as_prepared(), &leaf.into_node(), table)?;
+    policy.commit_write(slot, &leaf.into_node(), table)?;
   }
   Ok(AppendOrReserve::Done {
     copy_old,
