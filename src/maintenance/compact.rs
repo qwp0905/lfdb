@@ -194,11 +194,23 @@ impl<'a> CreatablePolicy for MiniTx<'a> {
  * blob contents through this policy means the compaction path crossed the wrong
  * boundary and should panic.
  */
+#[derive(Clone)]
 struct CompactionReadPolicy {
   block_cache: Arc<BlockCache>,
   version_controller: Arc<VersionController>,
 }
-impl ReadonlyPolicy for Arc<CompactionReadPolicy> {
+impl CompactionReadPolicy {
+  const fn new(
+    block_cache: Arc<BlockCache>,
+    version_controller: Arc<VersionController>,
+  ) -> Self {
+    Self {
+      block_cache,
+      version_controller,
+    }
+  }
+}
+impl ReadonlyPolicy for CompactionReadPolicy {
   fn is_aborted(&self, owner: TxId) -> bool {
     self.version_controller.is_aborted(owner)
   }
@@ -233,6 +245,21 @@ struct CompactionWritePolicy {
   version_controller: Arc<VersionController>,
   recorder: Arc<PageRecorder>,
   blob: Arc<BlobStorage>,
+}
+impl CompactionWritePolicy {
+  const fn new(
+    block_cache: Arc<BlockCache>,
+    version_controller: Arc<VersionController>,
+    recorder: Arc<PageRecorder>,
+    blob: Arc<BlobStorage>,
+  ) -> Self {
+    Self {
+      block_cache,
+      version_controller,
+      recorder,
+      blob,
+    }
+  }
 }
 impl ReadonlyPolicy for CompactionWritePolicy {
   fn fetch_slot(
@@ -297,6 +324,29 @@ impl WritablePolicy for CompactionWritePolicy {
   fn write_blob(&self, data: Vec<u8>) -> Result<crate::blob::BlobAppendGuard<'_>> {
     self.blob.append(data)
   }
+}
+
+fn apply_snapshot_once(
+  index: &BTreeIndex<CompactionWritePolicy>,
+  snapshotter: &mut Snapshotter<CompactionReadPolicy>,
+  new_table: &TableHandleRef,
+  resume_from: &mut Option<StaticKey>,
+  batch_size: usize,
+) -> Result {
+  let mut bulk = Vec::with_capacity(batch_size);
+  let mut start = None;
+  for _ in 0..batch_size {
+    let Some(snapshot) = snapshotter.next_snapshot()? else {
+      break;
+    };
+    start.get_or_insert_with(|| snapshot.key.clone());
+    bulk.push(snapshot);
+  }
+  if let Some(key) = start {
+    *resume_from = Some(key.to_vec());
+  };
+  let _guard = new_table.free().protect();
+  index.apply_snapshot_bulk(bulk, new_table)
 }
 
 const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
@@ -373,7 +423,7 @@ struct CompactionWorker {
   tables: Arc<TableMapper>,
   meta_table: TableHandleRef,
   event_bus: Arc<EventBus>,
-  old_index: BTreeIndex<Arc<CompactionReadPolicy>>,
+  old_index: BTreeIndex<CompactionReadPolicy>,
   new_index: BTreeIndex<CompactionWritePolicy>,
 }
 impl CompactionWorker {
@@ -387,19 +437,16 @@ impl CompactionWorker {
     meta_table: TableHandleRef,
     event_bus: Arc<EventBus>,
   ) -> Self {
-    let old_index = BTreeIndex::new(
-      CompactionReadPolicy {
-        block_cache: block_cache.clone(),
-        version_controller: version_controller.clone(),
-      }
-      .to_arc(),
-    );
-    let new_index = BTreeIndex::new(CompactionWritePolicy {
-      block_cache: block_cache.clone(),
-      version_controller: version_controller.clone(),
-      recorder: recorder.clone(),
-      blob: blob.clone(),
-    });
+    let old_index = BTreeIndex::new(CompactionReadPolicy::new(
+      block_cache.clone(),
+      version_controller.clone(),
+    ));
+    let new_index = BTreeIndex::new(CompactionWritePolicy::new(
+      block_cache.clone(),
+      version_controller.clone(),
+      recorder.clone(),
+      blob.clone(),
+    ));
     Self {
       block_cache,
       version_controller,
@@ -547,33 +594,15 @@ impl CompactionWorker {
     };
 
     while !snapshotter.is_done() {
-      self.apply_snapshot_once(&mut snapshotter, &cycle.new, &mut None, batch_size)?;
+      apply_snapshot_once(
+        &self.new_index,
+        &mut snapshotter,
+        &cycle.new,
+        &mut None,
+        batch_size,
+      )?;
     }
     self.remove_compaction(&cycle.metadata)?;
-    Ok(())
-  }
-
-  fn apply_snapshot_once(
-    &self,
-    snapshotter: &mut Snapshotter<Arc<CompactionReadPolicy>>,
-    new_table: &TableHandleRef,
-    resume_from: &mut Option<StaticKey>,
-    batch_size: usize,
-  ) -> Result {
-    let mut bulk = Vec::with_capacity(batch_size);
-    let mut start = None;
-    for _ in 0..batch_size {
-      let Some(snapshot) = snapshotter.next_snapshot()? else {
-        break;
-      };
-      start.get_or_insert_with(|| snapshot.key.clone());
-      bulk.push(snapshot);
-    }
-    if let Some(key) = start {
-      *resume_from = Some(key.to_vec());
-    };
-    let _guard = new_table.free().protect();
-    self.new_index.apply_snapshot_bulk(bulk, new_table)?;
     Ok(())
   }
 
@@ -616,16 +645,17 @@ impl CompactionWorker {
       warn!("table {} already dropped.", current.metadata.get_name());
       return Ok(true);
     }
-    if let Err(err) = self.apply_snapshot_once(
+    let Err(err) = apply_snapshot_once(
+      &self.new_index,
       snapshotter,
       &current.new,
       &mut current.resume_key,
       batch_size,
-    ) {
-      current.snapshotter = None;
-      return Err(err);
+    ) else {
+      return Ok(false);
     };
-    Ok(false)
+    current.snapshotter = None;
+    Err(err)
   }
 
   fn run_tick(
@@ -753,6 +783,34 @@ impl Compactor {
     this
   }
 
+  pub fn run_offline(
+    block_cache: &Arc<BlockCache>,
+    version_controller: &Arc<VersionController>,
+    recorder: &Arc<PageRecorder>,
+    blob: &Arc<BlobStorage>,
+    old: &TableHandleRef,
+    new: &TableHandleRef,
+    batch_size: usize,
+  ) -> Result {
+    let old_index = BTreeIndex::new(CompactionReadPolicy::new(
+      block_cache.clone(),
+      version_controller.clone(),
+    ));
+    let new_index = BTreeIndex::new(CompactionWritePolicy::new(
+      block_cache.clone(),
+      version_controller.clone(),
+      recorder.clone(),
+      blob.clone(),
+    ));
+    new_index.initialize(new)?;
+
+    let mut snapshotter = old_index.snapshot_from(old, None)?;
+    while !snapshotter.is_done() {
+      apply_snapshot_once(&new_index, &mut snapshotter, new, &mut None, batch_size)?;
+    }
+    Ok(())
+  }
+
   /**
    * Stop compaction immediately after WAL failure.
    *
@@ -842,7 +900,7 @@ struct CompactionCycle {
   old: TableHandleRef,
   new: TableHandleRef,
   metadata: TableMetadata,
-  snapshotter: Option<Snapshotter<Arc<CompactionReadPolicy>>>,
+  snapshotter: Option<Snapshotter<CompactionReadPolicy>>,
   resume_key: Option<StaticKey>,
 }
 impl CompactionCycle {

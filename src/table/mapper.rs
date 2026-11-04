@@ -64,7 +64,7 @@ impl TableMapper {
       open_handles: Default::default(),
       metadata: Arc::new(metadata),
       io_pool,
-      last_table_id: AtomicTableId::new(META_TABLE_ID + 1),
+      last_table_id: AtomicTableId::new(init.get_id() + 1),
     })
   }
 
@@ -139,6 +139,9 @@ impl TableMapper {
 
   pub fn meta_table(&self) -> TableHandleRef {
     self.metadata.clone()
+  }
+  pub fn replace_meta(&mut self, handle: TableHandleRef) {
+    self.metadata = handle;
   }
   pub fn meta_table_id(&self) -> TableId {
     self.metadata.get_id()
