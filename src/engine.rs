@@ -18,19 +18,20 @@ use crate::{
   disk::{DiskBackend, IOPool, Pointer},
   maintenance::{
     initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
-    CompactionTriggered, Compactor, GarbageCollectionConfig, GarbageCollector,
+    CompactionTriggered, Compactor, DropTableCommitted, GarbageCollectionConfig,
+    GarbageCollector,
   },
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,
   page::PAGE_SIZE,
-  table::{TableFormatVersion, TableHandleRef, TableId, TableMapper},
+  table::{TableFormatVersion, TableHandleRef, TableId, TableMapper, META_TABLE},
   transaction::{
     Checkpoint, CheckpointConfig, CheckpointSnapshot, PageRecorder,
     SnapshotFormatVersion, Transaction, TxOrchestrator,
   },
   utils::{error, info, ToArc},
-  wal::{WALConfig, WALFormatVersion, WriteAheadLog},
+  wal::{WALConfig, WALFormatVersion, WriteAheadLog, RESERVED_TX},
   Error, Result,
 };
 
@@ -180,8 +181,7 @@ impl Engine {
       .multi(thread_count)
       .pool();
 
-    let tables =
-      TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?.to_arc();
+    let mut tables = TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?;
 
     info!("trying to replay...");
     let (wal, replay) = WriteAheadLog::replay(
@@ -271,6 +271,38 @@ impl Engine {
     }
     stream.join().collect::<Result>()?;
 
+    tables.replay(handles.into_values(), &manifest.metadata_table)?;
+
+    let mut retired_meta = None;
+    if !meta_table.get_version().is_current() {
+      info!(
+        "metadata table format version has been expired. it will be updated from {} to {}",
+        meta_table.get_version(),
+        TableFormatVersion::CURRENT
+      );
+
+      let metadata = tables.create_metadata(META_TABLE);
+      let migrated = tables.create_handle(&metadata)?;
+      Compactor::run_offline(
+        &block_cache,
+        &version_controller,
+        &recorder,
+        &blob,
+        &meta_table,
+        &migrated,
+        compaction_config.batch_size,
+      )?;
+      tables.replace_meta(migrated);
+      manifest.metadata_table = metadata;
+      retired_meta = Some(meta_table);
+
+      info!(
+        "metadata table format version has been upgraded to {}",
+        TableFormatVersion::CURRENT
+      );
+    }
+
+    let tables = tables.to_arc();
     let checkpoint = Checkpoint::initial_checkpoint(
       wal.clone(),
       block_cache.clone(),
@@ -281,19 +313,6 @@ impl Engine {
       metrics_registry.clone(),
       checkpoint_config,
     )?;
-
-    tables.replay(handles.into_values(), &manifest.metadata_table)?;
-
-    if !meta_table.get_version().is_current() {
-      info!(
-        "metadata table format version has been expired. it will be updated from {} to {}",
-        meta_table.get_version(),
-        TableFormatVersion::CURRENT
-      );
-
-      // TODO: Implement offline compaction of the metadata table here when a change to the table format version is actually required.
-      // manifest.metadata_table.version = TableFormatVersion::CURRENT;
-    }
 
     manifest.snapshot_version = SnapshotFormatVersion::CURRENT;
     manifest.wal_version = WALFormatVersion::CURRENT;
@@ -327,6 +346,10 @@ impl Engine {
       blob.clone(),
       compaction_config,
     );
+
+    if let Some(table) = retired_meta {
+      event_bus.publish(DropTableCommitted::new(table, RESERVED_TX, 0));
+    }
 
     let events = found_handles
       .handles
