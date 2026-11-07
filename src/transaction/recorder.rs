@@ -37,7 +37,10 @@ impl PageRecorder {
     T: Serializable,
   {
     let ptr = slot.get_pointer();
-    slot.commit_with(|page| {
+    // Dropping the guard lets a checkpoint boundary pass this record, so it has to
+    // outlive the commit. A boundary that passed before the page became dirty would
+    // leave neither the page in that checkpoint's flush nor the record in its replay.
+    let _guard = slot.commit_with(|page| {
       let byte_len = page.serialize_from(data)?;
       self.wal.append_insert(
         tx_id,
@@ -45,8 +48,8 @@ impl PageRecorder {
         ptr,
         current_version,
         page.range(0..byte_len),
-      )?;
-      Ok(())
-    })
+      )
+    })?;
+    Ok(())
   }
 }
