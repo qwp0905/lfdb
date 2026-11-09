@@ -31,9 +31,13 @@ impl Log for TestLogger {
 }
 
 fn default_options(dir: &TempDir) -> EngineBuilder {
+  options_at(dir.path())
+}
+
+fn options_at(path: &std::path::Path) -> EngineBuilder {
   let _ = log::set_logger(&TestLogger);
   log::set_max_level(log::LevelFilter::Trace);
-  EngineBuilder::new(dir.path())
+  EngineBuilder::new(path)
     .wal_file_size(8 << 20)
     .wal_buffer_size(64 << 10)
     .wal_segment_expiration(Duration::from_millis(1))
@@ -1051,6 +1055,99 @@ fn test_start_not_commit() {
   let table = t.table(TEST_TABLE).expect("table error");
   assert_eq!(table.get(&key.into_bytes()).expect("find error"), None);
   t.commit().expect("commit error")
+}
+
+// ============================================================
+// 18. Start but not commit, followed by reads
+// ============================================================
+
+#[test]
+#[ignore]
+fn write_not_commit_then_read() {
+  let dir = std::env::var("CRASH_DIR").expect("CRASH_DIR not set");
+  let key = std::env::var("CRASH_KEY").expect("CRASH_KEY not set");
+  let path = std::path::Path::new(&dir);
+  let key_count = 3000;
+
+  // Reopened cleanly first, so the crash below is the only failure recovery has
+  // to handle.
+  {
+    let engine = options_at(path).open().expect("engine bootstrap failed");
+    create_table(&engine, TEST_TABLE);
+    for chunk in 0..key_count / 100 {
+      let mut t = engine.new_tx().expect("start failed.");
+      let table = t.table(TEST_TABLE).expect("table failed");
+      for i in chunk * 100..(chunk + 1) * 100 {
+        table
+          .insert(format!("key-{:06}", i).into_bytes(), vec![b'v'; 100])
+          .expect("insert failed");
+      }
+      t.commit().expect("commit failed");
+    }
+  }
+
+  // No later transaction commits, so nothing else persists alongside this write.
+  let engine = options_at(path).open().expect("engine reopen failed");
+  let t = engine.new_tx().expect("start failed.");
+  let table = t.table(TEST_TABLE).expect("table failed");
+  table
+    .insert(key.as_bytes().to_vec(), key.as_bytes().to_vec())
+    .expect("insert failed");
+
+  // Reads from other transactions must neither expose nor persist the pending
+  // write.
+  let t2 = engine.new_tx().expect("start failed.");
+  let table2 = t2.table(TEST_TABLE).expect("table failed");
+  for i in 0..key_count {
+    table2
+      .get(&format!("key-{:06}", i).into_bytes())
+      .expect("read failed");
+  }
+
+  std::process::exit(0);
+}
+
+// An uncommitted write must stay invisible after a crash, even when other
+// transactions read heavily while it is pending.
+#[test]
+fn test_start_not_commit_then_read() {
+  use std::io::stdout;
+  use std::process::Command;
+  let dir = tempdir_in(".").unwrap();
+
+  let key = "key".to_string();
+  if !Command::new(std::env::current_exe().unwrap())
+    .arg("--ignored")
+    .arg("--exact")
+    .arg("write_not_commit_then_read")
+    .arg("--")
+    .arg("--nocapture")
+    .env("CRASH_DIR", dir.path())
+    .env("CRASH_KEY", key.clone())
+    .stdout(stdout())
+    .stderr(stdout())
+    .status()
+    .expect("failed to spawn write_not_commit_then_read")
+    .success()
+  {
+    panic!("fail to run child")
+  }
+
+  // Neither the first transaction after restart nor the later ones may see it.
+  let engine = build_engine(&dir);
+  for i in 0..5 {
+    let mut t = engine.new_tx().expect("tx start error");
+    let table = t.table(TEST_TABLE).expect("table error");
+    assert_eq!(
+      table.get(key.as_bytes()).expect("find error"),
+      None,
+      "uncommitted write visible to transaction {i} after restart",
+    );
+    table
+      .insert(format!("after-{i}").into_bytes(), vec![])
+      .expect("insert error");
+    t.commit().expect("commit error");
+  }
 }
 
 // ============================================================
