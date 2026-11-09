@@ -3,12 +3,11 @@ use std::{fmt, sync::atomic::AtomicU64};
 /**
  * WAL log sequence id.
  *
- * `LogId` orders WAL records and defines replay boundaries. It is independent
- * from transaction ids.
+ * `WriteSeq` orders WAL records and defines replay boundaries.
  */
-pub type LogId = u64;
-pub type AtomicLogId = AtomicU64;
-pub const LOG_ID_BYTES: usize = LogId::BITS as usize >> 3;
+pub type WriteSeq = u64;
+pub type AtomicWriteSeq = AtomicU64;
+pub const WRITE_SEQ_BYTES: usize = WriteSeq::BITS as usize >> 3;
 
 /**
  * Transaction/version id.

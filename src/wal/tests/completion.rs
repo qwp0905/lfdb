@@ -3,7 +3,7 @@ use std::thread;
 use super::*;
 
 #[test]
-fn test_log_completion_starts_at_last_log_id() {
+fn test_log_completion_starts_at_last_write_seq() {
   let completion = LogCompletion::new(5);
   assert_eq!(completion.get_frontier(), 5);
 }

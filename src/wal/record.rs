@@ -1,12 +1,12 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use super::{LogId, RecordEncoding, TxId};
+use super::{RecordEncoding, TxId, WriteSeq};
 use crate::{
   blob::BlobMetadata,
   disk::{Pointer, POINTER_BYTES},
   table::{TableId, TABLE_ID_BYTES},
   utils::{OffsetReader, OffsetWriter},
-  wal::{LOG_ID_BYTES, TX_ID_BYTES},
+  wal::{TX_ID_BYTES, WRITE_SEQ_BYTES},
 };
 
 #[derive(Debug)]
@@ -21,15 +21,15 @@ pub enum Operation {
   },
   Commit,
   /**
-   * Records the last stable log_id and the minimum active transaction version.
+   * Records the last stable write_seq and the minimum active transaction version.
    * During recovery, min_active bounds the abort set — transactions that started
    * before min_active can be discarded, preventing the abort set from growing
    * unboundedly.
    */
   Checkpoint {
-    last_log_id: LogId,    // last log id
-    current_version: TxId, // current version
-    snapshot: PathBuf,     // mvcc snapshot path
+    durable_write_seq: WriteSeq, // durable write seq
+    current_version: TxId,       // current version
+    snapshot: PathBuf,           // mvcc snapshot path
   },
   BlobCreated(BlobMetadata), // created blob metadata
 }
@@ -49,7 +49,7 @@ impl Operation {
         POINTER_BYTES + TABLE_ID_BYTES + TX_ID_BYTES + data.len() + 1 + 2
       }
       Self::Checkpoint { snapshot, .. } => {
-        TX_ID_BYTES + LOG_ID_BYTES + snapshot.as_os_str().len()
+        TX_ID_BYTES + WRITE_SEQ_BYTES + snapshot.as_os_str().len()
       }
       Self::BlobCreated(metadata) => metadata.byte_len(),
       _ => 0,
@@ -59,17 +59,17 @@ impl Operation {
 
 #[derive(Debug)]
 pub struct LogRecord {
-  pub log_id: LogId,
+  pub write_seq: WriteSeq,
   pub tx_id: TxId,
   pub operation: Operation,
 }
 impl LogRecord {
   #[inline]
-  const fn new(log_id: LogId, tx_id: TxId, operation: Operation) -> Self {
+  const fn new(write_seq: WriteSeq, tx_id: TxId, operation: Operation) -> Self {
     Self {
       tx_id,
       operation,
-      log_id,
+      write_seq,
     }
   }
 
@@ -86,7 +86,7 @@ impl LogRecord {
       return None;
     }
 
-    let log_id = reader.read_u64()?;
+    let write_seq = reader.read_u64()?;
     let tx_id = reader.read_u64()?;
 
     let operation = match reader.read_byte()? {
@@ -108,11 +108,11 @@ impl LogRecord {
       }
       2 => (reader.is_eof()).then_some(Operation::Commit)?,
       3 => {
-        let log_id = reader.read_u64()?;
+        let write_seq = reader.read_u64()?;
         let current_version = reader.read_u64()?;
         let path = unsafe { OsStr::from_encoded_bytes_unchecked(reader.read_all()) };
         Operation::Checkpoint {
-          last_log_id: log_id,
+          durable_write_seq: write_seq,
           current_version,
           snapshot: path.into(),
         }
@@ -120,12 +120,12 @@ impl LogRecord {
       4 => Operation::BlobCreated(BlobMetadata::read_from(&mut reader)?),
       _ => return None,
     };
-    Some(LogRecord::new(log_id, tx_id, operation))
+    Some(LogRecord::new(write_seq, tx_id, operation))
   }
 
   fn write_at(&self, buf: &mut [u8]) {
     let mut writer = OffsetWriter::new(&mut buf[4..]);
-    writer.write_u64(self.log_id);
+    writer.write_u64(self.write_seq);
     writer.write_u64(self.tx_id);
 
     writer.write_u8(self.operation.type_byte());
@@ -147,11 +147,11 @@ impl LogRecord {
         writer.write(data);
       }
       Operation::Checkpoint {
-        last_log_id,
+        durable_write_seq,
         current_version,
         snapshot,
       } => {
-        writer.write_u64(*last_log_id);
+        writer.write_u64(*durable_write_seq);
         writer.write_u64(*current_version);
         writer.write(snapshot.as_os_str().as_encoded_bytes());
       }
@@ -182,7 +182,7 @@ pub struct LogRecordUninit {
 }
 impl LogRecordUninit {
   fn new(tx_id: TxId, operation: Operation) -> Self {
-    let len = operation.byte_len() + 4 + LOG_ID_BYTES + TX_ID_BYTES;
+    let len = operation.byte_len() + 4 + WRITE_SEQ_BYTES + TX_ID_BYTES;
     let mut buf = vec![0; len + LogRecord::LEN_BYTES];
     buf[..LogRecord::LEN_BYTES].copy_from_slice(&(len as u16).to_le_bytes());
     Self {
@@ -194,8 +194,8 @@ impl LogRecordUninit {
   pub const fn len(&self) -> usize {
     self.buf.len()
   }
-  pub fn init(mut self, log_id: LogId) -> Vec<u8> {
-    let record = LogRecord::new(log_id, self.tx_id, self.operation);
+  pub fn init(mut self, write_seq: WriteSeq) -> Vec<u8> {
+    let record = LogRecord::new(write_seq, self.tx_id, self.operation);
     record.write_at(&mut self.buf[LogRecord::LEN_BYTES..]);
     self.buf
   }
@@ -231,20 +231,20 @@ impl LogRecordUninit {
    * Build a checkpoint control record.
    *
    * The outer `tx_id` field has no meaning for checkpoint records; replay uses the
-   * checkpoint payload (`last_log_id`, `current_version`, and `snapshot_path`)
+   * checkpoint payload (`durable_write_seq`, `current_version`, and `snapshot_path`)
    * instead.
    */
   pub fn new_checkpoint(
-    last_log_id: LogId,
+    durable_write_seq: WriteSeq,
     current_version: TxId,
-    snapshot_path: PathBuf,
+    snapshot: PathBuf,
   ) -> Self {
     Self::new(
       0,
       Operation::Checkpoint {
-        last_log_id,
+        durable_write_seq,
         current_version,
-        snapshot: snapshot_path,
+        snapshot,
       },
     )
   }

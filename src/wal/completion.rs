@@ -10,8 +10,8 @@ use crossbeam::{atomic::AtomicCell, queue::SegQueue, utils::Backoff};
 use crossbeam_skiplist::SkipSet;
 
 use super::{
-  AppendOrder, AtomicLogId, BatchedWrite, FsyncResult, LogId, LogRecord,
-  SegmentGeneration, WAL_BLOCK_SIZE,
+  AppendOrder, AtomicWriteSeq, BatchedWrite, FsyncResult, LogRecord, SegmentGeneration,
+  WriteSeq, WAL_BLOCK_SIZE,
 };
 use crate::{
   disk::Pointer,
@@ -216,25 +216,25 @@ impl SyncCompletion {
  * and the completed set needs no synchronization of its own.
  */
 pub struct LogCompletion {
-  frontier: AtomicLogId,
-  batch: BatchQueue<LogId>,
-  completed: UnsafeCell<BTreeSet<LogId>>,
+  frontier: AtomicWriteSeq,
+  batch: BatchQueue<WriteSeq>,
+  completed: UnsafeCell<BTreeSet<WriteSeq>>,
 }
 impl LogCompletion {
-  pub fn new(last_log_id: LogId) -> Self {
+  pub fn new(last_write_seq: WriteSeq) -> Self {
     Self {
-      frontier: AtomicLogId::new(last_log_id),
+      frontier: AtomicWriteSeq::new(last_write_seq),
       batch: BatchQueue::new(),
       completed: UnsafeCell::new(BTreeSet::new()),
     }
   }
 
-  pub fn get_frontier(&self) -> LogId {
+  pub fn get_frontier(&self) -> WriteSeq {
     self.frontier.load(Ordering::Acquire)
   }
 
-  pub fn complete(&self, log_id: LogId) {
-    if !self.batch.push_and_compete(log_id) {
+  pub fn complete(&self, write_seq: WriteSeq) {
+    if !self.batch.push_and_compete(write_seq) {
       return;
     }
 
@@ -247,10 +247,10 @@ impl LogCompletion {
       let advanced = completed
         .iter()
         .zip(frontier..)
-        .take_while(|&(&id, expected)| id == expected)
+        .take_while(|&(&seq, expected)| seq == expected)
         .count();
       if advanced > 0 {
-        frontier += advanced as LogId;
+        frontier += advanced as WriteSeq;
         *completed = completed.split_off(&frontier);
         self.frontier.store(frontier, Ordering::Release);
       }

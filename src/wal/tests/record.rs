@@ -1,8 +1,8 @@
 use super::*;
 
-fn assert_roundtrip(record: LogRecordUninit, log_id: LogId) -> LogRecord {
+fn assert_roundtrip(record: LogRecordUninit, write_seq: WriteSeq) -> LogRecord {
   let tx_id = record.tx_id;
-  let bytes = record.init(log_id);
+  let bytes = record.init(write_seq);
   assert_eq!(
     bytes.len(),
     u16::from_le_bytes(unsafe { (bytes[..2].as_ptr() as *const [u8; 2]).read() })
@@ -10,7 +10,7 @@ fn assert_roundtrip(record: LogRecordUninit, log_id: LogId) -> LogRecord {
       + 2
   );
   let parsed: LogRecord = LogRecord::read_from(&bytes[2..]).unwrap();
-  assert_eq!(parsed.log_id, log_id);
+  assert_eq!(parsed.write_seq, write_seq);
   assert_eq!(parsed.tx_id, tx_id);
   parsed
 }
@@ -60,11 +60,11 @@ fn test_checkpoint_roundtrip() {
   let parsed = assert_roundtrip(r, 5);
   match parsed.operation {
     Operation::Checkpoint {
-      last_log_id,
+      durable_write_seq,
       current_version,
       snapshot,
     } => {
-      assert_eq!(last_log_id, i);
+      assert_eq!(durable_write_seq, i);
       assert_eq!(current_version, cv);
       assert_eq!(path, snapshot);
     }
