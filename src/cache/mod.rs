@@ -18,3 +18,6 @@ use node::*;
 
 mod shrink;
 pub use shrink::*;
+
+mod core;
+use core::*;

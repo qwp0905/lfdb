@@ -1,12 +1,8 @@
-use std::{
-  collections::{HashMap, VecDeque},
-  mem::replace,
-  sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 
 use super::{
-  Acquired, BlockId, CachedBlock, CachedSlot, DirtyBlocks, DirtyTables, EvictionGuard,
-  MappingTable, MappingToken, PendingFlush, WritableSlot,
+  Acquired, BlockCacheCore, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
+  MappingTable, PendingFlush, WritableSlot,
 };
 use crate::{
   background::{SharedWorkThread, ThreadBuilder},
@@ -15,6 +11,7 @@ use crate::{
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::ToArc,
+  wal::WriteAheadLog,
   Result,
 };
 
@@ -24,178 +21,6 @@ pub struct BlockCacheConfig {
   pub buffer_size: usize,
 }
 
-struct Core {
-  mapping: MappingTable,
-  cached_blocks: Box<[CachedBlock]>,
-  /**
-   * each dirty bits are protected by each batch mutations.
-   */
-  dirty_blocks: DirtyBlocks,
-  dirty_tables: DirtyTables,
-  allocator: PageAllocator<PAGE_SIZE>,
-}
-impl Core {
-  const fn new(
-    mapping: MappingTable,
-    cached_blocks: Box<[CachedBlock]>,
-    dirty_blocks: DirtyBlocks,
-    dirty_tables: DirtyTables,
-    allocator: PageAllocator<PAGE_SIZE>,
-  ) -> Self {
-    Self {
-      mapping,
-      cached_blocks,
-      dirty_blocks,
-      dirty_tables,
-      allocator,
-    }
-  }
-
-  const fn get_block(&self, block_id: BlockId) -> &CachedBlock {
-    &self.cached_blocks[block_id]
-  }
-
-  fn submit_eviction(&self, guard: &EvictionGuard) -> Option<PendingFlush> {
-    if !guard.is_evicted() {
-      return None;
-    }
-    let block_id = guard.get_block_id();
-    if !self.dirty_blocks.contains(block_id) {
-      return None;
-    }
-
-    Some(self.cached_blocks[block_id].submit_flush())
-  }
-
-  fn resolve_eviction(
-    &self,
-    pending: Option<PendingFlush>,
-    guard: &EvictionGuard,
-    new: PageRef<PAGE_SIZE>,
-    pointer: Pointer,
-    table: TableHandleRef,
-  ) -> Result {
-    let block_id = guard.get_block_id();
-    let block = &self.cached_blocks[block_id];
-
-    if !guard.is_evicted() {
-      unsafe { block.init(new, pointer, table) };
-      return Ok(());
-    }
-
-    if let Some(pending) = pending {
-      pending.finalize()?;
-      self.dirty_blocks.remove(block_id);
-      self.dirty_tables.mark(block.handle());
-    }
-
-    unsafe { block.replace(new, pointer, table) };
-    Ok(())
-  }
-
-  fn flush_block(&self, id: BlockId) -> Result {
-    let Some(_token) = self.mapping.try_pin(id) else {
-      return Ok(());
-    };
-
-    let block = &self.cached_blocks[id];
-    let (pending, epoch) = {
-      let latch = block.latch();
-      if !self.dirty_blocks.remove(id) {
-        return Ok(());
-      }
-      (block.submit_flush(), latch.epoch())
-    };
-
-    let Err(err) = pending.finalize() else {
-      self.dirty_tables.mark(block.handle());
-      return Ok(());
-    };
-
-    let latch = block.latch();
-    if latch.epoch() == epoch {
-      self.dirty_blocks.insert(id);
-    };
-    Err(err)
-  }
-
-  fn flush_tables(&self) -> Result {
-    let mut pending = Vec::new();
-    for table in self.dirty_tables.drain() {
-      pending.push((table.disk().fsync(), table));
-    }
-
-    let mut failed = None;
-    for (pending, table) in pending {
-      let Err(err) = pending.wait_flatten() else {
-        continue;
-      };
-
-      failed
-        .get_or_insert_with(|| (err, Vec::new()))
-        .1
-        .push(table);
-    }
-    let Some((err, failed)) = failed else {
-      return Ok(());
-    };
-    for table in failed {
-      self.dirty_tables.mark(&table);
-    }
-    Err(err)
-  }
-
-  fn aggregate_dirty_blocks(&self) -> Vec<BlockId> {
-    let mut buckets = HashMap::<_, Vec<_>>::new();
-    let mut len = 0;
-    for id in self.dirty_blocks.iter() {
-      let Some(_token) = self.mapping.try_pin(id) else {
-        // An exclusive owner is already handling this slot, for example during
-        // eviction/install. Do not add it to this flush snapshot.
-        continue;
-      };
-
-      // Snapshot dirty blocks into coarse disk-locality buckets. Flushing nearby
-      // pointers from the same table together reduces random write scattering during
-      // checkpoint.
-      let block = &self.cached_blocks[id];
-      let key = (block.handle().get_id(), block.get_pointer() >> BUCKET_SHIFT);
-      buckets.entry(key).or_default().push(id);
-      len += 1;
-    }
-
-    let mut dirty = vec![0; len];
-    let mut offset = 0;
-    for bucket in buckets.into_values() {
-      let end = offset + bucket.len();
-      dirty[replace(&mut offset, end)..end].copy_from_slice(&bucket);
-    }
-    dirty
-  }
-
-  const fn create_slot<'a>(
-    &'a self,
-    id: BlockId,
-    token: MappingToken<'a>,
-  ) -> CachedSlot<'a> {
-    CachedSlot::new(
-      self.get_block(id),
-      &self.dirty_blocks,
-      id,
-      token,
-      &self.allocator,
-    )
-  }
-
-  fn acquire_page_with(&self, guard: &EvictionGuard) -> PageRef<PAGE_SIZE> {
-    if guard.is_evicted() {
-      self.allocator.allocate()
-    } else {
-      self.allocator.allocate_new()
-    }
-  }
-}
-
 /**
  * Central block-cache manager and higher-level disk abstraction.
  *
@@ -203,16 +28,20 @@ impl Core {
  * through raw disk handles. The cache maps logical table blocks to cache slots,
  * loads missing pages, allocates fresh cached blocks, tracks dirty state, and
  * drives checkpoint flushing. `MappingTable` owns the logical-address to slot
- * mapping and eviction decisions; the block arrays, pins, batch handles, dirty
- * bitmap.
+ * mapping and eviction decisions, and `BlockCacheCore` owns the cached blocks and
+ * writes a page only after its log record is durable.
  */
 pub struct BlockCache {
-  core: Arc<Core>,
+  core: Arc<BlockCacheCore>,
   flush_executor: Arc<SharedWorkThread<BlockId, Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BlockCache {
-  pub fn open(config: BlockCacheConfig, metrics: Arc<MetricsRegistry>) -> Result<Self> {
+  pub fn open(
+    config: BlockCacheConfig,
+    wal: Arc<WriteAheadLog>,
+    metrics: Arc<MetricsRegistry>,
+  ) -> Self {
     let capacity = config.capacity / PAGE_SIZE;
     let buffer_size = config.buffer_size / PAGE_SIZE;
     let allocator = PageAllocator::new(buffer_size);
@@ -220,10 +49,10 @@ impl BlockCache {
     let mut blocks = Vec::with_capacity(capacity);
     blocks.resize_with(capacity, CachedBlock::uninit);
 
-    let core = Arc::new(Core::new(
+    let core = Arc::new(BlockCacheCore::new(
       MappingTable::new(config.shard_count, capacity),
       blocks.into_boxed_slice(),
-      DirtyBlocks::new(capacity),
+      wal,
       DirtyTables::new(),
       allocator,
     ));
@@ -233,12 +62,11 @@ impl BlockCache {
       .multi(PRE_FLUSH_CONCURRENCY)
       .shared(handle_flush_blocks(core.clone()))
       .to_arc();
-
-    Ok(Self {
+    Self {
       core,
       flush_executor,
       metrics,
-    })
+    }
   }
 
   /**
@@ -253,21 +81,21 @@ impl BlockCache {
     handle: &TableHandleRef,
   ) -> Result<WritableSlot<'_>> {
     let table_id = handle.get_id();
-    let Some(acquired) = self.core.mapping.try_acquire(table_id, pointer) else {
+    let Some(acquired) = self.core.get_mapping().try_acquire(table_id, pointer) else {
       return Ok(WritableSlot::new_temp(
         handle.clone(),
-        self.core.allocator.allocate(),
+        self.core.allocate_page(),
         pointer,
-        &self.core.dirty_tables,
+        &self.core,
       ));
     };
     let guard = match acquired {
       Acquired::Hit(block_id, token) => {
-        return Ok(self.core.create_slot(block_id, token).for_write());
+        return Ok(CachedSlot::new(block_id, &self.core, token).for_write());
       }
       Acquired::Evicted(guard) => guard,
     };
-    let pending = self.core.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard)?;
     let new = self.core.acquire_page_with(&guard);
     let slot = self.resolve_eviction(pending, guard, new, pointer, handle.clone())?;
     Ok(slot.for_write())
@@ -286,14 +114,14 @@ impl BlockCache {
     handle: &TableHandleRef,
   ) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self.core.mapping.acquire(table_id, pointer) {
+    let guard = match self.core.get_mapping().acquire(table_id, pointer) {
       Acquired::Hit(block_id, token) => {
-        return Ok(self.core.create_slot(block_id, token))
+        return Ok(CachedSlot::new(block_id, &self.core, token))
       }
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.core.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard)?;
     let mut new = self.core.acquire_page_with(&guard);
     unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
@@ -310,20 +138,24 @@ impl BlockCache {
     self
       .core
       .resolve_eviction(pending, &guard, new, pointer, table)?;
-    Ok(self.core.create_slot(guard.get_block_id(), guard.commit()))
+    Ok(CachedSlot::new(
+      guard.get_block_id(),
+      &self.core,
+      guard.commit(),
+    ))
   }
 
   fn __read(&self, pointer: Pointer, handle: &TableHandleRef) -> Result<CachedSlot<'_>> {
     let table_id = handle.get_id();
-    let guard = match self.core.mapping.acquire(table_id, pointer) {
+    let guard = match self.core.get_mapping().acquire(table_id, pointer) {
       Acquired::Hit(block_id, token) => {
         self.metrics.block_cache_hit.inc();
-        return Ok(self.core.create_slot(block_id, token));
+        return Ok(CachedSlot::new(block_id, &self.core, token));
       }
       Acquired::Evicted(guard) => guard,
     };
 
-    let pending = self.core.submit_eviction(&guard);
+    let pending = self.core.submit_eviction(&guard)?;
     let mut new = self.core.acquire_page_with(&guard);
     handle.disk().read(pointer, &mut new)?;
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
@@ -353,19 +185,11 @@ impl BlockCache {
 
 impl Drop for BlockCache {
   fn drop(&mut self) {
-    for i in self.core.mapping.get_block_ids() {
+    for i in self.core.get_mapping().get_block_ids() {
       unsafe { self.core.get_block(i).drop_in_place() };
     }
   }
 }
-
-/**
- * Coarse locality bucket used to order checkpoint writes by table and nearby
- * disk range.
- */
-const FLUSH_BUCKET_PAGES: Pointer = (1 << 20) / PAGE_SIZE as Pointer; // 1Mib
-const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
-
 /**
  * Incremental dirty-page flusher.
  *
@@ -376,14 +200,14 @@ const BUCKET_SHIFT: u32 = FLUSH_BUCKET_PAGES.ilog2();
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
-  core: Arc<Core>,
+  core: Arc<BlockCacheCore>,
   executor: Arc<SharedWorkThread<BlockId, Result>>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
     executor: Arc<SharedWorkThread<BlockId, Result>>,
-    core: Arc<Core>,
+    core: Arc<BlockCacheCore>,
   ) -> Self {
     Self {
       dirty_blocks,
@@ -426,7 +250,7 @@ impl CacheFlusher {
 
 const PRE_FLUSH_CONCURRENCY: usize = 3;
 
-const fn handle_flush_blocks(core: Arc<Core>) -> impl Fn(BlockId) -> Result {
+const fn handle_flush_blocks(core: Arc<BlockCacheCore>) -> impl Fn(BlockId) -> Result {
   move |id| core.flush_block(id)
 }
 
