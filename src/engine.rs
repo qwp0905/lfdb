@@ -31,7 +31,7 @@ use crate::{
     SnapshotFormatVersion, Transaction, TxOrchestrator,
   },
   utils::{error, info, ToArc},
-  wal::{WALConfig, WALFormatVersion, WriteAheadLog, RESERVED_TX},
+  wal::{WALConfig, WALFormatVersion, WriteAheadLog, WriteSeq, RESERVED_TX},
   Error, Result,
 };
 
@@ -88,14 +88,12 @@ impl Engine {
       flush_factor: config.checkpoint_flush_factor,
     };
 
-    let block_cache =
-      BlockCache::open(block_cache_config, metrics_registry.clone())?.to_arc();
-
     let Some(mut manifest) = load_manifest(&io_pool)? else {
       info!("engine initial state.");
-      let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
 
+      let (tables, metadata) = TableMapper::open_new(io_pool.clone())?;
       let tables = tables.to_arc();
+
       let wal = WriteAheadLog::init(
         wal_config,
         event_bus.clone(),
@@ -103,6 +101,11 @@ impl Engine {
         metrics_registry.clone(),
       )?
       .to_arc();
+
+      let block_cache =
+        BlockCache::open(block_cache_config, wal.clone(), metrics_registry.clone())
+          .to_arc();
+
       let blob = BlobStorage::init(io_pool.clone(), wal.clone()).to_arc();
       let recorder = PageRecorder::new(wal.clone()).to_arc();
       let version_controller = VersionController::init(&event_bus);
@@ -194,6 +197,10 @@ impl Engine {
     )?;
     let wal = wal.to_arc();
 
+    let block_cache =
+      BlockCache::open(block_cache_config, wal.clone(), metrics_registry.clone())
+        .to_arc();
+
     let snapshot = match replay.last_snapshot {
       Some(file) => {
         let mut handle = io_pool.open_scan_io(file)?;
@@ -223,29 +230,36 @@ impl Engine {
     let mut stream = {
       let block_cache = block_cache.clone();
       init_thread.stream(
-        move |(ptr, data, table): (Pointer, Vec<u8>, TableHandleRef)| {
-          unsafe { block_cache.read_unchecked(ptr, &table)? }
+        move |(ptr, data, write_seq, table): (
+          Pointer,
+          Vec<u8>,
+          WriteSeq,
+          TableHandleRef,
+        )| unsafe {
+          block_cache
+            .read_unchecked(ptr, &table)?
             .for_write()
-            .commit_with(|page| {
-              page.copy_from(&data, 0);
-              Ok(())
-            })
+            .commit_unchecked(&data, write_seq)
         },
       )
     };
 
-    let mut redo = HashMap::<(TableId, Pointer), Vec<u8>>::new();
+    let mut redo = HashMap::<(TableId, Pointer), (WriteSeq, Vec<u8>)>::new();
     for image in replay.redo {
-      redo.insert((image.table_id, image.pointer), image.data);
+      redo.insert(
+        (image.table_id, image.pointer),
+        (image.write_seq, image.data),
+      );
     }
 
-    for ((_, ptr), data) in redo.extract_if(|(table_id, _), _| *table_id == meta_table_id)
+    for ((_, ptr), (write_seq, data)) in
+      redo.extract_if(|(table_id, _), _| *table_id == meta_table_id)
     {
       max_used
         .entry(meta_table_id)
         .and_modify(|v| *v = (*v).max(ptr))
         .or_insert(ptr);
-      stream.push((ptr, data, meta_table.clone()));
+      stream.push((ptr, data, write_seq, meta_table.clone()));
     }
     stream.drain_all().collect::<Result>()?;
 
@@ -259,7 +273,7 @@ impl Engine {
       handles.insert(c_table.get_id(), (c_meta.clone(), c_table.clone()));
     }
 
-    for ((table_id, ptr), data) in redo {
+    for ((table_id, ptr), (write_seq, data)) in redo {
       let Some((_, handle)) = handles.get(&table_id) else {
         continue;
       };
@@ -267,7 +281,7 @@ impl Engine {
         .entry(table_id)
         .and_modify(|v| *v = (*v).max(ptr))
         .or_insert(ptr);
-      stream.push((ptr, data, handle.clone()));
+      stream.push((ptr, data, write_seq, handle.clone()));
     }
     stream.join().collect::<Result>()?;
 

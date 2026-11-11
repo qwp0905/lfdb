@@ -61,13 +61,20 @@ pub struct ReplayResult {
 }
 
 pub struct RedoImage {
+  pub write_seq: WriteSeq,
   pub table_id: TableId,
   pub pointer: Pointer,
   pub data: Vec<u8>,
 }
 impl RedoImage {
-  const fn new(table_id: TableId, pointer: Pointer, data: Vec<u8>) -> Self {
+  const fn new(
+    write_seq: WriteSeq,
+    table_id: TableId,
+    pointer: Pointer,
+    data: Vec<u8>,
+  ) -> Self {
     Self {
+      write_seq,
       table_id,
       pointer,
       data,
@@ -216,7 +223,7 @@ impl ReplayState {
         let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
           return Err(Error::CompressionCrashed(encoding));
         };
-        let image = RedoImage::new(table_id, pointer, decoded);
+        let image = RedoImage::new(record.write_seq, table_id, pointer, decoded);
         self.redo.insert(record.write_seq, image);
         self.started.insert(record.write_seq, record.tx_id);
         self.last_tx_id = self.last_tx_id.max(current_version);
