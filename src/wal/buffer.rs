@@ -32,6 +32,7 @@ pub struct SegmentBuffer {
   write_completion: WriteCompletion,
   sync_completion: Arc<SyncCompletion>,
   last_write_seq: Cell<Option<WriteSeq>>,
+  write_seq_offset: WriteSeq,
   generation: SegmentGeneration,
   event_bus: Arc<EventBus>,
 }
@@ -51,6 +52,7 @@ impl SegmentBuffer {
       write_completion: WriteCompletion::new(max_len as usize),
       sync_completion,
       last_write_seq: Cell::new(None),
+      write_seq_offset,
       generation,
       event_bus,
     }
@@ -76,6 +78,9 @@ impl SegmentBuffer {
 
   pub fn set_last_write_seq(&self, write_seq: WriteSeq) {
     self.last_write_seq.set(Some(write_seq));
+  }
+  pub const fn get_write_seq_offset(&self) -> WriteSeq {
+    self.write_seq_offset
   }
 
   pub fn load_log_buffer(&self) -> AtomicRef<LogBuffer> {
@@ -169,6 +174,9 @@ impl LogBuffer {
 
   pub fn reserve_append(&self, len: usize) -> BookingResult {
     self.reserved_offset.reserve(len)
+  }
+  pub fn current_append(&self) -> Option<AppendTicket> {
+    self.reserved_offset.current()
   }
   pub const fn get_write_seq_offset(&self) -> WriteSeq {
     self.write_seq_offset
