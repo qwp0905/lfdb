@@ -44,22 +44,6 @@ impl AtomicBitmap {
     let j = n & MASK;
     self.bits[i].load(Ordering::Acquire) & (1 << j) != 0
   }
-
-  pub fn remove(&self, n: u64) -> bool {
-    let i = (n >> SHIFT) as usize;
-    if i >= self.bits.len() {
-      return false;
-    };
-    let j = n & MASK;
-    let b = 1 << j;
-    let prev = self.bits[i].fetch_and(!b, Ordering::Release);
-    prev & b != 0
-  }
-
-  pub fn iter(&self) -> BitmapIter<impl Iterator<Item = u64> + '_> {
-    let iter = self.bits.iter().map(|bit| bit.load(Ordering::Acquire));
-    BitmapIter::new(iter, 0)
-  }
 }
 
 /**
