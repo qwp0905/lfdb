@@ -62,6 +62,20 @@ impl OffsetBooking {
       };
     }
   }
+
+  pub fn current(&self) -> Option<AppendTicket> {
+    let current = self.0.load(Ordering::Relaxed);
+    let offset = (current & MASK) as usize;
+    if offset > WAL_BLOCK_SIZE {
+      return None;
+    }
+    let order = (current >> BITS) as AppendOrder;
+    Some(AppendTicket {
+      offset,
+      len: 0,
+      order,
+    })
+  }
 }
 
 pub enum BookingResult {

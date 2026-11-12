@@ -1,7 +1,7 @@
 use std::{
   cell::UnsafeCell,
   mem::{ManuallyDrop, MaybeUninit},
-  sync::{Mutex, MutexGuard, RwLock},
+  sync::{atomic::Ordering, Mutex, MutexGuard, RwLock},
 };
 
 use crate::{
@@ -9,25 +9,25 @@ use crate::{
   page::{Page, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::{create_static_ref, SBox, ShortenedMutex, ShortenedRwLock},
+  wal::{AtomicWriteSeq, WriteSeq},
   Result,
 };
 
 /**
  * Exclusive update guard for a cached block.
  *
- * Applying a page installs the new page pointer and advances the block epoch.
+ * The page and the write seq that made it dirty are installed together under this
+ * guard, so both read under the same latch always match.
  */
 pub struct BlockLatch<'a> {
   metadata: &'a BlockMetadata,
-  guard: MutexGuard<'a, u64>,
+  dirty: &'a AtomicWriteSeq,
+  _guard: MutexGuard<'a, ()>,
 }
 impl<'a> BlockLatch<'a> {
-  pub fn apply(&mut self, page: PageRef<PAGE_SIZE>) {
+  pub fn apply(&mut self, page: PageRef<PAGE_SIZE>, write_seq: WriteSeq) {
     self.metadata.store_page(page);
-    *self.guard += 1;
-  }
-  pub fn epoch(&self) -> u64 {
-    *self.guard
+    self.dirty.store(write_seq, Ordering::Relaxed);
   }
 }
 
@@ -59,22 +59,90 @@ impl Drop for PendingFlush {
   }
 }
 
+const CLEAN: WriteSeq = WriteSeq::MAX;
+
+pub struct DirtySnapshot<'a> {
+  snapshot: ManuallyDrop<SBox<PageRef<PAGE_SIZE>>>,
+  block: &'a CachedBlock,
+  write_seq: WriteSeq,
+}
+impl<'a> DirtySnapshot<'a> {
+  const fn new(
+    snapshot: SBox<PageRef<PAGE_SIZE>>,
+    block: &'a CachedBlock,
+    write_seq: WriteSeq,
+  ) -> Self {
+    Self {
+      snapshot: ManuallyDrop::new(snapshot),
+      block,
+      write_seq,
+    }
+  }
+
+  pub const fn get_write_seq(&self) -> WriteSeq {
+    self.write_seq
+  }
+
+  pub fn submit(self) -> PendingDirty<'a> {
+    let mut this = ManuallyDrop::new(self);
+    let page = unsafe { ManuallyDrop::take(&mut this.snapshot) };
+    let pending = ManuallyDrop::new(this.block.submit_page(page));
+    PendingDirty {
+      pending,
+      block: this.block,
+      write_seq: this.write_seq,
+    }
+  }
+}
+impl<'a> Drop for DirtySnapshot<'a> {
+  fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.snapshot) };
+    self.block.rollback_dirty(self.write_seq);
+  }
+}
+
+pub struct PendingDirty<'a> {
+  pending: ManuallyDrop<PendingFlush>,
+  block: &'a CachedBlock,
+  write_seq: WriteSeq,
+}
+impl<'a> PendingDirty<'a> {
+  pub fn finalize(self) -> Result {
+    let mut this = ManuallyDrop::new(self);
+    let pending = unsafe { ManuallyDrop::take(&mut this.pending) };
+    let Err(err) = pending.finalize() else {
+      return Ok(());
+    };
+    this.block.rollback_dirty(this.write_seq);
+    Err(err)
+  }
+}
+impl<'a> Drop for PendingDirty<'a> {
+  fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.pending) };
+    self.block.rollback_dirty(self.write_seq);
+  }
+}
+
 /**
  * Cached page for one table block.
  *
  * The page pointer can be atomically swapped when a new page version is
- * installed. epoch is protected by batch mutation in writable slot.
+ * installed. `dirty` holds the write seq of the newest change not yet on disk. It
+ * is written only under the latch and read without it.
  */
 pub struct CachedBlock {
   metadata: UnsafeCell<MaybeUninit<BlockMetadata>>,
-  latch: Mutex<u64>,
+  dirty: AtomicWriteSeq,
+  latch: Mutex<()>,
 }
 impl CachedBlock {
   #[inline]
   pub const fn uninit() -> Self {
     Self {
       metadata: UnsafeCell::new(MaybeUninit::uninit()),
-      latch: Mutex::new(0),
+      dirty: AtomicWriteSeq::new(CLEAN),
+      latch: Mutex::new(()),
     }
   }
 
@@ -82,7 +150,25 @@ impl CachedBlock {
   pub fn latch(&self) -> BlockLatch<'_> {
     BlockLatch {
       metadata: unsafe { self.metadata_ref() },
-      guard: self.latch.l(),
+      dirty: &self.dirty,
+      _guard: self.latch.l(),
+    }
+  }
+
+  pub fn get_dirty(&self) -> Option<WriteSeq> {
+    let seq = self.dirty.load(Ordering::Relaxed);
+    (seq != CLEAN).then_some(seq)
+  }
+
+  pub fn clear_dirty(&self) -> Option<WriteSeq> {
+    let old = self.dirty.swap(CLEAN, Ordering::Relaxed);
+    (old != CLEAN).then_some(old)
+  }
+
+  fn rollback_dirty(&self, write_seq: WriteSeq) {
+    let _latch = self.latch();
+    if self.get_dirty().is_none() {
+      self.dirty.store(write_seq, Ordering::Relaxed);
     }
   }
 
@@ -105,13 +191,8 @@ impl CachedBlock {
     unsafe { &self.metadata_ref().handle }
   }
 
-  /**
-   * Write the current page to disk.
-   */
-  pub fn submit_flush(&self) -> PendingFlush {
+  fn submit_page(&self, page: SBox<PageRef<PAGE_SIZE>>) -> PendingFlush {
     let metadata = unsafe { self.metadata_ref() };
-    let page = metadata.load_page();
-
     // SAFETY: `write_async` needs a `'static` page because the IO worker may run
     // after this function returns. `PendingFlush` keeps an `SBox` clone of the
     // loaded page, and `finalize(self)` waits for the async write before that clone
@@ -123,6 +204,21 @@ impl CachedBlock {
       .disk()
       .write_async(metadata.pointer, static_ref);
     PendingFlush::new(pending, page)
+  }
+
+  pub fn flush_dirty(&self) -> Option<DirtySnapshot<'_>> {
+    let _latch = self.latch();
+    let dirty = self.clear_dirty()?;
+    let page = self.load_page();
+    Some(DirtySnapshot::new(page, self, dirty))
+  }
+
+  /**
+   * Write the current page to disk.
+   */
+  pub fn submit_flush(&self) -> PendingFlush {
+    let page = self.load_page();
+    self.submit_page(page)
   }
 
   pub unsafe fn drop_in_place(&self) {

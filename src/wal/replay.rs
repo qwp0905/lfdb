@@ -6,7 +6,7 @@ use std::{
 
 use crossbeam::channel::{unbounded, Sender};
 
-use super::{LogId, LogRecord, Operation, TxId, WALFormatVersion, FILE_EXT};
+use super::{LogRecord, Operation, TxId, WALFormatVersion, WriteSeq, FILE_EXT};
 use crate::{
   background::ThreadPool,
   blob::BlobMetadata,
@@ -29,17 +29,17 @@ pub const RESERVED_TX: TxId = 0;
  *
  * Checkpoint records trim the replay window.
  *
- * A checkpoint means every log before `last_log_id` is already represented
+ * A checkpoint means every log before `durable_write_seq` is already represented
  * elsewhere: page changes are durable in table files, and transaction visibility
  * state is available through the version snapshot. Those older logs may be
  * replayable, but they are no longer needed for startup recovery.
  *
- * Replay keeps only the logs from the checkpoint's `last_log_id` up to the first
+ * Replay keeps only the logs from the checkpoint's `durable_write_seq` up to the first
  * missing log id. A failed write or a crash can leave a hole while later
  * segments persist, and the records past the hole may complete a transaction
  * whose earlier records were lost.
  *
- * A checkpoint is trusted only when every log from its `last_log_id` to its own
+ * A checkpoint is trusted only when every log from its `durable_write_seq` to its own
  * record is present, because one written past a hole carries a snapshot that may
  * treat such a transaction as committed.
  *
@@ -50,7 +50,7 @@ pub const RESERVED_TX: TxId = 0;
  * does not decide whether a page record is redone.
  */
 pub struct ReplayResult {
-  pub last_log_id: LogId,
+  pub last_write_seq: WriteSeq,
   pub last_tx_id: TxId,
   pub started: BTreeSet<TxId>,
   pub closed: BTreeSet<TxId>,
@@ -61,13 +61,20 @@ pub struct ReplayResult {
 }
 
 pub struct RedoImage {
+  pub write_seq: WriteSeq,
   pub table_id: TableId,
   pub pointer: Pointer,
   pub data: Vec<u8>,
 }
 impl RedoImage {
-  const fn new(table_id: TableId, pointer: Pointer, data: Vec<u8>) -> Self {
+  const fn new(
+    write_seq: WriteSeq,
+    table_id: TableId,
+    pointer: Pointer,
+    data: Vec<u8>,
+  ) -> Self {
     Self {
+      write_seq,
       table_id,
       pointer,
       data,
@@ -105,12 +112,12 @@ pub fn replay(
 }
 
 struct CheckpointState {
-  start: LogId,
+  start: WriteSeq,
   snapshot: PathBuf,
   missing: usize,
 }
 impl CheckpointState {
-  const fn new(start: LogId, snapshot: PathBuf, missing: usize) -> Self {
+  const fn new(start: WriteSeq, snapshot: PathBuf, missing: usize) -> Self {
     Self {
       start,
       snapshot,
@@ -121,33 +128,24 @@ impl CheckpointState {
     self.missing == 0
   }
 
-  const fn covers(&self, id: LogId, log_id: LogId) -> bool {
-    self.start <= log_id && log_id <= id
-  }
-
-  const fn fill(&mut self) -> bool {
+  const fn fill(&mut self) {
     self.missing -= 1;
-    self.is_complete()
-  }
-
-  const fn track(&mut self, id: LogId, log_id: LogId) -> bool {
-    !self.is_complete() && self.covers(id, log_id) && self.fill()
   }
 }
 
 struct ReplayState {
-  last_log_id: LogId,
+  last_write_seq: WriteSeq,
   last_tx_id: TxId,
-  redo: BTreeMap<LogId, RedoImage>,
-  started: BTreeMap<LogId, TxId>,
-  closed: BTreeMap<LogId, TxId>,
-  blob_handles: BTreeMap<LogId, BlobMetadata>,
-  checkpoints: BTreeMap<LogId, CheckpointState>,
+  redo: BTreeMap<WriteSeq, RedoImage>,
+  started: BTreeMap<WriteSeq, TxId>,
+  closed: BTreeMap<WriteSeq, TxId>,
+  blob_handles: BTreeMap<WriteSeq, BlobMetadata>,
+  checkpoints: BTreeMap<WriteSeq, CheckpointState>,
 }
 impl ReplayState {
   const fn new() -> Self {
     Self {
-      last_log_id: 0,
+      last_write_seq: 0,
       last_tx_id: RESERVED_TX,
       redo: BTreeMap::new(),
       started: BTreeMap::new(),
@@ -157,7 +155,7 @@ impl ReplayState {
     }
   }
 
-  fn base(&self) -> Option<(&LogId, &CheckpointState)> {
+  fn base(&self) -> Option<(&WriteSeq, &CheckpointState)> {
     self
       .checkpoints
       .iter()
@@ -165,26 +163,33 @@ impl ReplayState {
       .find(|(_, state)| state.is_complete())
   }
 
-  fn floor(&self) -> LogId {
+  fn floor(&self) -> WriteSeq {
     self.base().map(|(_, state)| state.start).unwrap_or(0)
   }
 
   fn apply(&mut self, record: LogRecord) -> Result {
     self.last_tx_id = self.last_tx_id.max(record.tx_id + 1);
-    self.last_log_id = self.last_log_id.max(record.log_id + 1);
-    if record.log_id < self.floor() || self.contains(&record.log_id) {
+    self.last_write_seq = self.last_write_seq.max(record.write_seq + 1);
+    if record.write_seq < self.floor() || self.contains(&record.write_seq) {
       return Ok(());
     }
 
-    self.track(record.log_id);
+    self.track(record.write_seq);
     self.insert(record)
   }
 
-  fn track(&mut self, log_id: LogId) {
+  fn track(&mut self, write_seq: WriteSeq) {
     let mut settled = None;
-    for (id, state) in self.checkpoints.iter_mut() {
-      if state.track(*id, log_id) {
-        settled = Some(*id);
+    for (bound, state) in self
+      .checkpoints
+      .iter_mut()
+      .filter(|(_, state)| !state.is_complete())
+      .filter(|(_, state)| write_seq >= state.start)
+      .filter(|(&bound, _)| bound >= write_seq)
+    {
+      state.fill();
+      if state.is_complete() {
+        settled = Some(*bound);
       }
     }
     let Some(id) = settled else {
@@ -193,11 +198,11 @@ impl ReplayState {
     self.settle(id);
   }
 
-  fn settle(&mut self, id: LogId) {
-    if self.base().is_some_and(|(base, _)| *base > id) {
+  fn settle(&mut self, seq: WriteSeq) {
+    if self.base().is_some_and(|(base, _)| *base > seq) {
       return;
     }
-    let start = self.checkpoints[&id].start;
+    let start = self.checkpoints[&seq].start;
     self.checkpoints = self.checkpoints.split_off(&start);
     self.redo = self.redo.split_off(&start);
     self.started = self.started.split_off(&start);
@@ -218,48 +223,48 @@ impl ReplayState {
         let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
           return Err(Error::CompressionCrashed(encoding));
         };
-        let image = RedoImage::new(table_id, pointer, decoded);
-        self.redo.insert(record.log_id, image);
-        self.started.insert(record.log_id, record.tx_id);
+        let image = RedoImage::new(record.write_seq, table_id, pointer, decoded);
+        self.redo.insert(record.write_seq, image);
+        self.started.insert(record.write_seq, record.tx_id);
         self.last_tx_id = self.last_tx_id.max(current_version);
       }
       Operation::Commit => {
-        self.closed.insert(record.log_id, record.tx_id);
+        self.closed.insert(record.write_seq, record.tx_id);
       }
       Operation::Checkpoint {
-        last_log_id,
+        durable_write_seq,
         current_version,
         snapshot,
       } => {
         self.last_tx_id = self.last_tx_id.max(current_version);
-        let missing = (last_log_id..record.log_id)
+        let missing = (durable_write_seq..record.write_seq)
           .filter(|id| !self.contains(id))
           .count();
-        let state = CheckpointState::new(last_log_id, snapshot, missing);
-        self.checkpoints.insert(record.log_id, state);
+        let state = CheckpointState::new(durable_write_seq, snapshot, missing);
+        self.checkpoints.insert(record.write_seq, state);
         if missing == 0 {
-          self.settle(record.log_id);
+          self.settle(record.write_seq);
         }
       }
       Operation::BlobCreated(metadata) => {
-        self.blob_handles.insert(record.log_id, metadata);
+        self.blob_handles.insert(record.write_seq, metadata);
       }
     };
     Ok(())
   }
 
-  fn contains(&self, id: &LogId) -> bool {
+  fn contains(&self, id: &WriteSeq) -> bool {
     self.redo.contains_key(id)
       || self.closed.contains_key(id)
       || self.blob_handles.contains_key(id)
       || self.checkpoints.contains_key(id)
   }
 
-  fn first_missing(&self, start: LogId) -> LogId {
+  fn first_missing(&self, start: WriteSeq) -> WriteSeq {
     (start..).find(|id| !self.contains(id)).unwrap()
   }
 
-  fn first_log_id(&self) -> LogId {
+  fn first_write_seq(&self) -> WriteSeq {
     let first = [
       self.redo.keys().next(),
       self.closed.keys().next(),
@@ -272,12 +277,12 @@ impl ReplayState {
   fn into_result(self, segments: Vec<ScanIOHandle>) -> ReplayResult {
     let (start, last_snapshot) = match self.base() {
       Some((_, state)) => (state.start, Some(state.snapshot.clone())),
-      None => (self.first_log_id(), None),
+      None => (self.first_write_seq(), None),
     };
     let end = self.first_missing(start);
 
     ReplayResult {
-      last_log_id: self.last_log_id,
+      last_write_seq: self.last_write_seq,
       last_tx_id: self.last_tx_id,
       started: within(self.started, start, end).collect(),
       closed: within(self.closed, start, end).collect(),
@@ -290,9 +295,9 @@ impl ReplayState {
 }
 
 fn within<V>(
-  mut logs: BTreeMap<LogId, V>,
-  start: LogId,
-  end: LogId,
+  mut logs: BTreeMap<WriteSeq, V>,
+  start: WriteSeq,
+  end: WriteSeq,
 ) -> impl Iterator<Item = V> {
   let mut kept = logs.split_off(&start);
   kept.split_off(&end);

@@ -1,12 +1,12 @@
 use std::ops::Range;
 
-use super::{BlockId, BlockLatch, CachedBlock, DirtyBlocks, MappingToken};
+use super::{BlockCacheCore, BlockId, BlockLatch, MappingToken};
 use crate::{
-  cache::dirty::DirtyTables,
   disk::Pointer,
-  page::{Page, PageAllocator, PageRef, VecRef, PAGE_SIZE},
+  page::{Page, PageRef, VecRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::{create_static_ref, SBox},
+  wal::{DurabilityGuard, WriteSeq},
   Result,
 };
 
@@ -19,49 +19,42 @@ use crate::{
  * replacement, dirty marking, and page-pool details behind those modes.
  */
 pub struct CachedSlot<'a> {
-  block: &'a CachedBlock,
-  dirty: &'a DirtyBlocks,
   block_id: BlockId,
+  core: &'a BlockCacheCore,
   token: MappingToken<'a>,
-  allocator: &'a PageAllocator<PAGE_SIZE>,
 }
 impl<'a> CachedSlot<'a> {
   pub const fn new(
-    block: &'a CachedBlock,
-    dirty: &'a DirtyBlocks,
     block_id: BlockId,
+    core: &'a BlockCacheCore,
     token: MappingToken<'a>,
-    allocator: &'a PageAllocator<PAGE_SIZE>,
   ) -> Self {
     Self {
-      block,
-      dirty,
       block_id,
+      core,
       token,
-      allocator,
     }
   }
 
   pub fn for_read(self) -> ReadonlySlot {
     ReadonlySlot {
-      page: self.block.load_page(),
+      page: self.core.get_block(self.block_id).load_page(),
     }
   }
   pub fn for_write<'b>(self) -> WritableSlot<'b>
   where
     'a: 'b,
   {
-    let latch = self.block.latch();
+    let block = self.core.get_block(self.block_id);
+    let latch = block.latch();
     WritableSlot {
-      pointer: self.block.get_pointer(),
+      pointer: block.get_pointer(),
       target: WriteTarget::Cached {
-        page: self.block.load_page(),
-        dirty_blocks: self.dirty,
-        allocator: self.allocator,
-        block_id: self.block_id,
+        page: block.load_page(),
         latch,
         _token: self.token,
       },
+      core: self.core,
     }
   }
 }
@@ -90,16 +83,12 @@ impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
 enum WriteTarget<'a> {
   Cached {
     page: SBox<PageRef<PAGE_SIZE>>,
-    dirty_blocks: &'a DirtyBlocks,
-    allocator: &'a PageAllocator<PAGE_SIZE>,
-    block_id: BlockId,
     latch: BlockLatch<'a>,
     _token: MappingToken<'a>,
   },
   Temp {
     page: PageRef<PAGE_SIZE>,
     table: TableHandleRef,
-    dirty_tables: &'a DirtyTables,
   },
 }
 
@@ -111,21 +100,19 @@ enum WriteTarget<'a> {
 pub struct WritableSlot<'a> {
   pointer: Pointer,
   target: WriteTarget<'a>,
+  core: &'a BlockCacheCore,
 }
 impl<'a> WritableSlot<'a> {
   pub const fn new_temp(
     table: TableHandleRef,
     page: PageRef<PAGE_SIZE>,
     pointer: Pointer,
-    dirty_tables: &'a DirtyTables,
+    core: &'a BlockCacheCore,
   ) -> Self {
     Self {
       pointer,
-      target: WriteTarget::Temp {
-        page,
-        table,
-        dirty_tables,
-      },
+      target: WriteTarget::Temp { page, table },
+      core,
     }
   }
 
@@ -133,38 +120,54 @@ impl<'a> WritableSlot<'a> {
     self.pointer
   }
 
-  pub fn commit_with<T, F>(self, f: F) -> Result<T>
-  where
-    F: FnOnce(&mut Page<PAGE_SIZE>) -> Result<T>,
-  {
+  pub unsafe fn commit_unchecked(self, data: &[u8], write_seq: WriteSeq) -> Result {
     match self.target {
       WriteTarget::Cached {
-        dirty_blocks,
-        allocator,
-        block_id,
-        mut latch,
-        _token,
-        ..
+        mut latch, _token, ..
       } => {
-        let mut shadow = allocator.allocate();
-        let result = f(&mut shadow)?;
-        dirty_blocks.insert(block_id);
-        latch.apply(shadow);
-        Ok(result)
+        let mut shadow = self.core.allocate_page();
+        shadow.copy_from(data, 0);
+        latch.apply(shadow, write_seq);
       }
-      WriteTarget::Temp {
-        mut page,
-        table,
-        dirty_tables,
-      } => {
-        let result = f(&mut page)?;
+      WriteTarget::Temp { mut page, table } => {
+        page.copy_from(data, 0);
         let static_ref = unsafe { create_static_ref::<Page<PAGE_SIZE>>(&page) };
         table
           .disk()
           .write_async(self.pointer, static_ref)
           .wait_flatten()?;
-        dirty_tables.mark(&table);
-        Ok(result)
+        self.core.mark_dirty_table(&table);
+      }
+    };
+    Ok(())
+  }
+
+  pub fn commit_with<F>(self, f: F) -> Result
+  where
+    F: FnOnce(&mut Page<PAGE_SIZE>) -> Result<DurabilityGuard<'a>>,
+  {
+    // The guard has to outlive the install. Once it drops, a checkpoint boundary can
+    // pass this record, so a page that is not dirty by then would be left out of
+    // that checkpoint's flush while its record falls outside replay.
+    match self.target {
+      WriteTarget::Cached {
+        mut latch, _token, ..
+      } => {
+        let mut shadow = self.core.allocate_page();
+        let guard = f(&mut shadow)?;
+        latch.apply(shadow, guard.get_write_seq());
+        Ok(())
+      }
+      WriteTarget::Temp { mut page, table } => {
+        let guard = f(&mut page)?;
+        self.core.ensure_durability(guard.get_write_seq())?;
+        let static_ref = unsafe { create_static_ref::<Page<PAGE_SIZE>>(&page) };
+        table
+          .disk()
+          .write_async(self.pointer, static_ref)
+          .wait_flatten()?;
+        self.core.mark_dirty_table(&table);
+        Ok(())
       }
     }
   }

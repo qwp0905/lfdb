@@ -24,7 +24,7 @@ use crate::{
   mvcc::VersionController,
   page::PAGE_SIZE,
   utils::{debug, error, info, trace, uuid_simple, MpscQueue, ToArc, ToBox},
-  wal::{LogId, WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog},
+  wal::{WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog, WriteSeq},
   Error, Result,
 };
 
@@ -38,20 +38,20 @@ const BATCH_SIZE: f64 = ((1 << 20) / PAGE_SIZE / 2) as f64; // convert from mib/
 struct CheckpointCycle {
   segments: Vec<WALSegment>,
   flusher: CacheFlusher,
-  log_id: LogId,
+  write_seq: WriteSeq,
   start: Option<Instant>,
 }
 impl CheckpointCycle {
   fn new(
     segments: Vec<WALSegment>,
     flusher: CacheFlusher,
-    log_id: LogId,
+    write_seq: WriteSeq,
     start: Option<Instant>,
   ) -> Self {
     Self {
       segments,
       flusher,
-      log_id,
+      write_seq,
       start,
     }
   }
@@ -76,8 +76,8 @@ impl CheckpointCycle {
   fn take_segments(&mut self) -> Vec<WALSegment> {
     take(&mut self.segments)
   }
-  const fn get_log_id(&self) -> LogId {
-    self.log_id
+  const fn get_write_seq(&self) -> WriteSeq {
+    self.write_seq
   }
   const fn segments_len(&self) -> usize {
     self.segments.len()
@@ -207,15 +207,15 @@ impl Checkpoint {
       };
 
       cycle.flush_hard()?;
-      self.worker.finalize_checkpoint(cycle.get_log_id())?;
+      self.worker.finalize_checkpoint(cycle.get_write_seq())?;
       cycle.truncate_all()?;
       info!("last checkpoint completed.");
       return Ok(());
     }
 
-    let id = self.worker.run_hard()?;
+    let seq = self.worker.run_hard()?;
     while let Some(event) = unsafe { self.incoming.pop() } {
-      if id >= event.last_log_id {
+      if seq >= event.last_write_seq {
         event.segment.truncate()?;
       }
     }
@@ -271,7 +271,7 @@ impl CheckpointWorker {
     }
   }
 
-  fn finalize_checkpoint(&self, log_id: LogId) -> Result {
+  fn finalize_checkpoint(&self, write_seq: WriteSeq) -> Result {
     let (current_version, active, aborted) = self.version_controller.snapshot();
     let blobs = self.blob_storage.metadata_snapshot();
     let snapshot = CheckpointSnapshot::new(active, aborted, blobs);
@@ -283,7 +283,7 @@ impl CheckpointWorker {
 
     self
       .wal
-      .checkpoint_and_flush(log_id, current_version, current.clone())?;
+      .checkpoint_and_flush(write_seq, current_version, current.clone())?;
 
     for entry in self.io_pool.read_dir()? {
       let name = PathBuf::from(entry.file_name());
@@ -298,14 +298,14 @@ impl CheckpointWorker {
     Ok(())
   }
 
-  fn run_hard(&self) -> Result<LogId> {
-    let log_id = self.wal.durable_log_id();
-    info!("hard checkpoint trigger id {log_id}.");
+  fn run_hard(&self) -> Result<WriteSeq> {
+    let write_seq = self.wal.completed_write_seq();
+    info!("hard checkpoint trigger id {write_seq}.");
 
     self.block_cache.create_flusher().flush_hard()?;
-    self.finalize_checkpoint(log_id)?;
-    info!("hard checkpoint complete id {log_id}");
-    Ok(log_id)
+    self.finalize_checkpoint(write_seq)?;
+    info!("hard checkpoint complete id {write_seq}");
+    Ok(write_seq)
   }
 
   fn create_cycle(
@@ -313,11 +313,11 @@ impl CheckpointWorker {
     incoming: &MpscQueue<WALSegmentRotated>,
     metrics: &MetricsRegistry,
   ) -> CheckpointCycle {
-    let log_id = self.wal.durable_log_id();
+    let write_seq = self.wal.completed_write_seq();
     let mut non_durable = Vec::new();
     let mut durable = Vec::new();
     while let Some(event) = unsafe { incoming.pop() } {
-      if log_id >= event.last_log_id {
+      if write_seq >= event.last_write_seq {
         durable.push(event.segment);
       } else {
         non_durable.push(event);
@@ -329,7 +329,7 @@ impl CheckpointWorker {
     CheckpointCycle::new(
       durable,
       self.block_cache.create_flusher(),
-      log_id,
+      write_seq,
       metrics.checkpoint_cycle.start(),
     )
   }
@@ -352,7 +352,7 @@ impl CheckpointWorker {
 
       info!(
         "new checkpoint cycle created for id {}, dirty blocks {}, segments {}",
-        new.get_log_id(),
+        new.get_write_seq(),
         new.dirty_len(),
         new.segments_len(),
       );
@@ -370,7 +370,10 @@ impl CheckpointWorker {
       return current.advance_flush(batch_size);
     }
 
-    info!("checkpoint id {} trying to finish.", current.get_log_id());
+    info!(
+      "checkpoint id {} trying to finish.",
+      current.get_write_seq()
+    );
 
     current.finish_flush()?;
     debug!("block cache all flushed.");
@@ -382,9 +385,9 @@ impl CheckpointWorker {
       return Ok(());
     }
 
-    self.finalize_checkpoint(current.get_log_id())?;
+    self.finalize_checkpoint(current.get_write_seq())?;
     metrics.checkpoint_cycle.record(current.take_start());
-    info!("checkpoint complete id {}", current.get_log_id());
+    info!("checkpoint complete id {}", current.get_write_seq());
 
     self.wal.reuse_segments(current.take_segments());
     *cycle = None;

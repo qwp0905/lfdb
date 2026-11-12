@@ -2,11 +2,7 @@ use std::iter::repeat;
 
 use crossbeam_skiplist::SkipMap;
 
-use super::BlockId;
-use crate::{
-  table::{TableHandleRef, TableId},
-  utils::AtomicBitmap,
-};
+use crate::table::{TableHandleRef, TableId};
 
 /**
  * Table-level dirty marker set.
@@ -30,24 +26,5 @@ impl DirtyTables {
   #[inline]
   pub fn drain(&self) -> impl Iterator<Item = TableHandleRef> + '_ {
     repeat(()).map_while(|_| self.0.pop_front().map(|v| v.value().clone()))
-  }
-}
-
-pub struct DirtyBlocks(AtomicBitmap);
-impl DirtyBlocks {
-  pub fn new(capacity: usize) -> Self {
-    Self(AtomicBitmap::new(capacity))
-  }
-  pub fn iter(&self) -> impl Iterator<Item = BlockId> + '_ {
-    self.0.iter().map(|i| i as BlockId)
-  }
-  pub fn insert(&self, id: BlockId) -> bool {
-    self.0.insert(id as u64)
-  }
-  pub fn remove(&self, id: BlockId) -> bool {
-    self.0.remove(id as u64)
-  }
-  pub fn contains(&self, id: BlockId) -> bool {
-    self.0.contains(id as u64)
   }
 }

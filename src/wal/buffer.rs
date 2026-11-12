@@ -8,19 +8,19 @@ use crate::{
 };
 
 use super::{
-  AppendCompletion, AppendOrder, AppendTicket, BookingResult, FsyncResult, LogId,
-  OffsetBooking, SegmentGeneration, SyncCompletion, WALSegment, WriteCompletion,
+  AppendCompletion, AppendOrder, AppendTicket, BookingResult, FsyncResult, OffsetBooking,
+  SegmentGeneration, SyncCompletion, WALSegment, WriteCompletion, WriteSeq,
   WAL_BLOCK_SIZE,
 };
 
 pub struct WALSegmentRotated {
-  pub last_log_id: LogId,
+  pub last_write_seq: WriteSeq,
   pub segment: WALSegment,
 }
 impl WALSegmentRotated {
-  const fn new(last_log_id: LogId, segment: WALSegment) -> Self {
+  const fn new(last_write_seq: WriteSeq, segment: WALSegment) -> Self {
     Self {
-      last_log_id,
+      last_write_seq,
       segment,
     }
   }
@@ -31,7 +31,8 @@ pub struct SegmentBuffer {
   segment: ManuallyDrop<WALSegment>,
   write_completion: WriteCompletion,
   sync_completion: Arc<SyncCompletion>,
-  last_log_id: Cell<Option<LogId>>,
+  last_write_seq: Cell<Option<WriteSeq>>,
+  write_seq_offset: WriteSeq,
   generation: SegmentGeneration,
   event_bus: Arc<EventBus>,
 }
@@ -39,18 +40,19 @@ impl SegmentBuffer {
   pub fn new(
     segment: WALSegment,
     entry: PageRef<WAL_BLOCK_SIZE>,
-    log_id_offset: LogId,
+    write_seq_offset: WriteSeq,
     max_len: Pointer,
     sync_completion: Arc<SyncCompletion>,
     generation: SegmentGeneration,
     event_bus: Arc<EventBus>,
   ) -> Self {
     Self {
-      log_buffer: AtomicSBox::new(LogBuffer::new(0, entry, log_id_offset, 0, 0)),
+      log_buffer: AtomicSBox::new(LogBuffer::new(0, entry, write_seq_offset, 0, 0)),
       segment: ManuallyDrop::new(segment),
       write_completion: WriteCompletion::new(max_len as usize),
       sync_completion,
-      last_log_id: Cell::new(None),
+      last_write_seq: Cell::new(None),
+      write_seq_offset,
       generation,
       event_bus,
     }
@@ -60,13 +62,13 @@ impl SegmentBuffer {
     &self,
     segment: WALSegment,
     entry: PageRef<WAL_BLOCK_SIZE>,
-    log_id_offset: LogId,
+    write_seq_offset: WriteSeq,
     max_len: Pointer,
   ) -> Self {
     Self::new(
       segment,
       entry,
-      log_id_offset,
+      write_seq_offset,
       max_len,
       self.sync_completion.clone(),
       self.generation + 1,
@@ -74,8 +76,11 @@ impl SegmentBuffer {
     )
   }
 
-  pub fn set_last_log_id(&self, log_id: LogId) {
-    self.last_log_id.set(Some(log_id));
+  pub fn set_last_write_seq(&self, write_seq: WriteSeq) {
+    self.last_write_seq.set(Some(write_seq));
+  }
+  pub const fn get_write_seq_offset(&self) -> WriteSeq {
+    self.write_seq_offset
   }
 
   pub fn load_log_buffer(&self) -> AtomicRef<LogBuffer> {
@@ -100,12 +105,12 @@ impl SegmentBuffer {
 impl Drop for SegmentBuffer {
   fn drop(&mut self) {
     let segment = unsafe { ManuallyDrop::take(&mut self.segment) };
-    // Checked before `last_log_id` because a failed rotation never sets it, and
+    // Checked before `last_write_seq` because a failed rotation never sets it, and
     // the next segment's commits would otherwise wait for this fsync forever.
     if let Some(kind) = self.write_completion.error() {
       return self.sync_completion.failover(kind);
     }
-    let Some(last_log_id) = self.last_log_id.get() else {
+    let Some(last_write_seq) = self.last_write_seq.get() else {
       return;
     };
     self
@@ -113,7 +118,7 @@ impl Drop for SegmentBuffer {
       .register(self.generation, segment.fsync());
     self
       .event_bus
-      .publish(WALSegmentRotated::new(last_log_id, segment));
+      .publish(WALSegmentRotated::new(last_write_seq, segment));
   }
 }
 
@@ -137,13 +142,13 @@ pub struct LogBuffer {
   batch: BatchQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
   max_offset: Cell<usize>,
   append_completion: AppendCompletion,
-  log_id_offset: LogId,
+  write_seq_offset: WriteSeq,
 }
 impl LogBuffer {
   fn new(
     pointer: Pointer,
     entry: PageRef<WAL_BLOCK_SIZE>,
-    log_id_offset: LogId,
+    write_seq_offset: WriteSeq,
     offset: usize,
     order: AppendOrder,
   ) -> Self {
@@ -154,24 +159,27 @@ impl LogBuffer {
       batch: BatchQueue::new(),
       max_offset: Cell::new(0),
       append_completion: AppendCompletion::new(order),
-      log_id_offset,
+      write_seq_offset,
     }
   }
 
   pub fn initialized(
     pointer: Pointer,
     entry: PageRef<WAL_BLOCK_SIZE>,
-    log_id_offset: LogId,
+    write_seq_offset: WriteSeq,
     offset: usize,
   ) -> Self {
-    Self::new(pointer, entry, log_id_offset, offset, 1)
+    Self::new(pointer, entry, write_seq_offset, offset, 1)
   }
 
   pub fn reserve_append(&self, len: usize) -> BookingResult {
     self.reserved_offset.reserve(len)
   }
-  pub const fn get_log_id_offset(&self) -> LogId {
-    self.log_id_offset
+  pub fn current_append(&self) -> Option<AppendTicket> {
+    self.reserved_offset.current()
+  }
+  pub const fn get_write_seq_offset(&self) -> WriteSeq {
+    self.write_seq_offset
   }
   pub fn append_at(&self, record: &[u8], ticket: &AppendTicket) {
     unsafe { self.entry.copy_from_unchecked(record, ticket.get_offset()) };
