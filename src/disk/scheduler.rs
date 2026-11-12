@@ -13,14 +13,17 @@ use crate::{
   background::{oneshot, Oneshot, OneshotFulfill},
   metrics::MetricsRegistry,
   utils::{
-    create_static_ref, BatchQueue, ExclusivePin, OwnedSharedToken, SBox, SharedToken,
+    create_static_ref, BatchQueue, ExclusivePin, Occupied, OwnedSharedToken, SBox,
+    SharedToken,
   },
 };
 
 type WriteTask = (u64, IoSlice<'static>);
 
-type WriteBatch = Arc<BatchQueue<(WriteTask, OneshotFulfill<Result<()>>)>>;
-type SyncBatch = Arc<BatchQueue<OneshotFulfill<Result<()>>>>;
+type WriteRequest = (WriteTask, OneshotFulfill<Result<()>>);
+type SyncRequest = OneshotFulfill<Result<()>>;
+type WriteBatch = Arc<BatchQueue<WriteRequest>>;
+type SyncBatch = Arc<BatchQueue<SyncRequest>>;
 
 pub struct SyncScheduler {
   backend: Arc<dyn IOBackend>,
@@ -40,13 +43,9 @@ impl SyncScheduler {
     metrics: &Arc<MetricsRegistry>,
   ) -> Oneshot<Result<()>> {
     let (o, f) = oneshot();
-    if self.sync.push_and_compete(f) {
-      let guard = RecursiveSync::new(
-        self.sync.clone(),
-        self.backend.clone(),
-        metrics.clone(),
-        pin,
-      );
+    if let Some(occupied) = self.sync.compete_owned(f) {
+      let guard =
+        RecursiveSync::new(occupied, self.backend.clone(), metrics.clone(), pin);
       drain_sync(guard);
     }
     o
@@ -114,12 +113,9 @@ impl IOScheduler {
     metrics: &Arc<MetricsRegistry>,
   ) -> Oneshot<Result<()>> {
     let (o, f) = oneshot();
-    if self
-      .write
-      .push_and_compete(((offset, IoSlice::new(buf)), f))
-    {
+    if let Some(occupied) = self.write.compete_owned(((offset, IoSlice::new(buf)), f)) {
       let guard = RecursiveWrite::new(
-        self.write.clone(),
+        occupied,
         self.inner.backend.clone(),
         metrics.clone(),
         self.alloc.clone(),
@@ -138,10 +134,10 @@ impl IOScheduler {
   }
 }
 
-fn drain_write(guard: RecursiveWrite) {
+fn drain_write(mut guard: RecursiveWrite) {
   let count = max_iov();
   let mut buffered = Vec::with_capacity(count);
-  for task in unsafe { guard.queue.drain_n(count) } {
+  for task in guard.occupied.drain_n(count) {
     buffered.push(task);
   }
   if buffered.is_empty() {
@@ -228,10 +224,7 @@ impl Drop for BatchedWrite {
   }
 }
 
-fn finish_write(
-  guard: RecursiveWrite,
-  buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
-) {
+fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
   debug_assert!(!buffered.is_empty());
   let backend = guard.backend.clone();
   let guard = SBox::new(guard);
@@ -312,7 +305,7 @@ fn retry_write(mut batched: BatchedWrite, trial: u8) {
 
 fn create_fallocate_callback(
   guard: RecursiveWrite,
-  buffered: Vec<(WriteTask, OneshotFulfill<Result<()>>)>,
+  buffered: Vec<WriteRequest>,
   allocated: u64,
 ) -> impl FnOnce(&Result<usize>) {
   move |result| {
@@ -328,7 +321,7 @@ fn create_fallocate_callback(
 }
 
 struct RecursiveWrite {
-  queue: WriteBatch,
+  occupied: ManuallyDrop<Occupied<WriteBatch, WriteRequest>>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
   alloc: Option<Arc<AllocState>>,
@@ -336,14 +329,14 @@ struct RecursiveWrite {
 }
 impl RecursiveWrite {
   const fn new(
-    queue: WriteBatch,
+    occupied: Occupied<WriteBatch, WriteRequest>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
     alloc: Option<Arc<AllocState>>,
     pin: OwnedSharedToken,
   ) -> Self {
     Self {
-      queue,
+      occupied: ManuallyDrop::new(occupied),
       backend,
       metrics,
       alloc,
@@ -354,12 +347,13 @@ impl RecursiveWrite {
 impl Drop for RecursiveWrite {
   fn drop(&mut self) {
     let pin = unsafe { ManuallyDrop::take(&mut self.pin) };
-    if self.queue.try_release() {
+    let occupied = unsafe { ManuallyDrop::take(&mut self.occupied) };
+    let Some(occupied) = occupied.release() else {
       return;
-    }
+    };
 
     drain_write(Self::new(
-      self.queue.clone(),
+      occupied,
       self.backend.clone(),
       self.metrics.clone(),
       self.alloc.clone(),
@@ -371,20 +365,20 @@ impl Drop for RecursiveWrite {
 const EXTENT_SIZE: u64 = 1 << 20;
 
 struct RecursiveSync {
-  queue: SyncBatch,
+  occupied: ManuallyDrop<Occupied<SyncBatch, SyncRequest>>,
   backend: Arc<dyn IOBackend>,
   metrics: Arc<MetricsRegistry>,
   pin: Option<OwnedSharedToken>,
 }
 impl RecursiveSync {
   const fn new(
-    queue: SyncBatch,
+    occupied: Occupied<SyncBatch, SyncRequest>,
     backend: Arc<dyn IOBackend>,
     metrics: Arc<MetricsRegistry>,
     pin: Option<OwnedSharedToken>,
   ) -> Self {
     Self {
-      queue,
+      occupied: ManuallyDrop::new(occupied),
       backend,
       metrics,
       pin,
@@ -393,11 +387,12 @@ impl RecursiveSync {
 }
 impl Drop for RecursiveSync {
   fn drop(&mut self) {
-    if self.queue.try_release() {
+    let occupied = unsafe { ManuallyDrop::take(&mut self.occupied) };
+    let Some(occupied) = occupied.release() else {
       return;
-    }
+    };
     drain_sync(Self::new(
-      self.queue.clone(),
+      occupied,
       self.backend.clone(),
       self.metrics.clone(),
       self.pin.take(),
@@ -405,10 +400,10 @@ impl Drop for RecursiveSync {
   }
 }
 
-fn drain_sync(guard: RecursiveSync) {
+fn drain_sync(mut guard: RecursiveSync) {
   const COUNT: usize = 512;
   let mut waiting = Vec::with_capacity(COUNT);
-  for done in unsafe { guard.queue.drain_n(COUNT) } {
+  for done in guard.occupied.drain_n(COUNT) {
     waiting.push(done);
   }
 

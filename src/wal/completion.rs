@@ -234,15 +234,15 @@ impl LogCompletion {
   }
 
   pub fn complete(&self, write_seq: WriteSeq) {
-    if !self.batch.push_and_compete(write_seq) {
+    let Some(mut occupied) = self.batch.compete(write_seq) else {
       return;
-    }
+    };
 
     loop {
       // Another owner may have advanced the frontier while ownership was released.
       let mut frontier = self.frontier.load(Ordering::Relaxed);
       let completed = unsafe { &mut *self.completed.get() };
-      completed.extend(unsafe { self.batch.drain_all() });
+      completed.extend(occupied.drain_all());
 
       let advanced = completed
         .iter()
@@ -255,9 +255,10 @@ impl LogCompletion {
         self.frontier.store(frontier, Ordering::Release);
       }
 
-      if self.batch.try_release() {
+      let Some(next) = occupied.release() else {
         return;
-      }
+      };
+      occupied = next;
     }
   }
 }
