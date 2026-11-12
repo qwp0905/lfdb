@@ -195,7 +195,7 @@ impl LogBuffer {
     let (o, f) = oneshot();
     let batched = BatchedWrite::new(o);
 
-    if !self.batch.push_and_compete((ticket, f)) {
+    let Some(mut occupied) = self.batch.compete((ticket, f)) else {
       return batched;
     };
 
@@ -204,7 +204,7 @@ impl LogBuffer {
 
       let mut max_offset = self.max_offset.get();
       let mut waiting = Vec::new();
-      for (ticket, done) in unsafe { self.batch.drain_all() } {
+      for (ticket, done) in occupied.drain_all() {
         self.append_completion.wait_until(ticket.get_order());
         max_offset = max_offset.max(ticket.get_len() + ticket.get_offset());
         waiting.push(done);
@@ -216,9 +216,10 @@ impl LogBuffer {
       let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
       let pending = upstream.segment.write_async(self.pointer, static_ref);
       pending.add_callback(create_cb(waiting, page));
-      if self.batch.try_release() {
+      let Some(next) = occupied.release() else {
         return batched;
-      }
+      };
+      occupied = next;
     }
   }
 
