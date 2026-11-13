@@ -11,7 +11,7 @@ use crate::{
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   utils::ToArc,
-  wal::WriteAheadLog,
+  wal::{WriteAheadLog, WriteSeq},
   Result,
 };
 
@@ -33,7 +33,7 @@ pub struct BlockCacheConfig {
  */
 pub struct BlockCache {
   core: Arc<BlockCacheCore>,
-  flush_executor: Arc<SharedWorkThread<BlockId, Result>>,
+  flush_executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BlockCache {
@@ -170,12 +170,17 @@ impl BlockCache {
     measure!(self.metrics.block_cache_read, self.__read(pointer, handle))
   }
 
-  pub fn create_flusher(&self) -> CacheFlusher {
-    CacheFlusher::new(
-      VecDeque::from(self.core.aggregate_dirty_blocks()),
+  pub fn create_flusher(&self, boundary: WriteSeq) -> Result<CacheFlusher> {
+    let dirty_blocks = self.core.aggregate_dirty_blocks(boundary);
+    if !dirty_blocks.is_empty() {
+      self.core.ensure_durability(boundary - 1)?;
+    }
+    Ok(CacheFlusher::new(
+      VecDeque::from(dirty_blocks),
+      boundary,
       self.flush_executor.clone(),
       self.core.clone(),
-    )
+    ))
   }
 
   pub fn close(&self) {
@@ -200,17 +205,20 @@ impl Drop for BlockCache {
  */
 pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
+  boundary: WriteSeq,
   core: Arc<BlockCacheCore>,
-  executor: Arc<SharedWorkThread<BlockId, Result>>,
+  executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
-    executor: Arc<SharedWorkThread<BlockId, Result>>,
+    boundary: WriteSeq,
+    executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
     core: Arc<BlockCacheCore>,
   ) -> Self {
     Self {
       dirty_blocks,
+      boundary,
       executor,
       core,
     }
@@ -220,7 +228,7 @@ impl CacheFlusher {
     let count = count.min(self.dirty_blocks.len());
     let mut pending = Vec::with_capacity(count);
     for &id in self.dirty_blocks.iter().take(count) {
-      pending.push(self.executor.execute(id));
+      pending.push(self.executor.execute((id, self.boundary)));
     }
 
     for pending in pending {
@@ -250,8 +258,10 @@ impl CacheFlusher {
 
 const PRE_FLUSH_CONCURRENCY: usize = 3;
 
-const fn handle_flush_blocks(core: Arc<BlockCacheCore>) -> impl Fn(BlockId) -> Result {
-  move |id| core.flush_block(id)
+const fn handle_flush_blocks(
+  core: Arc<BlockCacheCore>,
+) -> impl Fn((BlockId, WriteSeq)) -> Result {
+  move |(id, boundary)| core.flush_block(id, boundary)
 }
 
 #[cfg(all(test, not(loom)))]
