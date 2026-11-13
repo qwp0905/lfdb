@@ -169,14 +169,14 @@ impl<'a> Cursor<'a> {
 
     // Own range bounds inside the iterator so user-provided key references do not
     // extend into the cursor scan lifetime.
-    CursorIter::new(
+    Ok(CursorIter::new(
       self.context,
       &self.table,
       self.compaction.as_ref(),
       &self.index,
       range.start_bound().map(|k| k.as_ref().to_vec()),
       range.end_bound().map(|k| k.as_ref().to_vec()),
-    )
+    ))
   }
   pub fn range_rev<'b, K>(
     &'a self,
@@ -191,14 +191,14 @@ impl<'a> Cursor<'a> {
 
     // Own range bounds inside the iterator so user-provided key references do not
     // extend into the cursor scan lifetime.
-    CursorIter::new_rev(
+    Ok(CursorIter::new_rev(
       self.context,
       &self.table,
       self.compaction.as_ref(),
       &self.index,
       range.start_bound().map(|k| k.as_ref().to_vec()),
       range.end_bound().map(|k| k.as_ref().to_vec()),
-    )
+    ))
   }
 
   pub fn create_bulk(&self) -> Bulk<'_> {
@@ -222,18 +222,18 @@ impl<'a> CursorIter<'a, BTreeIter<&'a &'a TxContext<'a>>> {
     index: &'a BTreeIndex<&'a TxContext<'a>>,
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,
-  ) -> Result<Self> {
-    let default = index.range(table, &start, &end)?;
+  ) -> Self {
+    let default = index.range(table, &start, &end);
     let iter = match compaction {
       Some(c) => MergeSorted::merge(
-        index.range(c, &start, &end)?,
+        index.range(c, &start, &end),
         default,
         SortDirection::Ascending,
       ),
       None => MergeSorted::single(default, SortDirection::Ascending),
     };
 
-    Ok(Self { context, iter })
+    Self { context, iter }
   }
 }
 impl<'a> CursorIter<'a, BTreeRevIter<&'a &'a TxContext<'a>>> {
@@ -244,18 +244,18 @@ impl<'a> CursorIter<'a, BTreeRevIter<&'a &'a TxContext<'a>>> {
     index: &'a BTreeIndex<&'a TxContext<'a>>,
     start: Bound<StaticKey>,
     end: Bound<StaticKey>,
-  ) -> Result<Self> {
-    let default = index.range_rev(table, &start, &end)?;
+  ) -> Self {
+    let default = index.range_rev(table, &start, &end);
     let iter = match compaction {
       Some(c) => MergeSorted::merge(
-        index.range_rev(c, &start, &end)?,
+        index.range_rev(c, &start, &end),
         default,
         SortDirection::Descending,
       ),
       None => MergeSorted::single(default, SortDirection::Descending),
     };
 
-    Ok(Self { context, iter })
+    Self { context, iter }
   }
 }
 impl<'a, Iter: MergeSortable> CursorIter<'a, Iter> {

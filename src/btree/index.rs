@@ -130,16 +130,16 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
-  ) -> Result<BTreeIter<&'_ Policy>> {
-    BTreeIter::open(&self.0, table, start, end)
+  ) -> BTreeIter<&'_ Policy> {
+    BTreeIter::new(&self.0, table, start, end)
   }
   pub fn range_rev(
     &self,
     table: &TableHandleRef,
     start: &Bound<StaticKey>,
     end: &Bound<StaticKey>,
-  ) -> Result<BTreeRevIter<&'_ Policy>> {
-    BTreeRevIter::open(&self.0, table, start, end)
+  ) -> BTreeRevIter<&'_ Policy> {
+    BTreeRevIter::new(&self.0, table, start, end)
   }
 }
 
@@ -148,7 +148,7 @@ impl<Policy: ReadonlyPolicy + Clone> BTreeIndex<Policy> {
     &self,
     table: &TableHandleRef,
     from: Option<StaticKeyRef>,
-  ) -> Result<Snapshotter<Policy>> {
+  ) -> Snapshotter<Policy> {
     Snapshotter::open(self.0.clone(), table, from)
   }
 }
