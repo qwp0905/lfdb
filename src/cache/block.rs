@@ -160,9 +160,8 @@ impl CachedBlock {
     (seq != CLEAN).then_some(seq)
   }
 
-  pub fn clear_dirty(&self) -> Option<WriteSeq> {
-    let old = self.dirty.swap(CLEAN, Ordering::Relaxed);
-    (old != CLEAN).then_some(old)
+  pub fn clear_dirty(&self) {
+    self.dirty.store(CLEAN, Ordering::Relaxed);
   }
 
   fn rollback_dirty(&self, write_seq: WriteSeq) {
@@ -206,9 +205,13 @@ impl CachedBlock {
     PendingFlush::new(pending, page)
   }
 
-  pub fn flush_dirty(&self) -> Option<DirtySnapshot<'_>> {
+  pub fn flush_dirty(&self, boundary: WriteSeq) -> Option<DirtySnapshot<'_>> {
     let _latch = self.latch();
-    let dirty = self.clear_dirty()?;
+    let dirty = self.get_dirty()?;
+    if dirty >= boundary {
+      return None;
+    }
+    self.clear_dirty();
     let page = self.load_page();
     Some(DirtySnapshot::new(page, self, dirty))
   }

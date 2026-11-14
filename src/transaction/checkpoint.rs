@@ -302,7 +302,7 @@ impl CheckpointWorker {
     let write_seq = self.wal.completed_write_seq();
     info!("hard checkpoint trigger id {write_seq}.");
 
-    self.block_cache.create_flusher().flush_hard()?;
+    self.block_cache.create_flusher(write_seq)?.flush_hard()?;
     self.finalize_checkpoint(write_seq)?;
     info!("hard checkpoint complete id {write_seq}");
     Ok(write_seq)
@@ -312,8 +312,9 @@ impl CheckpointWorker {
     &self,
     incoming: &MpscQueue<WALSegmentRotated>,
     metrics: &MetricsRegistry,
-  ) -> CheckpointCycle {
+  ) -> Result<CheckpointCycle> {
     let write_seq = self.wal.completed_write_seq();
+    let flusher = self.block_cache.create_flusher(write_seq)?;
     let mut non_durable = Vec::new();
     let mut durable = Vec::new();
     while let Some(event) = unsafe { incoming.pop() } {
@@ -326,12 +327,12 @@ impl CheckpointWorker {
     for event in non_durable {
       incoming.push(event);
     }
-    CheckpointCycle::new(
+    Ok(CheckpointCycle::new(
       durable,
-      self.block_cache.create_flusher(),
+      flusher,
       write_seq,
       metrics.checkpoint_cycle.start(),
-    )
+    ))
   }
 
   fn run_tick<F: Fn(usize) -> usize>(
@@ -344,7 +345,7 @@ impl CheckpointWorker {
     // SAFETY: single threaded access to cycle.
     let cycle = unsafe { &mut *cycle.as_ptr() };
     let Some(current) = cycle else {
-      let new = self.create_cycle(incoming, metrics);
+      let new = self.create_cycle(incoming, metrics)?;
       if new.is_empty() {
         debug!("no checkpoint required.");
         return Ok(());
