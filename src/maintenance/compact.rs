@@ -590,7 +590,7 @@ impl CompactionWorker {
       Some(v) => v,
       None => self
         .old_index
-        .snapshot_from(&cycle.old, cycle.resume_key.as_deref())?,
+        .snapshot_from(&cycle.old, cycle.resume_key.as_deref()),
     };
 
     while !snapshotter.is_done() {
@@ -620,7 +620,7 @@ impl CompactionWorker {
       current.snapshotter = Some(
         self
           .old_index
-          .snapshot_from(&current.old, current.resume_key.as_deref())?,
+          .snapshot_from(&current.old, current.resume_key.as_deref()),
       );
       return Ok(false);
     };
@@ -804,7 +804,7 @@ impl Compactor {
     ));
     new_index.initialize(new)?;
 
-    let mut snapshotter = old_index.snapshot_from(old, None)?;
+    let mut snapshotter = old_index.snapshot_from(old, None);
     while !snapshotter.is_done() {
       apply_snapshot_once(&new_index, &mut snapshotter, new, &mut None, batch_size)?;
     }

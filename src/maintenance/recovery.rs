@@ -134,7 +134,7 @@ pub fn open_tables(
     recorder: (),
   });
 
-  let mut iter = index.range(&meta_table, &Bound::Unbounded, &Bound::Unbounded)?;
+  let mut iter = index.range(&meta_table, &Bound::Unbounded, &Bound::Unbounded);
 
   while let Some((_, bytes)) = iter.get_next_pair()? {
     let metadata = TableMetadata::from_bytes(&bytes)?;
