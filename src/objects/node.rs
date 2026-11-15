@@ -32,7 +32,7 @@ impl<'a> Viewable<'a> for BTreeNodeView<'a> {
         page, scanner,
       )?)),
       1 => Ok(Self::Leaf(LeafNodeView::from_scanner(page, scanner)?)),
-      _ => Err(Error::InvalidFormat("invalid cursor node type")),
+      _ => Err(Error::Corrupted("invalid cursor node type")),
     }
   }
 }
@@ -41,7 +41,7 @@ impl<'a> BTreeNodeView<'a> {
   #[inline]
   pub fn into_leaf(self) -> Result<LeafNodeView<'a>> {
     match self {
-      Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
+      Self::Internal(_) => Err(Error::Corrupted("invalid leaf node type")),
       Self::Leaf(node) => Ok(node),
     }
   }
@@ -49,7 +49,7 @@ impl<'a> BTreeNodeView<'a> {
   pub fn into_internal(self) -> Result<InternalNodeView<'a>> {
     match self {
       Self::Internal(node) => Ok(node),
-      Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
+      Self::Leaf(_) => Err(Error::Corrupted("invalid internal node type")),
     }
   }
 }
@@ -72,12 +72,12 @@ impl BTreeNode {
   pub const fn as_internal_mut(&mut self) -> Result<&mut InternalNode> {
     match self {
       Self::Internal(node) => Ok(node),
-      Self::Leaf(_) => Err(Error::InvalidFormat("invalid internal node type")),
+      Self::Leaf(_) => Err(Error::Corrupted("invalid internal node type")),
     }
   }
   pub const fn as_leaf_mut(&mut self) -> Result<&mut LeafNode> {
     match self {
-      Self::Internal(_) => Err(Error::InvalidFormat("invalid leaf node type")),
+      Self::Internal(_) => Err(Error::Corrupted("invalid leaf node type")),
       Self::Leaf(node) => Ok(node),
     }
   }
@@ -105,7 +105,7 @@ impl Deserializable for BTreeNode {
     match scanner.read()? {
       0 => Ok(Self::Internal(InternalNode::from_scanner(scanner)?)),
       1 => Ok(Self::Leaf(LeafNode::from_scanner(scanner)?)),
-      _ => Err(Error::InvalidFormat("invalid cursor node type")),
+      _ => Err(Error::Corrupted("invalid cursor node type")),
     }
   }
 }

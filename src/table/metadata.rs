@@ -207,14 +207,18 @@ impl<'a> TableMetadataView<'a> {
     let compaction = match reader.read_byte() {
       Some(0) => None,
       Some(1) => Some(SegmentSpecView::read_from(&mut reader)?),
-      _ => return Err(Error::InvalidFormat("metadata crashed.")),
+      _ => {
+        return Err(Error::Corrupted(
+          "table metadata has an invalid compaction flag",
+        ))
+      }
     };
 
     let Some(name_len) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted("table metadata truncated at name length"));
     };
     let Some(name) = reader.read(name_len as usize) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted("table metadata truncated at name"));
     };
     let name =
       unsafe { TableNameRef::from_str_unchecked(str::from_utf8_unchecked(name)) };
@@ -255,19 +259,23 @@ struct SegmentSpecView<'a> {
 impl<'a> SegmentSpecView<'a> {
   fn read_from(reader: &mut OffsetReader<'a>) -> Result<Self> {
     let Some(id) = reader.read_array().map(TableId::from_le_bytes) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted("table metadata truncated at segment id"));
     };
     let Some(v) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted(
+        "table metadata truncated at format version",
+      ));
     };
     let Some(version) = TableFormatVersion::from_u16(v) else {
       return Err(Error::UnsupportedVersion);
     };
     let Some(len) = reader.read_u16() else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted(
+        "table metadata truncated at filename length",
+      ));
     };
     let Some(bytes) = reader.read(len as usize) else {
-      return Err(Error::InvalidFormat("metadata crashed."));
+      return Err(Error::Corrupted("table metadata truncated at filename"));
     };
     let filename = unsafe { OsStr::from_encoded_bytes_unchecked(bytes) };
     Ok(Self {

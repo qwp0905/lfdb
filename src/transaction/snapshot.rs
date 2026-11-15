@@ -81,7 +81,7 @@ impl CheckpointSnapshot {
         let bytes = file.read_to_vec(byte_len)?;
         let Some(metadata) = BlobMetadata::read_from(&mut OffsetReader::new(&bytes))
         else {
-          return Err(Error::InvalidFormat("blob metadata crashed."));
+          return Err(Error::Corrupted("blob metadata crashed."));
         };
         blob_metadata.push(metadata);
       }
