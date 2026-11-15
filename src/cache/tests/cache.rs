@@ -89,7 +89,7 @@ impl Fixture {
     slot.commit_with(|page| {
       page.copy_from(data, 0);
       if fail {
-        return Err(Error::InvalidFormat("injected failure"));
+        return Err(Error::Corrupted("injected failure"));
       }
       append(&self.wal, &self.table, self.pointer, page)
     })

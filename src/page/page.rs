@@ -76,16 +76,16 @@ impl<const T: usize> Page<T> {
 unsafe impl<const T: usize> Send for Page<T> {}
 unsafe impl<const T: usize> Sync for Page<T> {}
 
-const EOF: Error = Error::EOF;
-
 /**
  * Sequential reader over a `Page`.
  *
  * This wraps `OffsetReader` with the page size and converts out-of-bounds reads
- * into the engine's `Error::EOF`.
+ * into the engine's `Error::Corrupted`.
  */
 pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
 impl<'a, const T: usize> PageScanner<'a, T> {
+  const OUT_OF_BOUNDS: Error = Error::Corrupted("page read out of bounds");
+
   const fn new(inner: *mut u8) -> Self {
     Self(unsafe { OffsetReader::from_ptr(inner, T) })
   }
@@ -94,7 +94,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub const fn advance(&mut self, n: usize) -> Result<usize> {
     match self.0.advance(n) {
       Some(offset) => Ok(offset),
-      None => Err(EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
 
@@ -102,7 +102,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub const fn read(&mut self) -> Result<u8> {
     match self.0.read_byte() {
       Some(v) => Ok(v),
-      None => Err(Error::EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
 
@@ -110,7 +110,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub const fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
     match self.0.read(n) {
       Some(v) => Ok(v),
-      None => Err(EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
 
@@ -118,14 +118,14 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub const fn read_u64(&mut self) -> Result<u64> {
     match self.0.read_u64() {
       Some(v) => Ok(v),
-      None => Err(EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
   #[inline(always)]
   pub const fn read_u32(&mut self) -> Result<u32> {
     match self.0.read_u32() {
       Some(v) => Ok(v),
-      None => Err(EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
 
@@ -133,7 +133,7 @@ impl<'a, const T: usize> PageScanner<'a, T> {
   pub const fn read_u16(&mut self) -> Result<u16> {
     match self.0.read_u16() {
       Some(v) => Ok(v),
-      None => Err(EOF),
+      None => Err(Self::OUT_OF_BOUNDS),
     }
   }
 }
@@ -142,10 +142,12 @@ impl<'a, const T: usize> PageScanner<'a, T> {
  * Sequential writer over a `Page`.
  *
  * This wraps `OffsetWriter` with the page size and converts out-of-bounds
- * writes into the engine's `Error::EOF`.
+ * writes into the engine's `Error::Corrupted`.
  */
 pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
 impl<'a, const T: usize> PageWriter<'a, T> {
+  const OVERFLOW: Error = Error::Corrupted("page write overflow");
+
   const fn new(inner: *mut u8) -> Self {
     Self(unsafe { OffsetWriter::from_ptr(inner, T) })
   }
@@ -154,7 +156,7 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   pub const fn write(&mut self, bytes: &[u8]) -> Result<()> {
     match self.0.write(bytes) {
       true => Ok(()),
-      false => Err(EOF),
+      false => Err(Self::OVERFLOW),
     }
   }
 
@@ -162,21 +164,21 @@ impl<'a, const T: usize> PageWriter<'a, T> {
   pub const fn write_u64(&mut self, value: u64) -> Result {
     match self.0.write_u64(value) {
       true => Ok(()),
-      false => Err(EOF),
+      false => Err(Self::OVERFLOW),
     }
   }
   #[inline(always)]
   pub const fn write_u32(&mut self, value: u32) -> Result {
     match self.0.write_u32(value) {
       true => Ok(()),
-      false => Err(EOF),
+      false => Err(Self::OVERFLOW),
     }
   }
   #[inline(always)]
   pub const fn write_u16(&mut self, value: u16) -> Result {
     match self.0.write_u16(value) {
       true => Ok(()),
-      false => Err(EOF),
+      false => Err(Self::OVERFLOW),
     }
   }
 
