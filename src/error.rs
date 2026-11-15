@@ -68,6 +68,13 @@ pub enum Error {
 
   #[error("page size unsupported.")]
   UnsupportedPageSize,
+
+  /**
+   * An earlier call on this iterator returned an error and left it unusable; that
+   * call returned the cause. Open a new iterator.
+   */
+  #[error("iterator poisoned by an earlier error")]
+  IteratorPoisoned,
 }
 
 pub type Result<T = ()> = result::Result<T, Error>;
