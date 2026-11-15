@@ -12,7 +12,7 @@ use std::{
 
 use lfdb::{
   DefaultDiskBackend, DiskBackend, Engine, EngineBuilder, Error, IOBackend, IOTask,
-  TaskType,
+  TaskType, VecRef,
 };
 use log::Log;
 use tempfile::{tempdir_in, TempDir};
@@ -416,6 +416,92 @@ fn sweep(op: Op) {
   // Non-short-circuiting so the concurrent run always executes.
   sweep_until_unreached(|nth| run_scenario(op, nth, false) | run_scenario(op, nth, true));
   sweep_until_unreached(|nth| open_scenario(op, nth));
+}
+
+const SCAN_KEY_COUNT: usize = 200;
+
+#[derive(Clone, Copy)]
+enum ScanDirection {
+  Forward,
+  Backward,
+}
+
+/**
+ * Once an iterator returns an error, the position it stopped at is no longer
+ * known, so every later call must fail with `IteratorPoisoned`.
+ */
+fn expect_poisoned_after_error(
+  mut next: impl FnMut() -> Result<Option<(VecRef, VecRef)>, Error>,
+) -> bool {
+  let failed = loop {
+    match next() {
+      Ok(Some(_)) => continue,
+      Ok(None) => break false,
+      Err(err) => {
+        assert!(
+          !matches!(err, Error::IteratorPoisoned),
+          "poisoned before failing"
+        );
+        break true;
+      }
+    }
+  };
+  if !failed {
+    return false;
+  }
+  for _ in 0..2 {
+    assert!(
+      matches!(next(), Err(Error::IteratorPoisoned)),
+      "iterator kept going after an error"
+    );
+  }
+  true
+}
+
+/**
+ * The data outgrows the block cache and the engine is reopened, so the scan has
+ * to read pages from disk where the fault is injected.
+ */
+fn scan_scenario(direction: ScanDirection, nth: usize) -> bool {
+  let dir = tempdir_in(".").unwrap();
+  {
+    let engine = options(&dir).open().unwrap();
+    create_table(&engine);
+    let mut tx = engine.new_tx().unwrap();
+    let table = tx.table(TABLE).unwrap();
+    for i in 0..SCAN_KEY_COUNT {
+      table
+        .insert(format!("{i:0>6}").into_bytes(), vec![b'v'; VALUE_SIZE])
+        .unwrap();
+    }
+    drop(table);
+    tx.commit().unwrap();
+  }
+
+  let controller = FaultController::default();
+  let engine = options(&dir)
+    .open_with_backend(FaultBackend::new(controller.clone()))
+    .unwrap();
+  let tx = engine.new_tx().unwrap();
+  let table = tx.table(TABLE).unwrap();
+
+  controller.arm(Op::Read, nth);
+  match direction {
+    ScanDirection::Forward => {
+      let mut iter = table.range::<[_]>(..).unwrap();
+      expect_poisoned_after_error(|| iter.try_next())
+    }
+    ScanDirection::Backward => {
+      let mut iter = table.range_rev::<[_]>(..).unwrap();
+      expect_poisoned_after_error(|| iter.try_next())
+    }
+  }
+}
+
+#[test]
+fn read_failure_poisons_iterator() {
+  sweep_until_unreached(|nth| scan_scenario(ScanDirection::Forward, nth));
+  sweep_until_unreached(|nth| scan_scenario(ScanDirection::Backward, nth));
 }
 
 #[test]
