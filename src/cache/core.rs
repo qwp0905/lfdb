@@ -96,16 +96,18 @@ impl BlockCacheCore {
     Ok(())
   }
 
-  pub fn flush_block(&self, id: BlockId) -> Result {
+  pub fn flush_block(&self, id: BlockId, boundary: WriteSeq) -> Result {
     let Some(_token) = self.mapping.try_pin(id) else {
       return Ok(());
     };
 
+    // A block rewritten at or after the boundary is left dirty: its newest record
+    // holds the whole page, so replay from the boundary restores it, and the
+    // checkpoint record is flushed after that record.
     let block = &self.cached_blocks[id];
-    let Some(snapshot) = block.flush_dirty() else {
+    let Some(snapshot) = block.flush_dirty(boundary) else {
       return Ok(());
     };
-    self.wal.flush_until(snapshot.get_write_seq())?;
     snapshot.submit().finalize()?;
     self.mark_dirty_table(block.handle());
     Ok(())
@@ -137,7 +139,7 @@ impl BlockCacheCore {
     Err(err)
   }
 
-  pub fn aggregate_dirty_blocks(&self) -> Vec<BlockId> {
+  pub fn aggregate_dirty_blocks(&self, boundary: WriteSeq) -> Vec<BlockId> {
     let mut buckets = HashMap::<_, Vec<_>>::new();
     let mut len = 0;
 
@@ -145,7 +147,7 @@ impl BlockCacheCore {
       .cached_blocks
       .iter()
       .enumerate()
-      .filter(|(_, block)| block.get_dirty().is_some())
+      .filter(|(_, block)| block.get_dirty().is_some_and(|seq| seq < boundary))
     {
       let Some(_token) = self.mapping.try_pin(id) else {
         // An exclusive owner is already handling this slot, for example during

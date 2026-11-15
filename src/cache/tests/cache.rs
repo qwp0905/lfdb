@@ -71,7 +71,9 @@ impl Fixture {
       page.copy_from(&ORIGINAL, 0);
       append(&wal, &table, pointer, page)
     })?;
-    cache.create_flusher().flush_hard()?;
+    cache
+      .create_flusher(wal.completed_write_seq())?
+      .flush_hard()?;
 
     Ok(Self {
       _dir: dir,
@@ -98,8 +100,12 @@ impl Fixture {
     Ok(slot.as_ref().range(0..ORIGINAL.len()).to_vec())
   }
 
-  fn dirty_count(&self) -> usize {
-    self.cache.create_flusher().remaining()
+  fn flusher(&self) -> Result<CacheFlusher> {
+    self.cache.create_flusher(self.wal.completed_write_seq())
+  }
+
+  fn dirty_count(&self) -> Result<usize> {
+    Ok(self.flusher()?.remaining())
   }
 }
 impl Drop for Fixture {
@@ -133,9 +139,22 @@ fn failed_commit_leaves_nothing_to_flush() -> Result {
   let fixture = Fixture::new()?;
 
   assert!(fixture.write(&CHANGED, true).is_err());
-  assert_eq!(fixture.dirty_count(), 0);
+  assert_eq!(fixture.dirty_count()?, 0);
 
   fixture.write(&CHANGED, false)?;
-  assert_eq!(fixture.dirty_count(), 1);
+  assert_eq!(fixture.dirty_count()?, 1);
+  Ok(())
+}
+
+#[test]
+fn rewritten_block_stays_dirty() -> Result {
+  let fixture = Fixture::new()?;
+  fixture.write(&CHANGED, false)?;
+
+  let mut flusher = fixture.flusher()?;
+  fixture.write(&ORIGINAL, false)?;
+  flusher.flush_hard()?;
+
+  assert_eq!(fixture.dirty_count()?, 1);
   Ok(())
 }
