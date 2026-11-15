@@ -7,7 +7,7 @@ use crate::{
   page::VecRef,
   table::TableHandleRef,
   wal::TxId,
-  Result,
+  Error, Result,
 };
 
 use super::{
@@ -295,6 +295,10 @@ enum IterState {
    * Every key in range has been returned.
    */
   Done,
+  /**
+   * An earlier call returned an error, so the position is no longer known.
+   */
+  Poisoned,
 }
 
 /**
@@ -329,8 +333,18 @@ where
   }
 
   fn next_record(&mut self) -> Result<Option<BufferedEntry>> {
+    let err = match self.next_record_internal() {
+      Ok(record) => return Ok(record),
+      Err(err) => err,
+    };
+    self.state = IterState::Poisoned;
+    Err(err)
+  }
+
+  fn next_record_internal(&mut self) -> Result<Option<BufferedEntry>> {
     loop {
       match &mut self.state {
+        IterState::Poisoned => return Err(Error::IteratorPoisoned),
         IterState::Done => return Ok(None),
         IterState::Pending => {
           let leaf = self.core.descend(&self.start)?;
@@ -427,6 +441,10 @@ enum RevIterState {
    * Every key in range has been returned.
    */
   Done,
+  /**
+   * An earlier call returned an error, so the position is no longer known.
+   */
+  Poisoned,
 }
 
 pub struct BTreeRevIter<Policy> {
@@ -449,8 +467,18 @@ impl<Policy: ReadonlyPolicy> BTreeRevIter<Policy> {
   }
 
   fn next_record(&mut self) -> Result<Option<BufferedEntry>> {
+    let err = match self.next_record_internal() {
+      Ok(record) => return Ok(record),
+      Err(err) => err,
+    };
+    self.state = RevIterState::Poisoned;
+    Err(err)
+  }
+
+  fn next_record_internal(&mut self) -> Result<Option<BufferedEntry>> {
     loop {
       match &mut self.state {
+        RevIterState::Poisoned => return Err(Error::IteratorPoisoned),
         RevIterState::Done => return Ok(None),
         RevIterState::Pending { end } => {
           let root = self.core.get_root()?;
