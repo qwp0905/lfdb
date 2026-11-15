@@ -53,26 +53,28 @@ impl ManifestVersion {
     match self {
       Self::V0 => {
         let Some(page_size) = reader.read_u32() else {
-          return Err(CRASHED_ERR);
+          return Err(Error::Corrupted("manifest truncated at page size"));
         };
 
         let Some(len) = reader.read_u32() else {
-          return Err(CRASHED_ERR);
+          return Err(Error::Corrupted(
+            "manifest truncated at metadata table length",
+          ));
         };
         let Some(bytes) = reader.read(len as usize) else {
-          return Err(CRASHED_ERR);
+          return Err(Error::Corrupted("manifest truncated at metadata table"));
         };
         let metadata_table = TableMetadata::from_bytes(bytes)?;
 
         let Some(v) = reader.read_u16() else {
-          return Err(CRASHED_ERR);
+          return Err(Error::Corrupted("manifest truncated at snapshot version"));
         };
         let Some(snapshot_version) = SnapshotFormatVersion::from_u16(v) else {
           return Err(Error::UnsupportedVersion);
         };
 
         let Some(v) = reader.read_u16() else {
-          return Err(CRASHED_ERR);
+          return Err(Error::Corrupted("manifest truncated at wal version"));
         };
         let Some(wal_version) = WALFormatVersion::from_u16(v) else {
           return Err(Error::UnsupportedVersion);
@@ -109,7 +111,7 @@ impl Manifest {
     }
   }
 }
-const CRASHED_ERR: Error = Error::InvalidFormat("metadata crashed.");
+
 pub fn load_manifest(io_pool: &IOPool) -> Result<Option<Manifest>> {
   let filename = PathBuf::from(FILENAME);
   if !io_pool.exists(&filename)? {
@@ -124,10 +126,10 @@ pub fn load_manifest(io_pool: &IOPool) -> Result<Option<Manifest>> {
     .read_u32()
     .is_none_or(|c| c != calc_checksum(&bytes[4..]))
   {
-    return Err(CRASHED_ERR);
+    return Err(Error::Corrupted("manifest checksum mismatch"));
   }
   let Some(v) = reader.read_u16() else {
-    return Err(CRASHED_ERR);
+    return Err(Error::Corrupted("manifest truncated at format version"));
   };
   let Some(version) = ManifestVersion::from_u16(v) else {
     return Err(Error::UnsupportedVersion);

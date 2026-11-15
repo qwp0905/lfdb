@@ -221,7 +221,7 @@ impl ReplayState {
         original_len,
       } => {
         let Ok(decoded) = encoding.decompress(&data, original_len as usize) else {
-          return Err(Error::CompressionCrashed(encoding));
+          return Err(Error::Corrupted("wal record failed to decompress"));
         };
         let image = RedoImage::new(record.write_seq, table_id, pointer, decoded);
         self.redo.insert(record.write_seq, image);

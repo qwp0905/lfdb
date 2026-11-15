@@ -106,7 +106,7 @@ impl VersionRecord {
         let len = reader.read_u32()?;
         RecordData::Blob(id, offset, len)
       }
-      _ => return Err(Error::InvalidFormat("invalid type for data version record")),
+      _ => return Err(Error::Corrupted("invalid type for data version record")),
     };
     Ok(Self::new(owner, version, data))
   }
@@ -187,7 +187,7 @@ impl VersionRecordView {
         let len = reader.read_u32()?;
         RecordDataView::Blob(id, offset, len)
       }
-      _ => return Err(Error::InvalidFormat("invalid type for data version record")),
+      _ => return Err(Error::Corrupted("invalid type for data version record")),
     };
     Ok(Self::new(owner, version, data))
   }

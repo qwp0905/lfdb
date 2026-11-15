@@ -46,7 +46,7 @@ pub trait Deserializable: Sized + TypedObject {
     let expected = Self::TYPE.byte();
     let received = reader.read()?;
     if expected != received {
-      return Err(Error::DeserializeError(expected, received));
+      return Err(Error::Corrupted("unexpected block type"));
     }
 
     Self::read_from(&mut reader)
@@ -101,7 +101,7 @@ pub trait Viewable<'a>: Sized + TypedObject {
     let expected = Self::TYPE.byte();
     let received = scanner.read()?;
     if expected != received {
-      return Err(Error::DeserializeError(expected, received));
+      return Err(Error::Corrupted("unexpected block type"));
     }
 
     Self::read_from(page, &mut scanner)
