@@ -1,12 +1,16 @@
-use std::sync::{
-  Arc,
-  atomic::{AtomicUsize, Ordering},
+use std::{
+  path::Path,
+  sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  },
 };
 
 use criterion::{BenchmarkGroup, SamplingMode, Throughput, measurement::WallTime};
 use crossbeam::channel::{Sender, unbounded};
 use rand::{Rng, seq::SliceRandom};
 use rand_distr::{Distribution, Zipf};
+use sysinfo::System;
 
 use crate::BenchmarkDB;
 
@@ -28,6 +32,17 @@ fn make_value(i: usize) -> Vec<u8> {
     .to_vec();
   v.resize(VALUE_SIZE, b'x');
   v
+}
+
+/**
+ * Preloading runs on its own engine instance, so it may use far more cache than
+ * the measured instance and finish without evictions. Half of the available
+ * memory leaves room for the rest of the host.
+ */
+fn preload_cache_size() -> usize {
+  let mut system = System::new();
+  system.refresh_memory();
+  (system.available_memory() / 2) as usize
 }
 
 const CHUNK: usize = 1000;
@@ -93,23 +108,23 @@ fn spawn_workers(
   (tx, c, threads)
 }
 
-pub fn workload_a<F, E>(
+pub fn workload_a<E>(
+  dir: &Path,
+  cache_size: usize,
   record_count: usize,
   op_count: usize,
   thread_count: usize,
   mut group: BenchmarkGroup<WallTime>,
-  new: F,
 ) where
   E: BenchmarkDB + Send + Sync + 'static,
-  F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
-    let engine = new();
+    let engine = E::new(preload_cache_size(), dir);
     pre_load(&engine, record_count);
   }
 
-  let engine = Arc::new(new());
+  let engine = Arc::new(E::new(cache_size, dir));
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -145,23 +160,23 @@ pub fn workload_a<F, E>(
   engine.print_metrics();
 }
 
-pub fn workload_b<E, F>(
+pub fn workload_b<E>(
+  dir: &Path,
+  cache_size: usize,
   record_count: usize,
   op_count: usize,
   thread_count: usize,
   mut group: BenchmarkGroup<WallTime>,
-  new: F,
 ) where
   E: BenchmarkDB + Send + Sync + 'static,
-  F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
-    let engine = new();
+    let engine = E::new(preload_cache_size(), dir);
     pre_load(&engine, record_count);
   }
 
-  let engine = Arc::new(new());
+  let engine = Arc::new(E::new(cache_size, dir));
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -197,23 +212,23 @@ pub fn workload_b<E, F>(
   engine.print_metrics();
 }
 
-pub fn workload_d<E, F>(
+pub fn workload_d<E>(
+  dir: &Path,
+  cache_size: usize,
   record_count: usize,
   op_count: usize,
   thread_count: usize,
   mut group: BenchmarkGroup<WallTime>,
-  new: F,
 ) where
   E: BenchmarkDB + Send + Sync + 'static,
-  F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
-    let engine = new();
+    let engine = E::new(preload_cache_size(), dir);
     pre_load(&engine, record_count);
   }
 
-  let engine = Arc::new(new());
+  let engine = Arc::new(E::new(cache_size, dir));
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -249,15 +264,15 @@ pub fn workload_d<E, F>(
   engine.print_metrics();
 }
 
-pub fn workload_e<E, F>(
+pub fn workload_e<E>(
+  dir: &Path,
+  cache_size: usize,
   record_count: usize,
   op_count: usize,
   thread_count: usize,
   mut group: BenchmarkGroup<WallTime>,
-  new: F,
 ) where
   E: BenchmarkDB + Send + Sync + 'static,
-  F: Fn() -> E,
 {
   fn make_key(id: usize, i: usize) -> Vec<u8> {
     format!("{id:0>3}{i:0>width$}", width = KEY_SIZE - 3)
@@ -273,7 +288,7 @@ pub fn workload_e<E, F>(
 
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
-    let engine = new();
+    let engine = E::new(preload_cache_size(), dir);
     engine.ensure_table(TABLE);
     for &id in ids.iter() {
       let mut iter =
@@ -288,7 +303,7 @@ pub fn workload_e<E, F>(
     }
   }
 
-  let engine = Arc::new(new());
+  let engine = Arc::new(E::new(cache_size, dir));
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 
@@ -329,23 +344,23 @@ pub fn workload_e<E, F>(
   engine.print_metrics();
 }
 
-pub fn workload_f<E, F>(
+pub fn workload_f<E>(
+  dir: &Path,
+  cache_size: usize,
   record_count: usize,
   op_count: usize,
   thread_count: usize,
   mut group: BenchmarkGroup<WallTime>,
-  new: F,
 ) where
   E: BenchmarkDB + Send + Sync + 'static,
-  F: Fn() -> E,
 {
   println!("{record_count} records / {op_count} operations / {thread_count} threads");
   {
-    let engine = new();
+    let engine = E::new(preload_cache_size(), dir);
     pre_load(&engine, record_count);
   }
 
-  let engine = Arc::new(new());
+  let engine = Arc::new(E::new(cache_size, dir));
   let (t, r) = unbounded();
   let (tx, counter, threads) = spawn_workers(engine.clone(), thread_count, &t);
 

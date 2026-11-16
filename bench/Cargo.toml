@@ -16,6 +16,7 @@ rocksdb = { version = "0.24.0", features = [
   "multi-threaded-cf",
 ], optional = true }
 sled = { version = "0.34.7", optional = true }
+sysinfo = "0.38.4"
 
 [dev-dependencies]
 tempfile = "3.10.1"
