@@ -4,14 +4,14 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 
 use crate::BenchmarkDB;
 
-pub fn new(cache_size: usize, dir: &Path) -> impl BenchmarkDB + 'static {
-  Database::builder()
-    .set_cache_size(cache_size)
-    .create(dir.join("redb.redb"))
-    .unwrap()
-}
-
 impl BenchmarkDB for Database {
+  fn new(cache_size: usize, dir: &Path) -> Self {
+    Database::builder()
+      .set_cache_size(cache_size)
+      .create(dir.join("redb.redb"))
+      .unwrap()
+  }
+
   fn ensure_table(&self, table: &str) {
     let tx = self.begin_write().unwrap();
     tx.open_table(TableDefinition::<&[u8], Vec<u8>>::new(table))

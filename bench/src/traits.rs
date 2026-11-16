@@ -1,4 +1,10 @@
+use std::path::Path;
+
 pub trait BenchmarkDB {
+  fn new(cache_size: usize, dir: &Path) -> Self
+  where
+    Self: Sized;
+
   fn ensure_table(&self, table: &str);
   fn drop_table(&self, table: &str);
   fn bulk(&self, table: &str, kvs: &[(Vec<u8>, Vec<u8>)]);

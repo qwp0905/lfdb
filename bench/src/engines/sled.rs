@@ -4,14 +4,15 @@ use sled::{Batch, Config, Db, transaction::ConflictableTransactionResult};
 
 use crate::BenchmarkDB;
 
-pub fn new(cache_size: usize, dir: &Path) -> Db {
-  Config::new()
-    .cache_capacity(cache_size as u64)
-    .path(dir)
-    .open()
-    .unwrap()
-}
 impl BenchmarkDB for Db {
+  fn new(cache_size: usize, dir: &Path) -> Self {
+    Config::new()
+      .cache_capacity(cache_size as u64)
+      .path(dir)
+      .open()
+      .unwrap()
+  }
+
   fn ensure_table(&self, table: &str) {
     self.open_tree(table).unwrap();
   }
