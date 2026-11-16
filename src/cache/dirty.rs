@@ -1,6 +1,4 @@
-use std::iter::repeat;
-
-use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::{map::Entry, SkipMap};
 
 use crate::table::{TableHandleRef, TableId};
 
@@ -23,8 +21,17 @@ impl DirtyTables {
     self.0.get_or_insert_with(table.get_id(), || table.clone());
   }
 
-  #[inline]
-  pub fn drain(&self) -> impl Iterator<Item = TableHandleRef> + '_ {
-    repeat(()).map_while(|_| self.0.pop_front().map(|v| v.value().clone()))
+  pub fn get_all(&self) -> impl Iterator<Item = DirtyTableRef<'_>> + '_ {
+    self.0.iter().map(DirtyTableRef)
+  }
+}
+
+pub struct DirtyTableRef<'a>(Entry<'a, TableId, TableHandleRef>);
+impl<'a> DirtyTableRef<'a> {
+  pub fn as_table(&self) -> &TableHandleRef {
+    self.0.value()
+  }
+  pub fn finish(self) {
+    self.0.remove();
   }
 }

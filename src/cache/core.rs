@@ -115,28 +115,15 @@ impl BlockCacheCore {
 
   pub fn flush_tables(&self) -> Result {
     let mut pending = Vec::new();
-    for table in self.dirty_tables.drain() {
-      pending.push((table.disk().fsync(), table));
+    for table_ref in self.dirty_tables.get_all() {
+      pending.push((table_ref.as_table().disk().fsync(), table_ref));
     }
 
-    let mut failed = None;
-    for (pending, table) in pending {
-      let Err(err) = pending.wait_flatten() else {
-        continue;
-      };
-
-      failed
-        .get_or_insert_with(|| (err, Vec::new()))
-        .1
-        .push(table);
+    for (pending, table_ref) in pending {
+      pending.wait_flatten()?;
+      table_ref.finish();
     }
-    let Some((err, failed)) = failed else {
-      return Ok(());
-    };
-    for table in failed {
-      self.mark_dirty_table(&table);
-    }
-    Err(err)
+    Ok(())
   }
 
   pub fn aggregate_dirty_blocks(&self, boundary: WriteSeq) -> Vec<BlockId> {
