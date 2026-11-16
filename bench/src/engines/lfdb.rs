@@ -4,14 +4,14 @@ use lfdb::{Engine, EngineBuilder};
 
 use crate::BenchmarkDB;
 
-pub fn new(cache_size: usize, dir: &Path) -> impl BenchmarkDB + 'static {
-  EngineBuilder::new(dir)
-    .block_cache_memory_capacity(cache_size)
-    .open()
-    .unwrap()
-}
-
 impl BenchmarkDB for Engine {
+  fn new(cache_size: usize, dir: &Path) -> Self {
+    EngineBuilder::new(dir)
+      .block_cache_memory_capacity(cache_size)
+      .open()
+      .unwrap()
+  }
+
   fn get(&self, table: &str, key: &[u8]) {
     let tx = self.new_tx().unwrap();
     let table = tx.table(table).unwrap();

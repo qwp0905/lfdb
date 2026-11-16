@@ -8,7 +8,7 @@ use rocksdb::{
 
 use crate::BenchmarkDB;
 
-struct Engine {
+pub struct Engine {
   db: OptimisticTransactionDB,
   options: Options,
   write_options: WriteOptions,
@@ -16,40 +16,40 @@ struct Engine {
   _cache: Cache,
 }
 
-pub fn new(cache_size: usize, dir: &Path) -> impl BenchmarkDB + 'static {
-  let _cache = Cache::new_lru_cache(cache_size);
-  let mut block_opts = BlockBasedOptions::default();
-  block_opts.set_block_cache(&_cache);
-
-  let mut options = Options::default();
-  options.create_if_missing(true);
-  options.set_use_direct_reads(true);
-  options.set_use_direct_io_for_flush_and_compaction(true);
-  options.set_block_based_table_factory(&block_opts);
-
-  let cf_names =
-    DB::list_cf(&options, dir).unwrap_or_else(|_| vec!["default".to_string()]);
-  let descriptors: Vec<_> = cf_names
-    .iter()
-    .map(|name| ColumnFamilyDescriptor::new(name, options.clone()))
-    .collect();
-  let db =
-    OptimisticTransactionDB::open_cf_descriptors(&options, dir, descriptors).unwrap();
-
-  let mut write_options = WriteOptions::default();
-  write_options.set_sync(true);
-  let tx_options = OptimisticTransactionOptions::default();
-
-  Engine {
-    db,
-    options,
-    write_options,
-    tx_options,
-    _cache,
-  }
-}
-
 impl BenchmarkDB for Engine {
+  fn new(cache_size: usize, dir: &Path) -> Self {
+    let _cache = Cache::new_lru_cache(cache_size);
+    let mut block_opts = BlockBasedOptions::default();
+    block_opts.set_block_cache(&_cache);
+
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_use_direct_reads(true);
+    options.set_use_direct_io_for_flush_and_compaction(true);
+    options.set_block_based_table_factory(&block_opts);
+
+    let cf_names =
+      DB::list_cf(&options, dir).unwrap_or_else(|_| vec!["default".to_string()]);
+    let descriptors: Vec<_> = cf_names
+      .iter()
+      .map(|name| ColumnFamilyDescriptor::new(name, options.clone()))
+      .collect();
+    let db =
+      OptimisticTransactionDB::open_cf_descriptors(&options, dir, descriptors).unwrap();
+
+    let mut write_options = WriteOptions::default();
+    write_options.set_sync(true);
+    let tx_options = OptimisticTransactionOptions::default();
+
+    Self {
+      db,
+      options,
+      write_options,
+      tx_options,
+      _cache,
+    }
+  }
+
   fn ensure_table(&self, table: &str) {
     let _ = self.db.create_cf(table, &self.options);
   }
