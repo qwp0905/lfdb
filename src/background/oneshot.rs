@@ -29,6 +29,8 @@ pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
   (Oneshot(inner.0), OneshotFulfill(inner.1))
 }
 
+// A waker pointer stored in `state` owns one `SBox` count; whoever swaps it out
+// reclaims that count with `SBox::from_raw`.
 #[repr(align(4))]
 struct ThreadWaker(Thread);
 impl ThreadWaker {
@@ -51,33 +53,8 @@ thread_local! {
   static CURRENT: OnceCell<SBox<ThreadWaker>> = OnceCell::new();
 }
 
-struct WakerRef {
-  moved: bool,
-  ptr: *mut ThreadWaker,
-}
-impl WakerRef {
-  fn new() -> Self {
-    let waker = CURRENT.with(|v| v.get_or_init(|| SBox::new(ThreadWaker::new())).clone());
-    Self {
-      moved: false,
-      ptr: SBox::into_raw(waker),
-    }
-  }
-
-  const fn set_moved(&mut self) {
-    self.moved = true;
-  }
-  const fn as_ptr(&self) -> *mut ThreadWaker {
-    self.ptr
-  }
-}
-impl Drop for WakerRef {
-  fn drop(&mut self) {
-    if self.moved {
-      return;
-    }
-    let _ = unsafe { SBox::from_raw(self.ptr) };
-  }
+fn with_current<R>(f: impl FnOnce(&SBox<ThreadWaker>) -> R) -> R {
+  CURRENT.with(|v| f(v.get_or_init(|| SBox::new(ThreadWaker::new()))))
 }
 
 // Tagged pointers
@@ -176,7 +153,10 @@ impl<T> OneshotBehavior<T> {
     self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
-  fn try_park_with(&self, waker: &mut WakerRef) -> Result<bool, WaitDisconnectedError> {
+  fn try_park_with(
+    &self,
+    waker: &SBox<ThreadWaker>,
+  ) -> Result<bool, WaitDisconnectedError> {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -190,10 +170,11 @@ impl<T> OneshotBehavior<T> {
         }
         STATE_DISCONNECTED => return Err(WaitDisconnectedError),
         STATE_WAITING => {
-          let Err(err) = self.state.cas_weak(state, waker.as_ptr()) else {
-            waker.set_moved();
+          let raw = SBox::into_raw(waker.clone());
+          let Err(err) = self.state.cas_weak(state, raw) else {
             return Ok(true);
           };
+          drop(unsafe { SBox::from_raw(raw) });
           backoff.spin();
           state = err;
         }
@@ -209,8 +190,7 @@ impl<T> OneshotBehavior<T> {
   #[cfg(loom)]
   const MAX_YIELD: u8 = 1;
   pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
-    let mut waker = WakerRef::new();
-    loop {
+    with_current(|waker| loop {
       for _ in 0..Self::MAX_YIELD {
         match self.try_wait() {
           Ok(v) => return Ok(v),
@@ -218,11 +198,11 @@ impl<T> OneshotBehavior<T> {
           Err(TryWaitError::Empty(_)) => yield_now(),
         };
       }
-      if !self.try_park_with(&mut waker)? {
+      if !self.try_park_with(waker)? {
         return Ok(unsafe { self.read_value() });
       };
       park();
-    }
+    })
   }
 
   pub fn drop_receiver(&self) {
