@@ -19,9 +19,6 @@ pub use pool::*;
 mod vptr;
 pub use vptr::*;
 
-mod callback;
-pub use callback::*;
-
 mod shared;
 pub use shared::*;
 

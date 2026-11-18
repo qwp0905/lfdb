@@ -10,8 +10,6 @@ use crate::utils::{
   SBox,
 };
 
-use super::{Callback, CallbackSlot};
-
 pub enum TryWaitError<T> {
   Disconnected,
   Empty(T),
@@ -78,25 +76,16 @@ impl<T> Atomic<T> {
 pub struct OneshotBehavior<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
-  callback: CallbackSlot<T>,
 }
 impl<T> OneshotBehavior<T> {
   pub fn new() -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
       state: Atomic::new(STATE_WAITING),
-      callback: CallbackSlot::new(),
     }
-  }
-
-  pub fn add_callback(&self, f: Callback<T>) -> std::result::Result<(), Callback<T>> {
-    self.callback.set(f)
   }
 
   pub fn fulfill_and_wake(&self, result: T) {
-    if let Some(callback) = self.callback.take() {
-      callback.call(&result);
-    }
     self.value.with_mut(|v| unsafe { (*v).write(result) });
     let backoff = Backoff::new();
     let mut state = self.state.load();

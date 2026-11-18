@@ -1,8 +1,4 @@
-use loom::{
-  cell::UnsafeCell,
-  sync::{atomic::AtomicUsize, Arc},
-  thread,
-};
+use loom::{sync::Arc, thread};
 
 use super::*;
 
@@ -59,33 +55,5 @@ fn value_is_dropped_once_when_receiver_drops() {
     sender.join().unwrap();
 
     assert_eq!(Arc::strong_count(&probe), 1);
-  });
-}
-
-#[test]
-fn callback_or_waiter_receives_value_once() {
-  loom::model(|| {
-    let received = Arc::new(AtomicUsize::new(0));
-    let behavior = Arc::new(OneshotBehavior::new());
-    let sender = spawn_sender(&behavior, Some(1));
-
-    // The callback may run on the sender thread, so what it captures has to be
-    // published through the slot.
-    let callback = {
-      let received = received.clone();
-      let captured = UnsafeCell::new(0);
-      captured.with_mut(|c| unsafe { *c = 1 });
-      Callback::new(move |v: &usize| {
-        assert_eq!(captured.with(|c| unsafe { *c }), 1);
-        received.fetch_add(*v, Ordering::Relaxed);
-      })
-    };
-    if let Err(callback) = behavior.add_callback(callback) {
-      callback.call(&behavior.wait().unwrap());
-    }
-    behavior.drop_receiver();
-    sender.join().unwrap();
-
-    assert_eq!(received.load(Ordering::Relaxed), 1);
   });
 }

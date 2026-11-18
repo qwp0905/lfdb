@@ -6,7 +6,7 @@ use std::{
   ptr::NonNull,
 };
 
-use super::{Callback, OneshotBehavior, VPtr as VPtrRaw, WaitDisconnectedError};
+use super::{OneshotBehavior, VPtr as VPtrRaw, WaitDisconnectedError};
 
 type VPtr = VPtrRaw<TaskVTable>;
 type WaitResult<T> = std::result::Result<T, WaitDisconnectedError>;
@@ -17,7 +17,6 @@ struct TaskVTable {
   drop_sender: unsafe fn(NonNull<()>),
   drop_receiver: unsafe fn(NonNull<()>),
   drop_in_place: unsafe fn(NonNull<()>),
-  add_callback: unsafe fn(NonNull<()>, NonNull<()>) -> bool,
 }
 
 struct TaskPayload<T, R, F> {
@@ -35,7 +34,6 @@ where
     drop_sender: Self::drop_sender,
     drop_receiver: Self::drop_receiver,
     drop_in_place: Self::drop_in_place,
-    add_callback: Self::add_callback,
   };
 
   fn new(function: F) -> Self {
@@ -69,15 +67,6 @@ impl<T, R, F> TaskPayload<T, R, F> {
   unsafe fn drop_in_place(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
     unsafe { ManuallyDrop::drop(&mut (*this.function.get())) };
-  }
-  unsafe fn add_callback(ptr: NonNull<()>, callback: NonNull<()>) -> bool {
-    let this = VPtr::get_ref::<Self>(ptr);
-    let callback = unsafe { Callback::from_raw(callback.as_ptr()) };
-    let Err(callback) = this.behavior.add_callback(callback) else {
-      return true;
-    };
-    let _ = ManuallyDrop::new(callback);
-    false
   }
 }
 
@@ -148,24 +137,6 @@ impl<R> AsyncTask<R> {
       let result_ptr = NonNull::new_unchecked(result.as_mut_ptr().cast());
       (vtable.wait)(ptr, result_ptr);
       result.assume_init()
-    }
-  }
-  pub fn add_callback(
-    &self,
-    callback: Callback<R>,
-  ) -> std::result::Result<(), Callback<R>> {
-    let vtable = self.task.vtable();
-    let ptr = self.task.erased();
-    let callback = unsafe { NonNull::new_unchecked(Callback::into_raw(callback)) };
-    if unsafe { (vtable.add_callback)(ptr, callback) } {
-      return Ok(());
-    };
-    Err(unsafe { Callback::from_raw(callback.as_ptr()) })
-  }
-
-  pub fn must_call(self, callback: Callback<R>) {
-    if let Err(err) = self.add_callback(callback) {
-      err.call(&self.wait().unwrap())
     }
   }
 }

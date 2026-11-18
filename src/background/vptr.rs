@@ -1,12 +1,9 @@
-use std::{mem::forget, ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::utils::TwBox;
 
 unsafe fn drop_pair<T, VTable>(ptr: NonNull<Header<VTable>>) {
   let _ = TwBox::from_raw(ptr.as_ptr() as *mut VObject<T, VTable>);
-}
-unsafe fn drop_box<T, VTable>(ptr: NonNull<Header<VTable>>) {
-  let _ = Box::from_raw(ptr.as_ptr() as *mut VObject<T, VTable>);
 }
 struct Header<VTable: 'static> {
   vtable: &'static VTable,
@@ -17,12 +14,6 @@ impl<VTable> Header<VTable> {
     Self {
       vtable,
       drop_in_place: drop_pair::<T, VTable>,
-    }
-  }
-  const fn new_box<T>(vtable: &'static VTable) -> Self {
-    Self {
-      vtable,
-      drop_in_place: drop_box::<T, VTable>,
     }
   }
 }
@@ -48,22 +39,6 @@ impl<VTable> VPtr<VTable> {
     let p2 = unsafe { NonNull::new_unchecked(TwBox::into_raw(p2)) };
     (Self(p1.cast()), Self(p2.cast()))
   }
-  pub fn new_box<T: Send>(payload: T, vtable: &'static VTable) -> Self {
-    let inner = VObject::construct(Header::new_box::<T>(vtable), payload);
-    let p = NonNull::from_mut(Box::leak(Box::new(inner)));
-    Self(p.cast())
-  }
-
-  pub const fn into_raw(this: Self) -> *mut () {
-    let ptr = this.erased();
-    forget(this);
-    ptr.as_ptr()
-  }
-  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
-    let ptr = raw as *mut Header<VTable>;
-    Self(unsafe { NonNull::new_unchecked(ptr) })
-  }
-
   pub const fn vtable(&self) -> &'static VTable {
     unsafe { self.0.as_ref() }.vtable
   }
@@ -74,10 +49,6 @@ impl<VTable> VPtr<VTable> {
   pub const unsafe fn get_ref<'a, T>(ptr: NonNull<()>) -> &'a T {
     let raw = ptr.cast::<VObject<T, VTable>>();
     &raw.as_ref().payload
-  }
-  pub const unsafe fn get_mut<'a, T>(ptr: NonNull<()>) -> &'a mut T {
-    let mut raw = ptr.cast::<VObject<T, VTable>>();
-    &mut raw.as_mut().payload
   }
 }
 impl<VTable> Drop for VPtr<VTable> {

@@ -126,34 +126,3 @@ fn test_panicking_function_disconnects_receiver() {
   assert!(sender.join().is_err());
   assert!(matches!(rx.wait(), Err(WaitDisconnectedError)));
 }
-
-#[test]
-fn test_callback_registered_before_fulfill_observes_value() {
-  let observed = Arc::new(AtomicUsize::new(0));
-  let (tx, rx) = create_task::<usize>();
-  {
-    let observed = observed.clone();
-    let callback = Callback::new(move |v: &usize| {
-      observed.store(*v, Ordering::SeqCst);
-    });
-    assert!(rx.add_callback(callback).is_ok());
-  }
-  tx.fulfill(5);
-  assert_eq!(observed.load(Ordering::SeqCst), 5);
-  assert_eq!(rx.wait().expect("should be fulfilled"), 5);
-}
-
-#[test]
-fn test_must_call_runs_immediately_when_fulfilled() {
-  let observed = Arc::new(AtomicUsize::new(0));
-  let (tx, rx) = create_task::<usize>();
-  tx.fulfill(9);
-  let callback = {
-    let observed = observed.clone();
-    Callback::new(move |v: &usize| {
-      observed.store(*v, Ordering::SeqCst);
-    })
-  };
-  rx.must_call(callback);
-  assert_eq!(observed.load(Ordering::SeqCst), 9);
-}
