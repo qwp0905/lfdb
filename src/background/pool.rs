@@ -10,11 +10,12 @@ use crossbeam::{
 };
 
 use super::{
-  into_task, PendingTask, SharedFn, TaskRef, ThreadParker, ThreadSlot, UnwindSpawner,
+  create_task_with, AsyncTask, SharedFn, TaskFulfiller, ThreadParker, ThreadSlot,
+  UnwindSpawner,
 };
 
 enum Context {
-  Task(TaskRef),
+  Task(TaskFulfiller<()>),
   Term,
 }
 
@@ -33,7 +34,7 @@ const fn worker_loop(
         };
 
         match ctx {
-          Context::Task(task_ref) => task_ref.run(),
+          Context::Task(fulfiller) => fulfiller.fulfill(()),
           Context::Term => return core.drain_task(&local),
         }
         backoff.reset();
@@ -46,7 +47,7 @@ const fn worker_loop(
 
       // enqueued but tasks are left. state will be changed by producer.
       match ctx {
-        Context::Task(task_ref) => task_ref.run(),
+        Context::Task(fulfiller) => fulfiller.fulfill(()),
         Context::Term => return core.drain_task(&local),
       }
     }
@@ -151,18 +152,18 @@ impl ThreadPool {
     }
   }
 
-  fn spawn_internal<F, T>(core: &Core<Context>, f: F) -> PendingTask<T>
+  fn spawn_internal<F, T>(core: &Core<Context>, f: F) -> AsyncTask<T>
   where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
   {
-    let (task, pending) = into_task(f);
+    let (task, pending) = create_task_with(|_| f());
     core.push_global(Context::Task(task));
     core.parker.wake_once();
     pending
   }
 
-  pub fn spawn<F, T>(&self, f: F) -> PendingTask<T>
+  pub fn spawn<F, T>(&self, f: F) -> AsyncTask<T>
   where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -182,7 +183,7 @@ impl ThreadPool {
     let handler = SharedFn::new(handler);
     for value in input {
       let handler = handler.clone();
-      let (r, p) = into_task(move || handler.call(value));
+      let (r, p) = create_task_with(move |_| handler.call(value));
       self.core.push_global(Context::Task(r));
       pending.push(p);
     }
@@ -234,7 +235,7 @@ impl ThreadPool {
 
     while let Some(ctx) = self.core.pop_global() {
       if let Context::Task(task) = ctx {
-        task.run();
+        task.fulfill(());
       }
     }
   }
@@ -248,7 +249,7 @@ impl<T, R> TypedExecutor<T, R> {
   const fn new(core: Arc<Core<Context>>, handler: SharedFn<'static, T, R>) -> Self {
     Self { core, handler }
   }
-  fn execute(&self, input: T) -> PendingTask<R>
+  fn execute(&self, input: T) -> AsyncTask<R>
   where
     T: Send + 'static,
     R: Send + 'static,
@@ -289,14 +290,14 @@ impl<T, R> ForkStream<T, R> {
 }
 
 pub struct ForkJoin<T> {
-  pending: Vec<PendingTask<T>>,
+  pending: Vec<AsyncTask<T>>,
 }
 impl<T> ForkJoin<T> {
-  const fn new(pending: Vec<PendingTask<T>>) -> Self {
+  const fn new(pending: Vec<AsyncTask<T>>) -> Self {
     Self { pending }
   }
 
-  fn push(&mut self, pending: PendingTask<T>) {
+  fn push(&mut self, pending: AsyncTask<T>) {
     self.pending.push(pending);
   }
 

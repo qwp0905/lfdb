@@ -3,11 +3,12 @@ use std::{sync::Arc, thread::Builder};
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
 use super::{
-  oneshot, Oneshot, OneshotFulfill, SharedFn, ThreadParker, ThreadSlot, UnwindSpawner,
+  create_task, AsyncTask, SharedFn, TaskFulfiller, ThreadParker, ThreadSlot,
+  UnwindSpawner,
 };
 
 enum Context<T, R> {
-  Execute(T, OneshotFulfill<R>),
+  Execute(T, TaskFulfiller<R>),
   #[allow(unused)]
   Dispatch(T),
   Term,
@@ -92,8 +93,8 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
     }
   }
 
-  pub fn execute(&self, value: T) -> Oneshot<R> {
-    let (o, f) = oneshot();
+  pub fn execute(&self, value: T) -> AsyncTask<R> {
+    let (f, o) = create_task();
     self.register(Context::Execute(value, f));
     o
   }

@@ -67,14 +67,14 @@ impl Fixture {
     }
   }
 
-  fn write(&self, offset: u64, data: &'static [u8]) -> Oneshot<Result<()>> {
+  fn write(&self, offset: u64, data: &'static [u8]) -> AsyncTask<Result<()>> {
     let pin = self.scheduler.try_pin_owned().unwrap();
     self
       .scheduler
       .publish_write(data, offset, pin, &self.metrics)
   }
 
-  fn sync(&self) -> Oneshot<Result<()>> {
+  fn sync(&self) -> AsyncTask<Result<()>> {
     let pin = self.scheduler.try_pin_owned().unwrap();
     self.scheduler.publish_sync(pin, &self.metrics)
   }
@@ -85,7 +85,7 @@ fn block(byte: u8) -> &'static [u8] {
 }
 
 fn written(task: &IOTask) -> (u64, Vec<*const u8>) {
-  match task.get_type() {
+  match task.context().get_type() {
     TaskType::Pwrite { offset, buf } => (offset, vec![buf.as_ptr()]),
     TaskType::Pwritev { offset, bufs } => {
       (offset, bufs.iter().map(|b| b.as_ptr()).collect())
@@ -98,12 +98,35 @@ fn written(task: &IOTask) -> (u64, Vec<*const u8>) {
  * A request that is never fulfilled would block the wait forever, so the wait
  * is bounded to report a failure instead of hanging.
  */
-fn result(done: Oneshot<Result<()>>) -> Result<()> {
+fn result(done: AsyncTask<Result<()>>) -> Result<()> {
   let (tx, rx) = mpsc::channel();
   thread::spawn(move || {
     let _ = tx.send(done.wait().unwrap());
   });
   rx.recv_timeout(TIMEOUT).expect("request was not fulfilled")
+}
+
+#[test]
+fn test_write_callback_receives_backend_result() {
+  let f = Fixture::new(None);
+  let publish = |offset: u64| {
+    let pin = f.scheduler.try_pin_owned().unwrap();
+    f.scheduler.publish_write_with(
+      block(0),
+      offset,
+      pin,
+      &f.metrics,
+      |result: Result<()>| result.map_err(|err| err.kind()),
+    )
+  };
+
+  let succeeded = publish(0);
+  f.backend.take().fulfill(Ok(BLOCK));
+  assert_eq!(succeeded.wait().unwrap(), Ok(()));
+
+  let failed = publish(BLOCK as u64);
+  f.backend.take().fulfill(Err(Error::from(ErrorKind::Other)));
+  assert_eq!(failed.wait().unwrap(), Err(ErrorKind::Other));
 }
 
 #[test]
@@ -162,7 +185,7 @@ fn test_scheduler_allocates_before_first_write() {
 
   let allocation = f.backend.take();
   assert!(matches!(
-    allocation.get_type(),
+    allocation.context().get_type(),
     TaskType::Fallocate {
       offset: 0,
       len: EXTENT
@@ -184,7 +207,7 @@ fn test_scheduler_allocates_before_first_write() {
 
   let _beyond = f.write(EXTENT, block(2));
   assert!(matches!(
-    f.backend.take().get_type(),
+    f.backend.take().context().get_type(),
     TaskType::Fallocate {
       offset: EXTENT,
       len: EXTENT
@@ -205,7 +228,7 @@ fn test_scheduler_fallocate_failure() {
 
   let _retry = f.write(0, block(1));
   assert!(matches!(
-    f.backend.take().get_type(),
+    f.backend.take().context().get_type(),
     TaskType::Fallocate {
       offset: 0,
       len: EXTENT
@@ -246,14 +269,14 @@ fn test_scheduler_merges_syncs() {
   let f = Fixture::new(None);
   let first = f.sync();
   let held = f.backend.take();
-  assert!(matches!(held.get_type(), TaskType::Fdatasync));
+  assert!(matches!(held.context().get_type(), TaskType::Fdatasync));
 
   let waiting = [f.sync(), f.sync()];
   assert!(f.backend.is_idle());
 
   held.fulfill(Ok(0));
   let merged = f.backend.take();
-  assert!(matches!(merged.get_type(), TaskType::Fdatasync));
+  assert!(matches!(merged.context().get_type(), TaskType::Fdatasync));
   assert!(f.backend.is_idle());
 
   merged.fulfill(Err(Error::from(ErrorKind::Other)));

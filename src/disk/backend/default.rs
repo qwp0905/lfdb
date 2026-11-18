@@ -30,7 +30,8 @@ impl IOBackend for DefaultIOBackend {
   }
 
   fn submit(&self, task: IOTask) {
-    self.async_io.submit(task.init(self.file.clone()));
+    task.context().bind(self.file.clone());
+    self.async_io.submit(task);
   }
 
   fn metadata(&self) -> Result<std::fs::Metadata> {

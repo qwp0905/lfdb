@@ -4,52 +4,101 @@ use std::{
   path::Path,
 };
 
-use super::{PendingAsync, TaskType, TaskUninit};
+use crate::background::{
+  create_tagged_task, create_tagged_task_with, AsyncTask, TaskFulfiller,
+};
+
+use super::{IOContext, TaskType};
 
 pub const IO_RETRY: u8 = 3;
 
-type None = fn(&Result<usize>);
-pub const NO_CALLBACK: Option<None> = None;
+pub struct IOTask {
+  fulfiller: TaskFulfiller<Result<usize>, IOContext>,
+}
 
-pub type IOTask = TaskUninit<usize>;
 impl IOTask {
-  fn create<F: FnOnce(&Result<usize>) + Send + 'static>(
-    task_type: TaskType,
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    let (task, done) = Self::new(callback, task_type);
-    (task, done)
+  pub fn fulfill(self, result: Result<usize>) {
+    self.fulfiller.fulfill(result);
   }
-  pub fn new_pwrite<F: FnOnce(&Result<usize>) + Send + 'static>(
+  pub fn context(&self) -> &IOContext {
+    self.fulfiller.context()
+  }
+  const fn new(fulfiller: TaskFulfiller<Result<usize>, IOContext>) -> Self {
+    Self { fulfiller }
+  }
+  #[cfg(target_os = "linux")]
+  pub(crate) fn into_raw(this: Self) -> *mut () {
+    TaskFulfiller::into_raw(this.fulfiller)
+  }
+  #[cfg(target_os = "linux")]
+  pub(crate) const unsafe fn from_raw(raw: *mut ()) -> Self {
+    Self::new(unsafe { TaskFulfiller::from_raw(raw) })
+  }
+  fn create_with<T: Send + 'static, F: FnOnce(Result<usize>) -> T + Send + 'static>(
+    task_type: TaskType,
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    let (fulfiller, done) = create_tagged_task_with(IOContext::new(task_type), callback);
+    (Self::new(fulfiller), done)
+  }
+  fn create(task_type: TaskType) -> (Self, AsyncTask<Result<usize>>) {
+    let (fulfiller, done) = create_tagged_task(IOContext::new(task_type));
+    (Self::new(fulfiller), done)
+  }
+  pub fn new_pwrite_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
     buf: &'static [u8],
     offset: u64,
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    Self::create(TaskType::Pwrite { offset, buf }, callback)
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    Self::create_with(TaskType::Pwrite { offset, buf }, callback)
   }
-  pub fn new_pwritev<F: FnOnce(&Result<usize>) + Send + 'static>(
+  pub fn new_pwrite(buf: &'static [u8], offset: u64) -> (Self, AsyncTask<Result<usize>>) {
+    Self::create(TaskType::Pwrite { offset, buf })
+  }
+  pub fn new_pwritev_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
     bufs: &'static [IoSlice<'static>],
     offset: u64,
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    Self::create(TaskType::Pwritev { offset, bufs }, callback)
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    Self::create_with(TaskType::Pwritev { offset, bufs }, callback)
   }
-  pub fn new_fsync<F: FnOnce(&Result<usize>) + Send + 'static>(
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    Self::create(TaskType::Fsync, callback)
+  pub fn new_fsync_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    Self::create_with(TaskType::Fsync, callback)
   }
-  pub fn new_fdatasync<F: FnOnce(&Result<usize>) + Send + 'static>(
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    Self::create(TaskType::Fdatasync, callback)
+  pub fn new_fsync() -> (Self, AsyncTask<Result<usize>>) {
+    Self::create(TaskType::Fsync)
   }
-  pub fn new_fallocate<F: FnOnce(&Result<usize>) + Send + 'static>(
+  pub fn new_fdatasync_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    Self::create_with(TaskType::Fdatasync, callback)
+  }
+  pub fn new_fallocate_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
     offset: u64,
     len: u64,
-    callback: Option<F>,
-  ) -> (Self, PendingAsync<usize>) {
-    Self::create(TaskType::Fallocate { offset, len }, callback)
+    callback: F,
+  ) -> (Self, AsyncTask<T>) {
+    Self::create_with(TaskType::Fallocate { offset, len }, callback)
+  }
+  pub fn new_fallocate(offset: u64, len: u64) -> (Self, AsyncTask<Result<usize>>) {
+    Self::create(TaskType::Fallocate { offset, len })
   }
 }
 

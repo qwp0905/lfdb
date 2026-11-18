@@ -9,10 +9,10 @@ use std::{
 
 use super::{
   AllocState, AppendIOHandle, DirHandle, DiskBackend, IOBackend, IOScheduler, IOTask,
-  PendingAsync, ScanIOHandle, NO_CALLBACK,
+  ScanIOHandle,
 };
 use crate::{
-  background::{Callback, Oneshot},
+  background::AsyncTask,
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex},
   Error, Result,
@@ -21,30 +21,21 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub enum PendingIO<T: 'static = ()> {
-  Fulfilled(IOResult<T>),
-  Scheduled(Oneshot<IOResult<T>>),
-  Direct(PendingAsync<T>),
+pub enum PendingIO<T: 'static = IOResult<()>> {
+  Fulfilled(T),
+  Scheduled(AsyncTask<T>),
 }
 impl<T> PendingIO<T> {
-  pub fn wait(self) -> IOResult<T> {
+  pub fn wait(self) -> T {
     match self {
       Self::Fulfilled(v) => v,
       Self::Scheduled(o) => o.wait().unwrap(),
-      Self::Direct(o) => o.wait(),
     }
   }
-
+}
+impl<T> PendingIO<IOResult<T>> {
   pub fn wait_flatten(self) -> Result<T> {
     self.wait().map_err(Error::IO)
-  }
-
-  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
-    match self {
-      Self::Fulfilled(v) => f(&v),
-      Self::Scheduled(o) => o.must_call(Callback::new(f)),
-      Self::Direct(o) => o.must_call(Callback::new(f)),
-    };
   }
 }
 
@@ -144,9 +135,9 @@ impl IOPool {
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
-    let (task, done) = IOTask::new_fallocate(0, size, NO_CALLBACK);
+    let (task, done) = IOTask::new_fallocate(0, size);
     file.submit(task);
-    done.wait().map_err(Error::IO)?;
+    done.wait().unwrap().map_err(Error::IO)?;
     Ok(self.create_handle(file, filename, None))
   }
 
@@ -227,6 +218,26 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
+  pub fn write_async_with<R, F>(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    callback: F,
+  ) -> PendingIO<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(IOResult<()>) -> R + Send + 'static,
+  {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
+      return PendingIO::Fulfilled(callback(Ok(())));
+    };
+    let done =
+      self
+        .scheduler
+        .publish_write_with(buf, offset, pin, &self.metrics, callback);
+    PendingIO::Scheduled(done)
+  }
+
   pub fn fdatasync_async(&self) -> PendingIO {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
@@ -235,13 +246,16 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
-  pub fn fsync_async(&self) -> PendingIO<usize> {
+  pub fn fsync_async(&self) -> PendingIO {
     let Some(pin) = self.scheduler.try_pin_owned() else {
-      return PendingIO::Fulfilled(Ok(0));
+      return PendingIO::Fulfilled(Ok(()));
     };
-    let (task, done) = IOTask::new_fsync(Some(move |_: &IOResult<usize>| drop(pin)));
+    let (task, done) = IOTask::new_fsync_with(move |result: IOResult<usize>| {
+      drop(pin);
+      result.map(drop)
+    });
     self.scheduler.backend().submit(task);
-    PendingIO::Direct(done)
+    PendingIO::Scheduled(done)
   }
 
   /**

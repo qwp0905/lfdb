@@ -6,7 +6,7 @@ use std::{
 
 use super::WALSegment;
 use crate::{
-  background::{oneshot, Oneshot, OneshotFulfill, ThreadSlot, UnwindSpawner},
+  background::{create_task, AsyncTask, TaskFulfiller, ThreadSlot, UnwindSpawner},
   disk::{IOPool, Pointer},
   utils::{error, MpscQueue, ToBox},
   Result,
@@ -142,8 +142,8 @@ impl PreloadThread {
     self.waker.unpark();
   }
 
-  fn request(&self) -> Oneshot<Result<WALSegment>> {
-    let (o, f) = oneshot();
+  fn request(&self) -> AsyncTask<Result<WALSegment>> {
+    let (f, o) = create_task();
     self.queue.push(Context::Request(f));
     self.wake();
     o
@@ -165,7 +165,7 @@ impl Drop for PreloadThread {
 }
 
 enum Context {
-  Request(OneshotFulfill<Result<WALSegment>>),
+  Request(TaskFulfiller<Result<WALSegment>>),
   Term,
 }
 

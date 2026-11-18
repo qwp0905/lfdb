@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
   disk::{IOHandle, IOPool, PendingIO, Pointer},
-  page::Page,
-  utils::uuid_simple,
+  page::PageRef,
+  utils::{create_static_ref, uuid_simple},
   Error, Result,
 };
 
@@ -36,14 +36,25 @@ impl WALSegment {
 
     Ok(Self { handle })
   }
-  pub fn write_async(
+  pub fn submit_write<R, F>(
     &self,
     pointer: Pointer,
-    page: &'static Page<WAL_BLOCK_SIZE>,
-  ) -> PendingIO {
+    page: PageRef<WAL_BLOCK_SIZE>,
+    callback: F,
+  ) -> PendingIO<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(io::Result<()>) -> R + Send + 'static,
+  {
+    // SAFETY: the slice points into the heap buffer of `page`, which the completion
+    // closure owns until the write finishes.
+    let static_ref = unsafe { create_static_ref::<[u8]>(page.as_slice()) };
     self
       .handle
-      .write_async(page.as_slice(), pointer << Self::SHIFT)
+      .write_async_with(static_ref, pointer << Self::SHIFT, move |result| {
+        drop(page);
+        callback(result)
+      })
   }
 
   /**

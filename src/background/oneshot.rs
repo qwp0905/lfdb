@@ -7,10 +7,8 @@ use crate::utils::{
     thread::{current, park, yield_now, Thread},
     thread_local, AtomicPtr, Backoff, UnsafeCell,
   },
-  SBox, TwBox,
+  SBox,
 };
-
-use super::{Callback, CallbackSlot};
 
 pub enum TryWaitError<T> {
   Disconnected,
@@ -19,16 +17,8 @@ pub enum TryWaitError<T> {
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
 
-/**
- * Creates a single-use channel pair (Oneshot, OneshotFulfill).
- * State transitions: Waiting → Fulfilled → Disconnected.
- * The receiver parks until the sender fulfills the value or disconnects.
- */
-pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = TwBox::new(OneshotBehavior::new());
-  (Oneshot(inner.0), OneshotFulfill(inner.1))
-}
-
+// A waker pointer stored in `state` owns one `SBox` count; whoever swaps it out
+// reclaims that count with `SBox::from_raw`.
 #[repr(align(4))]
 struct ThreadWaker(Thread);
 impl ThreadWaker {
@@ -40,6 +30,11 @@ impl ThreadWaker {
     self.0.unpark();
   }
 }
+impl Default for ThreadWaker {
+  fn default() -> Self {
+    Self::new()
+  }
+}
 
 #[cfg(not(loom))]
 thread_local! {
@@ -49,35 +44,6 @@ thread_local! {
 #[cfg(loom)]
 thread_local! {
   static CURRENT: OnceCell<SBox<ThreadWaker>> = OnceCell::new();
-}
-
-struct WakerRef {
-  moved: bool,
-  ptr: *mut ThreadWaker,
-}
-impl WakerRef {
-  fn new() -> Self {
-    let waker = CURRENT.with(|v| v.get_or_init(|| SBox::new(ThreadWaker::new())).clone());
-    Self {
-      moved: false,
-      ptr: SBox::into_raw(waker),
-    }
-  }
-
-  const fn set_moved(&mut self) {
-    self.moved = true;
-  }
-  const fn as_ptr(&self) -> *mut ThreadWaker {
-    self.ptr
-  }
-}
-impl Drop for WakerRef {
-  fn drop(&mut self) {
-    if self.moved {
-      return;
-    }
-    let _ = unsafe { SBox::from_raw(self.ptr) };
-  }
 }
 
 // Tagged pointers
@@ -108,28 +74,19 @@ impl<T> Atomic<T> {
   }
 }
 
-pub struct OneshotBehavior<T> {
+pub struct Oneshot<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
-  callback: CallbackSlot<T>,
 }
-impl<T> OneshotBehavior<T> {
+impl<T> Oneshot<T> {
   pub fn new() -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
       state: Atomic::new(STATE_WAITING),
-      callback: CallbackSlot::new(),
     }
-  }
-
-  pub fn add_callback(&self, f: Callback<T>) -> std::result::Result<(), Callback<T>> {
-    self.callback.set(f)
   }
 
   pub fn fulfill_and_wake(&self, result: T) {
-    if let Some(callback) = self.callback.take() {
-      callback.call(&result);
-    }
     self.value.with_mut(|v| unsafe { (*v).write(result) });
     let backoff = Backoff::new();
     let mut state = self.state.load();
@@ -176,28 +133,23 @@ impl<T> OneshotBehavior<T> {
     self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
-  fn try_park_with(&self, waker: &mut WakerRef) -> Result<bool, WaitDisconnectedError> {
+  fn try_park(&self) -> bool {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
       match state {
-        STATE_FULFILLED => {
-          let Err(err) = self.state.cas_weak(state, STATE_DISCONNECTED) else {
-            return Ok(false);
-          };
-          backoff.spin();
-          state = err;
-        }
-        STATE_DISCONNECTED => return Err(WaitDisconnectedError),
+        STATE_FULFILLED | STATE_DISCONNECTED => return false,
         STATE_WAITING => {
-          let Err(err) = self.state.cas_weak(state, waker.as_ptr()) else {
-            waker.set_moved();
-            return Ok(true);
+          let waker = CURRENT.with(|v| v.get_or_init(Default::default).clone());
+          let raw = SBox::into_raw(waker);
+          let Err(err) = self.state.cas_weak(state, raw) else {
+            return true;
           };
+          drop(unsafe { SBox::from_raw(raw) });
           backoff.spin();
           state = err;
         }
-        _ => return Ok(true),
+        _ => return true,
       }
     }
   }
@@ -209,7 +161,6 @@ impl<T> OneshotBehavior<T> {
   #[cfg(loom)]
   const MAX_YIELD: u8 = 1;
   pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
-    let mut waker = WakerRef::new();
     loop {
       for _ in 0..Self::MAX_YIELD {
         match self.try_wait() {
@@ -218,10 +169,9 @@ impl<T> OneshotBehavior<T> {
           Err(TryWaitError::Empty(_)) => yield_now(),
         };
       }
-      if !self.try_park_with(&mut waker)? {
-        return Ok(unsafe { self.read_value() });
+      if self.try_park() {
+        park();
       };
-      park();
     }
   }
 
@@ -256,58 +206,8 @@ impl<T> OneshotBehavior<T> {
   }
 }
 
-/**
- * Minimal single-use completion primitive for background work.
- *
- * This is not intended to be a general-purpose channel. It exists so
- * `Execute::execute` can return a cheap handle for receiving exactly
- * one result from a worker. The implementation uses a dedicated heap-allocated
- * pair shared by the waiter and fulfiller to keep the synchronization surface
- * small and predictable.
- */
-pub struct Oneshot<T>(TwBox<OneshotBehavior<T>>);
-impl<T> Oneshot<T> {
-  pub fn wait(self) -> Result<T, WaitDisconnectedError> {
-    self.0.wait()
-  }
-
-  pub fn add_callback(
-    &self,
-    callback: Callback<T>,
-  ) -> std::result::Result<(), Callback<T>> {
-    self.0.add_callback(callback)
-  }
-
-  pub fn must_call(self, callback: Callback<T>) {
-    if let Err(err) = self.add_callback(callback) {
-      err.call(&self.wait().unwrap())
-    }
-  }
-}
-impl<T> Drop for Oneshot<T> {
-  fn drop(&mut self) {
-    self.0.drop_receiver();
-  }
-}
-
-pub struct OneshotFulfill<T>(TwBox<OneshotBehavior<T>>);
-impl<T> OneshotFulfill<T> {
-  pub fn fulfill(self, result: T) {
-    self.0.fulfill_and_wake(result);
-  }
-}
-impl<T> Drop for OneshotFulfill<T> {
-  fn drop(&mut self) {
-    self.0.drop_sender();
-  }
-}
-
-unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
-unsafe impl<T: Send> Send for OneshotBehavior<T> {}
-
-#[cfg(all(test, not(loom)))]
-#[path = "tests/oneshot.rs"]
-mod tests;
+unsafe impl<T: Send> Sync for Oneshot<T> {}
+unsafe impl<T: Send> Send for Oneshot<T> {}
 
 #[cfg(all(test, loom))]
 #[path = "tests/oneshot_loom.rs"]

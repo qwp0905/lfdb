@@ -82,7 +82,7 @@ impl FaultController {
   fn intercept(&self, index: usize, task: IOTask) -> Option<IOTask> {
     let (lock, cvar) = &*self.hold;
     let mut state = lock.lock().unwrap();
-    match task.get_type() {
+    match task.context().get_type() {
       TaskType::Fdatasync => {
         state.fdatasynced.push(index);
         cvar.notify_all();
@@ -112,7 +112,7 @@ impl IOBackend for FaultIO {
     let Some(task) = self.controller.intercept(self.index, task) else {
       return;
     };
-    let slot = match task.get_type() {
+    let slot = match task.context().get_type() {
       TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => &self.controller.write,
       TaskType::Fdatasync => &self.controller.fdatasync,
       TaskType::Fsync | TaskType::Fallocate { .. } => return self.inner.submit(task),

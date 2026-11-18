@@ -51,7 +51,7 @@ enum Op {
 }
 impl Op {
   fn of(task: &IOTask) -> Self {
-    match task.get_type() {
+    match task.context().get_type() {
       TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
       TaskType::Fsync => Self::Fsync,
       TaskType::Fdatasync => Self::Fdatasync,
