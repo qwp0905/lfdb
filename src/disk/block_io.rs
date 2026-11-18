@@ -56,7 +56,7 @@ impl<const N: usize> BlockIOHandle<N> {
   }
 
   #[inline]
-  pub fn fsync(&self) -> PendingIO<usize> {
+  pub fn fsync(&self) -> PendingIO<()> {
     self.handle.fsync_async()
   }
 

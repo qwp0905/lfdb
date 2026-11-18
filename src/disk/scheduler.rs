@@ -10,7 +10,7 @@ use crossbeam::utils::Backoff;
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
-  background::{oneshot, Oneshot, OneshotFulfill},
+  background::{create_task, AsyncTask, TaskFulfiller},
   metrics::MetricsRegistry,
   utils::{
     create_static_ref, BatchQueue, ExclusivePin, Occupied, OwnedSharedToken, SBox,
@@ -20,8 +20,8 @@ use crate::{
 
 type WriteTask = (u64, IoSlice<'static>);
 
-type WriteRequest = (WriteTask, OneshotFulfill<Result<()>>);
-type SyncRequest = OneshotFulfill<Result<()>>;
+type WriteRequest = (WriteTask, TaskFulfiller<Result<()>>);
+type SyncRequest = TaskFulfiller<Result<()>>;
 type WriteBatch = Arc<BatchQueue<WriteRequest>>;
 type SyncBatch = Arc<BatchQueue<SyncRequest>>;
 
@@ -41,8 +41,8 @@ impl SyncScheduler {
     &self,
     pin: Option<OwnedSharedToken>,
     metrics: &Arc<MetricsRegistry>,
-  ) -> Oneshot<Result<()>> {
-    let (o, f) = oneshot();
+  ) -> AsyncTask<Result<()>> {
+    let (f, o) = create_task();
     if let Some(occupied) = self.sync.compete_owned(f) {
       let guard =
         RecursiveSync::new(occupied, self.backend.clone(), metrics.clone(), pin);
@@ -111,8 +111,8 @@ impl IOScheduler {
     offset: u64,
     pin: OwnedSharedToken,
     metrics: &Arc<MetricsRegistry>,
-  ) -> Oneshot<Result<()>> {
-    let (o, f) = oneshot();
+  ) -> AsyncTask<Result<()>> {
+    let (f, o) = create_task();
     if let Some(occupied) = self.write.compete_owned(((offset, IoSlice::new(buf)), f)) {
       let guard = RecursiveWrite::new(
         occupied,
@@ -129,7 +129,7 @@ impl IOScheduler {
     &self,
     pin: OwnedSharedToken,
     metrics: &Arc<MetricsRegistry>,
-  ) -> Oneshot<Result<()>> {
+  ) -> AsyncTask<Result<()>> {
     self.inner.publish(Some(pin), metrics)
   }
 }
@@ -174,14 +174,14 @@ fn drain_write(mut guard: RecursiveWrite) {
 
   let backend = guard.backend.clone();
   let callback = create_fallocate_callback(guard, buffered, allocated);
-  let (task, _) = IOTask::new_fallocate(offset, len, Some(callback));
+  let (task, _) = IOTask::new_fallocate_with(offset, len, callback);
   backend.submit(task);
 }
 
 struct BatchedWrite {
   offset: u64,
   bufs: Vec<IoSlice<'static>>,
-  waiting: Vec<OneshotFulfill<Result<()>>>,
+  waiting: Vec<TaskFulfiller<Result<()>>>,
   measure: Option<Instant>,
   guard: SBox<RecursiveWrite>,
   error: Option<ErrorKind>,
@@ -190,7 +190,7 @@ impl BatchedWrite {
   fn new(
     offset: u64,
     bufs: Vec<IoSlice<'static>>,
-    waiting: Vec<OneshotFulfill<Result<()>>>,
+    waiting: Vec<TaskFulfiller<Result<()>>>,
     guard: SBox<RecursiveWrite>,
   ) -> Self {
     Self {
@@ -257,9 +257,9 @@ fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
       unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
     let callback = create_write_callback(batched, 0);
     let (task, _) = if static_ref.len() == 1 {
-      IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+      IOTask::new_pwrite_with(&static_ref[0], offset, callback)
     } else {
-      IOTask::new_pwritev(static_ref, offset, Some(callback))
+      IOTask::new_pwritev_with(static_ref, offset, callback)
     };
     backend.submit(task);
   }
@@ -269,9 +269,9 @@ fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
   let callback = create_write_callback(batched, 0);
   let (task, _) = if static_ref.len() == 1 {
-    IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+    IOTask::new_pwrite_with(&static_ref[0], offset, callback)
   } else {
-    IOTask::new_pwritev(static_ref, offset, Some(callback))
+    IOTask::new_pwritev_with(static_ref, offset, callback)
   };
   backend.submit(task);
 }
@@ -279,9 +279,9 @@ fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
 fn create_write_callback(
   mut batched: BatchedWrite,
   trial: u8,
-) -> impl FnOnce(&Result<usize>) {
-  move |result: &Result<usize>| match result {
-    Ok(c) if *c < batched.bytes_len() => retry_write(batched, trial + 1),
+) -> impl FnOnce(Result<usize>) {
+  move |result: Result<usize>| match result {
+    Ok(c) if c < batched.bytes_len() => retry_write(batched, trial + 1),
     Ok(_) => {}
     Err(err) => batched.set_error(err.kind()),
   }
@@ -296,9 +296,9 @@ fn retry_write(mut batched: BatchedWrite, trial: u8) {
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
   let callback = create_write_callback(batched, trial);
   let (task, _) = if static_ref.len() == 1 {
-    IOTask::new_pwrite(&static_ref[0], offset, Some(callback))
+    IOTask::new_pwrite_with(&static_ref[0], offset, callback)
   } else {
-    IOTask::new_pwritev(static_ref, offset, Some(callback))
+    IOTask::new_pwritev_with(static_ref, offset, callback)
   };
   backend.submit(task);
 }
@@ -307,7 +307,7 @@ fn create_fallocate_callback(
   guard: RecursiveWrite,
   buffered: Vec<WriteRequest>,
   allocated: u64,
-) -> impl FnOnce(&Result<usize>) {
+) -> impl FnOnce(Result<usize>) {
   move |result| {
     if let Err(err) = result {
       let kind = err.kind();
@@ -413,14 +413,14 @@ fn drain_sync(mut guard: RecursiveSync) {
 
   guard.metrics.disk_sync_batch.record(waiting.len() as f64);
   let backend = guard.backend.clone();
-  let callback = move |r: &Result<usize>| {
+  let callback = move |r: Result<usize>| {
     let _guard = guard;
     let result = r.as_ref().map(|_| ()).map_err(|err| err.kind());
     for done in waiting {
       done.fulfill(result.map_err(Error::from));
     }
   };
-  let (task, _) = IOTask::new_fdatasync(Some(callback));
+  let (task, _) = IOTask::new_fdatasync_with(callback);
   backend.submit(task);
 }
 

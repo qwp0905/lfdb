@@ -9,10 +9,10 @@ use std::{
 
 use super::{
   AllocState, AppendIOHandle, DirHandle, DiskBackend, IOBackend, IOScheduler, IOTask,
-  PendingAsync, ScanIOHandle, NO_CALLBACK,
+  ScanIOHandle,
 };
 use crate::{
-  background::{Callback, Oneshot},
+  background::{AsyncTask, Callback},
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex},
   Error, Result,
@@ -23,15 +23,13 @@ const MAX_RETRY: u8 = 10;
 
 pub enum PendingIO<T: 'static = ()> {
   Fulfilled(IOResult<T>),
-  Scheduled(Oneshot<IOResult<T>>),
-  Direct(PendingAsync<T>),
+  Scheduled(AsyncTask<IOResult<T>>),
 }
 impl<T> PendingIO<T> {
   pub fn wait(self) -> IOResult<T> {
     match self {
       Self::Fulfilled(v) => v,
       Self::Scheduled(o) => o.wait().unwrap(),
-      Self::Direct(o) => o.wait(),
     }
   }
 
@@ -43,7 +41,6 @@ impl<T> PendingIO<T> {
     match self {
       Self::Fulfilled(v) => f(&v),
       Self::Scheduled(o) => o.must_call(Callback::new(f)),
-      Self::Direct(o) => o.must_call(Callback::new(f)),
     };
   }
 }
@@ -144,9 +141,9 @@ impl IOPool {
 
   pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
     let file = self.open_direct(&filename)?;
-    let (task, done) = IOTask::new_fallocate(0, size, NO_CALLBACK);
+    let (task, done) = IOTask::new_fallocate(0, size);
     file.submit(task);
-    done.wait().map_err(Error::IO)?;
+    done.wait().unwrap().map_err(Error::IO)?;
     Ok(self.create_handle(file, filename, None))
   }
 
@@ -235,13 +232,16 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
-  pub fn fsync_async(&self) -> PendingIO<usize> {
+  pub fn fsync_async(&self) -> PendingIO<()> {
     let Some(pin) = self.scheduler.try_pin_owned() else {
-      return PendingIO::Fulfilled(Ok(0));
+      return PendingIO::Fulfilled(Ok(()));
     };
-    let (task, done) = IOTask::new_fsync(Some(move |_: &IOResult<usize>| drop(pin)));
+    let (task, done) = IOTask::new_fsync_with(move |result: IOResult<usize>| {
+      drop(pin);
+      result.map(drop)
+    });
     self.scheduler.backend().submit(task);
-    PendingIO::Direct(done)
+    PendingIO::Scheduled(done)
   }
 
   /**

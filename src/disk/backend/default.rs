@@ -10,7 +10,7 @@ use std::{
 
 use crate::utils::info;
 
-use super::{direct_io, pread, AsyncIO, DiskBackend, IOBackend, IOTask};
+use super::{direct_io, pread, AsyncIO, AsyncIOTask, DiskBackend, IOBackend, IOTask};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
@@ -30,7 +30,11 @@ impl IOBackend for DefaultIOBackend {
   }
 
   fn submit(&self, task: IOTask) {
-    self.async_io.submit(task.init(self.file.clone()));
+    self.async_io.submit(AsyncIOTask::new(
+      task.task_type,
+      self.file.clone(),
+      task.fulfiller,
+    ));
   }
 
   fn metadata(&self) -> Result<std::fs::Metadata> {
