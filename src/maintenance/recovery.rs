@@ -12,7 +12,7 @@ use std::{
 use crossbeam_skiplist::{SkipMap, SkipSet};
 
 use crate::{
-  background::{PendingTask, ThreadPool},
+  background::{AsyncTask, ThreadPool},
   blob::{BlobAppendGuard, BlobId, BlobLen, BlobOffset, BlobStorage},
   btree::{BTreeIndex, MergeSortable, ReadonlyPolicy, WritablePolicy},
   cache::BlockCache,
@@ -323,7 +323,7 @@ fn spawn_job(
   pool: &ThreadPool,
   recovery: &TableRecovery,
   job: RecoveryJob,
-) -> (TableRecovery, PendingTask<Result<Vec<RecoveryJob>>>) {
+) -> (TableRecovery, AsyncTask<Result<Vec<RecoveryJob>>>) {
   let this = recovery.clone();
   (recovery.clone(), pool.spawn(move || this.run(job)))
 }

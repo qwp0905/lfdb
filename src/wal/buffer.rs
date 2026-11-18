@@ -1,7 +1,7 @@
 use std::{cell::Cell, io, mem::ManuallyDrop, sync::Arc};
 
 use crate::{
-  background::{oneshot, EventBus, Oneshot, OneshotFulfill},
+  background::{create_task, AsyncTask, EventBus, TaskFulfiller},
   disk::Pointer,
   page::{Page, PageAllocator, PageRef},
   utils::{create_static_ref, AtomicRef, AtomicSBox, BatchQueue, SBox},
@@ -123,10 +123,10 @@ impl Drop for SegmentBuffer {
 }
 
 pub struct BatchedWrite {
-  current: Oneshot<io::Result<()>>,
+  current: AsyncTask<io::Result<()>>,
 }
 impl BatchedWrite {
-  const fn new(current: Oneshot<io::Result<()>>) -> Self {
+  const fn new(current: AsyncTask<io::Result<()>>) -> Self {
     Self { current }
   }
 
@@ -139,7 +139,7 @@ pub struct LogBuffer {
   pointer: Pointer,
   entry: PageRef<WAL_BLOCK_SIZE>,
   reserved_offset: OffsetBooking,
-  batch: BatchQueue<(AppendTicket, OneshotFulfill<io::Result<()>>)>,
+  batch: BatchQueue<(AppendTicket, TaskFulfiller<io::Result<()>>)>,
   max_offset: Cell<usize>,
   append_completion: AppendCompletion,
   write_seq_offset: WriteSeq,
@@ -192,7 +192,7 @@ impl LogBuffer {
     upstream: &SegmentBuffer,
     allocator: &PageAllocator<WAL_BLOCK_SIZE>,
   ) -> BatchedWrite {
-    let (o, f) = oneshot();
+    let (f, o) = create_task();
     let batched = BatchedWrite::new(o);
 
     let Some(mut occupied) = self.batch.compete((ticket, f)) else {
@@ -240,7 +240,7 @@ impl LogBuffer {
 }
 
 const fn create_cb(
-  waiting: Vec<OneshotFulfill<io::Result<()>>>,
+  waiting: Vec<TaskFulfiller<io::Result<()>>>,
   page: PageRef<WAL_BLOCK_SIZE>,
 ) -> impl FnOnce(&io::Result<()>) {
   move |result| {

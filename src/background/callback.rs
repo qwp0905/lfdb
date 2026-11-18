@@ -64,12 +64,12 @@ impl<R> Callback<R> {
     unsafe { (vtable.call)(ptr, NonNull::from_ref(value).cast()) };
   }
 
-  const unsafe fn from_raw(raw: *mut ()) -> Self {
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
     let vptr = unsafe { VPtr::from_raw(raw) };
     Self(ManuallyDrop::new(vptr), PhantomData)
   }
 
-  fn into_raw(this: Self) -> *mut () {
+  pub fn into_raw(this: Self) -> *mut () {
     let mut this = ManuallyDrop::new(this);
     VPtr::into_raw(unsafe { ManuallyDrop::take(&mut this.0) })
   }

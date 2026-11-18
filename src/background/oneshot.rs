@@ -7,7 +7,7 @@ use crate::utils::{
     thread::{current, park, yield_now, Thread},
     thread_local, AtomicPtr, Backoff, UnsafeCell,
   },
-  SBox, TwBox,
+  SBox,
 };
 
 use super::{Callback, CallbackSlot};
@@ -18,16 +18,6 @@ pub enum TryWaitError<T> {
 }
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
-
-/**
- * Creates a single-use channel pair (Oneshot, OneshotFulfill).
- * State transitions: Waiting → Fulfilled → Disconnected.
- * The receiver parks until the sender fulfills the value or disconnects.
- */
-pub fn oneshot<T>() -> (Oneshot<T>, OneshotFulfill<T>) {
-  let inner = TwBox::new(OneshotBehavior::new());
-  (Oneshot(inner.0), OneshotFulfill(inner.1))
-}
 
 // A waker pointer stored in `state` owns one `SBox` count; whoever swaps it out
 // reclaims that count with `SBox::from_raw`.
@@ -236,58 +226,8 @@ impl<T> OneshotBehavior<T> {
   }
 }
 
-/**
- * Minimal single-use completion primitive for background work.
- *
- * This is not intended to be a general-purpose channel. It exists so
- * `Execute::execute` can return a cheap handle for receiving exactly
- * one result from a worker. The implementation uses a dedicated heap-allocated
- * pair shared by the waiter and fulfiller to keep the synchronization surface
- * small and predictable.
- */
-pub struct Oneshot<T>(TwBox<OneshotBehavior<T>>);
-impl<T> Oneshot<T> {
-  pub fn wait(self) -> Result<T, WaitDisconnectedError> {
-    self.0.wait()
-  }
-
-  pub fn add_callback(
-    &self,
-    callback: Callback<T>,
-  ) -> std::result::Result<(), Callback<T>> {
-    self.0.add_callback(callback)
-  }
-
-  pub fn must_call(self, callback: Callback<T>) {
-    if let Err(err) = self.add_callback(callback) {
-      err.call(&self.wait().unwrap())
-    }
-  }
-}
-impl<T> Drop for Oneshot<T> {
-  fn drop(&mut self) {
-    self.0.drop_receiver();
-  }
-}
-
-pub struct OneshotFulfill<T>(TwBox<OneshotBehavior<T>>);
-impl<T> OneshotFulfill<T> {
-  pub fn fulfill(self, result: T) {
-    self.0.fulfill_and_wake(result);
-  }
-}
-impl<T> Drop for OneshotFulfill<T> {
-  fn drop(&mut self) {
-    self.0.drop_sender();
-  }
-}
-
 unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
 unsafe impl<T: Send> Send for OneshotBehavior<T> {}
-
-#[cfg(all(test, not(loom)))]
-#[path = "tests/oneshot.rs"]
-mod tests;
 
 #[cfg(all(test, loom))]
 #[path = "tests/oneshot_loom.rs"]
