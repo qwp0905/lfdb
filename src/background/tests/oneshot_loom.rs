@@ -3,15 +3,15 @@ use loom::{sync::Arc, thread};
 use super::*;
 
 fn spawn_sender<T: Send + 'static>(
-  behavior: &Arc<OneshotBehavior<T>>,
+  oneshot: &Arc<Oneshot<T>>,
   value: Option<T>,
 ) -> thread::JoinHandle<()> {
-  let behavior = behavior.clone();
+  let oneshot = oneshot.clone();
   thread::spawn(move || {
     if let Some(value) = value {
-      behavior.fulfill_and_wake(value);
+      oneshot.fulfill_and_wake(value);
     }
-    behavior.drop_sender();
+    oneshot.drop_sender();
   })
 }
 
@@ -19,11 +19,11 @@ fn spawn_sender<T: Send + 'static>(
 fn fulfilled_value_is_received() {
   loom::model(|| {
     let probe = Arc::new(());
-    let behavior = Arc::new(OneshotBehavior::new());
-    let sender = spawn_sender(&behavior, Some(probe.clone()));
+    let oneshot = Arc::new(Oneshot::new());
+    let sender = spawn_sender(&oneshot, Some(probe.clone()));
 
-    let received = behavior.wait().unwrap();
-    behavior.drop_receiver();
+    let received = oneshot.wait().unwrap();
+    oneshot.drop_receiver();
     sender.join().unwrap();
 
     assert!(Arc::ptr_eq(&received, &probe));
@@ -35,11 +35,11 @@ fn fulfilled_value_is_received() {
 #[test]
 fn dropped_sender_disconnects_waiter() {
   loom::model(|| {
-    let behavior = Arc::new(OneshotBehavior::<()>::new());
-    let sender = spawn_sender(&behavior, None);
+    let oneshot = Arc::new(Oneshot::<()>::new());
+    let sender = spawn_sender(&oneshot, None);
 
-    assert!(behavior.wait().is_err());
-    behavior.drop_receiver();
+    assert!(oneshot.wait().is_err());
+    oneshot.drop_receiver();
     sender.join().unwrap();
   });
 }
@@ -48,10 +48,10 @@ fn dropped_sender_disconnects_waiter() {
 fn value_is_dropped_once_when_receiver_drops() {
   loom::model(|| {
     let probe = Arc::new(());
-    let behavior = Arc::new(OneshotBehavior::new());
-    let sender = spawn_sender(&behavior, Some(probe.clone()));
+    let oneshot = Arc::new(Oneshot::new());
+    let sender = spawn_sender(&oneshot, Some(probe.clone()));
 
-    behavior.drop_receiver();
+    oneshot.drop_receiver();
     sender.join().unwrap();
 
     assert_eq!(Arc::strong_count(&probe), 1);

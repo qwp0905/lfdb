@@ -6,7 +6,7 @@ use std::{
   ptr::NonNull,
 };
 
-use super::{OneshotBehavior, VPtr as VPtrRaw, WaitDisconnectedError};
+use super::{Oneshot, VPtr as VPtrRaw, WaitDisconnectedError};
 
 type VPtr = VPtrRaw<TaskVTable>;
 type WaitResult<T> = std::result::Result<T, WaitDisconnectedError>;
@@ -22,7 +22,7 @@ struct TaskVTable {
 
 struct TaskPayload<T, R, F, C> {
   function: UnsafeCell<ManuallyDrop<F>>,
-  behavior: OneshotBehavior<R>,
+  oneshot: Oneshot<R>,
   context: C,
   _marker: PhantomData<fn(T) -> R>,
 }
@@ -42,7 +42,7 @@ where
   fn new(function: F, context: C) -> Self {
     Self {
       function: UnsafeCell::new(ManuallyDrop::new(function)),
-      behavior: OneshotBehavior::new(),
+      oneshot: Oneshot::new(),
       context,
       _marker: PhantomData,
     }
@@ -52,21 +52,21 @@ where
     let this = VPtr::get_ref::<Self>(ptr);
     let func = unsafe { ManuallyDrop::take(&mut (*this.function.get())) };
     let value = unsafe { value.cast::<T>().read() };
-    this.behavior.fulfill_and_wake(func(value));
+    this.oneshot.fulfill_and_wake(func(value));
   }
 }
 impl<T, R, F, C> TaskPayload<T, R, F, C> {
   unsafe fn drop_receiver(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
-    this.behavior.drop_receiver();
+    this.oneshot.drop_receiver();
   }
   unsafe fn drop_sender(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
-    this.behavior.drop_sender();
+    this.oneshot.drop_sender();
   }
   unsafe fn wait(ptr: NonNull<()>, value: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
-    value.cast::<WaitResult<R>>().write(this.behavior.wait());
+    value.cast::<WaitResult<R>>().write(this.oneshot.wait());
   }
   unsafe fn drop_in_place(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);

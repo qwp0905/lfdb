@@ -74,11 +74,11 @@ impl<T> Atomic<T> {
   }
 }
 
-pub struct OneshotBehavior<T> {
+pub struct Oneshot<T> {
   state: Atomic<ThreadWaker>,
   value: UnsafeCell<MaybeUninit<T>>,
 }
-impl<T> OneshotBehavior<T> {
+impl<T> Oneshot<T> {
   pub fn new() -> Self {
     Self {
       value: UnsafeCell::new(MaybeUninit::uninit()),
@@ -206,8 +206,8 @@ impl<T> OneshotBehavior<T> {
   }
 }
 
-unsafe impl<T: Send> Sync for OneshotBehavior<T> {}
-unsafe impl<T: Send> Send for OneshotBehavior<T> {}
+unsafe impl<T: Send> Sync for Oneshot<T> {}
+unsafe impl<T: Send> Send for Oneshot<T> {}
 
 #[cfg(all(test, loom))]
 #[path = "tests/oneshot_loom.rs"]
