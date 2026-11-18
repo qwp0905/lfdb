@@ -43,9 +43,4 @@ pub use mpsc::*;
 mod batch;
 pub use batch::*;
 
-#[cfg(target_os = "linux")]
-mod slot_pool;
-#[cfg(target_os = "linux")]
-pub use slot_pool::*;
-
 pub mod loom;
