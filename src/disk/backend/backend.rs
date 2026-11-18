@@ -26,6 +26,12 @@ impl IOTask {
   const fn new(fulfiller: TaskFulfiller<Result<usize>, IOContext>) -> Self {
     Self { fulfiller }
   }
+  pub(crate) fn into_raw(this: Self) -> *mut () {
+    TaskFulfiller::into_raw(this.fulfiller)
+  }
+  pub(crate) const unsafe fn from_raw(raw: *mut ()) -> Self {
+    Self::new(unsafe { TaskFulfiller::from_raw(raw) })
+  }
   fn create_with<T: Send + 'static, F: FnOnce(Result<usize>) -> T + Send + 'static>(
     task_type: TaskType,
     callback: F,

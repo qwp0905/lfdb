@@ -134,7 +134,7 @@ impl<T, C> TaskFulfiller<T, C> {
     VPtr::into_raw(unsafe { ManuallyDrop::take(&mut this.task.0) })
   }
   #[cfg(target_os = "linux")]
-  pub unsafe fn from_raw(raw: *mut ()) -> Self {
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
     Self::new(unsafe { VPtr::from_raw(raw) })
   }
 }
