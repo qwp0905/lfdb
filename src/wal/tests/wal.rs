@@ -64,7 +64,7 @@ impl FaultController {
     };
     // Fulfilled outside the lock because completion callbacks resubmit writes.
     for task in held {
-      task.fulfiller.fulfill(Err(IoError::from(kind)));
+      task.fulfill(Err(IoError::from(kind)));
     }
   }
 
@@ -82,7 +82,7 @@ impl FaultController {
   fn intercept(&self, index: usize, task: IOTask) -> Option<IOTask> {
     let (lock, cvar) = &*self.hold;
     let mut state = lock.lock().unwrap();
-    match task.task_type {
+    match task.context().get_type() {
       TaskType::Fdatasync => {
         state.fdatasynced.push(index);
         cvar.notify_all();
@@ -97,7 +97,7 @@ impl FaultController {
       return None;
     };
     drop(state);
-    task.fulfiller.fulfill(Err(IoError::from(kind)));
+    task.fulfill(Err(IoError::from(kind)));
     None
   }
 }
@@ -112,7 +112,7 @@ impl IOBackend for FaultIO {
     let Some(task) = self.controller.intercept(self.index, task) else {
       return;
     };
-    let slot = match task.task_type {
+    let slot = match task.context().get_type() {
       TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => &self.controller.write,
       TaskType::Fdatasync => &self.controller.fdatasync,
       TaskType::Fsync | TaskType::Fallocate { .. } => return self.inner.submit(task),
@@ -120,7 +120,7 @@ impl IOBackend for FaultIO {
     let Some(kind) = slot.lock().unwrap().take() else {
       return self.inner.submit(task);
     };
-    task.fulfiller.fulfill(Err(IoError::from(kind)));
+    task.fulfill(Err(IoError::from(kind)));
   }
   fn pread(&self, buf: &mut [u8], offset: u64) -> IoResult<usize> {
     self.inner.pread(buf, offset)

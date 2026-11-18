@@ -4,34 +4,38 @@ use std::{
   path::Path,
 };
 
-use crate::background::{create_task, create_task_with, AsyncTask, TaskFulfiller};
+use crate::background::{
+  create_tagged_task, create_tagged_task_with, AsyncTask, TaskFulfiller,
+};
 
-use super::TaskType;
+use super::{IOContext, TaskType};
 
 pub const IO_RETRY: u8 = 3;
 
 pub struct IOTask {
-  pub task_type: TaskType,
-  pub fulfiller: TaskFulfiller<Result<usize>>,
+  fulfiller: TaskFulfiller<Result<usize>, IOContext>,
 }
 
 impl IOTask {
-  const fn new(task_type: TaskType, fulfiller: TaskFulfiller<Result<usize>>) -> Self {
-    Self {
-      task_type,
-      fulfiller,
-    }
+  pub fn fulfill(self, result: Result<usize>) {
+    self.fulfiller.fulfill(result);
+  }
+  pub fn context(&self) -> &IOContext {
+    self.fulfiller.context()
+  }
+  const fn new(fulfiller: TaskFulfiller<Result<usize>, IOContext>) -> Self {
+    Self { fulfiller }
   }
   fn create_with<T: Send + 'static, F: FnOnce(Result<usize>) -> T + Send + 'static>(
     task_type: TaskType,
     callback: F,
   ) -> (Self, AsyncTask<T>) {
-    let (fulfiller, done) = create_task_with(callback);
-    (Self::new(task_type, fulfiller), done)
+    let (fulfiller, done) = create_tagged_task_with(IOContext::new(task_type), callback);
+    (Self::new(fulfiller), done)
   }
   fn create(task_type: TaskType) -> (Self, AsyncTask<Result<usize>>) {
-    let (fulfiller, done) = create_task();
-    (Self::new(task_type, fulfiller), done)
+    let (fulfiller, done) = create_tagged_task(IOContext::new(task_type));
+    (Self::new(fulfiller), done)
   }
   pub fn new_pwrite_with<
     T: Send + 'static,

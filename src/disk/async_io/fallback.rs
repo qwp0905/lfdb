@@ -2,12 +2,12 @@ use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{SharedWorkThread, ThreadBuilder};
 
-use super::super::{fallocate, pwrite, pwritev, AsyncIOTask};
+use super::super::{fallocate, pwrite, pwritev, IOTask};
 use super::TaskType;
 
-fn handle_task(task: AsyncIOTask<usize>) {
-  let file = task.toward();
-  let result = match task.get_type() {
+fn handle_task(task: IOTask) {
+  let file = task.context().toward();
+  let result = match task.context().get_type() {
     TaskType::Pwrite { offset, buf } => pwrite(file, buf, offset),
     TaskType::Pwritev { offset, bufs } => pwritev(file, bufs, offset),
     TaskType::Fsync => file.sync_all().map(|_| 0),
@@ -17,7 +17,7 @@ fn handle_task(task: AsyncIOTask<usize>) {
   task.fulfill(result);
 }
 pub struct AsyncIO {
-  thread: SharedWorkThread<AsyncIOTask<usize>, ()>,
+  thread: SharedWorkThread<IOTask, ()>,
 }
 impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {
@@ -29,7 +29,7 @@ impl AsyncIO {
     Ok(Self { thread })
   }
 
-  pub fn submit(&self, task: AsyncIOTask<usize>) {
+  pub fn submit(&self, task: IOTask) {
     self.thread.dispatch(task);
   }
 

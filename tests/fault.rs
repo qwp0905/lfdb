@@ -51,7 +51,7 @@ enum Op {
 }
 impl Op {
   fn of(task: &IOTask) -> Self {
-    match task.task_type {
+    match task.context().get_type() {
       TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
       TaskType::Fsync => Self::Fsync,
       TaskType::Fdatasync => Self::Fdatasync,
@@ -116,7 +116,7 @@ impl IOBackend for FaultIO {
     if !self.controller.should_fail(Op::of(&task)) {
       return self.inner.submit(task);
     }
-    task.fulfiller.fulfill(Err(IoError::from(ErrorKind::Other)));
+    task.fulfill(Err(IoError::from(ErrorKind::Other)));
   }
 
   fn metadata(&self) -> IoResult<Metadata> {

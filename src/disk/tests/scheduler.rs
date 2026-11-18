@@ -85,7 +85,7 @@ fn block(byte: u8) -> &'static [u8] {
 }
 
 fn written(task: &IOTask) -> (u64, Vec<*const u8>) {
-  match task.task_type {
+  match task.context().get_type() {
     TaskType::Pwrite { offset, buf } => (offset, vec![buf.as_ptr()]),
     TaskType::Pwritev { offset, bufs } => {
       (offset, bufs.iter().map(|b| b.as_ptr()).collect())
@@ -121,14 +121,11 @@ fn test_write_callback_receives_backend_result() {
   };
 
   let succeeded = publish(0);
-  f.backend.take().fulfiller.fulfill(Ok(BLOCK));
+  f.backend.take().fulfill(Ok(BLOCK));
   assert_eq!(succeeded.wait().unwrap(), Ok(()));
 
   let failed = publish(BLOCK as u64);
-  f.backend
-    .take()
-    .fulfiller
-    .fulfill(Err(Error::from(ErrorKind::Other)));
+  f.backend.take().fulfill(Err(Error::from(ErrorKind::Other)));
   assert_eq!(failed.wait().unwrap(), Err(ErrorKind::Other));
 }
 
@@ -146,7 +143,7 @@ fn test_scheduler_merges_adjacent_writes() {
   ];
   assert!(f.backend.is_idle());
 
-  held.fulfiller.fulfill(Ok(BLOCK));
+  held.fulfill(Ok(BLOCK));
   let merged = f.backend.take();
   assert_eq!(
     written(&merged),
@@ -156,8 +153,8 @@ fn test_scheduler_merges_adjacent_writes() {
   assert_eq!(written(&separate), (5 * BLOCK as u64, vec![z.as_ptr()]));
   assert!(f.backend.is_idle());
 
-  merged.fulfiller.fulfill(Ok(2 * BLOCK));
-  separate.fulfiller.fulfill(Ok(BLOCK));
+  merged.fulfill(Ok(2 * BLOCK));
+  separate.fulfill(Ok(BLOCK));
   assert!(result(first).is_ok());
   waiting.into_iter().for_each(|w| assert!(result(w).is_ok()));
 }
@@ -171,12 +168,12 @@ fn test_scheduler_deduplicates_same_block() {
   let (older, newer) = (block(1), block(2));
   let waiting = [f.write(BLOCK as u64, older), f.write(BLOCK as u64, newer)];
 
-  held.fulfiller.fulfill(Ok(BLOCK));
+  held.fulfill(Ok(BLOCK));
   let task = f.backend.take();
   assert_eq!(written(&task), (BLOCK as u64, vec![newer.as_ptr()]));
   assert!(f.backend.is_idle());
 
-  task.fulfiller.fulfill(Ok(BLOCK));
+  task.fulfill(Ok(BLOCK));
   assert!(result(first).is_ok());
   waiting.into_iter().for_each(|w| assert!(result(w).is_ok()));
 }
@@ -188,7 +185,7 @@ fn test_scheduler_allocates_before_first_write() {
 
   let allocation = f.backend.take();
   assert!(matches!(
-    allocation.task_type,
+    allocation.context().get_type(),
     TaskType::Fallocate {
       offset: 0,
       len: EXTENT
@@ -196,21 +193,21 @@ fn test_scheduler_allocates_before_first_write() {
   ));
   assert!(f.backend.is_idle());
 
-  allocation.fulfiller.fulfill(Ok(0));
+  allocation.fulfill(Ok(0));
   let write = f.backend.take();
   assert_eq!(written(&write).0, 0);
-  write.fulfiller.fulfill(Ok(BLOCK));
+  write.fulfill(Ok(BLOCK));
   assert!(result(first).is_ok());
 
   let inside = f.write(BLOCK as u64, block(1));
   let write = f.backend.take();
   assert_eq!(written(&write).0, BLOCK as u64);
-  write.fulfiller.fulfill(Ok(BLOCK));
+  write.fulfill(Ok(BLOCK));
   assert!(result(inside).is_ok());
 
   let _beyond = f.write(EXTENT, block(2));
   assert!(matches!(
-    f.backend.take().task_type,
+    f.backend.take().context().get_type(),
     TaskType::Fallocate {
       offset: EXTENT,
       len: EXTENT
@@ -225,14 +222,13 @@ fn test_scheduler_fallocate_failure() {
 
   f.backend
     .take()
-    .fulfiller
     .fulfill(Err(Error::from(ErrorKind::StorageFull)));
   assert!(f.backend.is_idle());
   assert_eq!(result(first).unwrap_err().kind(), ErrorKind::StorageFull);
 
   let _retry = f.write(0, block(1));
   assert!(matches!(
-    f.backend.take().task_type,
+    f.backend.take().context().get_type(),
     TaskType::Fallocate {
       offset: 0,
       len: EXTENT
@@ -246,10 +242,10 @@ fn test_scheduler_retries_short_write() {
   let data = block(0);
   let done = f.write(0, data);
 
-  f.backend.take().fulfiller.fulfill(Ok(1));
+  f.backend.take().fulfill(Ok(1));
   let retried = f.backend.take();
   assert_eq!(written(&retried), (0, vec![data.as_ptr()]));
-  retried.fulfiller.fulfill(Ok(BLOCK));
+  retried.fulfill(Ok(BLOCK));
 
   assert!(result(done).is_ok());
   assert!(f.backend.is_idle());
@@ -261,7 +257,7 @@ fn test_scheduler_gives_up_short_write() {
   let done = f.write(0, block(0));
 
   for _ in 0..IO_RETRY {
-    f.backend.take().fulfiller.fulfill(Ok(1));
+    f.backend.take().fulfill(Ok(1));
   }
 
   assert!(f.backend.is_idle());
@@ -273,17 +269,17 @@ fn test_scheduler_merges_syncs() {
   let f = Fixture::new(None);
   let first = f.sync();
   let held = f.backend.take();
-  assert!(matches!(held.task_type, TaskType::Fdatasync));
+  assert!(matches!(held.context().get_type(), TaskType::Fdatasync));
 
   let waiting = [f.sync(), f.sync()];
   assert!(f.backend.is_idle());
 
-  held.fulfiller.fulfill(Ok(0));
+  held.fulfill(Ok(0));
   let merged = f.backend.take();
-  assert!(matches!(merged.task_type, TaskType::Fdatasync));
+  assert!(matches!(merged.context().get_type(), TaskType::Fdatasync));
   assert!(f.backend.is_idle());
 
-  merged.fulfiller.fulfill(Err(Error::from(ErrorKind::Other)));
+  merged.fulfill(Err(Error::from(ErrorKind::Other)));
   assert!(result(first).is_ok());
   waiting
     .into_iter()
@@ -307,15 +303,15 @@ fn test_scheduler_close_waits_for_published_requests() {
   }
   assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
-  held.fulfiller.fulfill(Ok(BLOCK));
+  held.fulfill(Ok(BLOCK));
   let next = f.backend.take();
   assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
-  next.fulfiller.fulfill(Ok(1));
+  next.fulfill(Ok(1));
   let retried = f.backend.take();
   assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
-  retried.fulfiller.fulfill(Ok(BLOCK));
+  retried.fulfill(Ok(BLOCK));
   rx.recv_timeout(TIMEOUT).expect("close did not finish");
 
   assert!(result(first).is_ok());

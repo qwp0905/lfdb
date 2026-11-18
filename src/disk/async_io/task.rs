@@ -1,8 +1,7 @@
+use std::cell::OnceCell;
 use std::fs::File;
-use std::io::{IoSlice, Result};
+use std::io::IoSlice;
 use std::sync::Arc;
-
-use crate::background::TaskFulfiller;
 
 #[derive(Clone, Copy)]
 pub enum TaskType {
@@ -22,32 +21,24 @@ pub enum TaskType {
   },
 }
 
-pub struct AsyncIOTask<T> {
+pub struct IOContext {
   task_type: TaskType,
-  toward: Arc<File>,
-  fulfiller: TaskFulfiller<Result<T>>,
+  toward: OnceCell<Arc<File>>,
 }
-impl<T> AsyncIOTask<T> {
-  pub const fn new(
-    task_type: TaskType,
-    toward: Arc<File>,
-    fulfiller: TaskFulfiller<Result<T>>,
-  ) -> Self {
+impl IOContext {
+  pub const fn new(task_type: TaskType) -> Self {
     Self {
       task_type,
-      toward,
-      fulfiller,
+      toward: OnceCell::new(),
     }
   }
   pub const fn get_type(&self) -> TaskType {
     self.task_type
   }
-
   pub fn toward(&self) -> &'_ File {
-    &self.toward
+    self.toward.get().unwrap()
   }
-
-  pub fn fulfill(self, result: Result<T>) {
-    self.fulfiller.fulfill(result);
+  pub fn bind(&self, file: Arc<File>) {
+    let _ = self.toward.set(file);
   }
 }
