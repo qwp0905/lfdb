@@ -30,6 +30,11 @@ impl ThreadWaker {
     self.0.unpark();
   }
 }
+impl Default for ThreadWaker {
+  fn default() -> Self {
+    Self::new()
+  }
+}
 
 #[cfg(not(loom))]
 thread_local! {
@@ -39,10 +44,6 @@ thread_local! {
 #[cfg(loom)]
 thread_local! {
   static CURRENT: OnceCell<SBox<ThreadWaker>> = OnceCell::new();
-}
-
-fn with_current<R>(f: impl FnOnce(&SBox<ThreadWaker>) -> R) -> R {
-  CURRENT.with(|v| f(v.get_or_init(|| SBox::new(ThreadWaker::new()))))
 }
 
 // Tagged pointers
@@ -132,34 +133,34 @@ impl<T> OneshotBehavior<T> {
     self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
-  fn try_park_with(
-    &self,
-    waker: &SBox<ThreadWaker>,
-  ) -> Result<bool, WaitDisconnectedError> {
-    let backoff = Backoff::new();
-    let mut state = self.state.load();
-    loop {
-      match state {
-        STATE_FULFILLED => {
-          let Err(err) = self.state.cas_weak(state, STATE_DISCONNECTED) else {
-            return Ok(false);
-          };
-          backoff.spin();
-          state = err;
+  fn try_park(&self) -> Result<bool, WaitDisconnectedError> {
+    CURRENT.with(|v| {
+      let waker = v.get_or_init(Default::default);
+      let backoff = Backoff::new();
+      let mut state = self.state.load();
+      loop {
+        match state {
+          STATE_FULFILLED => {
+            let Err(err) = self.state.cas_weak(state, STATE_DISCONNECTED) else {
+              return Ok(false);
+            };
+            backoff.spin();
+            state = err;
+          }
+          STATE_DISCONNECTED => return Err(WaitDisconnectedError),
+          STATE_WAITING => {
+            let raw = SBox::into_raw(waker.clone());
+            let Err(err) = self.state.cas_weak(state, raw) else {
+              return Ok(true);
+            };
+            drop(unsafe { SBox::from_raw(raw) });
+            backoff.spin();
+            state = err;
+          }
+          _ => return Ok(true),
         }
-        STATE_DISCONNECTED => return Err(WaitDisconnectedError),
-        STATE_WAITING => {
-          let raw = SBox::into_raw(waker.clone());
-          let Err(err) = self.state.cas_weak(state, raw) else {
-            return Ok(true);
-          };
-          drop(unsafe { SBox::from_raw(raw) });
-          backoff.spin();
-          state = err;
-        }
-        _ => return Ok(true),
       }
-    }
+    })
   }
 
   #[cfg(not(loom))]
@@ -169,7 +170,7 @@ impl<T> OneshotBehavior<T> {
   #[cfg(loom)]
   const MAX_YIELD: u8 = 1;
   pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
-    with_current(|waker| loop {
+    loop {
       for _ in 0..Self::MAX_YIELD {
         match self.try_wait() {
           Ok(v) => return Ok(v),
@@ -177,11 +178,11 @@ impl<T> OneshotBehavior<T> {
           Err(TryWaitError::Empty(_)) => yield_now(),
         };
       }
-      if !self.try_park_with(waker)? {
+      if !self.try_park()? {
         return Ok(unsafe { self.read_value() });
       };
       park();
-    })
+    }
   }
 
   pub fn drop_receiver(&self) {
