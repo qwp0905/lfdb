@@ -26,9 +26,11 @@ impl IOTask {
   const fn new(fulfiller: TaskFulfiller<Result<usize>, IOContext>) -> Self {
     Self { fulfiller }
   }
+  #[cfg(target_os = "linux")]
   pub(crate) fn into_raw(this: Self) -> *mut () {
     TaskFulfiller::into_raw(this.fulfiller)
   }
+  #[cfg(target_os = "linux")]
   pub(crate) const unsafe fn from_raw(raw: *mut ()) -> Self {
     Self::new(unsafe { TaskFulfiller::from_raw(raw) })
   }
