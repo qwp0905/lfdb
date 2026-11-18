@@ -3,8 +3,8 @@ use std::{cell::Cell, io, mem::ManuallyDrop, sync::Arc};
 use crate::{
   background::{create_task, AsyncTask, EventBus, TaskFulfiller},
   disk::Pointer,
-  page::{Page, PageAllocator, PageRef},
-  utils::{create_static_ref, AtomicRef, AtomicSBox, BatchQueue, SBox},
+  page::{PageAllocator, PageRef},
+  utils::{AtomicRef, AtomicSBox, BatchQueue, SBox},
 };
 
 use super::{
@@ -213,12 +213,9 @@ impl LogBuffer {
 
       page.copy_from(self.entry.range(0..max_offset), 0);
 
-      let static_ref = unsafe { create_static_ref::<Page<WAL_BLOCK_SIZE>>(&page) };
-      upstream.segment.write_async_with(
-        self.pointer,
-        static_ref,
-        create_cb(waiting, page),
-      );
+      upstream
+        .segment
+        .submit_write(self.pointer, page, create_cb(waiting));
       let Some(next) = occupied.release() else {
         return batched;
       };
@@ -244,10 +241,8 @@ impl LogBuffer {
 
 const fn create_cb(
   waiting: Vec<TaskFulfiller<io::Result<()>>>,
-  page: PageRef<WAL_BLOCK_SIZE>,
 ) -> impl FnOnce(io::Result<()>) {
   move |result| {
-    drop(page);
     let result = result.map_err(|err| err.kind());
     for done in waiting {
       done.fulfill(result.map_err(io::Error::from));
