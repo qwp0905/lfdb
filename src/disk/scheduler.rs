@@ -10,7 +10,7 @@ use crossbeam::utils::Backoff;
 
 use super::{max_iov, IOBackend, IOTask, IO_RETRY};
 use crate::{
-  background::{create_task, AsyncTask, TaskFulfiller},
+  background::{create_task, create_task_with, AsyncTask, TaskFulfiller},
   metrics::MetricsRegistry,
   utils::{
     create_static_ref, BatchQueue, ExclusivePin, Occupied, OwnedSharedToken, SBox,
@@ -113,17 +113,47 @@ impl IOScheduler {
     metrics: &Arc<MetricsRegistry>,
   ) -> AsyncTask<Result<()>> {
     let (f, o) = create_task();
-    if let Some(occupied) = self.write.compete_owned(((offset, IoSlice::new(buf)), f)) {
-      let guard = RecursiveWrite::new(
-        occupied,
-        self.inner.backend.clone(),
-        metrics.clone(),
-        self.alloc.clone(),
-        pin,
-      );
-      drain_write(guard);
-    };
+    self.publish_write_request(buf, offset, pin, metrics, f);
     o
+  }
+  pub fn publish_write_with<R, F>(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    pin: OwnedSharedToken,
+    metrics: &Arc<MetricsRegistry>,
+    callback: F,
+  ) -> AsyncTask<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(Result<()>) -> R + Send + 'static,
+  {
+    let (f, o) = create_task_with(callback);
+    self.publish_write_request(buf, offset, pin, metrics, f);
+    o
+  }
+  fn publish_write_request(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    pin: OwnedSharedToken,
+    metrics: &Arc<MetricsRegistry>,
+    done: TaskFulfiller<Result<()>>,
+  ) {
+    let Some(occupied) = self
+      .write
+      .compete_owned(((offset, IoSlice::new(buf)), done))
+    else {
+      return;
+    };
+    let guard = RecursiveWrite::new(
+      occupied,
+      self.inner.backend.clone(),
+      metrics.clone(),
+      self.alloc.clone(),
+      pin,
+    );
+    drain_write(guard);
   }
   pub fn publish_sync(
     &self,

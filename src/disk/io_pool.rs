@@ -12,7 +12,7 @@ use super::{
   ScanIOHandle,
 };
 use crate::{
-  background::{AsyncTask, Callback},
+  background::AsyncTask,
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex},
   Error, Result,
@@ -21,27 +21,21 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub enum PendingIO<T: 'static = ()> {
-  Fulfilled(IOResult<T>),
-  Scheduled(AsyncTask<IOResult<T>>),
+pub enum PendingIO<T: 'static = IOResult<()>> {
+  Fulfilled(T),
+  Scheduled(AsyncTask<T>),
 }
 impl<T> PendingIO<T> {
-  pub fn wait(self) -> IOResult<T> {
+  pub fn wait(self) -> T {
     match self {
       Self::Fulfilled(v) => v,
       Self::Scheduled(o) => o.wait().unwrap(),
     }
   }
-
+}
+impl<T> PendingIO<IOResult<T>> {
   pub fn wait_flatten(self) -> Result<T> {
     self.wait().map_err(Error::IO)
-  }
-
-  pub fn add_callback<F: FnOnce(&IOResult<T>) + Send + 'static>(self, f: F) {
-    match self {
-      Self::Fulfilled(v) => f(&v),
-      Self::Scheduled(o) => o.must_call(Callback::new(f)),
-    };
   }
 }
 
@@ -224,6 +218,26 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
+  pub fn write_async_with<R, F>(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    callback: F,
+  ) -> PendingIO<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(IOResult<()>) -> R + Send + 'static,
+  {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
+      return PendingIO::Fulfilled(callback(Ok(())));
+    };
+    let done =
+      self
+        .scheduler
+        .publish_write_with(buf, offset, pin, &self.metrics, callback);
+    PendingIO::Scheduled(done)
+  }
+
   pub fn fdatasync_async(&self) -> PendingIO {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
@@ -232,7 +246,7 @@ impl IOHandle {
     PendingIO::Scheduled(done)
   }
 
-  pub fn fsync_async(&self) -> PendingIO<()> {
+  pub fn fsync_async(&self) -> PendingIO {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };

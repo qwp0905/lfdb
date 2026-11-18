@@ -107,6 +107,32 @@ fn result(done: AsyncTask<Result<()>>) -> Result<()> {
 }
 
 #[test]
+fn test_write_callback_receives_backend_result() {
+  let f = Fixture::new(None);
+  let publish = |offset: u64| {
+    let pin = f.scheduler.try_pin_owned().unwrap();
+    f.scheduler.publish_write_with(
+      block(0),
+      offset,
+      pin,
+      &f.metrics,
+      |result: Result<()>| result.map_err(|err| err.kind()),
+    )
+  };
+
+  let succeeded = publish(0);
+  f.backend.take().fulfiller.fulfill(Ok(BLOCK));
+  assert_eq!(succeeded.wait().unwrap(), Ok(()));
+
+  let failed = publish(BLOCK as u64);
+  f.backend
+    .take()
+    .fulfiller
+    .fulfill(Err(Error::from(ErrorKind::Other)));
+  assert_eq!(failed.wait().unwrap(), Err(ErrorKind::Other));
+}
+
+#[test]
 fn test_scheduler_merges_adjacent_writes() {
   let f = Fixture::new(None);
   let first = f.write(0, block(0));

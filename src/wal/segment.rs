@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
@@ -36,14 +36,19 @@ impl WALSegment {
 
     Ok(Self { handle })
   }
-  pub fn write_async(
+  pub fn write_async_with<R, F>(
     &self,
     pointer: Pointer,
     page: &'static Page<WAL_BLOCK_SIZE>,
-  ) -> PendingIO {
+    callback: F,
+  ) -> PendingIO<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(io::Result<()>) -> R + Send + 'static,
+  {
     self
       .handle
-      .write_async(page.as_slice(), pointer << Self::SHIFT)
+      .write_async_with(page.as_slice(), pointer << Self::SHIFT, callback)
   }
 
   /**
