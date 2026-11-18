@@ -133,30 +133,23 @@ impl<T> OneshotBehavior<T> {
     self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
-  fn try_park(&self) -> Result<bool, WaitDisconnectedError> {
+  fn try_park(&self) -> bool {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
       match state {
-        STATE_FULFILLED => {
-          let Err(err) = self.state.cas_weak(state, STATE_DISCONNECTED) else {
-            return Ok(false);
-          };
-          backoff.spin();
-          state = err;
-        }
-        STATE_DISCONNECTED => return Err(WaitDisconnectedError),
+        STATE_FULFILLED | STATE_DISCONNECTED => return false,
         STATE_WAITING => {
           let waker = CURRENT.with(|v| v.get_or_init(Default::default).clone());
           let raw = SBox::into_raw(waker);
           let Err(err) = self.state.cas_weak(state, raw) else {
-            return Ok(true);
+            return true;
           };
           drop(unsafe { SBox::from_raw(raw) });
           backoff.spin();
           state = err;
         }
-        _ => return Ok(true),
+        _ => return true,
       }
     }
   }
@@ -176,10 +169,9 @@ impl<T> OneshotBehavior<T> {
           Err(TryWaitError::Empty(_)) => yield_now(),
         };
       }
-      if !self.try_park()? {
-        return Ok(unsafe { self.read_value() });
+      if self.try_park() {
+        park();
       };
-      park();
     }
   }
 
