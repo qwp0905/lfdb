@@ -46,6 +46,18 @@ impl<VTable> VPtr<VTable> {
     self.0.cast()
   }
 
+  #[cfg(target_os = "linux")]
+  pub const fn into_raw(this: Self) -> *mut () {
+    let ptr = this.erased();
+    std::mem::forget(this);
+    ptr.as_ptr()
+  }
+  #[cfg(target_os = "linux")]
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
+    let ptr = raw as *mut Header<VTable>;
+    Self(unsafe { NonNull::new_unchecked(ptr) })
+  }
+
   pub const unsafe fn get_ref<'a, T>(ptr: NonNull<()>) -> &'a T {
     let raw = ptr.cast::<VObject<T, VTable>>();
     &raw.as_ref().payload
