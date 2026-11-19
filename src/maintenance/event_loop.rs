@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
   background::{EventBus, EventRouter, ThreadSlot, UnwindSpawner},
-  utils::error,
+  utils::{error, info},
   Result,
 };
 
@@ -67,24 +67,16 @@ const fn create_event_loop(
   move || {
     let mut event_router = EventRouter::new(event_bus);
     let mut last = Instant::now();
-    loop {
+
+    while !closed.load(Ordering::Relaxed) {
       unsafe { event_router.run_tick() };
-      if closed.load(Ordering::Relaxed) {
-        break;
-      }
 
       let now = Instant::now();
       if now - last >= TICK_SIZE {
         last = now;
 
         unsafe { checkpoint.run_tick() };
-        if closed.load(Ordering::Relaxed) {
-          break;
-        }
         unsafe { garbage_collector.run_tick() };
-        if closed.load(Ordering::Relaxed) {
-          break;
-        }
         unsafe { compactor.run_tick() };
       }
 
@@ -96,8 +88,13 @@ const fn create_event_loop(
       }
     }
 
+    info!("event loop started to close.");
     compactor.close()?;
+    info!("compactor closed.");
     garbage_collector.close();
-    checkpoint.close()
+    info!("gc closed.");
+    checkpoint.close()?;
+    info!("checkpoint closed.");
+    Ok(())
   }
 }
