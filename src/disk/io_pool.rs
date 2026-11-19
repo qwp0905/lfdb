@@ -12,7 +12,7 @@ use super::{
   ScanIOHandle,
 };
 use crate::{
-  background::AsyncTask,
+  background::{AsyncTask, TryWaitError},
   metrics::{measure, MetricsRegistry},
   utils::{error, ShortenedMutex},
   Error, Result,
@@ -30,6 +30,22 @@ impl<T> PendingIO<T> {
     match self {
       Self::Fulfilled(v) => v,
       Self::Scheduled(o) => o.wait().unwrap(),
+    }
+  }
+
+  pub fn try_wait(self) -> std::result::Result<T, TryWaitError<Self>> {
+    match self {
+      Self::Fulfilled(v) => Ok(v),
+      Self::Scheduled(task) => task
+        .try_wait()
+        .map_err(|err| err.map_empty(|pending| Self::Scheduled(pending))),
+    }
+  }
+
+  pub fn try_park(&self) -> bool {
+    match self {
+      Self::Fulfilled(_) => false,
+      Self::Scheduled(task) => task.try_park(),
     }
   }
 }

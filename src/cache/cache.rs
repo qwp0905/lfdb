@@ -2,15 +2,14 @@ use std::{collections::VecDeque, sync::Arc};
 
 use super::{
   Acquired, BlockCacheCore, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
-  MappingTable, PendingFlush, WritableSlot,
+  MappingTable, PendingDiskWrite, WritableSlot,
 };
 use crate::{
-  background::{SharedWorkThread, ThreadBuilder},
+  background::Select,
   disk::Pointer,
   metrics::{measure, MetricsRegistry},
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
-  utils::ToArc,
   wal::{WriteAheadLog, WriteSeq},
   Result,
 };
@@ -33,7 +32,6 @@ pub struct BlockCacheConfig {
  */
 pub struct BlockCache {
   core: Arc<BlockCacheCore>,
-  flush_executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
   metrics: Arc<MetricsRegistry>,
 }
 impl BlockCache {
@@ -56,17 +54,7 @@ impl BlockCache {
       DirtyTables::new(),
       allocator,
     ));
-
-    let flush_executor = ThreadBuilder::new()
-      .name("flush executor")
-      .multi(PRE_FLUSH_CONCURRENCY)
-      .shared(handle_flush_blocks(core.clone()))
-      .to_arc();
-    Self {
-      core,
-      flush_executor,
-      metrics,
-    }
+    Self { core, metrics }
   }
 
   /**
@@ -129,7 +117,7 @@ impl BlockCache {
 
   fn resolve_eviction<'a>(
     &'a self,
-    pending: Option<PendingFlush>,
+    pending: Option<PendingDiskWrite>,
     guard: EvictionGuard<'a>,
     new: PageRef<PAGE_SIZE>,
     pointer: Pointer,
@@ -178,13 +166,8 @@ impl BlockCache {
     Ok(CacheFlusher::new(
       VecDeque::from(dirty_blocks),
       boundary,
-      self.flush_executor.clone(),
       self.core.clone(),
     ))
-  }
-
-  pub fn close(&self) {
-    self.flush_executor.close();
   }
 }
 
@@ -207,32 +190,34 @@ pub struct CacheFlusher {
   dirty_blocks: VecDeque<BlockId>,
   boundary: WriteSeq,
   core: Arc<BlockCacheCore>,
-  executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
 }
 impl CacheFlusher {
   const fn new(
     dirty_blocks: VecDeque<BlockId>,
     boundary: WriteSeq,
-    executor: Arc<SharedWorkThread<(BlockId, WriteSeq), Result>>,
     core: Arc<BlockCacheCore>,
   ) -> Self {
     Self {
       dirty_blocks,
       boundary,
-      executor,
       core,
     }
   }
 
   pub fn advance(&mut self, count: usize) -> Result {
     let count = count.min(self.dirty_blocks.len());
-    let mut pending = Vec::with_capacity(count);
+    let mut pending = Select::with_capacity(PRE_FLUSH_CONCURRENCY);
     for &id in self.dirty_blocks.iter().take(count) {
-      pending.push(self.executor.execute((id, self.boundary)));
+      if pending.len() >= PRE_FLUSH_CONCURRENCY {
+        pending.select().unwrap()?;
+      }
+      let Some(p) = self.core.submit_flush_block(id, self.boundary) else {
+        continue;
+      };
+      pending.push(p);
     }
-
-    for pending in pending {
-      pending.wait().unwrap()?;
+    while !pending.is_empty() {
+      pending.select().unwrap()?;
     }
     self.dirty_blocks.drain(..count);
     Ok(())
@@ -252,17 +237,22 @@ impl CacheFlusher {
   }
 
   pub fn finish(&self) -> Result {
-    self.core.flush_tables()
+    let mut pending = Select::with_capacity(PRE_FLUSH_CONCURRENCY);
+    for task in self.core.flush_tables() {
+      if pending.len() >= PRE_FLUSH_CONCURRENCY {
+        pending.select().unwrap()?;
+      }
+      pending.push(task);
+    }
+
+    while !pending.is_empty() {
+      pending.select().unwrap()?;
+    }
+    Ok(())
   }
 }
 
 const PRE_FLUSH_CONCURRENCY: usize = 3;
-
-const fn handle_flush_blocks(
-  core: Arc<BlockCacheCore>,
-) -> impl Fn((BlockId, WriteSeq)) -> Result {
-  move |(id, boundary)| core.flush_block(id, boundary)
-}
 
 #[cfg(all(test, not(loom)))]
 #[path = "tests/cache.rs"]

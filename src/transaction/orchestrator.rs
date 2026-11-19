@@ -153,8 +153,6 @@ impl TxOrchestrator {
     info!("gc closed.");
     self.checkpoint.close()?;
 
-    self.block_cache.close();
-    info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
     Ok(())
