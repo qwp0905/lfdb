@@ -1,21 +1,15 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, UnsafeCell},
   collections::LinkedList,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  time::Duration,
 };
-
-use crossbeam::atomic::AtomicCell;
 
 use super::DropTableCommitted;
 use crate::{
-  background::{
-    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
-  },
+  background::{binding_events, EventBus, OwnedSubscription, SharedSubscription},
   blob::BlobStorage,
   btree::{
     BTreeIndex, CreatablePolicy, GetResult, ReadonlyPolicy, ResolvedConflict,
@@ -27,7 +21,7 @@ use crate::{
   objects::{Serializable, StaticKey},
   table::{TableHandleRef, TableMapper, TableMetadata, TableMetadataView, TableNameRef},
   transaction::PageRecorder,
-  utils::{error, info, trace, warn, MpscQueue, ToArc, ToBox},
+  utils::{error, info, trace, warn, MpscQueue},
   wal::{TxId, WALFailed, WriteAheadLog, RESERVED_TX},
   Error, Result,
 };
@@ -349,8 +343,6 @@ fn apply_snapshot_once(
   index.apply_snapshot_bulk(bulk, new_table)
 }
 
-const COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
-
 pub struct CompactionCommitted {
   old: TableHandleRef,
   new: TableHandleRef,
@@ -662,7 +654,7 @@ impl CompactionWorker {
     &self,
     incoming: &MpscQueue<CompactTask>,
     in_progress: &MpscQueue<CompactionCycle>,
-    cycle: &AtomicCell<Option<CompactionCycle>>,
+    cycle: &mut Option<CompactionCycle>,
     batch_size: usize,
     waiting_publish: &mut LinkedList<(
       TableHandleRef,
@@ -704,27 +696,33 @@ impl CompactionWorker {
       in_progress.push(CompactionCycle::new(old, new, metadata));
     }
 
-    // SAFETY: single threaded access to cycle.
-    let cycle_ref = unsafe { &mut *cycle.as_ptr() };
-    let Some(current) = cycle_ref
-      .as_mut()
-      .or_else(|| unsafe { in_progress.pop().map(|v| (*cycle.as_ptr()).insert(v)) })
-    else {
+    if cycle.is_none() {
+      *cycle = unsafe { in_progress.pop() };
+    }
+    let Some(current) = cycle.as_mut() else {
       return Ok(());
     };
     if self.execute(current, batch_size)? {
-      *cycle_ref = None;
+      *cycle = None;
     }
     Ok(())
   }
 }
 
 pub struct Compactor {
-  incoming: Arc<MpscQueue<CompactTask>>,
-  in_progress: Arc<MpscQueue<CompactionCycle>>,
-  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  ticker: Box<IntervalWorkThread>,
-  worker: Arc<CompactionWorker>,
+  incoming: MpscQueue<CompactTask>,
+  in_progress: MpscQueue<CompactionCycle>,
+  cycle: UnsafeCell<Option<CompactionCycle>>,
+  /**
+   * Wait until the compaction metadata publication is globally visible.
+   * `waiting_publish` holds compactions whose metadata update has committed, but
+   * may still be invisible to transactions that were already active. Once the
+   * commit version is below the global minimum visible version, future access can
+   * observe the old/new table-segment pair from metadata.
+   */
+  waiting_publish:
+    UnsafeCell<LinkedList<(TableHandleRef, TableHandleRef, TableMetadata, TxId)>>,
+  worker: CompactionWorker,
   failed: AtomicBool,
   batch_size: usize,
 }
@@ -740,9 +738,6 @@ impl Compactor {
     config: CompactionConfig,
   ) -> Arc<Self> {
     let meta_table = tables.meta_table();
-    let incoming = MpscQueue::new().to_arc();
-    let in_progress = MpscQueue::new().to_arc();
-    let cycle = AtomicCell::new(None).to_arc();
     let worker = CompactionWorker::new(
       block_cache,
       version_controller,
@@ -752,29 +747,13 @@ impl Compactor {
       tables,
       meta_table,
       event_bus.clone(),
-    )
-    .to_arc();
-    let ticker = ThreadBuilder::new()
-      .name("compaction")
-      .stack_size(2 << 20)
-      .single()
-      .interval(
-        COMPACTION_INTERVAL,
-        compaction_loop(
-          incoming.clone(),
-          in_progress.clone(),
-          worker.clone(),
-          cycle.clone(),
-          config.batch_size,
-        ),
-      )
-      .to_box();
+    );
 
     let this = Arc::new(Self {
-      incoming,
-      in_progress,
-      cycle,
-      ticker,
+      incoming: MpscQueue::new(),
+      in_progress: MpscQueue::new(),
+      cycle: UnsafeCell::new(None),
+      waiting_publish: UnsafeCell::new(LinkedList::new()),
       worker,
       failed: AtomicBool::new(false),
       batch_size: config.batch_size,
@@ -821,15 +800,13 @@ impl Compactor {
    */
   pub fn close(&self) -> Result {
     if !self.worker.wal.is_available() {
-      self.failover();
       return Ok(());
     }
     if self.failed.fetch_or(true, Ordering::Relaxed) {
       return Ok(());
     }
-    self.ticker.close();
 
-    let mut cycle = self.cycle.take();
+    let mut cycle = unsafe { &mut *self.cycle.get() }.take();
     if self.in_progress.is_empty() && cycle.is_none() {
       return Ok(());
     }
@@ -846,15 +823,29 @@ impl Compactor {
     Ok(())
   }
 
-  fn failover(&self) {
-    if self.failed.fetch_or(true, Ordering::Relaxed) {
+  pub unsafe fn run_tick(&self) {
+    if self.failed.load(Ordering::Relaxed) {
       return;
     }
-    self.ticker.close();
-    let _ = self.cycle.take();
-    while unsafe { self.in_progress.pop() }.is_some() {}
+    let Err(err) = self.worker.run_tick(
+      &self.incoming,
+      &self.in_progress,
+      unsafe { &mut *self.cycle.get() },
+      self.batch_size,
+      unsafe { &mut *self.waiting_publish.get() },
+    ) else {
+      return;
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("compaction failed: {err}");
   }
 }
+// SAFETY: `cycle` and `waiting_publish` are touched only by `run_tick`, which the
+// event loop calls from its own thread, and by `close`, which runs after the loop
+// has stopped.
+unsafe impl Sync for Compactor {}
 
 impl OwnedSubscription<CompactionCommitted> for Compactor {
   fn handle(&self, event: CompactionCommitted) {
@@ -876,7 +867,7 @@ impl OwnedSubscription<CompactionPublished> for Compactor {
 impl SharedSubscription<WALFailed> for Compactor {
   fn handle(&self, _: Arc<WALFailed>) {
     error!("compactor stopped since wal failure detected.");
-    self.failover();
+    self.failed.store(true, Ordering::Relaxed);
   }
 }
 binding_events!(Compactor {
@@ -889,12 +880,9 @@ binding_events!(Compactor {
 });
 
 /**
- * Shared storage for the currently active compaction cycle.
- *
- * The interval worker is the only thread that mutates this while it is running,
- * but shutdown needs to take over the current work context after the worker is
- * closed. Keeping the active cycle outside the worker closure lets `close`
- * continue draining the same compaction synchronously.
+ * The active cycle is kept on `Compactor` rather than inside a tick, so `close`
+ * can take over the same cycle after the event loop stops and finish it
+ * synchronously.
  */
 struct CompactionCycle {
   old: TableHandleRef,
@@ -916,35 +904,5 @@ impl CompactionCycle {
       snapshotter: None,
       resume_key: None,
     }
-  }
-}
-
-fn compaction_loop(
-  incoming: Arc<MpscQueue<CompactTask>>,
-  in_progress: Arc<MpscQueue<CompactionCycle>>,
-  worker: Arc<CompactionWorker>,
-  cycle: Arc<AtomicCell<Option<CompactionCycle>>>,
-  batch_size: usize,
-) -> impl FnMut() {
-  // Wait until the compaction metadata publication is globally visible.
-  // `waiting_publish` holds compactions whose metadata update has committed, but
-  // may still be invisible to transactions that were already active. Once the
-  // commit version is below the global minimum visible version, future access can
-  // observe the old/new table-segment pair from metadata.
-  let mut waiting_publish = LinkedList::new();
-  move || {
-    let Err(err) = worker.run_tick(
-      &incoming,
-      &in_progress,
-      &cycle,
-      batch_size,
-      &mut waiting_publish,
-    ) else {
-      return;
-    };
-    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
-      panic!("{err}");
-    }
-    error!("compaction failed: {err}");
   }
 }
