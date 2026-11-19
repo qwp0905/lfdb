@@ -1,29 +1,25 @@
 use std::{
+  cell::UnsafeCell,
   mem::take,
   path::PathBuf,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  time::{Duration, Instant},
+  time::Instant,
 };
-
-use crossbeam::atomic::AtomicCell;
 
 use super::CheckpointSnapshot;
 
 use crate::{
-  background::{
-    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
-  },
+  background::{binding_events, EventBus, OwnedSubscription, SharedSubscription},
   blob::BlobStorage,
   cache::{BlockCache, CacheFlusher},
   disk::IOPool,
   metrics::MetricsRegistry,
   mvcc::VersionController,
   page::PAGE_SIZE,
-  utils::{debug, error, info, trace, uuid_simple, MpscQueue, ToArc, ToBox},
+  utils::{debug, error, info, trace, uuid_simple, MpscQueue},
   wal::{WALFailed, WALSegment, WALSegmentRotated, WriteAheadLog, WriteSeq},
   Error, Result,
 };
@@ -32,7 +28,6 @@ pub struct CheckpointConfig {
   pub flush_factor: f64,
 }
 
-const CHECKPOINT_TICK: Duration = Duration::from_millis(500);
 const BATCH_SIZE: f64 = ((1 << 20) / PAGE_SIZE / 2) as f64; // convert from mib/sec
 
 struct CheckpointCycle {
@@ -94,8 +89,7 @@ impl CheckpointCycle {
 }
 
 pub struct Checkpoint {
-  incoming: Arc<MpscQueue<WALSegmentRotated>>,
-  ticker: Box<IntervalWorkThread>,
+  incoming: MpscQueue<WALSegmentRotated>,
   /**
    * Shared storage for the active checkpoint cycle.
    *
@@ -103,41 +97,24 @@ pub struct Checkpoint {
    * over the current checkpoint context after closing the worker and finish it
    * synchronously.
    */
-  cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
-  worker: Arc<CheckpointWorker>,
+  cycle: UnsafeCell<Option<CheckpointCycle>>,
+  worker: CheckpointWorker,
   failed: AtomicBool,
+  config: CheckpointConfig,
 }
 impl Checkpoint {
   fn with_worker(
-    worker: Arc<CheckpointWorker>,
+    worker: CheckpointWorker,
     event_bus: Arc<EventBus>,
-    metrics: Arc<MetricsRegistry>,
     config: CheckpointConfig,
   ) -> Arc<Self> {
-    let incoming = MpscQueue::new().to_arc();
-    let cycle = AtomicCell::new(None).to_arc();
-    let ticker = ThreadBuilder::new()
-      .name("checkpoint")
-      .stack_size(2 << 20)
-      .single()
-      .interval(
-        CHECKPOINT_TICK,
-        checkpoint_loop(
-          incoming.clone(),
-          worker.clone(),
-          cycle.clone(),
-          metrics,
-          config.flush_factor,
-        ),
-      )
-      .to_box();
-
+    let incoming = MpscQueue::new();
     let this = Arc::new(Self {
       incoming,
-      ticker,
-      cycle,
+      cycle: UnsafeCell::new(None),
       worker,
       failed: AtomicBool::new(false),
+      config,
     });
     event_bus.register(&this);
     this
@@ -152,36 +129,37 @@ impl Checkpoint {
     metrics: Arc<MetricsRegistry>,
     config: CheckpointConfig,
   ) -> Arc<Self> {
-    let worker =
-      CheckpointWorker::new(wal, block_cache, version_controller, io_pool, blob_storage)
-        .to_arc();
-    Self::with_worker(worker, event_bus, metrics, config)
+    let worker = CheckpointWorker::new(
+      wal,
+      block_cache,
+      version_controller,
+      io_pool,
+      blob_storage,
+      metrics,
+    );
+    Self::with_worker(worker, event_bus, config)
   }
 
-  pub fn initial_checkpoint(
-    wal: Arc<WriteAheadLog>,
-    block_cache: Arc<BlockCache>,
-    version_controller: Arc<VersionController>,
-    io_pool: Arc<IOPool>,
-    blob_storage: Arc<BlobStorage>,
-    event_bus: Arc<EventBus>,
-    metrics: Arc<MetricsRegistry>,
-    config: CheckpointConfig,
-  ) -> Result<Arc<Self>> {
-    let worker =
-      CheckpointWorker::new(wal, block_cache, version_controller, io_pool, blob_storage)
-        .to_arc();
-    worker.run_hard()?;
-    Ok(Self::with_worker(worker, event_bus, metrics, config))
+  pub fn run_manually(&self) -> Result {
+    self.worker.run_hard()?;
+    Ok(())
   }
 
-  fn failover(&self) {
-    if self.failed.fetch_or(true, Ordering::Relaxed) {
+  pub unsafe fn run_tick(&self) {
+    if self.failed.load(Ordering::Relaxed) {
       return;
     }
-    self.ticker.close();
-    let _ = self.cycle.take();
-    while unsafe { self.incoming.pop() }.is_some() {}
+    let Err(err) = self.worker.run_tick(
+      &self.incoming,
+      unsafe { &mut *self.cycle.get() },
+      self.config.flush_factor,
+    ) else {
+      return;
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("checkpoint failed: {err}");
   }
 
   /**
@@ -194,15 +172,13 @@ impl Checkpoint {
    */
   pub fn close(&self) -> Result {
     if !self.worker.wal.is_available() {
-      self.failover();
       return Ok(());
     }
     if self.failed.fetch_or(true, Ordering::Relaxed) {
       return Ok(());
     }
-    self.ticker.close();
     if self.incoming.is_empty() {
-      let Some(mut cycle) = self.cycle.take() else {
+      let Some(mut cycle) = unsafe { &mut *self.cycle.get() }.take() else {
         return Ok(());
       };
 
@@ -220,7 +196,7 @@ impl Checkpoint {
       }
     }
 
-    if let Some(cycle) = self.cycle.take() {
+    if let Some(cycle) = unsafe { &mut *self.cycle.get() }.take() {
       cycle.truncate_all()?;
     }
 
@@ -228,6 +204,9 @@ impl Checkpoint {
     Ok(())
   }
 }
+// SAFETY: `cycle` is touched only by `run_tick`, which the event loop calls from
+// its own thread, and by `close`, which runs after the loop has stopped.
+unsafe impl Sync for Checkpoint {}
 
 impl OwnedSubscription<WALSegmentRotated> for Checkpoint {
   fn handle(&self, event: WALSegmentRotated) {
@@ -237,7 +216,7 @@ impl OwnedSubscription<WALSegmentRotated> for Checkpoint {
 impl SharedSubscription<WALFailed> for Checkpoint {
   fn handle(&self, _: Arc<WALFailed>) {
     error!("checkpoint stopped since wal failure detected.");
-    self.failover();
+    self.failed.store(true, Ordering::Relaxed);
   }
 }
 binding_events!(Checkpoint {
@@ -253,6 +232,7 @@ struct CheckpointWorker {
   version_controller: Arc<VersionController>,
   io_pool: Arc<IOPool>,
   blob_storage: Arc<BlobStorage>,
+  metrics: Arc<MetricsRegistry>,
 }
 impl CheckpointWorker {
   const fn new(
@@ -261,6 +241,7 @@ impl CheckpointWorker {
     version_controller: Arc<VersionController>,
     io_pool: Arc<IOPool>,
     blob_storage: Arc<BlobStorage>,
+    metrics: Arc<MetricsRegistry>,
   ) -> Self {
     Self {
       wal,
@@ -268,6 +249,7 @@ impl CheckpointWorker {
       version_controller,
       io_pool,
       blob_storage,
+      metrics,
     }
   }
 
@@ -311,7 +293,6 @@ impl CheckpointWorker {
   fn create_cycle(
     &self,
     incoming: &MpscQueue<WALSegmentRotated>,
-    metrics: &MetricsRegistry,
   ) -> Result<CheckpointCycle> {
     let write_seq = self.wal.completed_write_seq();
     let flusher = self.block_cache.create_flusher(write_seq)?;
@@ -331,21 +312,18 @@ impl CheckpointWorker {
       durable,
       flusher,
       write_seq,
-      metrics.checkpoint_cycle.start(),
+      self.metrics.checkpoint_cycle.start(),
     ))
   }
 
-  fn run_tick<F: Fn(usize) -> usize>(
+  fn run_tick(
     &self,
     incoming: &MpscQueue<WALSegmentRotated>,
-    cycle: &AtomicCell<Option<CheckpointCycle>>,
-    metrics: &MetricsRegistry,
-    calc_batch_size: &F,
+    cycle: &mut Option<CheckpointCycle>,
+    flush_factor: f64,
   ) -> Result {
-    // SAFETY: single threaded access to cycle.
-    let cycle = unsafe { &mut *cycle.as_ptr() };
     let Some(current) = cycle else {
-      let new = self.create_cycle(incoming, metrics)?;
+      let new = self.create_cycle(incoming)?;
       if new.is_empty() {
         debug!("no checkpoint required.");
         return Ok(());
@@ -366,7 +344,8 @@ impl CheckpointWorker {
       // The number of retired-but-not-yet-reusable WAL segments is treated as write
       // pressure. Higher pressure flushes more dirty blocks per tick, both throttling
       // ongoing write load indirectly and moving segment reuse forward sooner.
-      let batch_size = calc_batch_size(current.segments_len() + incoming.len());
+      let batch_size = (flush_factor.powi((current.segments_len() + incoming.len()) as _)
+        * BATCH_SIZE) as usize;
       trace!("checkpoint flush {} blocks", batch_size);
       return current.advance_flush(batch_size);
     }
@@ -381,55 +360,17 @@ impl CheckpointWorker {
 
     if current.segments_len() == 0 {
       debug!("skip create checkpoint snapshot since nothing to rotate.");
-      metrics.checkpoint_cycle.record(current.take_start());
+      self.metrics.checkpoint_cycle.record(current.take_start());
       *cycle = None;
       return Ok(());
     }
 
     self.finalize_checkpoint(current.get_write_seq())?;
-    metrics.checkpoint_cycle.record(current.take_start());
+    self.metrics.checkpoint_cycle.record(current.take_start());
     info!("checkpoint complete id {}", current.get_write_seq());
 
     self.wal.reuse_segments(current.take_segments());
     *cycle = None;
     Ok(())
-  }
-}
-
-/**
- * Adaptive incremental checkpoint.
- * As the pressure to replace Wal segments increases,
- * more cache blocks are flushed.
- */
-fn checkpoint_loop(
-  incoming: Arc<MpscQueue<WALSegmentRotated>>,
-  worker: Arc<CheckpointWorker>,
-  cycle: Arc<AtomicCell<Option<CheckpointCycle>>>,
-  metrics: Arc<MetricsRegistry>,
-  flush_factor: f64,
-) -> impl FnMut() {
-  let mut calculated = [0f64; 20];
-  calculated[0] = BATCH_SIZE;
-  for i in 1..calculated.len() {
-    calculated[i] = calculated[i - 1] * flush_factor;
-  }
-
-  let calc_batch_size = move |pressure: usize| -> usize {
-    if pressure < calculated.len() {
-      return calculated[pressure] as usize;
-    }
-
-    let last = calculated.len() - 1;
-    (flush_factor.powi((pressure - last) as i32) * calculated[last]) as usize
-  };
-
-  move || {
-    let Err(err) = worker.run_tick(&incoming, &cycle, &metrics, &calc_batch_size) else {
-      return;
-    };
-    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
-      panic!("{err}");
-    }
-    error!("checkpoint failed: {err}");
   }
 }
