@@ -80,4 +80,4 @@ mod tests;
 
 #[cfg(all(test, loom))]
 #[path = "tests/select_loom.rs"]
-mod loom_tests;
+mod tests;
