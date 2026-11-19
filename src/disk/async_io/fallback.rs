@@ -17,7 +17,7 @@ fn handle_task(task: IOTask) {
   task.fulfill(result);
 }
 pub struct AsyncIO {
-  thread: SharedWorkThread<IOTask, ()>,
+  thread: SharedWorkThread<IOTask>,
 }
 impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {

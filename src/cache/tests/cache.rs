@@ -110,7 +110,6 @@ impl Fixture {
 }
 impl Drop for Fixture {
   fn drop(&mut self) {
-    self.cache.close();
     self.wal.close();
   }
 }

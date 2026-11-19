@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use super::{IntervalWorkThread, SharedFn, SharedWorkThread, SingleFn, ThreadPool};
+use super::{IntervalWorkThread, SingleFn, ThreadPool};
+#[cfg(not(target_os = "linux"))]
+use super::{SharedFn, SharedWorkThread};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -69,11 +71,11 @@ impl MultiThreadBuilder {
     ThreadPool::new(self.builder.name, self.builder.stack_size, self.count)
   }
 
-  pub fn shared<T, R, F>(self, f: F) -> SharedWorkThread<T, R>
+  #[cfg(not(target_os = "linux"))]
+  pub fn shared<T, F>(self, f: F) -> SharedWorkThread<T>
   where
     T: Send + 'static,
-    R: Send + 'static,
-    F: Fn(T) -> R + Send + Sync + 'static,
+    F: Fn(T) + Send + Sync + 'static,
   {
     SharedWorkThread::new(
       self.builder.name,

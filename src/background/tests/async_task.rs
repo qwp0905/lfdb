@@ -120,6 +120,35 @@ fn test_unfulfilled_function_is_dropped_without_running() {
 }
 
 #[test]
+fn test_try_wait_returns_task_until_fulfilled() {
+  let (tx, rx) = create_task::<usize>();
+  let Err(TryWaitError::Empty(rx)) = rx.try_wait() else {
+    panic!("should be empty before fulfill");
+  };
+  tx.fulfill(9);
+  assert!(matches!(rx.try_wait(), Ok(9)));
+}
+
+#[test]
+fn test_try_wait_reports_disconnect() {
+  let (tx, rx) = create_task::<usize>();
+  drop(tx);
+  assert!(matches!(rx.try_wait(), Err(TryWaitError::Disconnected)));
+}
+
+#[test]
+fn test_try_park_reports_pending_until_finished() {
+  let (tx, rx) = create_task::<usize>();
+  assert!(rx.try_park());
+  tx.fulfill(1);
+  assert!(!rx.try_park());
+
+  let (tx, rx) = create_task::<usize>();
+  drop(tx);
+  assert!(!rx.try_park());
+}
+
+#[test]
 fn test_panicking_function_disconnects_receiver() {
   let (tx, rx) = create_task_with(|_: ()| -> usize { panic!("function failed") });
   let sender = spawn(move || tx.fulfill(()));
