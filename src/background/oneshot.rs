@@ -4,7 +4,7 @@ use std::{
 
 use crate::utils::{
   loom::{
-    thread::{current, park, yield_now, Thread},
+    thread::{current, Thread},
     thread_local, AtomicPtr, Backoff, UnsafeCell,
   },
   SBox,
@@ -14,6 +14,18 @@ pub enum TryWaitError<T> {
   Disconnected,
   Empty(T),
 }
+impl<T> TryWaitError<T> {
+  pub fn map_empty<F, R>(self, project: F) -> TryWaitError<R>
+  where
+    F: FnOnce(T) -> R,
+  {
+    match self {
+      Self::Disconnected => TryWaitError::Disconnected,
+      Self::Empty(err) => TryWaitError::Empty(project(err)),
+    }
+  }
+}
+
 #[derive(Debug)]
 pub struct WaitDisconnectedError;
 
@@ -86,7 +98,7 @@ impl<T> Oneshot<T> {
     }
   }
 
-  pub fn fulfill_and_wake(&self, result: T) {
+  pub unsafe fn fulfill_and_wake(&self, result: T) {
     self.value.with_mut(|v| unsafe { (*v).write(result) });
     let backoff = Backoff::new();
     let mut state = self.state.load();
@@ -109,7 +121,7 @@ impl<T> Oneshot<T> {
     }
   }
 
-  fn try_wait(&self) -> std::result::Result<T, TryWaitError<()>> {
+  pub unsafe fn try_wait(&self) -> std::result::Result<T, TryWaitError<()>> {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -133,7 +145,7 @@ impl<T> Oneshot<T> {
     self.value.with_mut(|v| unsafe { (*v).assume_init_drop() });
   }
 
-  fn try_park(&self) -> bool {
+  pub unsafe fn try_park(&self) -> bool {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -149,33 +161,25 @@ impl<T> Oneshot<T> {
           backoff.spin();
           state = err;
         }
-        _ => return true,
+        _ => {
+          let waker = CURRENT.with(|v| v.get_or_init(Default::default).clone());
+          if state == waker.as_ptr() {
+            return true;
+          }
+          let raw = SBox::into_raw(waker);
+          let Err(err) = self.state.cas_weak(state, raw) else {
+            drop(unsafe { SBox::from_raw(state) });
+            return true;
+          };
+          drop(unsafe { SBox::from_raw(raw) });
+          backoff.spin();
+          state = err;
+        }
       }
     }
   }
 
-  #[cfg(not(loom))]
-  const MAX_YIELD: u8 = 10;
-  // Loom keeps scheduling the other thread while one yields, so a long yield
-  // phase lets the sender always finish before the waiter reaches park.
-  #[cfg(loom)]
-  const MAX_YIELD: u8 = 1;
-  pub fn wait(&self) -> Result<T, WaitDisconnectedError> {
-    loop {
-      for _ in 0..Self::MAX_YIELD {
-        match self.try_wait() {
-          Ok(v) => return Ok(v),
-          Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
-          Err(TryWaitError::Empty(_)) => yield_now(),
-        };
-      }
-      if self.try_park() {
-        park();
-      };
-    }
-  }
-
-  pub fn drop_receiver(&self) {
+  pub unsafe fn drop_receiver(&self) {
     match self.state.swap(STATE_DISCONNECTED) {
       STATE_FULFILLED => unsafe { self.drop_value() },
       STATE_WAITING | STATE_DISCONNECTED => {}
@@ -185,7 +189,7 @@ impl<T> Oneshot<T> {
     }
   }
 
-  pub fn drop_sender(&self) {
+  pub unsafe fn drop_sender(&self) {
     let backoff = Backoff::new();
     let mut state = self.state.load();
     loop {
@@ -208,7 +212,3 @@ impl<T> Oneshot<T> {
 
 unsafe impl<T: Send> Sync for Oneshot<T> {}
 unsafe impl<T: Send> Send for Oneshot<T> {}
-
-#[cfg(all(test, loom))]
-#[path = "tests/oneshot_loom.rs"]
-mod tests;

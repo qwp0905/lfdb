@@ -1,4 +1,6 @@
-use super::{SharedFn, SharedWorkThread, ThreadPool};
+use super::ThreadPool;
+#[cfg(not(target_os = "linux"))]
+use super::{SharedFn, SharedWorkThread};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
@@ -39,11 +41,11 @@ impl ThreadBuilder {
     ThreadPool::new(self.name, self.stack_size, self.count)
   }
 
-  pub fn shared<T, R, F>(self, f: F) -> SharedWorkThread<T, R>
+  #[cfg(not(target_os = "linux"))]
+  pub fn shared<T, F>(self, f: F) -> SharedWorkThread<T>
   where
     T: Send + 'static,
-    R: Send + 'static,
-    F: Fn(T) -> R + Send + Sync + 'static,
+    F: Fn(T) + Send + Sync + 'static,
   {
     SharedWorkThread::new(self.name, self.stack_size, self.count, SharedFn::new(f))
   }

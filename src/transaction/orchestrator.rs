@@ -145,8 +145,6 @@ impl TxOrchestrator {
     self.event_loop.close();
     info!("event loop closed");
 
-    self.block_cache.close();
-    info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
   }

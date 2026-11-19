@@ -2,23 +2,18 @@ use std::{sync::Arc, thread::Builder};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
-use super::{
-  create_task, AsyncTask, SharedFn, TaskFulfiller, ThreadParker, ThreadSlot,
-  UnwindSpawner,
-};
+use super::{SharedFn, ThreadParker, ThreadSlot, UnwindSpawner};
 
-enum Context<T, R> {
-  Execute(T, TaskFulfiller<R>),
-  #[allow(unused)]
+enum Context<T> {
   Dispatch(T),
   Term,
 }
 
-struct Inner<T, R> {
-  queue: SegQueue<Context<T, R>>,
+struct Inner<T> {
+  queue: SegQueue<Context<T>>,
   parker: ThreadParker,
 }
-impl<T, R> Inner<T, R> {
+impl<T> Inner<T> {
   fn new() -> Self {
     Self {
       queue: SegQueue::new(),
@@ -26,14 +21,14 @@ impl<T, R> Inner<T, R> {
     }
   }
 }
-pub struct SharedWorkThread<T: Send + 'static, R: Send + 'static> {
-  inner: Arc<Inner<T, R>>,
+pub struct SharedWorkThread<T: Send + 'static> {
+  inner: Arc<Inner<T>>,
   slots: Box<[ThreadSlot]>,
 }
-impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
+impl<T: Send + 'static> SharedWorkThread<T> {
   const fn worker_loop(
-    inner: Arc<Inner<T, R>>,
-    handler: SharedFn<'static, T, R>,
+    inner: Arc<Inner<T>>,
+    handler: SharedFn<'static, T, ()>,
   ) -> impl FnOnce() {
     move || {
       let backoff = Backoff::new();
@@ -44,10 +39,7 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
             continue;
           };
           match ctx {
-            Context::Execute(v, done) => done.fulfill(handler.call(v)),
-            Context::Dispatch(v) => {
-              let _ = handler.call(v);
-            }
+            Context::Dispatch(v) => handler.call(v),
             Context::Term => return,
           }
           backoff.reset();
@@ -58,10 +50,7 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
           continue;
         };
         match ctx {
-          Context::Execute(v, done) => done.fulfill(handler.call(v)),
-          Context::Dispatch(v) => {
-            let _ = handler.call(v);
-          }
+          Context::Dispatch(v) => handler.call(v),
           Context::Term => return,
         }
       }
@@ -71,11 +60,10 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
     name: impl ToString,
     size: usize,
     count: usize,
-    handler: SharedFn<'static, T, R>,
+    handler: SharedFn<'static, T, ()>,
   ) -> Self
   where
     T: Send + 'static,
-    R: Send + 'static,
   {
     let inner = Arc::new(Inner::new());
     let mut slots = Vec::with_capacity(count);
@@ -93,16 +81,10 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
     }
   }
 
-  pub fn execute(&self, value: T) -> AsyncTask<R> {
-    let (f, o) = create_task();
-    self.register(Context::Execute(value, f));
-    o
-  }
-  #[cfg(not(target_os = "linux"))]
   pub fn dispatch(&self, value: T) {
     self.register(Context::Dispatch(value));
   }
-  fn register(&self, ctx: Context<T, R>) {
+  fn register(&self, ctx: Context<T>) {
     self.inner.queue.push(ctx);
     self.inner.parker.wake_once();
   }
@@ -121,7 +103,7 @@ impl<T: Send + 'static, R: Send + 'static> SharedWorkThread<T, R> {
     }
   }
 }
-impl<T: Send + 'static, R: Send + 'static> Drop for SharedWorkThread<T, R> {
+impl<T: Send + 'static> Drop for SharedWorkThread<T> {
   fn drop(&mut self) {
     self.close();
   }

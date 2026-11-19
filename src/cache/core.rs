@@ -1,15 +1,21 @@
-use std::{collections::HashMap, mem::replace, sync::Arc};
+use std::{
+  collections::HashMap,
+  mem::{replace, ManuallyDrop},
+  sync::Arc,
+};
 
 use crate::{
-  disk::Pointer,
+  background::{Selectable, TryWaitError},
+  disk::{PendingIO, Pointer},
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
   wal::{WriteAheadLog, WriteSeq},
-  Result,
+  Error, Result,
 };
 
 use super::{
-  BlockId, CachedBlock, DirtyTables, EvictionGuard, MappingTable, PendingFlush,
+  BlockId, CachedBlock, DirtyTableRef, DirtyTables, EvictionGuard, MappingTable,
+  MappingToken, PendingDirty, PendingDiskWrite,
 };
 
 /**
@@ -59,7 +65,10 @@ impl BlockCacheCore {
     &self.cached_blocks[block_id]
   }
 
-  pub fn submit_eviction(&self, guard: &EvictionGuard) -> Result<Option<PendingFlush>> {
+  pub fn submit_eviction(
+    &self,
+    guard: &EvictionGuard,
+  ) -> Result<Option<PendingDiskWrite>> {
     if !guard.is_evicted() {
       return Ok(None);
     }
@@ -73,7 +82,7 @@ impl BlockCacheCore {
 
   pub fn resolve_eviction(
     &self,
-    pending: Option<PendingFlush>,
+    pending: Option<PendingDiskWrite>,
     guard: &EvictionGuard,
     new: PageRef<PAGE_SIZE>,
     pointer: Pointer,
@@ -96,34 +105,28 @@ impl BlockCacheCore {
     Ok(())
   }
 
-  pub fn flush_block(&self, id: BlockId, boundary: WriteSeq) -> Result {
-    let Some(_token) = self.mapping.try_pin(id) else {
-      return Ok(());
-    };
+  pub fn submit_flush_block(
+    &self,
+    id: BlockId,
+    boundary: WriteSeq,
+  ) -> Option<PendingFlushBlock<'_>> {
+    let token = self.mapping.try_pin(id)?;
 
     // A block rewritten at or after the boundary is left dirty: its newest record
     // holds the whole page, so replay from the boundary restores it, and the
     // checkpoint record is flushed after that record.
     let block = &self.cached_blocks[id];
-    let Some(snapshot) = block.flush_dirty(boundary) else {
-      return Ok(());
-    };
-    snapshot.submit().finalize()?;
-    self.mark_dirty_table(block.handle());
-    Ok(())
+    let snapshot = block.flush_dirty(boundary)?;
+    Some(PendingFlushBlock::new(
+      token,
+      snapshot.submit(),
+      block.handle(),
+      &self.dirty_tables,
+    ))
   }
 
-  pub fn flush_tables(&self) -> Result {
-    let mut pending = Vec::new();
-    for table_ref in self.dirty_tables.get_all() {
-      pending.push((table_ref.as_table().disk().fsync(), table_ref));
-    }
-
-    for (pending, table_ref) in pending {
-      pending.wait_flatten()?;
-      table_ref.finish();
-    }
-    Ok(())
+  pub fn flush_tables(&self) -> impl Iterator<Item = PendingFlushTable<'_>> + '_ {
+    self.dirty_tables.get_all().map(PendingFlushTable::new)
   }
 
   pub fn aggregate_dirty_blocks(&self, boundary: WriteSeq) -> Vec<BlockId> {
@@ -169,5 +172,94 @@ impl BlockCacheCore {
     } else {
       self.allocator.allocate_new()
     }
+  }
+}
+
+pub struct PendingFlushBlock<'a> {
+  pending: ManuallyDrop<PendingDirty<'a>>,
+  token: ManuallyDrop<MappingToken<'a>>,
+  table: &'a TableHandleRef,
+  dirty: &'a DirtyTables,
+}
+impl<'a> PendingFlushBlock<'a> {
+  const fn new(
+    token: MappingToken<'a>,
+    pending: PendingDirty<'a>,
+    table: &'a TableHandleRef,
+    dirty: &'a DirtyTables,
+  ) -> Self {
+    Self {
+      token: ManuallyDrop::new(token),
+      pending: ManuallyDrop::new(pending),
+      table,
+      dirty,
+    }
+  }
+}
+impl<'a> Drop for PendingFlushBlock<'a> {
+  fn drop(&mut self) {
+    unsafe { ManuallyDrop::drop(&mut self.pending) };
+    unsafe { ManuallyDrop::drop(&mut self.token) };
+  }
+}
+impl<'a> Selectable for PendingFlushBlock<'a> {
+  type Output = Result;
+
+  fn try_wait(self) -> std::result::Result<Self::Output, TryWaitError<Self>> {
+    let mut this = ManuallyDrop::new(self);
+    let token = unsafe { ManuallyDrop::take(&mut this.token) };
+    let pending = unsafe { ManuallyDrop::take(&mut this.pending) };
+    let result = match pending.try_finalize() {
+      Ok(result) => result,
+      Err(err) => {
+        return Err(
+          err.map_empty(|pending| Self::new(token, pending, this.table, this.dirty)),
+        )
+      }
+    };
+    if let Err(err) = result {
+      return Ok(Err(err));
+    }
+    this.dirty.mark(this.table);
+    Ok(Ok(()))
+  }
+
+  fn try_park(&self) -> bool {
+    self.pending.try_park()
+  }
+}
+
+pub struct PendingFlushTable<'a> {
+  pending: PendingIO,
+  table: DirtyTableRef<'a>,
+}
+impl<'a> PendingFlushTable<'a> {
+  fn new(table: DirtyTableRef<'a>) -> Self {
+    let pending = table.as_table().disk().fsync();
+    Self { pending, table }
+  }
+}
+impl<'a> Selectable for PendingFlushTable<'a> {
+  type Output = Result;
+
+  fn try_wait(self) -> std::result::Result<Self::Output, TryWaitError<Self>> {
+    let result = match self.pending.try_wait() {
+      Ok(result) => result,
+      Err(err) => {
+        return Err(err.map_empty(|pending| Self {
+          pending,
+          table: self.table,
+        }))
+      }
+    };
+    if let Err(err) = result {
+      return Ok(Err(Error::IO(err)));
+    }
+    self.table.finish();
+    Ok(Ok(()))
+  }
+
+  fn try_park(&self) -> bool {
+    self.pending.try_park()
   }
 }

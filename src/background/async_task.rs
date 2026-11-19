@@ -6,14 +6,16 @@ use std::{
   ptr::NonNull,
 };
 
-use super::{Oneshot, VPtr as VPtrRaw, WaitDisconnectedError};
+use crate::utils::loom::thread::{park, yield_now};
+
+use super::{Oneshot, Selectable, TryWaitError, VPtr as VPtrRaw, WaitDisconnectedError};
 
 type VPtr = VPtrRaw<TaskVTable>;
-type WaitResult<T> = std::result::Result<T, WaitDisconnectedError>;
 
 struct TaskVTable {
   fulfill: unsafe fn(NonNull<()>, NonNull<()>),
-  wait: unsafe fn(NonNull<()>, NonNull<()>),
+  try_wait: unsafe fn(NonNull<()>, NonNull<()>),
+  try_park: unsafe fn(NonNull<()>) -> bool,
   context: unsafe fn(NonNull<()>) -> NonNull<()>,
   drop_sender: unsafe fn(NonNull<()>),
   drop_receiver: unsafe fn(NonNull<()>),
@@ -32,7 +34,8 @@ where
 {
   const VTABLE: TaskVTable = TaskVTable {
     fulfill: Self::fulfill,
-    wait: Self::wait,
+    try_wait: Self::try_wait,
+    try_park: Self::try_park,
     drop_sender: Self::drop_sender,
     drop_receiver: Self::drop_receiver,
     drop_in_place: Self::drop_in_place,
@@ -52,7 +55,7 @@ where
     let this = VPtr::get_ref::<Self>(ptr);
     let func = unsafe { ManuallyDrop::take(&mut (*this.function.get())) };
     let value = unsafe { value.cast::<T>().read() };
-    this.oneshot.fulfill_and_wake(func(value));
+    unsafe { this.oneshot.fulfill_and_wake(func(value)) };
   }
 }
 impl<T, R, F, C> TaskPayload<T, R, F, C> {
@@ -64,9 +67,14 @@ impl<T, R, F, C> TaskPayload<T, R, F, C> {
     let this = VPtr::get_ref::<Self>(ptr);
     this.oneshot.drop_sender();
   }
-  unsafe fn wait(ptr: NonNull<()>, value: NonNull<()>) {
+  unsafe fn try_wait(ptr: NonNull<()>, value: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
-    value.cast::<WaitResult<R>>().write(this.oneshot.wait());
+    let casted = value.cast::<Result<R, TryWaitError<()>>>();
+    unsafe { casted.write(this.oneshot.try_wait()) };
+  }
+  unsafe fn try_park(ptr: NonNull<()>) -> bool {
+    let this = VPtr::get_ref::<Self>(ptr);
+    unsafe { this.oneshot.try_park() }
   }
   unsafe fn drop_in_place(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
@@ -77,6 +85,10 @@ impl<T, R, F, C> TaskPayload<T, R, F, C> {
     NonNull::from_ref(&this.context).cast()
   }
 }
+// SAFETY: the two handles of a pair touch disjoint parts of the payload. Only the
+// fulfiller takes `function` and reads `context`, only the receiver calls the
+// receiver side of `oneshot`, and `oneshot` synchronizes the hand-off between them.
+unsafe impl<T, R: Send, F: Send, C: Send> Sync for TaskPayload<T, R, F, C> {}
 
 struct TaskRefInner(ManuallyDrop<VPtr>);
 impl TaskRefInner {
@@ -157,15 +169,54 @@ impl<R> AsyncTask<R> {
     }
   }
 
-  pub fn wait(self) -> WaitResult<R> {
+  pub fn try_wait(self) -> Result<R, TryWaitError<Self>> {
     let vtable = self.task.vtable();
     let ptr = self.task.erased();
-    let mut result = MaybeUninit::<WaitResult<R>>::uninit();
-    unsafe {
-      let result_ptr = NonNull::new_unchecked(result.as_mut_ptr().cast());
-      (vtable.wait)(ptr, result_ptr);
-      result.assume_init()
+    let mut result = MaybeUninit::<Result<R, TryWaitError<()>>>::uninit();
+    let result_ptr = unsafe { NonNull::new_unchecked(result.as_mut_ptr()) };
+    unsafe { (vtable.try_wait)(ptr, result_ptr.cast()) };
+    match unsafe { result.assume_init() } {
+      Ok(v) => Ok(v),
+      Err(TryWaitError::Disconnected) => Err(TryWaitError::Disconnected),
+      Err(TryWaitError::Empty(_)) => Err(TryWaitError::Empty(self)),
     }
+  }
+
+  pub fn try_park(&self) -> bool {
+    let vtable = self.task.vtable();
+    let ptr = self.task.erased();
+    unsafe { (vtable.try_park)(ptr) }
+  }
+
+  #[cfg(not(loom))]
+  const MAX_YIELD: u8 = 10;
+  // Loom keeps scheduling the other thread while one yields, so a long yield
+  // phase lets the sender always finish before the waiter reaches park.
+  #[cfg(loom)]
+  const MAX_YIELD: u8 = 1;
+  pub fn wait(mut self) -> Result<R, WaitDisconnectedError> {
+    loop {
+      for _ in 0..Self::MAX_YIELD {
+        match self.try_wait() {
+          Ok(v) => return Ok(v),
+          Err(TryWaitError::Disconnected) => return Err(WaitDisconnectedError),
+          Err(TryWaitError::Empty(this)) => self = this,
+        };
+        yield_now();
+      }
+      if self.try_park() {
+        park();
+      }
+    }
+  }
+}
+impl<R> Selectable for AsyncTask<R> {
+  type Output = R;
+  fn try_wait(self) -> Result<R, TryWaitError<Self>> {
+    AsyncTask::try_wait(self)
+  }
+  fn try_park(&self) -> bool {
+    AsyncTask::try_park(self)
   }
 }
 impl<R> Drop for AsyncTask<R> {
@@ -212,3 +263,7 @@ pub fn create_tagged_task_with<
 #[cfg(all(test, not(loom)))]
 #[path = "tests/async_task.rs"]
 mod tests;
+
+#[cfg(all(test, loom))]
+#[path = "tests/async_task_loom.rs"]
+mod loom_tests;

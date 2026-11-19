@@ -16,7 +16,9 @@ pub use pool::*;
 mod vptr;
 pub use vptr::*;
 
+#[cfg(not(target_os = "linux"))]
 mod shared;
+#[cfg(not(target_os = "linux"))]
 pub use shared::*;
 
 mod utils;
@@ -24,3 +26,6 @@ pub use utils::*;
 
 mod async_task;
 pub use async_task::*;
+
+mod select;
+pub use select::*;

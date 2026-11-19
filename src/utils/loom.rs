@@ -60,4 +60,9 @@ impl Backoff {
   pub fn snooze(&self) {
     ::loom::thread::yield_now();
   }
+
+  // A spin phase only delays parking, so loom goes straight to the park path.
+  pub const fn is_completed(&self) -> bool {
+    true
+  }
 }

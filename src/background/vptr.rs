@@ -31,7 +31,7 @@ impl<T, VTable> VObject<T, VTable> {
 
 pub struct VPtr<VTable: 'static>(NonNull<Header<VTable>>);
 impl<VTable> VPtr<VTable> {
-  pub fn new_pair<T: Send>(payload: T, vtable: &'static VTable) -> (Self, Self) {
+  pub fn new_pair<T: Send + Sync>(payload: T, vtable: &'static VTable) -> (Self, Self) {
     let inner = VObject::construct(Header::new_pair::<T>(vtable), payload);
     let (p1, p2) = TwBox::new(inner);
 
@@ -70,5 +70,7 @@ impl<VTable> Drop for VPtr<VTable> {
   }
 }
 
+// SAFETY: `new_pair` requires a `Send + Sync` payload, so one handle may move to
+// another thread while its pair stays behind, as with `TwBox`. The vtable is read
+// through a `&'static` reference, hence `VTable: Sync`.
 unsafe impl<VTable: Sync> Send for VPtr<VTable> {}
-unsafe impl<VTable: Sync> Sync for VPtr<VTable> {}
