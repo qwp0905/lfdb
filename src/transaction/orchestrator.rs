@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{Checkpoint, PageRecorder};
+use super::PageRecorder;
 
 use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
@@ -8,7 +8,7 @@ use crate::{
   cache::{BlockCache, CachedSlot, WritableSlot},
   disk::Pointer,
   error::Result,
-  maintenance::{Compactor, GarbageCollector},
+  maintenance::EventLoop,
   mvcc::{TxSnapshot, TxState, VersionController},
   objects::Serializable,
   table::{TableHandleRef, TableId, TableMapper, TableMetadata, TableNameRef},
@@ -25,12 +25,10 @@ pub struct TxOrchestrator {
   wal: Arc<WriteAheadLog>,
   tables: Arc<TableMapper>,
   block_cache: Arc<BlockCache>,
-  checkpoint: Arc<Checkpoint>,
   version_controller: Arc<VersionController>,
-  gc: Arc<GarbageCollector>,
   recorder: Arc<PageRecorder>,
-  compactor: Arc<Compactor>,
   blob: Arc<BlobStorage>,
+  event_loop: EventLoop,
 }
 impl TxOrchestrator {
   pub const fn new(
@@ -38,22 +36,18 @@ impl TxOrchestrator {
     block_cache: Arc<BlockCache>,
     tables: Arc<TableMapper>,
     version_controller: Arc<VersionController>,
-    gc: Arc<GarbageCollector>,
     recorder: Arc<PageRecorder>,
-    compactor: Arc<Compactor>,
     blob: Arc<BlobStorage>,
-    checkpoint: Arc<Checkpoint>,
+    event_loop: EventLoop,
   ) -> Self {
     Self {
       wal,
       tables,
       block_cache,
-      checkpoint,
       version_controller,
-      gc,
       recorder,
-      compactor,
       blob,
+      event_loop,
     }
   }
 
@@ -147,16 +141,13 @@ impl TxOrchestrator {
    * work. Lower-level storage components are then closed after their users have
    * finished.
    */
-  pub fn close(&self) -> Result {
-    self.compactor.close()?;
-    self.gc.close();
-    info!("gc closed.");
-    self.checkpoint.close()?;
+  pub fn close(&self) {
+    self.event_loop.close();
+    info!("event loop closed");
 
     self.block_cache.close();
     info!("block cache closed.");
     self.wal.close();
     info!("wal closed.");
-    Ok(())
   }
 }

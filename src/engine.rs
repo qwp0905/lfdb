@@ -17,20 +17,18 @@ use crate::{
   cache::{BlockCache, BlockCacheConfig},
   disk::{DiskBackend, IOPool, Pointer},
   maintenance::{
-    initialize, open_tables, recovery, CompactionConfig, CompactionPublished,
-    CompactionTriggered, Compactor, DropTableCommitted, GarbageCollectionConfig,
-    GarbageCollector,
+    initialize, open_tables, recovery, Checkpoint, CheckpointConfig, CheckpointSnapshot,
+    CompactionConfig, CompactionPublished, CompactionTriggered, Compactor,
+    DropTableCommitted, EventLoop, GarbageCollectionConfig, GarbageCollector,
+    SnapshotFormatVersion,
   },
   manifest::{load_manifest, save_manifest, Manifest},
   metrics::{EngineMetrics, MetricsRegistry},
   mvcc::VersionController,
   page::PAGE_SIZE,
   table::{TableFormatVersion, TableHandleRef, TableId, TableMapper, META_TABLE},
-  transaction::{
-    Checkpoint, CheckpointConfig, CheckpointSnapshot, PageRecorder,
-    SnapshotFormatVersion, Transaction, TxOrchestrator,
-  },
-  utils::{error, info, ToArc},
+  transaction::{PageRecorder, Transaction, TxOrchestrator},
+  utils::{info, ToArc},
   wal::{WALConfig, WALFormatVersion, WriteAheadLog, WriteSeq, RESERVED_TX},
   Error, Result,
 };
@@ -153,16 +151,15 @@ impl Engine {
         compaction_config,
       );
 
+      let event_loop = EventLoop::new(event_bus.clone(), checkpoint, gc, compactor);
       let orchestrator = TxOrchestrator::new(
         wal,
         block_cache,
         tables,
         version_controller,
-        gc,
         recorder,
-        compactor,
         blob,
-        checkpoint,
+        event_loop,
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
@@ -181,7 +178,7 @@ impl Engine {
     let thread_count = available_parallelism().map(NonZero::get).unwrap_or(1);
     let init_thread = ThreadBuilder::new()
       .name("bootstrap")
-      .multi(thread_count)
+      .count(thread_count)
       .pool();
 
     let mut tables = TableMapper::open_exists(io_pool.clone(), &manifest.metadata_table)?;
@@ -317,7 +314,7 @@ impl Engine {
     }
 
     let tables = tables.to_arc();
-    let checkpoint = Checkpoint::initial_checkpoint(
+    let checkpoint = Checkpoint::new(
       wal.clone(),
       block_cache.clone(),
       version_controller.clone(),
@@ -326,7 +323,8 @@ impl Engine {
       event_bus.clone(),
       metrics_registry.clone(),
       checkpoint_config,
-    )?;
+    );
+    checkpoint.run_manually()?;
 
     manifest.snapshot_version = SnapshotFormatVersion::CURRENT;
     manifest.wal_version = WALFormatVersion::CURRENT;
@@ -390,18 +388,18 @@ impl Engine {
       .join()
       .collect::<Result>()?;
 
+    init_thread.close();
+
+    let event_loop = EventLoop::new(event_bus.clone(), checkpoint, gc, compactor);
     let orchestrator = TxOrchestrator::new(
       wal,
       block_cache,
       tables,
       version_controller,
-      gc,
       recorder,
-      compactor,
       blob,
-      checkpoint.clone(),
+      event_loop,
     );
-    init_thread.close();
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
     Ok(Self {
@@ -440,11 +438,7 @@ impl Drop for Engine {
   fn drop(&mut self) {
     if self.available.fetch_and(false, Ordering::Relaxed) {
       info!("engine shutdown");
-      if let Err(err) = self.orchestrator.close() {
-        error!("error occurs in close engine: {err}");
-      };
-
-      self.event_bus.close();
+      self.orchestrator.close();
     }
   }
 }
