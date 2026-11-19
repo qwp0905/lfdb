@@ -59,7 +59,7 @@ impl BlockCache {
 
     let flush_executor = ThreadBuilder::new()
       .name("flush executor")
-      .multi(PRE_FLUSH_CONCURRENCY)
+      .count(PRE_FLUSH_CONCURRENCY)
       .shared(handle_flush_blocks(core.clone()))
       .to_arc();
     Self {

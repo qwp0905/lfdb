@@ -24,7 +24,7 @@ impl AsyncIO {
     let count = available_parallelism().map(NonZero::get).unwrap_or(1);
     let thread = ThreadBuilder::new()
       .name("async io")
-      .multi(count)
+      .count(count)
       .shared(handle_task);
     Ok(Self { thread })
   }

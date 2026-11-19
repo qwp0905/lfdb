@@ -31,21 +31,6 @@ impl<'a, T, R> Clone for SharedFn<'a, T, R> {
   }
 }
 
-pub struct SingleFn<'a, T, R>(Box<dyn FnMut(T) -> R + Send + 'a>);
-impl<'a, T, R> SingleFn<'a, T, R> {
-  pub fn new<F>(f: F) -> Self
-  where
-    F: FnMut(T) -> R + Send + 'a,
-  {
-    Self(Box::new(f))
-  }
-
-  #[inline]
-  pub fn call(&mut self, v: T) -> R {
-    (self.0)(v)
-  }
-}
-
 /**
  * One-shot storage for a background thread join handle.
  *

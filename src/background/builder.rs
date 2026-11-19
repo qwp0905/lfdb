@@ -1,26 +1,24 @@
-use std::time::Duration;
-
-use super::{IntervalWorkThread, SharedFn, SharedWorkThread, SingleFn, ThreadPool};
+use super::{SharedFn, SharedWorkThread, ThreadPool};
 
 const DEFAULT_STACK_SIZE: usize = 64 << 10;
 
 /**
- * Builders for the engine's background runtime families.
+ * Builder for the engine's multi-threaded background runtimes.
  *
- * Runtime construction is split into two layers. `ThreadBuilder` stores common
- * thread settings such as name and stack size, then selects either the
- * multi-threaded family or the single-threaded family. Multi-threaded runtimes
- * use `SharedFn`; single-threaded runtimes use `SingleFn`.
+ * `ThreadBuilder` stores common thread settings such as name, stack size and
+ * worker count, then creates either a `ThreadPool` or a `SharedWorkThread`.
  */
 pub struct ThreadBuilder {
   name: String,
   stack_size: usize,
+  count: usize,
 }
 impl ThreadBuilder {
   pub const fn new() -> Self {
     ThreadBuilder {
       name: String::new(),
       stack_size: DEFAULT_STACK_SIZE,
+      count: 1,
     }
   }
   pub fn name<S: ToString>(mut self, name: S) -> Self {
@@ -32,41 +30,13 @@ impl ThreadBuilder {
     self.stack_size = size;
     self
   }
-  pub fn multi(self, count: usize) -> MultiThreadBuilder {
-    MultiThreadBuilder {
-      builder: self,
-      count,
-    }
+  pub const fn count(mut self, count: usize) -> Self {
+    self.count = count;
+    self
   }
-  pub const fn single(self) -> SingleThreadBuilder {
-    SingleThreadBuilder { builder: self }
-  }
-}
 
-pub struct SingleThreadBuilder {
-  builder: ThreadBuilder,
-}
-impl SingleThreadBuilder {
-  pub fn interval<F>(self, timeout: Duration, mut f: F) -> IntervalWorkThread
-  where
-    F: FnMut() + Send + Sync + 'static,
-  {
-    IntervalWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      timeout,
-      SingleFn::new(move |_| f()),
-    )
-  }
-}
-
-pub struct MultiThreadBuilder {
-  builder: ThreadBuilder,
-  count: usize,
-}
-impl MultiThreadBuilder {
   pub fn pool(self) -> ThreadPool {
-    ThreadPool::new(self.builder.name, self.builder.stack_size, self.count)
+    ThreadPool::new(self.name, self.stack_size, self.count)
   }
 
   pub fn shared<T, R, F>(self, f: F) -> SharedWorkThread<T, R>
@@ -75,11 +45,6 @@ impl MultiThreadBuilder {
     R: Send + 'static,
     F: Fn(T) -> R + Send + Sync + 'static,
   {
-    SharedWorkThread::new(
-      self.builder.name,
-      self.builder.stack_size,
-      self.count,
-      SharedFn::new(f),
-    )
+    SharedWorkThread::new(self.name, self.stack_size, self.count, SharedFn::new(f))
   }
 }
