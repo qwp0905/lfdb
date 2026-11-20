@@ -1,21 +1,21 @@
-use std::{
-  fs::{File, OpenOptions},
-  io::{IoSlice, Result},
-  path::Path,
-};
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
-use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::{
   fs::{FileExt, OpenOptionsExt},
   io::{FromRawHandle, IntoRawHandle, RawHandle},
 };
+#[cfg(all(unix, not(target_os = "linux")))]
+use std::os::IntoRawFd;
+use std::{
+  fs::File,
+  io::{IoSlice, Result},
+};
+#[cfg(not(target_os = "linux"))]
+use std::{fs::OpenOptions, path::Path};
 #[cfg(unix)]
 use std::{
   io::{Error, ErrorKind},
   os::{
-    fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+    fd::{AsRawFd, FromRawFd, RawFd},
     unix::fs::FileExt,
   },
 };
@@ -139,10 +139,6 @@ pub fn direct_io(options: &mut OpenOptions, path: &Path) -> Result<File> {
     Ok(())
   })?;
   Ok(file)
-}
-#[cfg(all(unix, not(target_vendor = "apple")))]
-pub fn direct_io(options: &mut OpenOptions, path: &Path) -> Result<File> {
-  options.custom_flags(libc::O_DIRECT).open(path)
 }
 #[cfg(windows)]
 pub fn direct_io(options: &mut OpenOptions, path: &Path) -> Result<File> {

@@ -1,9 +1,8 @@
-use std::cell::OnceCell;
-use std::fs::{File, OpenOptions};
-use std::io::{IoSlice, Result};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{cell::OnceCell, fs::File, io::IoSlice, path::PathBuf, sync::Arc};
+#[cfg(not(target_os = "linux"))]
+use std::{fs::OpenOptions, io::Result, path::Path};
 
+#[cfg(not(target_os = "linux"))]
 use super::super::direct_io;
 
 #[derive(Clone)]
@@ -67,6 +66,18 @@ impl OpenFlags {
       return options.open(path);
     }
     direct_io(&mut options, path)
+  }
+
+  #[cfg(target_os = "linux")]
+  pub fn as_raw(&self) -> i32 {
+    let access = match (self.read, self.write) {
+      (true, false) => libc::O_RDONLY,
+      (false, true) => libc::O_WRONLY,
+      _ => libc::O_RDWR,
+    };
+    let create = if self.create { libc::O_CREAT } else { 0 };
+    let direct = if self.direct { libc::O_DIRECT } else { 0 };
+    libc::O_CLOEXEC | access | create | direct
   }
 }
 

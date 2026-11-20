@@ -1,8 +1,12 @@
 use std::{
+  ffi::CString,
   fs::File,
   io::{Error, ErrorKind, Read, Result, Write},
   mem::ManuallyDrop,
-  os::fd::{AsRawFd, FromRawFd, RawFd},
+  os::{
+    fd::{AsRawFd, FromRawFd, RawFd},
+    unix::ffi::OsStringExt,
+  },
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -72,25 +76,38 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
+fn as_fd(task: &IOTask) -> types::Fd {
+  types::Fd(task.context().toward().as_raw_fd())
+}
+
 fn to_entry(task: IOTask) -> squeue::Entry {
-  let fd = types::Fd(task.context().toward().as_raw_fd());
   let mut entry = match task.context().get_type() {
     TaskType::Pwrite { offset, buf } => {
-      opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
-        .offset(offset)
+      opcode::Write::new(as_fd(&task), buf.as_ptr(), buf.len() as u32)
+        .offset(*offset)
         .build()
     }
-    TaskType::Pwritev { offset, bufs } => {
-      opcode::Writev::new(fd, bufs.as_ptr() as *const libc::iovec, bufs.len() as u32)
-        .offset(offset)
-        .build()
-    }
-    TaskType::Fsync => opcode::Fsync::new(fd).build(),
-    TaskType::Fdatasync => opcode::Fsync::new(fd)
+    TaskType::Pwritev { offset, bufs } => opcode::Writev::new(
+      as_fd(&task),
+      bufs.as_ptr() as *const libc::iovec,
+      bufs.len() as u32,
+    )
+    .offset(*offset)
+    .build(),
+    TaskType::Fsync => opcode::Fsync::new(as_fd(&task)).build(),
+    TaskType::Fdatasync => opcode::Fsync::new(as_fd(&task))
       .flags(types::FsyncFlags::DATASYNC)
       .build(),
-    TaskType::Fallocate { offset, len } => {
-      opcode::Fallocate::new(fd, len).offset(offset).build()
+    TaskType::Fallocate { offset, len } => opcode::Fallocate::new(as_fd(&task), *len)
+      .offset(*offset)
+      .build(),
+    TaskType::Open { path, flags } => {
+      let path = CString::new(path.clone().into_os_string().into_vec())
+        .expect("path must not contains nul string.");
+      opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), path.as_ptr())
+        .mode(0o666)
+        .flags(flags.as_raw())
+        .build()
     }
   };
   entry.set_user_data(IOTask::into_raw(task) as u64);
