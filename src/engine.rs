@@ -160,6 +160,7 @@ impl Engine {
         recorder,
         blob,
         event_loop,
+        io_pool,
       );
 
       info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());
@@ -399,6 +400,7 @@ impl Engine {
       recorder,
       blob,
       event_loop,
+      io_pool,
     );
 
     info!("engine bootstrapped in {} secs.", st.elapsed().as_secs());

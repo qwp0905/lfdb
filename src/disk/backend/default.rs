@@ -5,8 +5,6 @@ use std::{
   sync::Arc,
 };
 
-use crate::utils::info;
-
 use super::{from_raw, pread, AsyncIO, DiskBackend, IOBackend, IOTask};
 
 /**
@@ -85,11 +83,9 @@ impl DiskBackend for DefaultDiskBackend {
   fn ensure_dir(&self, path: &Path) -> Result<()> {
     create_dir_all(path)
   }
-}
-impl Drop for DefaultDiskBackend {
-  fn drop(&mut self) {
+
+  fn close(&self) {
     self.async_io.close();
-    info!("disk backend closed.");
   }
 }
 

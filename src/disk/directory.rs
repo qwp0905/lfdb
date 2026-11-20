@@ -93,4 +93,7 @@ impl DirHandle {
   pub fn unlock(&self) -> IOResult<()> {
     self.scheduler.backend().unlock()
   }
+  pub fn close(&self) {
+    self.disk_backend.close();
+  }
 }

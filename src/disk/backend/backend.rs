@@ -158,6 +158,11 @@ pub trait DiskBackend: Send + Sync {
   fn exists(&self, path: &Path) -> Result<bool>;
   fn rename(&self, from: &Path, to: &Path) -> Result<()>;
   fn ensure_dir(&self, path: &Path) -> Result<()>;
+  /**
+   * Joins the I/O threads, so the owner must call it from outside them. Dropping
+   * is not enough: an I/O callback can hold the last reference.
+   */
+  fn close(&self);
 }
 
 impl dyn DiskBackend {

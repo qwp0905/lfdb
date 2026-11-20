@@ -172,6 +172,10 @@ impl IOPool {
     self.open_full(filename)
   }
 
+  pub fn close(&self) {
+    self.base_dir.close();
+  }
+
   /**
    * Durably sync base-directory namespace changes.
    *
@@ -193,8 +197,13 @@ impl IOPool {
     self.base_dir.exists(filename).map_err(Error::IO)
   }
 }
+/*
+ * No I/O callback holds the pool itself, so this never runs on an I/O thread and
+ * can always join them.
+ */
 impl Drop for IOPool {
   fn drop(&mut self) {
+    self.close();
     let _ = self.base_dir.unlock();
   }
 }

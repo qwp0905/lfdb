@@ -178,6 +178,10 @@ impl DiskBackend for FaultBackend {
   fn ensure_dir(&self, path: &Path) -> IoResult<()> {
     self.inner.ensure_dir(path)
   }
+
+  fn close(&self) {
+    self.inner.close()
+  }
 }
 
 fn options(dir: &TempDir) -> EngineBuilder {
