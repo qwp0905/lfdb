@@ -35,6 +35,9 @@ impl<T> Block<T> {
     self.head = i + 1;
     unsafe { self.data[i].assume_init_read() }
   }
+  const fn peek(&self) -> &T {
+    unsafe { self.data[self.head].assume_init_ref() }
+  }
   const fn is_full(&self) -> bool {
     self.tail == CAP
   }
@@ -99,11 +102,24 @@ impl<T> ChunkQueue<T> {
     self.tail = tail.next;
   }
   pub fn pop(&mut self) -> Option<T> {
+    let value = self.front()?.pop();
+    self.len -= 1;
+    Some(value)
+  }
+  pub fn pop_if(&mut self, f: impl FnOnce(&T) -> bool) -> Option<T> {
+    let front = self.front()?;
+    if !f(front.peek()) {
+      return None;
+    }
+    let value = front.pop();
+    self.len -= 1;
+    Some(value)
+  }
+  fn front(&mut self) -> Option<&mut Block<T>> {
     while !self.head.is_null() {
       let head = unsafe { &mut *self.head };
       if !head.is_empty() {
-        self.len -= 1;
-        return Some(head.pop());
+        return Some(head);
       }
       self.head = unsafe { Box::from_raw(self.head) }.next;
     }
