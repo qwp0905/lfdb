@@ -1,29 +1,50 @@
 use std::{
-  sync::Arc,
-  thread::{park, park_timeout, Builder, Thread},
+  cell::UnsafeCell,
+  ptr::null_mut,
+  sync::{
+    atomic::{AtomicPtr, Ordering},
+    Arc,
+  },
   time::{Duration, Instant},
 };
 
-use super::WALSegment;
+use crossbeam::queue::SegQueue;
+
+use super::{PendingSegment, WALSegment};
 use crate::{
-  background::{create_task, AsyncTask, TaskFulfiller, ThreadSlot, UnwindSpawner},
   disk::{IOPool, Pointer},
-  utils::{error, MpscQueue, ToBox},
-  Result,
+  utils::{error, ChunkQueue, MpscQueue},
+  Error, Result,
 };
 
 /**
- * Pre-allocates the next WAL segment in the background so rotation never blocks.
- * Reuses old segments via rename instead of creating new files.
+ * Supplies the next WAL segment to rotation.
  *
- * When idle leftover segments in
- * the reuse queue are truncated — no reason to hold pre-allocated disk space
- * when there is no burst traffic.
+ * Idle reused segments are released — no reason to hold pre-allocated disk
+ * space when there is no burst traffic.
  */
 pub struct SegmentPreload {
-  preload: Box<PreloadThread>,
+  ready: SegQueue<WALSegment>,
+  /**
+   * Always holds a raw `PendingSegment` until `close`, so a new segment is
+   * prepared one rotation ahead instead of on demand.
+   */
+  slot: AtomicPtr<()>,
+  /**
+   * Kept apart so cleanup I/O for failed creations runs in the maintenance loop,
+   * never on the rotating thread.
+   */
+  failed: MpscQueue<WALSegment>,
+  /**
+   * Only `reuse` pushes into `ready` and it records every push here. Since `ready`
+   * is FIFO and its segments are interchangeable, the surplus over `ready.len()`
+   * is exactly the stale front.
+   */
+  expiry: UnsafeCell<ChunkQueue<Instant>>,
   io_pool: Arc<IOPool>,
-  ready: Arc<MpscQueue<(Instant, WALSegment)>>,
+  max_len: Pointer,
+  expiration: Duration,
+  min_count: usize,
 }
 impl SegmentPreload {
   pub fn new(
@@ -32,49 +53,69 @@ impl SegmentPreload {
     segment_min_count: usize,
     io_pool: Arc<IOPool>,
   ) -> Self {
-    let ready = Arc::new(MpscQueue::new());
-    let preload = PreloadThread::new(
-      ready.clone(),
-      io_pool.clone(),
-      max_len,
-      segment_expiration,
-      segment_min_count,
-    )
-    .to_box();
+    let pending = WALSegment::open(max_len, &io_pool);
     Self {
-      preload,
-      ready,
+      ready: SegQueue::new(),
+      slot: AtomicPtr::new(PendingSegment::into_raw(pending)),
+      failed: MpscQueue::new(),
+      expiry: UnsafeCell::new(ChunkQueue::new()),
       io_pool,
+      max_len,
+      expiration: segment_expiration,
+      min_count: segment_min_count,
     }
   }
 
   pub fn load(&self) -> Result<WALSegment> {
-    self.preload.request().wait().unwrap()
+    if let Some(segment) = self.ready.pop() {
+      return Ok(segment);
+    }
+
+    let next = PendingSegment::into_raw(WALSegment::open(self.max_len, &self.io_pool));
+    let prev = self.slot.swap(next, Ordering::AcqRel);
+    // SAFETY: the swap hands the previous raw `PendingSegment` to this caller alone.
+    let pending = unsafe { PendingSegment::from_raw(prev) };
+    let (err, segment) = match pending.resolve() {
+      Ok(segment) => return Ok(segment),
+      Err(failed) => failed,
+    };
+    if let Some(segment) = segment {
+      self.failed.push(segment);
+    }
+    Err(Error::IO(err))
   }
 
   /**
-   * Stop without cleanup I/O after WAL failure.
-   *
-   * In failover state the engine can no longer trust WAL I/O, so the preloader
-   * only stops workers and drops queued handles. Normal shutdown can still issue
-   * cleanup truncates, but failover must not depend on more disk operations.
-   */
-  pub fn failover(&self) {
-    self.preload.close();
-    while unsafe { self.ready.pop() }.is_some() {}
-  }
-
-  /**
-   * must call after close segment rotate thread
+   * must call after the maintenance loop has stopped
    */
   pub fn close(&self) {
-    self.preload.close();
-    while let Some((_, segment)) = unsafe { self.ready.pop() } {
+    while let Some(segment) = self.ready.pop() {
       let _ = segment.truncate();
     }
+    // SAFETY: with the maintenance loop stopped, this is the only consumer.
+    while let Some(segment) = unsafe { self.failed.pop() } {
+      let _ = segment.truncate();
+    }
+
+    let raw = self.slot.swap(null_mut(), Ordering::AcqRel);
+    if raw.is_null() {
+      return;
+    }
+    // SAFETY: a non-null slot holds a raw `PendingSegment`, now owned here.
+    let segment = match unsafe { PendingSegment::from_raw(raw) }.resolve() {
+      Ok(segment) => segment,
+      Err((_, Some(segment))) => segment,
+      Err((_, None)) => return,
+    };
+    let _ = segment.truncate();
   }
 
-  pub fn reuse(&self, reused: Vec<WALSegment>) {
+  /**
+   * # Safety
+   * Must be called from a single thread together with `expire`, since both mutate
+   * the expiry log without synchronization.
+   */
+  pub unsafe fn reuse(&self, reused: Vec<WALSegment>) {
     let mut succeeded = Vec::with_capacity(reused.len());
     let mut failed = Vec::new();
     for segment in reused {
@@ -95,125 +136,63 @@ impl SegmentPreload {
       return;
     }
 
+    // SAFETY: the caller confines `reuse` and `expire` to one thread.
+    let expiry = unsafe { &mut *self.expiry.get() };
     let now = Instant::now();
     for segment in succeeded {
-      self.ready.push((now, segment));
+      expiry.push(now);
+      self.ready.push(segment);
     }
-    self.preload.wake();
     for segment in failed {
       let _ = segment.truncate();
     }
   }
-}
 
-struct PreloadThread {
-  queue: Arc<MpscQueue<Context>>,
-  waker: Thread,
-  slot: ThreadSlot,
-}
-impl PreloadThread {
-  fn new(
-    ready: Arc<MpscQueue<(Instant, WALSegment)>>,
-    io_pool: Arc<IOPool>,
-    max_len: Pointer,
-    segment_expiration: Duration,
-    segment_min_count: usize,
-  ) -> Self {
-    let queue = Arc::new(MpscQueue::new());
-    let handle = Builder::new()
-      .name("wal segment preload".to_string())
-      .stack_size(2 << 20)
-      .spawn_unwind(worker_loop(
-        ready,
-        queue.clone(),
-        io_pool,
-        max_len,
-        segment_expiration,
-        segment_min_count,
-      ));
-    Self {
-      queue,
-      waker: handle.thread().clone(),
-      slot: ThreadSlot::new(handle),
+  /**
+   * # Safety
+   * Must be called from a single thread together with `reuse`, since both mutate
+   * the expiry log without synchronization.
+   */
+  pub unsafe fn expire(&self) {
+    // SAFETY: `expire` runs on one thread and `close` only after it stops, so this is
+    // the only consumer.
+    while let Some(segment) = unsafe { self.failed.pop() } {
+      let _ = segment.truncate();
+    }
+
+    // SAFETY: the caller confines `reuse` and `expire` to one thread.
+    let expiry = unsafe { &mut *self.expiry.get() };
+    loop {
+      for _ in self.ready.len()..expiry.len() {
+        expiry.pop();
+      }
+      if expiry.len() <= self.min_count {
+        return;
+      }
+      if expiry
+        .pop_if(|entered_at| entered_at.elapsed() >= self.expiration)
+        .is_none()
+      {
+        return;
+      }
+      let Some(segment) = self.ready.pop() else {
+        return;
+      };
+      let _ = segment.truncate();
     }
   }
-
-  fn wake(&self) {
-    self.waker.unpark();
-  }
-
-  fn request(&self) -> AsyncTask<Result<WALSegment>> {
-    let (f, o) = create_task();
-    self.queue.push(Context::Request(f));
-    self.wake();
-    o
-  }
-
-  fn close(&self) {
-    let Some(handle) = self.slot.close() else {
-      return;
-    };
-    self.queue.push(Context::Term);
-    self.waker.unpark();
-    handle.join().unwrap();
-  }
 }
-impl Drop for PreloadThread {
+impl Drop for SegmentPreload {
   fn drop(&mut self) {
-    self.close();
+    let raw = *self.slot.get_mut();
+    if raw.is_null() {
+      return;
+    }
+    // SAFETY: a non-null slot holds a raw `PendingSegment`, now owned here.
+    drop(unsafe { PendingSegment::from_raw(raw) });
   }
 }
 
-enum Context {
-  Request(TaskFulfiller<Result<WALSegment>>),
-  Term,
-}
-
-fn create_new(io_pool: &IOPool, max_len: Pointer) -> Result<WALSegment> {
-  let segment = WALSegment::open(max_len, io_pool)?;
-  io_pool.sync_dir()?;
-  Ok(segment)
-}
-const fn worker_loop(
-  ready: Arc<MpscQueue<(Instant, WALSegment)>>,
-  request: Arc<MpscQueue<Context>>,
-  io_pool: Arc<IOPool>,
-  max_len: Pointer,
-  expiration: Duration,
-  min_count: usize,
-) -> impl FnOnce() {
-  move || {
-    let mut preloaded = None;
-    let segment = loop {
-      let (entered_at, segment) = preloaded
-        .take()
-        .or_else(|| unsafe { ready.pop() }.map(|(e, s)| (e, Ok(s))))
-        .unwrap_or_else(|| (Instant::now(), create_new(&io_pool, max_len)));
-
-      if let Some(ctx) = unsafe { request.pop() } {
-        match ctx {
-          Context::Request(done) => done.fulfill(segment),
-          Context::Term => break segment,
-        }
-        continue;
-      };
-
-      if ready.len() < min_count {
-        park();
-        preloaded = Some((entered_at, segment));
-        continue;
-      }
-
-      let elapsed = entered_at.elapsed();
-      if elapsed < expiration {
-        park_timeout(expiration - elapsed);
-        preloaded = Some((entered_at, segment));
-        continue;
-      }
-
-      let _ = segment.and_then(|seg| seg.truncate());
-    };
-
-    let _ = segment.and_then(|seg| seg.truncate());
-  }
-}
+// SAFETY: the expiry log is the only unsynchronized state, and the contracts of
+// `reuse` and `expire` confine every access to it to one thread.
+unsafe impl Sync for SegmentPreload {}
