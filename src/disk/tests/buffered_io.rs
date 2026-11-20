@@ -23,7 +23,7 @@ fn test_scan_io() {
   }
 
   {
-    let mut handle = io_pool.open_append_io(filename.clone()).unwrap();
+    let mut handle = io_pool.open_append_io(&filename).unwrap();
     for buf in vectors.iter() {
       handle.append(buf).unwrap();
     }
@@ -31,7 +31,7 @@ fn test_scan_io() {
   }
 
   {
-    let mut handle = io_pool.open_scan_io(filename).unwrap();
+    let mut handle = io_pool.open_scan_io(&filename).unwrap();
     let mut offset = 0;
     for buf in vectors.iter() {
       assert_eq!(handle.get_offset(), offset);

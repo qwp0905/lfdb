@@ -77,16 +77,19 @@ pub struct IOScheduler {
   pin: Arc<ExclusivePin>,
 }
 impl IOScheduler {
-  pub fn new(backend: Arc<dyn IOBackend>, alloc: Option<AllocState>) -> Self {
+  pub fn new(backend: Arc<dyn IOBackend>) -> Self {
     Self {
       inner: SyncScheduler::new(backend),
       write: WriteBatch::default(),
-      alloc: alloc.map(Arc::new),
+      alloc: None,
       pin: Arc::new(ExclusivePin::new()),
     }
   }
-  pub fn backend(&self) -> &dyn IOBackend {
-    &*self.inner.backend
+  pub fn set_alloc(&mut self, alloc: u64) {
+    self.alloc = Some(Arc::new(AllocState::new(alloc)))
+  }
+  pub fn backend(&self) -> &'_ Arc<dyn IOBackend> {
+    &self.inner.backend
   }
   pub fn try_pin(&self) -> Option<SharedToken<'_>> {
     self.pin.try_shared()
@@ -462,15 +465,15 @@ fn drain_sync(mut guard: RecursiveSync) {
  * `Arc` and can move across threads, but the write batch serializes
  * execution so the state is logically single-threaded.
  */
-pub struct AllocState(Cell<u64>);
+struct AllocState(Cell<u64>);
 impl AllocState {
-  pub const fn new(allocated: u64) -> Self {
+  const fn new(allocated: u64) -> Self {
     Self(Cell::new(allocated))
   }
-  pub const unsafe fn get(&self) -> u64 {
+  const unsafe fn get(&self) -> u64 {
     self.0.get()
   }
-  pub unsafe fn set(&self, allocated: u64) {
+  unsafe fn set(&self, allocated: u64) {
     self.0.set(allocated);
   }
 }

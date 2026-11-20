@@ -1,10 +1,10 @@
 use crate::{
   cache::ShrinkMap,
-  disk::IOPool,
+  disk::{IOPool, PendingIO},
   page::AlignedBuf,
   utils::{debug, uuid_simple, Permit, Semaphore, ShortenedRwLock},
   wal::WriteAheadLog,
-  Result,
+  Error, Result,
 };
 
 use super::{
@@ -75,7 +75,7 @@ impl BlobStorage {
       last_id = last_id.max(id + 1);
 
       let handle = BlobHandle::new(
-        io_pool.open_dynamic_sized(metadata.get_filename().clone())?,
+        io_pool.open_dynamic_sized(metadata.get_filename())?,
         metadata,
       );
       readonly.insert(id, Arc::new(handle));
@@ -172,12 +172,13 @@ impl BlobStorage {
         return Ok(guard);
       }
 
-      let new = self.open_new_handle()?;
+      let (new, pending) = self.open_new_handle()?;
 
       // The newly created blob file must be visible after a crash so replay/GC can
       // discover and account for it. Blob contents and directory namespace durability
       // are handled as separate boundaries.
       self.io_pool.sync_dir()?;
+      pending.wait_flatten()?;
       self.wal.append_blob_created(new.metadata().clone())?;
       self
         .writable
@@ -186,14 +187,18 @@ impl BlobStorage {
     }
   }
 
-  fn open_new_handle(&self) -> Result<BlobHandle> {
+  fn open_new_handle(&self) -> Result<(BlobHandle, PendingIO)> {
     let id = self.last_id.fetch_add(1, Ordering::Relaxed);
     let metadata = BlobMetadata::new(id, filename());
 
     let io = self
       .io_pool
-      .open_static_sized(metadata.get_filename().clone(), BLOB_SIZE)?;
-    Ok(BlobHandle::new(io, metadata))
+      .open_static_sized(metadata.get_filename())
+      .wait()
+      .unwrap()
+      .map_err(Error::IO)?;
+    let pending = io.fallocate_async(0, BLOB_SIZE);
+    Ok((BlobHandle::new(io, metadata), pending))
   }
 
   pub fn metadata_snapshot(&self) -> Vec<BlobMetadata> {

@@ -198,7 +198,7 @@ impl Engine {
       BlockCache::open(block_cache_config, wal.clone(), metrics_registry.clone())
         .to_arc();
 
-    let snapshot = match replay.last_snapshot {
+    let snapshot = match &replay.last_snapshot {
       Some(file) => {
         let mut handle = io_pool.open_scan_io(file)?;
         CheckpointSnapshot::read_from(&mut handle, manifest.snapshot_version)?

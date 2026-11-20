@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{
   disk::IOPool, maintenance::SnapshotFormatVersion, table::TableMetadata,
@@ -118,7 +118,7 @@ pub fn load_manifest(io_pool: &IOPool) -> Result<Option<Manifest>> {
     return Ok(None);
   };
 
-  let mut file = io_pool.open_scan_io(filename)?;
+  let mut file = io_pool.open_scan_io(&filename)?;
   let len = u32::from_le_bytes(file.read_array::<4>()?) as usize;
   let bytes = file.read_to_vec(len)?;
   let mut reader = OffsetReader::new(&bytes);
@@ -141,7 +141,7 @@ pub fn save_manifest(io_pool: &IOPool, manifest: &Manifest) -> Result {
   let bytes = ManifestVersion::CURRENT.serialize(manifest);
   let checksum = calc_checksum(&bytes);
 
-  let mut file = io_pool.open_append_io(PathBuf::from(FILENAME))?;
+  let mut file = io_pool.open_append_io(Path::new(FILENAME))?;
 
   file.append(&(bytes.len() as u32 + 4).to_le_bytes())?;
   file.append(&checksum.to_le_bytes())?;

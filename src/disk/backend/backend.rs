@@ -1,14 +1,15 @@
 use std::{
-  fs::{Metadata, OpenOptions, ReadDir},
+  fs::{Metadata, ReadDir},
   io::{Error, ErrorKind, IoSlice, Result},
-  path::Path,
+  path::{Path, PathBuf},
+  sync::Arc,
 };
 
 use crate::background::{
   create_tagged_task, create_tagged_task_with, AsyncTask, TaskFulfiller,
 };
 
-use super::{IOContext, TaskType};
+use super::{IOContext, OpenFlags, TaskType};
 
 pub const IO_RETRY: u8 = 3;
 
@@ -145,15 +146,49 @@ pub trait IOBackend: Send + Sync {
  * lets other platforms provide the closest practical behavior.
  */
 pub trait DiskBackend: Send + Sync {
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>;
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> Result<Box<dyn IOBackend>>;
+  fn submit_open(&self, task: IOTask);
+  /**
+   * # Safety
+   * `raw` must come from an open task this backend received through `submit_open`,
+   * and be adopted only once, since it carries ownership of the opened handle.
+   */
+  unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend>;
   fn read_dir(&self, path: &Path) -> Result<ReadDir>;
   fn remove_file(&self, path: &Path) -> Result<()>;
   fn exists(&self, path: &Path) -> Result<bool>;
   fn rename(&self, from: &Path, to: &Path) -> Result<()>;
   fn ensure_dir(&self, path: &Path) -> Result<()>;
+}
+
+impl dyn DiskBackend {
+  pub fn open(
+    self: &Arc<Self>,
+    flags: OpenFlags,
+    path: PathBuf,
+  ) -> AsyncTask<Result<Box<dyn IOBackend>>> {
+    let this = self.clone();
+    // SAFETY: the task is submitted to this backend right below, and its callback runs once.
+    let callback = move |result: Result<_>| unsafe { result.map(|raw| this.adopt(raw)) };
+    let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
+    self.submit_open(task);
+    done
+  }
+  pub fn open_with<T, F>(
+    self: &Arc<Self>,
+    flags: OpenFlags,
+    path: PathBuf,
+    callback: F,
+  ) -> AsyncTask<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(Result<Box<dyn IOBackend>>) -> T + Send + 'static,
+  {
+    let this = self.clone();
+    // SAFETY: the task is submitted to this backend right below, and its callback runs once.
+    let callback =
+      move |result: Result<_>| callback(unsafe { result.map(|raw| this.adopt(raw)) });
+    let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
+    self.submit_open(task);
+    done
+  }
 }

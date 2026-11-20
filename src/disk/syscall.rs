@@ -7,11 +7,17 @@ use std::{
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
-use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::{
+  fs::{FileExt, OpenOptionsExt},
+  io::{FromRawHandle, IntoRawHandle, RawHandle},
+};
 #[cfg(unix)]
 use std::{
   io::{Error, ErrorKind},
-  os::{fd::AsRawFd, unix::fs::FileExt},
+  os::{
+    fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+    unix::fs::FileExt,
+  },
 };
 
 #[cfg(unix)]
@@ -143,4 +149,21 @@ pub fn direct_io(options: &mut OpenOptions, path: &Path) -> Result<File> {
   options
     .custom_flags(winapi::um::winbase::FILE_FLAG_NO_BUFFERING)
     .open(path)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn into_raw(file: File) -> usize {
+  file.into_raw_fd() as usize
+}
+#[cfg(unix)]
+pub unsafe fn from_raw(raw: usize) -> File {
+  unsafe { File::from_raw_fd(raw as RawFd) }
+}
+#[cfg(windows)]
+pub fn into_raw(file: File) -> usize {
+  file.into_raw_handle() as usize
+}
+#[cfg(windows)]
+pub unsafe fn from_raw(raw: usize) -> File {
+  unsafe { File::from_raw_handle(raw as RawHandle) }
 }

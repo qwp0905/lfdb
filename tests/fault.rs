@@ -1,5 +1,5 @@
 use std::{
-  fs::{Metadata, OpenOptions, ReadDir},
+  fs::{Metadata, ReadDir},
   io::{Error as IoError, ErrorKind, Result as IoResult},
   path::Path,
   sync::{
@@ -56,6 +56,7 @@ impl Op {
       TaskType::Fsync => Self::Fsync,
       TaskType::Fdatasync => Self::Fdatasync,
       TaskType::Fallocate { .. } => Self::Fallocate,
+      TaskType::Open { .. } => unreachable!("open tasks never reach an IOBackend"),
     }
   }
 }
@@ -150,19 +151,12 @@ impl FaultBackend {
   }
 }
 impl DiskBackend for FaultBackend {
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> IoResult<Box<dyn IOBackend>> {
-    self.inner.open(options, path).map(|inner| self.wrap(inner))
+  fn submit_open(&self, task: IOTask) {
+    self.inner.submit_open(task)
   }
 
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> IoResult<Box<dyn IOBackend>> {
-    self
-      .inner
-      .open_direct_io(options, path)
-      .map(|inner| self.wrap(inner))
+  unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {
+    self.wrap(unsafe { self.inner.adopt(raw) })
   }
 
   fn read_dir(&self, path: &Path) -> IoResult<ReadDir> {
