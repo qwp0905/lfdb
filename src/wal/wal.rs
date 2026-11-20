@@ -118,7 +118,7 @@ impl WriteAheadLog {
     let sync_completion = Arc::new(SyncCompletion::new());
 
     let buffer = SegmentBuffer::new(
-      preloader.load()?,
+      preloader.load().map_err(Error::IO)?,
       buffer_allocator.allocate(),
       last_write_seq,
       max_len,
@@ -287,7 +287,7 @@ impl WriteAheadLog {
     Ok(write_seq)
   }
 
-  fn rotate_segment(&self, reserved: ReservedAppend) -> Result {
+  fn rotate_segment(&self, reserved: ReservedAppend) -> io::Result<()> {
     let ReservedAppend {
       buffer,
       ticket,
@@ -297,12 +297,7 @@ impl WriteAheadLog {
     let pointer = buffer.get_pointer();
     let write_seq = buffer.get_write_seq_offset() + ticket.get_order() as WriteSeq;
 
-    let new = match self.preloader.load() {
-      Ok(v) => v,
-      Err(Error::IO(err)) => return Err(self.failover(err.kind())),
-      Err(err) => return Err(err),
-    };
-
+    let new = self.preloader.load()?;
     let replacement =
       segment.init_next(new, self.allocator.allocate(), write_seq, self.max_len);
     self.buffer.store(replacement);
@@ -310,9 +305,7 @@ impl WriteAheadLog {
     buffer.flush_and_forget(ticket, &segment, &self.allocator);
     drop(buffer);
 
-    if let Err(err) = segment.wait_completion(pointer + 1) {
-      return Err(self.failover(err.kind()));
-    };
+    segment.wait_completion(pointer + 1)?;
     segment.set_last_write_seq(write_seq);
     Ok(())
   }
@@ -355,7 +348,9 @@ impl WriteAheadLog {
           .map_err(self.handle_failover())?;
         return Ok(DurabilityGuard::new(&self.log_completion, write_seq));
       }
-      self.rotate_segment(reserved)?;
+      self
+        .rotate_segment(reserved)
+        .map_err(self.handle_failover())?;
     }
   }
 
