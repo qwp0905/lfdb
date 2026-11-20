@@ -7,7 +7,7 @@ use std::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
-  thread::Builder,
+  thread::{current, Builder},
 };
 
 use io_uring::{
@@ -378,6 +378,12 @@ impl AsyncIO {
     };
     self.queue.push(Context::Term);
     self.waker.wake();
+
+    debug_assert_ne!(
+      handle.thread().id(),
+      current().id(),
+      "thread must not close its own handle."
+    );
     handle.join().unwrap();
   }
 }
