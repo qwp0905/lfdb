@@ -15,7 +15,7 @@ use std::{fs::OpenOptions, path::Path};
 use std::{
   io::{Error, ErrorKind},
   os::{
-    fd::{AsRawFd, FromRawFd, RawFd},
+    fd::{AsRawFd, FromRawFd},
     unix::fs::FileExt,
   },
 };
@@ -153,7 +153,7 @@ pub fn into_raw(file: File) -> usize {
 }
 #[cfg(unix)]
 pub unsafe fn from_raw(raw: usize) -> File {
-  unsafe { File::from_raw_fd(raw as RawFd) }
+  unsafe { File::from_raw_fd(raw as _) }
 }
 #[cfg(windows)]
 pub fn into_raw(file: File) -> usize {
