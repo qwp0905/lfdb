@@ -1,10 +1,10 @@
+#[cfg(all(unix, not(target_os = "linux")))]
+use std::os::fd::IntoRawFd;
 #[cfg(windows)]
 use std::os::windows::{
   fs::{FileExt, OpenOptionsExt},
   io::{FromRawHandle, IntoRawHandle, RawHandle},
 };
-#[cfg(all(unix, not(target_os = "linux")))]
-use std::os::IntoRawFd;
 use std::{
   fs::File,
   io::{IoSlice, Result},
