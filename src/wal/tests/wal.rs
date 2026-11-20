@@ -246,7 +246,7 @@ impl Fixture {
     wal.close();
     drop(wal);
 
-    let init_thread = ThreadBuilder::new().name("replay").multi(1).pool();
+    let init_thread = ThreadBuilder::new().name("replay").count(1).pool();
     let (wal, result) = WriteAheadLog::replay(
       self.config(),
       self.event_bus.clone(),

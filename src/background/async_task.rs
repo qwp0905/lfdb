@@ -266,4 +266,4 @@ mod tests;
 
 #[cfg(all(test, loom))]
 #[path = "tests/async_task_loom.rs"]
-mod loom_tests;
+mod tests;

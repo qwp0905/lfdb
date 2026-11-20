@@ -16,7 +16,7 @@ fn test_no_timeout() {
   let thread = ThreadBuilder::new()
     .name("test-no-timeout")
     .stack_size(DEFAULT_STACK_SIZE)
-    .multi(thread_count)
+    .count(thread_count)
     .pool();
 
   // Send multiple tasks
@@ -59,7 +59,7 @@ fn test_multiple_threads() {
   let thread = ThreadBuilder::new()
     .name("test-multi")
     .stack_size(DEFAULT_STACK_SIZE)
-    .multi(thread_count)
+    .count(thread_count)
     .pool();
 
   let receivers: Vec<_> = (0..(thread_count << 1))
@@ -90,7 +90,7 @@ fn test_multiple_threads() {
 #[test]
 fn test_multiple_close() {
   let thread_count = 4;
-  let thread = ThreadBuilder::new().multi(thread_count).pool();
+  let thread = ThreadBuilder::new().count(thread_count).pool();
   thread.close();
   thread.close();
   thread.close();

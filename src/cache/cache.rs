@@ -54,6 +54,7 @@ impl BlockCache {
       DirtyTables::new(),
       allocator,
     ));
+
     Self { core, metrics }
   }
 

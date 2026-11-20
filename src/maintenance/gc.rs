@@ -1,15 +1,15 @@
 use std::{
+  cell::UnsafeCell,
   collections::{HashSet, LinkedList, VecDeque},
-  sync::Arc,
-  time::Duration,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+  },
 };
 
 use super::CompactionTriggered;
 use crate::{
-  background::{
-    binding_events, EventBus, IntervalWorkThread, OwnedSubscription, SharedSubscription,
-    ThreadBuilder,
-  },
+  background::{binding_events, EventBus, OwnedSubscription, SharedSubscription},
   blob::{BlobId, BlobStorage},
   cache::{BlockCache, WritableSlot},
   disk::Pointer,
@@ -21,7 +21,7 @@ use crate::{
   page::PAGE_SIZE,
   table::{TableHandleRef, TableId, TableMapper},
   transaction::PageRecorder,
-  utils::{error, ChunkQueue, MpscQueue, ToArc, ToBox},
+  utils::{error, ChunkQueue, MpscQueue},
   wal::{TxId, WALFailed, RESERVED_TX},
   Error, Result,
 };
@@ -32,11 +32,15 @@ pub struct GarbageCollectionConfig {
   pub compact_min_size: usize,
 }
 
-const GC_RUN_INTERVAL: Duration = Duration::from_millis(500);
-
 pub struct GarbageCollector {
-  release_queue: Arc<MpscQueue<DropTableCommitted>>,
-  main: Box<IntervalWorkThread>,
+  release_queue: MpscQueue<DropTableCommitted>,
+  cycle: UnsafeCell<Option<GcCycle>>,
+  steps: UnsafeCell<TableSteps>,
+  worker: GcWorker,
+  closed: AtomicBool,
+  batch_size: usize,
+  compact_threshold: f64,
+  compact_min_size: Pointer,
 }
 impl GarbageCollector {
   pub fn new(
@@ -48,39 +52,56 @@ impl GarbageCollector {
     blob: Arc<BlobStorage>,
     config: GarbageCollectionConfig,
   ) -> Arc<Self> {
-    let release_queue = MpscQueue::new().to_arc();
-    let worker =
-      GcWorker::new(block_cache, version_controller, recorder, mapper, blob).to_arc();
-
-    let main = ThreadBuilder::new()
-      .name("gc main")
-      .stack_size(2 << 20)
-      .single()
-      .interval(
-        GC_RUN_INTERVAL,
-        gc_main_loop(
-          worker,
-          event_bus.clone(),
-          release_queue.clone(),
-          config.batch_size,
-          config.compact_threshold,
-          (config.compact_min_size / PAGE_SIZE) as Pointer,
-        ),
-      )
-      .to_box();
-
+    let release_queue = MpscQueue::new();
+    let worker = GcWorker::new(
+      block_cache,
+      version_controller,
+      recorder,
+      mapper,
+      blob,
+      event_bus.clone(),
+    );
     let this = Arc::new(Self {
       release_queue,
-      main,
+      cycle: UnsafeCell::new(None),
+      steps: UnsafeCell::new(TableSteps::new()),
+      worker,
+      closed: AtomicBool::new(false),
+      batch_size: config.batch_size,
+      compact_threshold: config.compact_threshold,
+      compact_min_size: (config.compact_min_size / PAGE_SIZE) as _,
     });
     event_bus.register(&this);
     this
   }
 
   pub fn close(&self) {
-    self.main.close();
+    self.closed.fetch_or(true, Ordering::Relaxed);
+  }
+
+  pub unsafe fn run_tick(&self) {
+    if self.closed.load(Ordering::Relaxed) {
+      return;
+    }
+    let Err(err) = self.worker.run_tick(
+      unsafe { &mut *self.cycle.get() },
+      self.batch_size,
+      self.compact_threshold,
+      self.compact_min_size,
+    ) else {
+      return self
+        .worker
+        .release_tables(&self.release_queue, unsafe { &mut *self.steps.get() });
+    };
+    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
+      panic!("{err}");
+    }
+    error!("gc failed: {err}");
   }
 }
+// SAFETY: `cycle` and `steps` are touched only by `run_tick`, which the event loop
+// calls from its own thread.
+unsafe impl Sync for GarbageCollector {}
 
 impl OwnedSubscription<DropTableCommitted> for GarbageCollector {
   fn handle(&self, event: DropTableCommitted) {
@@ -126,6 +147,7 @@ struct GcWorker {
   recorder: Arc<PageRecorder>,
   mapper: Arc<TableMapper>,
   blob: Arc<BlobStorage>,
+  event_bus: Arc<EventBus>,
 }
 impl GcWorker {
   const fn new(
@@ -134,6 +156,7 @@ impl GcWorker {
     recorder: Arc<PageRecorder>,
     mapper: Arc<TableMapper>,
     blob: Arc<BlobStorage>,
+    event_bus: Arc<EventBus>,
   ) -> Self {
     Self {
       block_cache,
@@ -141,6 +164,7 @@ impl GcWorker {
       recorder,
       mapper,
       blob,
+      event_bus,
     }
   }
   fn serialize_and_log<T: Serializable>(
@@ -371,7 +395,6 @@ impl GcWorker {
     &self,
     current: &mut GcCycle,
     task: &GcTask,
-    event_bus: &EventBus,
     compact_threshold: f64,
     compact_min_size: Pointer,
   ) -> Result {
@@ -475,14 +498,15 @@ impl GcWorker {
     if total != 0 && (dead as f64 / total as f64 <= compact_threshold) {
       return Ok(());
     }
-    event_bus.publish(CompactionTriggered::new(task.table.clone()));
+    self
+      .event_bus
+      .publish(CompactionTriggered::new(task.table.clone()));
     Ok(())
   }
 
   fn run_tick(
     &self,
     cycle: &mut Option<GcCycle>,
-    event_bus: &EventBus,
     batch_size: usize,
     compact_threshold: f64,
     compact_min_size: Pointer,
@@ -499,13 +523,9 @@ impl GcWorker {
         return Ok(());
       };
 
-      if let Err(err) = self.handle_task(
-        current,
-        &task,
-        event_bus,
-        compact_threshold,
-        compact_min_size,
-      ) {
+      if let Err(err) =
+        self.handle_task(current, &task, compact_threshold, compact_min_size)
+      {
         current.tasks.push(task);
         return Err(err);
       };
@@ -670,33 +690,5 @@ impl TableSteps {
   }
   fn abort_unpinned(&mut self, table: TableHandleRef) {
     self.unreachable.push_back(table);
-  }
-}
-
-const fn gc_main_loop(
-  worker: Arc<GcWorker>,
-  event_bus: Arc<EventBus>,
-  release_queue: Arc<MpscQueue<DropTableCommitted>>,
-  batch_size: usize,
-  compact_threshold: f64,
-  compact_min_size: Pointer,
-) -> impl FnMut() {
-  let mut cycle = None;
-  let mut steps = TableSteps::new();
-
-  move || {
-    let Err(err) = worker.run_tick(
-      &mut cycle,
-      &event_bus,
-      batch_size,
-      compact_threshold,
-      compact_min_size,
-    ) else {
-      return worker.release_tables(&release_queue, &mut steps);
-    };
-    if !matches!(err, Error::IO(_) | Error::WALFailed(_)) {
-      panic!("{err}");
-    }
-    error!("gc failed: {err}");
   }
 }

@@ -10,11 +10,5 @@ pub use transaction::*;
 mod context;
 pub use context::*;
 
-mod checkpoint;
-pub use checkpoint::*;
-
-mod snapshot;
-pub use snapshot::*;
-
 mod cursor;
 pub use cursor::*;

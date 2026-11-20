@@ -2,15 +2,11 @@ use std::{
   any::{Any, TypeId},
   collections::HashMap,
   marker::PhantomData,
-  sync::{Arc, Weak},
-  thread::{park, Builder, Thread},
+  sync::{Arc, OnceLock, Weak},
+  thread::{current, Thread},
 };
 
-use crossbeam::utils::Backoff;
-
 use crate::utils::MpscQueue;
-
-use super::{ThreadSlot, UnwindSpawner};
 
 /**
  * Subscriber for events that may be observed by multiple consumers.
@@ -136,13 +132,15 @@ enum Route {
  * model is still exclusive: a type is either an owned hand-off event or a shared
  * notification event, never both.
  */
-struct EventRouter {
+pub struct EventRouter {
   handlers: HashMap<TypeId, Route>,
+  event_bus: Arc<EventBus>,
 }
 impl EventRouter {
-  fn new() -> Self {
+  pub fn new(event_bus: Arc<EventBus>) -> Self {
     Self {
       handlers: HashMap::new(),
+      event_bus,
     }
   }
 
@@ -178,6 +176,25 @@ impl EventRouter {
       _ => *route = Route::Shared(vec![handler]),
     }
     true
+  }
+
+  pub unsafe fn run_tick(&mut self) {
+    self.event_bus.waker.get_or_init(current);
+    while let Some(msg) = unsafe { self.event_bus.queue.pop() } {
+      match msg {
+        EventMsg::Publish(event) => self.route(event),
+        EventMsg::SubOwned(id, handler) => {
+          if !self.register_owned(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
+        }
+        EventMsg::SubShared(id, handler) => {
+          if !self.register_shared(id, handler) {
+            panic!("error to register {:?} as owned event subscriber", id);
+          };
+        }
+      }
+    }
   }
 
   fn route(&mut self, event: OwnedEvent) {
@@ -298,61 +315,21 @@ enum EventMsg {
   Publish(OwnedEvent),
   SubShared(TypeId, Box<dyn SharedEventAdapter + Send + Sync>),
   SubOwned(TypeId, Box<dyn OwnedEventAdapter + Send + Sync>),
-  Terminate,
-}
-
-const fn handle_thread(queue: Arc<MpscQueue<EventMsg>>) -> impl FnOnce() {
-  move || unsafe {
-    let mut router = EventRouter::new();
-    let backoff = Backoff::new();
-
-    loop {
-      if backoff.is_completed() {
-        park();
-        backoff.reset();
-      };
-
-      let Some(msg) = queue.pop() else {
-        backoff.snooze();
-        continue;
-      };
-
-      match msg {
-        EventMsg::Publish(event) => router.route(event),
-        EventMsg::SubOwned(id, handler) => {
-          if !router.register_owned(id, handler) {
-            panic!("error to register {:?} as owned event subscriber", id);
-          };
-        }
-        EventMsg::SubShared(id, handler) => {
-          if !router.register_shared(id, handler) {
-            panic!("error to register {:?} as owned event subscriber", id);
-          };
-        }
-        EventMsg::Terminate => return,
-      }
-      backoff.reset();
-    }
-  }
 }
 
 pub struct EventBus {
-  queue: Arc<MpscQueue<EventMsg>>,
-  waker: Thread,
-  slot: ThreadSlot,
+  queue: MpscQueue<EventMsg>,
+  waker: OnceLock<Thread>,
 }
 impl EventBus {
   pub fn new() -> Self {
-    let queue = Arc::new(MpscQueue::new());
-    let handle = Builder::new()
-      .name("event bus".to_string())
-      .stack_size(2 << 20)
-      .spawn_unwind(handle_thread(queue.clone()));
-    let waker = handle.thread().clone();
-    Self {
-      queue,
-      waker,
-      slot: ThreadSlot::new(handle),
+    let queue = MpscQueue::new();
+    let waker = OnceLock::new();
+    Self { queue, waker }
+  }
+  fn wake(&self) {
+    if let Some(waker) = self.waker.get() {
+      waker.unpark();
     }
   }
 
@@ -365,7 +342,7 @@ impl EventBus {
     self
       .queue
       .push(EventMsg::SubShared(TypeId::of::<E>(), Box::new(adapter)));
-    self.waker.unpark();
+    self.wake();
   }
   fn bind_owned<E, S>(&self, subscriber: Weak<S>)
   where
@@ -376,7 +353,7 @@ impl EventBus {
     self
       .queue
       .push(EventMsg::SubOwned(TypeId::of::<E>(), Box::new(adapter)));
-    self.waker.unpark();
+    self.wake();
   }
 
   pub fn register<S>(&self, subscriber: &Arc<S>)
@@ -390,7 +367,7 @@ impl EventBus {
 
   pub fn publish<E: Any + Send + Sync>(&self, event: E) {
     self.queue.push(EventMsg::Publish(Box::new(event)));
-    self.waker.unpark();
+    self.wake();
   }
   pub fn batch_publish<E, I>(&self, mut events: I)
   where
@@ -404,20 +381,7 @@ impl EventBus {
     for event in events {
       self.queue.push(EventMsg::Publish(Box::new(event)));
     }
-    self.waker.unpark();
-  }
-
-  pub fn close(&self) {
-    if let Some(handle) = self.slot.close() {
-      self.queue.push(EventMsg::Terminate);
-      self.waker.unpark();
-      handle.join().unwrap();
-    }
-  }
-}
-impl Drop for EventBus {
-  fn drop(&mut self) {
-    self.close();
+    self.wake();
   }
 }
 

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-  disk::IOPool, table::TableMetadata, transaction::SnapshotFormatVersion,
+  disk::IOPool, maintenance::SnapshotFormatVersion, table::TableMetadata,
   utils::OffsetReader, wal::WALFormatVersion, Error, Result,
 };
 

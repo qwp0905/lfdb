@@ -4,9 +4,6 @@ pub use builder::*;
 mod oneshot;
 pub use oneshot::*;
 
-mod interval;
-pub use interval::*;
-
 mod parker;
 pub use parker::*;
 
