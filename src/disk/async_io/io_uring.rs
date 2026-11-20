@@ -1,12 +1,8 @@
 use std::{
-  ffi::CString,
   fs::File,
   io::{Error, ErrorKind, Read, Result, Write},
   mem::ManuallyDrop,
-  os::{
-    fd::{AsRawFd, FromRawFd, RawFd},
-    unix::ffi::OsStringExt,
-  },
+  os::fd::{AsRawFd, FromRawFd, RawFd},
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -102,8 +98,6 @@ fn to_entry(task: IOTask) -> squeue::Entry {
       .offset(*offset)
       .build(),
     TaskType::Open { path, flags } => {
-      let path = CString::new(path.clone().into_os_string().into_vec())
-        .expect("path must not contains nul string.");
       opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), path.as_ptr())
         .mode(0o666)
         .flags(flags.as_raw())
