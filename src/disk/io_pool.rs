@@ -1,5 +1,6 @@
 use std::{
-  fs::{DirEntry, OpenOptions},
+  convert::identity,
+  fs::DirEntry,
   io::{Error as IOError, ErrorKind, Result as IOResult},
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -8,8 +9,7 @@ use std::{
 };
 
 use super::{
-  AllocState, AppendIOHandle, DirHandle, DiskBackend, IOBackend, IOScheduler, IOTask,
-  ScanIOHandle,
+  AppendIOHandle, DirHandle, DiskBackend, IOScheduler, IOTask, OpenFlags, ScanIOHandle,
 };
 use crate::{
   background::{AsyncTask, TryWaitError},
@@ -76,7 +76,7 @@ impl IOPool {
     // The base directory lock prevents multiple engine processes from using the
     // same database directory. Retry is a courtesy delay, not a recovery protocol:
     // if another process keeps the lock, opening the pool fails.
-    let base_dir = DirHandle::ensure(base_path, Box::new(backend), metrics.clone())
+    let base_dir = DirHandle::ensure(base_path, Arc::new(backend), metrics.clone())
       .map_err(Error::IO)
       .map(Arc::new)?;
     for _ in 0..MAX_RETRY {
@@ -94,67 +94,86 @@ impl IOPool {
     Err(Error::DirOpenFailed)
   }
 
-  pub fn open_append_io(&self, filename: PathBuf) -> Result<AppendIOHandle> {
-    let path = self.base_dir.get_path().join(&filename);
-    let mut options = OpenOptions::new();
-    let file = self
+  pub fn open_append_io(&self, filename: &Path) -> Result<AppendIOHandle> {
+    let backend = self
       .base_dir
-      .open_direct_io(options.write(true).create(true), &path)
+      .open(OpenFlags::write_only(), filename)
+      .wait()
+      .unwrap()
       .map_err(Error::IO)?;
-    Ok(AppendIOHandle::new(file))
+    Ok(AppendIOHandle::new(backend))
   }
-  pub fn open_scan_io(&self, filename: PathBuf) -> Result<ScanIOHandle> {
-    let path = self.base_dir.get_path().join(&filename);
-    let mut options = OpenOptions::new();
-    let file = self
+  pub fn open_scan_io(&self, filename: &Path) -> Result<ScanIOHandle> {
+    let backend = self
       .base_dir
-      .open_direct_io(options.read(true), &path)
+      .open(OpenFlags::read_only(), filename)
+      .wait()
+      .unwrap()
       .map_err(Error::IO)?;
-    Ok(ScanIOHandle::new(file, self.base_dir.clone(), filename))
+    Ok(ScanIOHandle::new(
+      backend,
+      self.base_dir.clone(),
+      filename.to_path_buf(),
+    ))
   }
 
-  fn open_direct(&self, filename: &PathBuf) -> Result<Arc<dyn IOBackend>> {
+  fn open_full_with<T, F>(&self, filename: &Path, callback: F) -> AsyncTask<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(IOResult<IOHandle>) -> T + Send + 'static,
+  {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
     // accumulated and sorted in the eager_buffering layer, then
     // flushed as a single pwritev call per contiguous block.
-
-    let path = self.base_dir.get_path().join(filename);
-    let mut options = OpenOptions::new();
-    self
-      .base_dir
-      .open_direct_io(options.read(true).write(true).create(true), &path)
-      .map(Arc::<dyn IOBackend>::from)
-      .map_err(Error::IO)
+    let flags = OpenFlags::full();
+    let metrics = self.metrics.clone();
+    let base_dir = self.base_dir.clone();
+    let name = Mutex::new(filename.to_path_buf());
+    self.base_dir.open_with(flags, filename, |result| {
+      let result = result.map(|backend| IOHandle {
+        scheduler: IOScheduler::new(Arc::from(backend)),
+        metrics,
+        base_dir,
+        filename: name,
+      });
+      callback(result)
+    })
   }
 
-  pub fn open_dynamic_sized(&self, filename: PathBuf) -> Result<IOHandle> {
-    let file = self.open_direct(&filename)?;
-    let allocated = file.metadata().map_err(Error::IO)?.len();
-    Ok(self.create_handle(file, filename, Some(AllocState::new(allocated))))
+  fn open_full(&self, filename: &Path) -> AsyncTask<IOResult<IOHandle>> {
+    self.open_full_with(filename, identity)
   }
 
-  fn create_handle(
-    &self,
-    backend: Arc<dyn IOBackend>,
-    filename: PathBuf,
-    alloc: Option<AllocState>,
-  ) -> IOHandle {
-    let scheduler = IOScheduler::new(backend, alloc);
-    IOHandle {
-      scheduler,
-      metrics: self.metrics.clone(),
-      base_dir: self.base_dir.clone(),
-      filename: Mutex::new(filename),
-    }
+  pub fn open_dynamic_sized(&self, filename: &Path) -> Result<IOHandle> {
+    let mut handle = self
+      .open_full(filename)
+      .wait()
+      .unwrap()
+      .map_err(Error::IO)?;
+    let len = handle
+      .scheduler
+      .backend()
+      .metadata()
+      .map_err(Error::IO)?
+      .len();
+    handle.scheduler.set_alloc(len);
+    Ok(handle)
   }
 
-  pub fn open_static_sized(&self, filename: PathBuf, size: u64) -> Result<IOHandle> {
-    let file = self.open_direct(&filename)?;
-    let (task, done) = IOTask::new_fallocate(0, size);
-    file.submit(task);
-    done.wait().unwrap().map_err(Error::IO)?;
-    Ok(self.create_handle(file, filename, None))
+  pub fn open_static_sized_with<T, F>(&self, filename: &Path, callback: F) -> AsyncTask<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(IOResult<IOHandle>) -> T + Send + 'static,
+  {
+    self.open_full_with(filename, callback)
+  }
+  pub fn open_static_sized(&self, filename: &Path) -> AsyncTask<IOResult<IOHandle>> {
+    self.open_full(filename)
+  }
+
+  pub fn close(&self) {
+    self.base_dir.close();
   }
 
   /**
@@ -178,8 +197,13 @@ impl IOPool {
     self.base_dir.exists(filename).map_err(Error::IO)
   }
 }
+/*
+ * No I/O callback holds the pool itself, so this never runs on an I/O thread and
+ * can always join them.
+ */
 impl Drop for IOPool {
   fn drop(&mut self) {
+    self.close();
     let _ = self.base_dir.unlock();
   }
 }
@@ -205,6 +229,10 @@ impl IOHandle {
       self.metrics.disk_read,
       self.scheduler.backend().pread_exact(buf, offset)
     )
+  }
+
+  pub fn sync_dir_async(&self) -> PendingIO {
+    self.base_dir.fdatasync()
   }
 
   /**
@@ -271,6 +299,36 @@ impl IOHandle {
       result.map(drop)
     });
     self.scheduler.backend().submit(task);
+    PendingIO::Scheduled(done)
+  }
+
+  pub fn fallocate_async(&self, offset: u64, len: u64) -> PendingIO {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
+      return PendingIO::Fulfilled(Ok(()));
+    };
+    let (task, done) = IOTask::new_fallocate_with(offset, len, move |result| {
+      drop(pin);
+      result.map(drop)
+    });
+    self.scheduler.backend().submit(task);
+    PendingIO::Scheduled(done)
+  }
+
+  pub fn fallocate_then<T, F>(self, offset: u64, len: u64, callback: F) -> PendingIO<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(IOResult<()>, Self) -> T + Send + 'static,
+  {
+    let Some(pin) = self.scheduler.try_pin_owned() else {
+      return PendingIO::Fulfilled(callback(Ok(()), self));
+    };
+
+    let backend = self.scheduler.backend().clone();
+    let (task, done) = IOTask::new_fallocate_with(offset, len, move |result| {
+      drop(pin);
+      callback(result.map(drop), self)
+    });
+    backend.submit(task);
     PendingIO::Scheduled(done)
   }
 

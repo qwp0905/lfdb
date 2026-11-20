@@ -1,9 +1,10 @@
 use std::{
-  fs::{Metadata, OpenOptions, ReadDir},
+  collections::HashMap,
+  fs::{Metadata, ReadDir},
   io::{Error as IoError, ErrorKind, Result as IoResult},
   mem::take,
   path::Path,
-  sync::{Condvar, Mutex},
+  sync::{Condvar, Mutex, OnceLock},
   thread::scope,
 };
 
@@ -16,9 +17,36 @@ use crate::{
 
 const TABLE: TableId = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Op {
+  Open,
+  Write,
+  Fdatasync,
+  /**
+   * Kept apart from `Fdatasync` so a sync on a file that never received a write,
+   * such as the directory, never takes a fault armed for a commit.
+   */
+  UnwrittenFdatasync,
+  Fsync,
+  Fallocate,
+}
+impl Op {
+  fn of(task: &IOTask, written: bool) -> Self {
+    match task.context().get_type() {
+      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
+      TaskType::Fdatasync if written => Self::Fdatasync,
+      TaskType::Fdatasync => Self::UnwrittenFdatasync,
+      TaskType::Fsync => Self::Fsync,
+      TaskType::Fallocate { .. } => Self::Fallocate,
+      TaskType::Open { .. } => Self::Open,
+    }
+  }
+}
+
 #[derive(Default)]
 struct HoldState {
   opened: usize,
+  written: usize,
   target: Option<usize>,
   failure: Option<ErrorKind>,
   held: Vec<IOTask>,
@@ -27,29 +55,37 @@ struct HoldState {
 
 #[derive(Clone, Default)]
 struct FaultController {
-  write: Arc<Mutex<Option<ErrorKind>>>,
-  fdatasync: Arc<Mutex<Option<ErrorKind>>>,
+  armed: Arc<Mutex<HashMap<Op, ErrorKind>>>,
   hold: Arc<(Mutex<HoldState>, Condvar)>,
 }
 impl FaultController {
-  fn fail_next_write(&self, kind: ErrorKind) {
-    *self.write.lock().unwrap() = Some(kind);
+  fn fail_next(&self, op: Op, kind: ErrorKind) {
+    self.armed.lock().unwrap().insert(op, kind);
   }
-  fn fail_next_fdatasync(&self, kind: ErrorKind) {
-    *self.fdatasync.lock().unwrap() = Some(kind);
+  fn take(&self, op: Op) -> Option<ErrorKind> {
+    self.armed.lock().unwrap().remove(&op)
   }
 
-  fn register(&self) -> usize {
+  fn count_open(&self) {
+    let (lock, cvar) = &*self.hold;
+    lock.lock().unwrap().opened += 1;
+    cvar.notify_all();
+  }
+  fn opened(&self) -> usize {
+    self.hold.0.lock().unwrap().opened
+  }
+
+  fn number(&self) -> usize {
     let (lock, cvar) = &*self.hold;
     let mut state = lock.lock().unwrap();
-    let index = state.opened;
-    state.opened += 1;
+    let index = state.written;
+    state.written += 1;
     cvar.notify_all();
     index
   }
 
   /**
-   * Writes to the `index`-th opened segment stay in flight until `release`, so a
+   * Writes to the `index`-th written file stay in flight until `release`, so a
    * test can act while the WAL has not yet observed their outcome.
    */
   fn hold_writes(&self, index: usize) {
@@ -79,7 +115,10 @@ impl FaultController {
     assert!(!waited.timed_out(), "fault condition was never reached");
   }
 
-  fn intercept(&self, index: usize, task: IOTask) -> Option<IOTask> {
+  fn intercept(&self, index: Option<usize>, task: IOTask) -> Option<IOTask> {
+    let Some(index) = index else {
+      return Some(task);
+    };
     let (lock, cvar) = &*self.hold;
     let mut state = lock.lock().unwrap();
     match task.context().get_type() {
@@ -103,21 +142,27 @@ impl FaultController {
 }
 
 struct FaultIO {
-  index: usize,
+  /**
+   * Numbered by first write rather than by open, because opens complete out of
+   * order while first writes follow the order the WAL starts using segments.
+   */
+  index: OnceLock<usize>,
   inner: Box<dyn IOBackend>,
   controller: FaultController,
 }
 impl IOBackend for FaultIO {
   fn submit(&self, task: IOTask) {
-    let Some(task) = self.controller.intercept(self.index, task) else {
+    if matches!(
+      task.context().get_type(),
+      TaskType::Pwrite { .. } | TaskType::Pwritev { .. }
+    ) {
+      self.index.get_or_init(|| self.controller.number());
+    }
+    let index = self.index.get().copied();
+    let Some(task) = self.controller.intercept(index, task) else {
       return;
     };
-    let slot = match task.context().get_type() {
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => &self.controller.write,
-      TaskType::Fdatasync => &self.controller.fdatasync,
-      TaskType::Fsync | TaskType::Fallocate { .. } => return self.inner.submit(task),
-    };
-    let Some(kind) = slot.lock().unwrap().take() else {
+    let Some(kind) = self.controller.take(Op::of(&task, index.is_some())) else {
       return self.inner.submit(task);
     };
     task.fulfill(Err(IoError::from(kind)));
@@ -136,42 +181,24 @@ impl IOBackend for FaultIO {
   }
 }
 
-/**
- * Only segment files are wrapped, because the preloader syncs the directory in
- * the background and would otherwise consume a fault armed for a commit.
- */
 struct FaultBackend {
   inner: DefaultDiskBackend,
   controller: FaultController,
 }
-impl FaultBackend {
-  fn wrap(&self, path: &Path, inner: Box<dyn IOBackend>) -> Box<dyn IOBackend> {
-    if path.extension().is_none_or(|ext| ext != "log") {
-      return inner;
-    }
+impl DiskBackend for FaultBackend {
+  fn submit_open(&self, task: IOTask) {
+    self.controller.count_open();
+    let Some(kind) = self.controller.take(Op::Open) else {
+      return self.inner.submit_open(task);
+    };
+    task.fulfill(Err(IoError::from(kind)));
+  }
+  unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {
     Box::new(FaultIO {
-      index: self.controller.register(),
-      inner,
+      index: OnceLock::new(),
+      inner: unsafe { self.inner.adopt(raw) },
       controller: self.controller.clone(),
     })
-  }
-}
-impl DiskBackend for FaultBackend {
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> IoResult<Box<dyn IOBackend>> {
-    self
-      .inner
-      .open(options, path)
-      .map(|inner| self.wrap(path, inner))
-  }
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> IoResult<Box<dyn IOBackend>> {
-    self
-      .inner
-      .open_direct_io(options, path)
-      .map(|inner| self.wrap(path, inner))
   }
   fn read_dir(&self, path: &Path) -> IoResult<ReadDir> {
     self.inner.read_dir(path)
@@ -187,6 +214,9 @@ impl DiskBackend for FaultBackend {
   }
   fn ensure_dir(&self, path: &Path) -> IoResult<()> {
     self.inner.ensure_dir(path)
+  }
+  fn close(&self) {
+    self.inner.close()
   }
 }
 
@@ -286,7 +316,7 @@ fn commit_returns_wal_failed_when_fdatasync_fails() {
   insert(&wal, 2).unwrap();
   fixture
     .controller
-    .fail_next_fdatasync(ErrorKind::StorageFull);
+    .fail_next(Op::Fdatasync, ErrorKind::StorageFull);
   assert!(matches!(
     commit(&wal, 2),
     Err(Error::WALFailed(ErrorKind::StorageFull))
@@ -317,7 +347,9 @@ fn commit_returns_wal_failed_when_block_write_fails() {
   // Armed after the insert because a non-flushing append still submits its block
   // write, which would otherwise take the fault meant for the commit.
   insert(&wal, 2).unwrap();
-  fixture.controller.fail_next_write(ErrorKind::StorageFull);
+  fixture
+    .controller
+    .fail_next(Op::Write, ErrorKind::StorageFull);
   assert!(matches!(
     commit(&wal, 2),
     Err(Error::WALFailed(ErrorKind::StorageFull))
@@ -345,16 +377,16 @@ fn replay_keeps_tx_atomic_when_rotated_segment_write_fails() {
   insert_at(&wal, 2, DURABLE).unwrap();
   commit(&wal, 1).unwrap();
 
-  // The first opened segment is the one the WAL starts on.
   fixture.controller.hold_writes(0);
   insert_at(&wal, 2, LOST).unwrap();
+  let opened = fixture.controller.opened();
 
   let committed = scope(|s| {
     let filler = s.spawn(|| while insert(&wal, 3).is_ok() {});
 
-    // The preloader opens the third segment only after handing the second one to
-    // the rotation, which has already reserved the tail of the first segment.
-    fixture.controller.wait_until(|state| state.opened >= 3);
+    // Rotation submits the next creation only after reserving the tail of the
+    // first segment, so a commit issued from here on lands in the second.
+    fixture.controller.wait_until(|state| state.opened > opened);
     let commit = s.spawn(|| commit(&wal, 2));
 
     fixture
@@ -379,4 +411,34 @@ fn replay_keeps_tx_atomic_when_rotated_segment_write_fails() {
     !result.closed.contains(&2) || has(LOST),
     "tx 2 replayed as committed without its lost record"
   );
+}
+
+/**
+ * Segments are prepared one rotation ahead, so the failure surfaces within the
+ * next rotations rather than at a fixed one.
+ */
+#[test]
+fn rotation_returns_wal_failed_when_next_segment_cannot_be_prepared() {
+  const MAX_INSERTS: usize = 100_000;
+
+  for op in [Op::Open, Op::Fallocate, Op::Fsync, Op::UnwrittenFdatasync] {
+    let fixture = Fixture::with_segment_size(WAL_BLOCK_SIZE * 2);
+    let wal = fixture.open();
+
+    insert(&wal, 1).unwrap();
+    commit(&wal, 1).unwrap();
+
+    fixture.controller.fail_next(op, ErrorKind::StorageFull);
+    let failed = (0..MAX_INSERTS)
+      .map(|_| insert(&wal, 2))
+      .find(Result::is_err);
+    assert!(matches!(
+      failed,
+      Some(Err(Error::WALFailed(ErrorKind::StorageFull)))
+    ));
+    assert!(!wal.is_available());
+
+    let result = fixture.replay(wal);
+    assert!(result.closed.contains(&1));
+  }
 }

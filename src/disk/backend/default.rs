@@ -1,16 +1,11 @@
 use std::{
-  fs::{
-    create_dir_all, exists, read_dir, remove_file, rename, File, OpenOptions,
-    TryLockError,
-  },
+  fs::{create_dir_all, exists, read_dir, remove_file, rename, File, TryLockError},
   io::Result,
   path::Path,
   sync::Arc,
 };
 
-use crate::utils::info;
-
-use super::{direct_io, pread, AsyncIO, DiskBackend, IOBackend, IOTask};
+use super::{from_raw, pread, AsyncIO, DiskBackend, IOBackend, IOTask};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
@@ -64,23 +59,12 @@ impl DefaultDiskBackend {
   }
 }
 impl DiskBackend for DefaultDiskBackend {
-  fn open(&self, options: &mut OpenOptions, path: &Path) -> Result<Box<dyn IOBackend>>
-  where
-    Self: Sized,
-  {
-    let file = Arc::new(options.open(path)?);
-    Ok(Box::new(DefaultIOBackend::new(file, self.async_io.clone())))
+  fn submit_open(&self, task: IOTask) {
+    self.async_io.submit(task);
   }
-  fn open_direct_io(
-    &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> Result<Box<dyn IOBackend>> {
-    let file = direct_io(options, path)?;
-    Ok(Box::new(DefaultIOBackend::new(
-      Arc::new(file),
-      self.async_io.clone(),
-    )))
+  unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {
+    let file = Arc::new(from_raw(raw));
+    Box::new(DefaultIOBackend::new(file, self.async_io.clone()))
   }
   fn read_dir(&self, path: &Path) -> Result<std::fs::ReadDir> {
     read_dir(path)
@@ -99,11 +83,9 @@ impl DiskBackend for DefaultDiskBackend {
   fn ensure_dir(&self, path: &Path) -> Result<()> {
     create_dir_all(path)
   }
-}
-impl Drop for DefaultDiskBackend {
-  fn drop(&mut self) {
+
+  fn close(&self) {
     self.async_io.close();
-    info!("disk backend closed.");
   }
 }
 

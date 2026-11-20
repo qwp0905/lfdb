@@ -42,9 +42,8 @@ pub struct TableMapper {
 impl TableMapper {
   pub fn open_new(io_pool: Arc<IOPool>) -> Result<(Self, TableMetadata)> {
     let filename = to_path(META_TABLE);
-    let init =
-      TableMetadata::new(META_TABLE_ID, META_TABLE.into_owned(), filename.clone());
-    let disk = BlockIOHandle::new(io_pool.open_dynamic_sized(filename)?);
+    let disk = BlockIOHandle::new(io_pool.open_dynamic_sized(&filename)?);
+    let init = TableMetadata::new(META_TABLE_ID, META_TABLE.into_owned(), filename);
     let metadata = TableHandle::new(&init, disk);
     Ok((
       Self {
@@ -57,8 +56,7 @@ impl TableMapper {
     ))
   }
   pub fn open_exists(io_pool: Arc<IOPool>, init: &TableMetadata) -> Result<Self> {
-    let disk =
-      BlockIOHandle::new(io_pool.open_dynamic_sized(init.get_filename().to_path_buf())?);
+    let disk = BlockIOHandle::new(io_pool.open_dynamic_sized(init.get_filename())?);
     let metadata = TableHandle::new(init, disk);
     Ok(Self {
       open_handles: Default::default(),
@@ -69,9 +67,7 @@ impl TableMapper {
   }
 
   pub fn create_handle(&self, table_meta: &TableMetadata) -> Result<TableHandleRef> {
-    let io = self
-      .io_pool
-      .open_dynamic_sized(table_meta.get_filename().to_path_buf())?;
+    let io = self.io_pool.open_dynamic_sized(table_meta.get_filename())?;
     let handle = BlockIOHandle::new(io);
     Ok(Arc::new(TableHandle::new(table_meta, handle)))
   }

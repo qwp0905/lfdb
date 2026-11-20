@@ -2,6 +2,7 @@ use std::{io, path::PathBuf};
 
 use super::WAL_BLOCK_SIZE;
 use crate::{
+  background::AsyncTask,
   disk::{IOHandle, IOPool, PendingIO, Pointer},
   page::PageRef,
   utils::{create_static_ref, uuid_simple},
@@ -11,6 +12,41 @@ use crate::{
 pub const FILE_EXT: &str = "log";
 
 pub type FsyncResult = PendingIO;
+
+pub struct PendingSegment(AsyncTask<io::Result<PendingOperations>>);
+impl PendingSegment {
+  pub fn resolve(
+    self,
+  ) -> std::result::Result<WALSegment, (io::Error, Option<WALSegment>)> {
+    let joined = match self.0.wait().unwrap() {
+      Ok(joined) => joined,
+      Err(err) => return Err((err, None)),
+    };
+    let (pending, segment) = match joined.fallocate.wait() {
+      Ok((pending, handle)) => (pending, WALSegment { handle }),
+      Err((err, handle)) => return Err((err, Some(WALSegment { handle }))),
+    };
+    if let Err(err) = pending.wait() {
+      return Err((err, Some(segment)));
+    }
+    if let Err(err) = joined.sync_dir.wait() {
+      return Err((err, Some(segment)));
+    }
+    Ok(segment)
+  }
+
+  pub fn into_raw(this: Self) -> *mut () {
+    AsyncTask::into_raw(this.0)
+  }
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
+    Self(unsafe { AsyncTask::from_raw(raw) })
+  }
+}
+
+struct PendingOperations {
+  fallocate: PendingIO<std::result::Result<(PendingIO, IOHandle), (io::Error, IOHandle)>>,
+  sync_dir: PendingIO,
+}
 
 /**
  * Fixed-size WAL segment made of WAL blocks.
@@ -24,17 +60,28 @@ pub struct WALSegment {
 }
 impl WALSegment {
   const SHIFT: u32 = WAL_BLOCK_SIZE.ilog2();
-  pub fn open(max_len: Pointer, pool: &IOPool) -> Result<Self> {
+  pub fn open(max_len: Pointer, pool: &IOPool) -> PendingSegment {
     let filename = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
 
     // Pre-allocate the full file space upfront. Segments are rarely created fresh —
     // they are almost always reused via rename(). Paying the allocation cost once
     // at creation avoids metadata updates on every subsequent write.
     let file_len = max_len << Self::SHIFT;
-    let handle = pool.open_static_sized(filename, file_len)?;
-    handle.fsync_async().wait_flatten()?;
+    let task = pool.open_static_sized_with(&filename, move |result| {
+      let handle = result?;
+      let sync_dir = handle.sync_dir_async();
+      let fallocate =
+        handle.fallocate_then(0, file_len, move |result, handle| match result {
+          Ok(_) => Ok((handle.fsync_async(), handle)),
+          Err(err) => Err((err, handle)),
+        });
+      Ok(PendingOperations {
+        fallocate,
+        sync_dir,
+      })
+    });
 
-    Ok(Self { handle })
+    PendingSegment(task)
   }
   pub fn submit_write<R, F>(
     &self,

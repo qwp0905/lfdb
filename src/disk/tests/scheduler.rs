@@ -59,7 +59,10 @@ struct Fixture {
 impl Fixture {
   fn new(allocated: Option<u64>) -> Self {
     let backend = Arc::new(HeldBackend::default());
-    let scheduler = IOScheduler::new(backend.clone(), allocated.map(AllocState::new));
+    let mut scheduler = IOScheduler::new(backend.clone());
+    if let Some(allocated) = allocated {
+      scheduler.set_alloc(allocated);
+    }
     Self {
       backend,
       scheduler: Arc::new(scheduler),
@@ -86,9 +89,9 @@ fn block(byte: u8) -> &'static [u8] {
 
 fn written(task: &IOTask) -> (u64, Vec<*const u8>) {
   match task.context().get_type() {
-    TaskType::Pwrite { offset, buf } => (offset, vec![buf.as_ptr()]),
+    TaskType::Pwrite { offset, buf } => (*offset, vec![buf.as_ptr()]),
     TaskType::Pwritev { offset, bufs } => {
-      (offset, bufs.iter().map(|b| b.as_ptr()).collect())
+      (*offset, bufs.iter().map(|b| b.as_ptr()).collect())
     }
     _ => panic!("expected a write task"),
   }

@@ -1,16 +1,26 @@
+use std::path::PathBuf;
+
 use super::*;
+use crate::disk::OpenFlags;
 use tempfile::tempdir_in;
+
+fn disk() -> Arc<dyn DiskBackend> {
+  Arc::new(DefaultDiskBackend::new().unwrap())
+}
+
+fn open(disk: &Arc<dyn DiskBackend>, path: PathBuf) -> Box<dyn IOBackend> {
+  disk
+    .open(OpenFlags::buffered(), path)
+    .wait()
+    .unwrap()
+    .unwrap()
+}
 
 #[test]
 fn test_pread() -> Result<()> {
   let dir = tempdir_in(".")?;
-  let disk = DefaultDiskBackend::new().unwrap();
-  let file = disk
-    .open(
-      OpenOptions::new().read(true).write(true).create(true),
-      &dir.path().join("test_file.txt"),
-    )
-    .unwrap();
+  let disk = disk();
+  let file = open(&disk, dir.path().join("test_file.txt"));
   let content = b"Hello, World!";
 
   // Create a test file with content
@@ -50,14 +60,8 @@ fn test_pread() -> Result<()> {
 #[test]
 fn test_pwrite() {
   let dir = tempdir_in(".").unwrap();
-  let file_path = dir.path().join("test_pwrite.txt");
-  let disk = DefaultDiskBackend::new().unwrap();
-  let file = disk
-    .open(
-      OpenOptions::new().read(true).write(true).create(true),
-      &file_path,
-    )
-    .unwrap();
+  let disk = disk();
+  let file = open(&disk, dir.path().join("test_pwrite.txt"));
 
   // Test 1: Write at the beginning
   let content = b"Hello";
@@ -92,14 +96,8 @@ fn test_pwrite() {
 #[test]
 fn test_allocate() -> Result<()> {
   let dir = tempdir_in(".")?;
-  let path = dir.path().join("fallocate.txt");
-  let disk = DefaultDiskBackend::new().unwrap();
-  let file = disk
-    .open(
-      OpenOptions::new().read(true).write(true).create(true),
-      &path,
-    )
-    .unwrap();
+  let disk = disk();
+  let file = open(&disk, dir.path().join("fallocate.txt"));
 
   let (task, done) = IOTask::new_fallocate(0, 0);
   file.submit(task);

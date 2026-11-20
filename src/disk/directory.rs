@@ -1,12 +1,12 @@
 use std::{
-  fs::{DirEntry, OpenOptions},
+  fs::DirEntry,
   io::Result as IOResult,
   path::{Path, PathBuf},
   sync::Arc,
 };
 
-use super::{DiskBackend, IOBackend, PendingIO, SyncScheduler};
-use crate::metrics::MetricsRegistry;
+use super::{DiskBackend, IOBackend, OpenFlags, PendingIO, SyncScheduler};
+use crate::{background::AsyncTask, metrics::MetricsRegistry};
 
 /**
  * Base-directory-bound disk backend.
@@ -17,21 +17,22 @@ use crate::metrics::MetricsRegistry;
  */
 pub struct DirHandle {
   scheduler: SyncScheduler,
-  disk_backend: Box<dyn DiskBackend>,
+  disk_backend: Arc<dyn DiskBackend>,
   metrics: Arc<MetricsRegistry>,
   path: PathBuf,
 }
 impl DirHandle {
   pub fn ensure(
     path: &Path,
-    disk_backend: Box<dyn DiskBackend>,
+    disk_backend: Arc<dyn DiskBackend>,
     metrics: Arc<MetricsRegistry>,
   ) -> IOResult<Self> {
-    let mut options = OpenOptions::new();
     disk_backend.ensure_dir(path)?;
     let path = path.canonicalize()?;
     let backend = disk_backend
-      .open(options.read(true), &path)
+      .open(OpenFlags::directory(), path.to_path_buf())
+      .wait()
+      .unwrap()
       .map(Arc::<dyn IOBackend>::from)?;
 
     Ok(Self {
@@ -65,17 +66,34 @@ impl DirHandle {
       .disk_backend
       .rename(&self.path.join(from), &self.path.join(to))
   }
-  pub fn open_direct_io(
+  pub fn open_with<T, F>(
     &self,
-    options: &mut OpenOptions,
-    path: &Path,
-  ) -> IOResult<Box<dyn IOBackend>> {
-    self.disk_backend.open_direct_io(options, path)
+    flags: OpenFlags,
+    filename: &Path,
+    callback: F,
+  ) -> AsyncTask<T>
+  where
+    T: Send + 'static,
+    F: FnOnce(IOResult<Box<dyn IOBackend>>) -> T + Send + 'static,
+  {
+    let path = self.path.join(filename);
+    self.disk_backend.open_with(flags, path, callback)
+  }
+  pub fn open(
+    &self,
+    flags: OpenFlags,
+    filename: &Path,
+  ) -> AsyncTask<IOResult<Box<dyn IOBackend>>> {
+    let path = self.path.join(filename);
+    self.disk_backend.open(flags, path)
   }
   pub fn try_lock(&self) -> IOResult<bool> {
     self.scheduler.backend().try_flock()
   }
   pub fn unlock(&self) -> IOResult<()> {
     self.scheduler.backend().unlock()
+  }
+  pub fn close(&self) {
+    self.disk_backend.close();
   }
 }

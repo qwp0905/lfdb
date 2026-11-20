@@ -158,13 +158,13 @@ impl<T, C> Drop for TaskFulfiller<T, C> {
 }
 
 pub struct AsyncTask<R> {
-  task: VPtr,
+  task: ManuallyDrop<VPtr>,
   _marker: PhantomData<R>,
 }
 impl<R> AsyncTask<R> {
   const fn new(task: VPtr) -> Self {
     Self {
-      task,
+      task: ManuallyDrop::new(task),
       _marker: PhantomData,
     }
   }
@@ -209,6 +209,14 @@ impl<R> AsyncTask<R> {
       }
     }
   }
+
+  pub fn into_raw(this: Self) -> *mut () {
+    let mut this = ManuallyDrop::new(this);
+    VPtr::into_raw(unsafe { ManuallyDrop::take(&mut this.task) })
+  }
+  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
+    Self::new(unsafe { VPtr::from_raw(raw) })
+  }
 }
 impl<R> Selectable for AsyncTask<R> {
   type Output = R;
@@ -221,8 +229,9 @@ impl<R> Selectable for AsyncTask<R> {
 }
 impl<R> Drop for AsyncTask<R> {
   fn drop(&mut self) {
-    let vtable = self.task.vtable();
-    let ptr = self.task.erased();
+    let task = unsafe { ManuallyDrop::take(&mut self.task) };
+    let vtable = task.vtable();
+    let ptr = task.erased();
     unsafe { (vtable.drop_receiver)(ptr) };
   }
 }

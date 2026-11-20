@@ -1,18 +1,28 @@
+use std::ffi::OsStr;
+use std::path::Path;
 use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{SharedWorkThread, ThreadBuilder};
 
-use super::super::{fallocate, pwrite, pwritev, IOTask};
+use super::super::{fallocate, into_raw, pwrite, pwritev, IOTask};
 use super::TaskType;
 
 fn handle_task(task: IOTask) {
-  let file = task.context().toward();
   let result = match task.context().get_type() {
-    TaskType::Pwrite { offset, buf } => pwrite(file, buf, offset),
-    TaskType::Pwritev { offset, bufs } => pwritev(file, bufs, offset),
-    TaskType::Fsync => file.sync_all().map(|_| 0),
-    TaskType::Fdatasync => file.sync_data().map(|_| 0),
-    TaskType::Fallocate { offset, len } => fallocate(file, offset, len).map(|_| 0),
+    TaskType::Pwrite { offset, buf } => pwrite(task.context().toward(), buf, *offset),
+    TaskType::Pwritev { offset, bufs } => pwritev(task.context().toward(), bufs, *offset),
+    TaskType::Fsync => task.context().toward().sync_all().map(|_| 0),
+    TaskType::Fdatasync => task.context().toward().sync_data().map(|_| 0),
+    TaskType::Fallocate { offset, len } => {
+      fallocate(task.context().toward(), *offset, *len).map(|_| 0)
+    }
+    // SAFETY: the bytes come from `into_encoded_bytes` on this platform, unchanged
+    // except for the trailing nul that `to_bytes` leaves out.
+    TaskType::Open { path, flags } => flags
+      .open(Path::new(unsafe {
+        OsStr::from_encoded_bytes_unchecked(path.to_bytes())
+      }))
+      .map(into_raw),
   };
   task.fulfill(result);
 }

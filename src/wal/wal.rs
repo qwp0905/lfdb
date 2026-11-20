@@ -195,7 +195,6 @@ impl WriteAheadLog {
 
     error!("error occurs in wal: {err}");
     error!("it does not recover automatically, please drop engine and restart.");
-    self.preloader.failover();
     self.event_bus.publish(WALFailed);
     Error::WALFailed(err)
   }
@@ -469,8 +468,11 @@ impl WriteAheadLog {
     self.state.load().is_available()
   }
 
-  pub fn reuse_segments(&self, segments: Vec<WALSegment>) {
-    self.preloader.reuse(segments)
+  pub unsafe fn reuse_segments(&self, segments: Vec<WALSegment>) {
+    unsafe { self.preloader.reuse(segments) }
+  }
+  pub unsafe fn expire_segments(&self) {
+    unsafe { self.preloader.expire() };
   }
 
   pub fn close(&self) {

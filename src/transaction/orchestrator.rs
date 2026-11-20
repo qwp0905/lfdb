@@ -6,7 +6,7 @@ use crate::{
   blob::{BlobAppendGuard, BlobHandle, BlobId, BlobStorage},
   btree::ResolvedConflict,
   cache::{BlockCache, CachedSlot, WritableSlot},
-  disk::Pointer,
+  disk::{IOPool, Pointer},
   error::Result,
   maintenance::EventLoop,
   mvcc::{TxSnapshot, TxState, VersionController},
@@ -29,6 +29,7 @@ pub struct TxOrchestrator {
   recorder: Arc<PageRecorder>,
   blob: Arc<BlobStorage>,
   event_loop: EventLoop,
+  io_pool: Arc<IOPool>,
 }
 impl TxOrchestrator {
   pub const fn new(
@@ -39,6 +40,7 @@ impl TxOrchestrator {
     recorder: Arc<PageRecorder>,
     blob: Arc<BlobStorage>,
     event_loop: EventLoop,
+    io_pool: Arc<IOPool>,
   ) -> Self {
     Self {
       wal,
@@ -48,6 +50,7 @@ impl TxOrchestrator {
       recorder,
       blob,
       event_loop,
+      io_pool,
     }
   }
 
@@ -147,5 +150,8 @@ impl TxOrchestrator {
 
     self.wal.close();
     info!("wal closed.");
+
+    self.io_pool.close();
+    info!("io pool closed.");
   }
 }

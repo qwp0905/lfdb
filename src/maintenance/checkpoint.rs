@@ -259,7 +259,7 @@ impl CheckpointWorker {
     let snapshot = CheckpointSnapshot::new(active, aborted, blobs);
 
     let current = PathBuf::from(uuid_simple()).with_extension(FILE_EXT);
-    snapshot.write_at(&mut self.io_pool.open_append_io(current.clone())?)?;
+    snapshot.write_at(&mut self.io_pool.open_append_io(&current)?)?;
     debug!("checkpoint snapshot persisted.");
     self.io_pool.sync_dir()?;
 
@@ -322,6 +322,8 @@ impl CheckpointWorker {
     cycle: &mut Option<CheckpointCycle>,
     flush_factor: f64,
   ) -> Result {
+    unsafe { self.wal.expire_segments() };
+
     let Some(current) = cycle else {
       let new = self.create_cycle(incoming)?;
       if new.is_empty() {
@@ -369,7 +371,7 @@ impl CheckpointWorker {
     self.metrics.checkpoint_cycle.record(current.take_start());
     info!("checkpoint complete id {}", current.get_write_seq());
 
-    self.wal.reuse_segments(current.take_segments());
+    unsafe { self.wal.reuse_segments(current.take_segments()) };
     *cycle = None;
     Ok(())
   }
