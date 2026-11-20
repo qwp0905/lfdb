@@ -1,4 +1,7 @@
-use std::{sync::Arc, thread::Builder};
+use std::{
+  sync::Arc,
+  thread::{current, Builder},
+};
 
 use crossbeam::{queue::SegQueue, utils::Backoff};
 
@@ -99,6 +102,11 @@ impl<T: Send + 'static> SharedWorkThread<T> {
     }
     self.inner.parker.wake_all();
     for handle in threads {
+      debug_assert_ne!(
+        handle.thread().id(),
+        current().id(),
+        "a worker must not close its own pool"
+      );
       handle.join().unwrap();
     }
   }
