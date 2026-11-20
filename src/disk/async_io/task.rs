@@ -1,4 +1,4 @@
-use std::{cell::OnceCell, fs::File, io::IoSlice, path::PathBuf, sync::Arc};
+use std::{cell::OnceCell, ffi::CString, fs::File, io::IoSlice, sync::Arc};
 #[cfg(not(target_os = "linux"))]
 use std::{fs::OpenOptions, io::Result, path::Path};
 
@@ -98,7 +98,7 @@ pub enum TaskType {
     len: u64,
   },
   Open {
-    path: PathBuf,
+    path: CString,
     flags: OpenFlags,
   },
 }

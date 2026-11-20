@@ -1,4 +1,5 @@
 use std::{
+  ffi::CString,
   fs::{Metadata, ReadDir},
   io::{Error, ErrorKind, IoSlice, Result},
   path::{Path, PathBuf},
@@ -174,6 +175,9 @@ impl dyn DiskBackend {
     let this = self.clone();
     // SAFETY: the task is submitted to this backend right below, and its callback runs once.
     let callback = move |result: Result<_>| unsafe { result.map(|raw| this.adopt(raw)) };
+
+    let path = CString::new(path.into_os_string().into_encoded_bytes())
+      .expect("path must not contains nul string.");
     let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
     self.submit_open(task);
     done
@@ -192,6 +196,9 @@ impl dyn DiskBackend {
     // SAFETY: the task is submitted to this backend right below, and its callback runs once.
     let callback =
       move |result: Result<_>| callback(unsafe { result.map(|raw| this.adopt(raw)) });
+
+    let path = CString::new(path.into_os_string().into_encoded_bytes())
+      .expect("path must not contains nul string.");
     let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
     self.submit_open(task);
     done

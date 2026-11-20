@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+use std::path::Path;
 use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{SharedWorkThread, ThreadBuilder};
@@ -14,7 +16,13 @@ fn handle_task(task: IOTask) {
     TaskType::Fallocate { offset, len } => {
       fallocate(task.context().toward(), *offset, *len).map(|_| 0)
     }
-    TaskType::Open { path, flags } => flags.open(path).map(into_raw),
+    // SAFETY: the bytes come from `into_encoded_bytes` on this platform, unchanged
+    // except for the trailing nul that `to_bytes` leaves out.
+    TaskType::Open { path, flags } => flags
+      .open(Path::new(unsafe {
+        OsStr::from_encoded_bytes_unchecked(path.to_bytes())
+      }))
+      .map(into_raw),
   };
   task.fulfill(result);
 }
