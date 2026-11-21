@@ -1,5 +1,6 @@
 use std::{
   cell::UnsafeCell,
+  io::Result,
   ptr::null_mut,
   sync::{
     atomic::{AtomicPtr, Ordering},
@@ -14,7 +15,6 @@ use super::{PendingSegment, WALSegment};
 use crate::{
   disk::{IOPool, Pointer},
   utils::{error, ChunkQueue, MpscQueue},
-  Error, Result,
 };
 
 /**
@@ -82,7 +82,7 @@ impl SegmentPreload {
     if let Some(segment) = segment {
       self.failed.push(segment);
     }
-    Err(Error::IO(err))
+    Err(err)
   }
 
   /**
