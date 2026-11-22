@@ -7,13 +7,13 @@ use std::{
   },
 };
 
-use super::{AbortedSet, ActiveSet, ActiveState};
+use super::{AbortedSet, ActiveSet, ActiveSnapshot, ActiveState};
 
 use crate::{
   background::{binding_events, EventBus, OnceParker, SharedSubscription},
   btree::ResolvedConflict,
   cache::ShrinkMap,
-  utils::{error, warn, OffsetBitmap, SBox, ShortenedMutex},
+  utils::{error, warn, SBox, ShortenedMutex},
   wal::{TxId, WALFailed, RESERVED_TX},
 };
 
@@ -71,17 +71,21 @@ impl<'a> Deref for TxState<'a> {
  * does not expand visibility.
  */
 pub struct TxSnapshot<'a> {
-  active: OffsetBitmap,
+  active: ActiveSnapshot,
   aborted: &'a AbortedSet,
 }
 impl<'a> TxSnapshot<'a> {
-  const fn new(active: OffsetBitmap, aborted: &'a AbortedSet) -> Self {
+  const fn new(active: ActiveSnapshot, aborted: &'a AbortedSet) -> Self {
     Self { active, aborted }
   }
 
   #[inline]
   pub fn is_active(&self, &tx_id: &TxId) -> bool {
     self.active.contains(tx_id)
+  }
+  #[inline]
+  pub fn is_within(&self, version: TxId) -> bool {
+    version <= self.active.get_version()
   }
   pub fn is_aborted(&self, tx_id: TxId) -> bool {
     self.aborted.contains(tx_id)
@@ -241,13 +245,9 @@ impl VersionController {
    * boundary.
    */
   pub fn snapshot(&self) -> (TxId, Vec<TxId>, Vec<TxId>) {
-    let tx_id = self.active.current_version();
-    let active = self
-      .active
-      .snapshot()
-      .iter()
-      .take_while(|&id| id < tx_id)
-      .collect();
+    let snapshot = self.active.snapshot();
+    let tx_id = snapshot.get_version();
+    let active = snapshot.iter().collect();
     let aborted = self.aborted.snapshot_until(tx_id);
     (tx_id, active, aborted)
   }
