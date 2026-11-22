@@ -442,6 +442,9 @@ impl GcWorker {
         total += 1;
 
         if self.version_controller.is_aborted(e.record.owner) {
+          // Aborted records are never removed from the leaf, and their owner is
+          // always below their version, so the marker bound must follow the owner.
+          current.min_version = current.min_version.min(e.record.owner);
           dead += 1;
           if let Some(p) = e.next {
             let task = GcTask::trim_entry(p, task.table.clone());
