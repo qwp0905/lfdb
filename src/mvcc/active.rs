@@ -110,16 +110,39 @@ impl ActiveSet {
   pub fn is_active(&self, &tx_id: &TxId) -> bool {
     self.inner.rl().contains(tx_id)
   }
-  /**
-   * Create a snapshot of active transaction ids.
-   */
-  pub fn snapshot(&self) -> OffsetBitmap {
-    self.inner.rl().clone()
+  pub fn snapshot(&self) -> ActiveSnapshot {
+    let inner = self.inner.rl();
+    ActiveSnapshot::new(inner.clone(), self.current_version())
   }
   pub fn remove(&self, &tx_id: &TxId) {
     self.inner.wl().remove_and_shrink(tx_id);
   }
   pub fn min_version(&self) -> Option<TxId> {
     self.inner.rl().front()
+  }
+}
+
+/**
+ * Active transaction ids and the next transaction id at a single instant.
+ *
+ * A transaction below `version` and absent from `active` had finished by then, so
+ * every record it wrote is at or below `version`.
+ */
+pub struct ActiveSnapshot {
+  active: OffsetBitmap,
+  version: TxId,
+}
+impl ActiveSnapshot {
+  const fn new(active: OffsetBitmap, version: TxId) -> Self {
+    Self { active, version }
+  }
+  pub fn contains(&self, tx_id: TxId) -> bool {
+    self.active.contains(tx_id)
+  }
+  pub const fn get_version(&self) -> TxId {
+    self.version
+  }
+  pub fn iter(&self) -> impl Iterator<Item = TxId> + '_ {
+    self.active.iter()
   }
 }

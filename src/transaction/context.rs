@@ -63,8 +63,8 @@ impl<'a> ReadonlyPolicy for TxContext<'a> {
   fn is_owned(&self, owner: TxId) -> bool {
     self.state.get_id() == owner
   }
-  fn is_readable(&self, version: TxId) -> bool {
-    version <= self.state.get_id()
+  fn is_within(&self, version: TxId) -> bool {
+    self.snapshot.is_within(version)
   }
   fn is_active(&self, owner: TxId) -> bool {
     self.snapshot.is_active(&owner)

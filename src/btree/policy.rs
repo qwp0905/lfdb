@@ -19,7 +19,7 @@ use crate::{
 pub trait ReadonlyPolicy {
   fn is_aborted(&self, owner: TxId) -> bool;
   fn is_owned(&self, owner: TxId) -> bool;
-  fn is_readable(&self, version: TxId) -> bool;
+  fn is_within(&self, version: TxId) -> bool;
   fn is_active(&self, owner: TxId) -> bool;
   fn read_blob(
     &self,
@@ -43,7 +43,7 @@ pub trait ReadonlyPolicy {
     if self.is_owned(owner) {
       return true;
     }
-    self.is_readable(version) && !self.is_active(owner) && !self.is_aborted(owner)
+    self.is_within(version) && !self.is_active(owner) && !self.is_aborted(owner)
   }
 }
 impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
@@ -53,8 +53,8 @@ impl<Policy: ReadonlyPolicy> ReadonlyPolicy for &Policy {
   fn is_owned(&self, owner: TxId) -> bool {
     (*self).is_owned(owner)
   }
-  fn is_readable(&self, version: TxId) -> bool {
-    (*self).is_readable(version)
+  fn is_within(&self, version: TxId) -> bool {
+    (*self).is_within(version)
   }
   fn is_active(&self, owner: TxId) -> bool {
     (*self).is_active(owner)

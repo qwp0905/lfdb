@@ -320,7 +320,7 @@ fn try_append_at_leaf_once<'a, Policy: CreatablePolicy + Sync>(
     FindSlotResult::Move(_) => unreachable!(),
     FindSlotResult::Replace(pos, old, entry_ptr) => {
       let writable = policy.is_owned(old.owner) || policy.is_aborted(old.owner);
-      let visible = policy.is_readable(old.version) && !policy.is_active(old.owner);
+      let visible = policy.is_within(old.version) && !policy.is_active(old.owner);
       match (writable, visible) {
         (true, _) => (pos, true, op),
         (false, false) => return Ok(TryAppendAtLeaf::Conflict(old.owner, op)),
@@ -391,7 +391,7 @@ fn try_append_at_leaf_init<'a, 'b, Policy: CreatablePolicy + Sync>(
     NodeFindResult::Move(p) => return Ok(TryAppendAtLeafInit::Move(p, op)),
     NodeFindResult::Found(pos, old, entry_ptr) => {
       let writable = policy.is_owned(old.owner) || policy.is_aborted(old.owner);
-      let visible = policy.is_readable(old.version) && !policy.is_active(old.owner);
+      let visible = policy.is_within(old.version) && !policy.is_active(old.owner);
       match (writable, visible) {
         (true, _) => (leaf.into_owned()?, pos, true),
         (false, false) => return Ok(TryAppendAtLeafInit::Conflict(old.owner, op)),

@@ -117,8 +117,8 @@ impl<'a> ReadonlyPolicy for MiniTx<'a> {
   fn is_owned(&self, owner: TxId) -> bool {
     self.state.get_id() == owner
   }
-  fn is_readable(&self, version: TxId) -> bool {
-    version <= self.state.get_id()
+  fn is_within(&self, version: TxId) -> bool {
+    self.snapshot.is_within(version)
   }
   fn is_active(&self, owner: TxId) -> bool {
     self.snapshot.is_active(&owner)
@@ -211,7 +211,7 @@ impl ReadonlyPolicy for CompactionReadPolicy {
   fn is_owned(&self, _: TxId) -> bool {
     false
   }
-  fn is_readable(&self, _: TxId) -> bool {
+  fn is_within(&self, _: TxId) -> bool {
     true
   }
   fn is_active(&self, _: TxId) -> bool {
@@ -269,7 +269,7 @@ impl ReadonlyPolicy for CompactionWritePolicy {
   fn is_owned(&self, _: TxId) -> bool {
     false
   }
-  fn is_readable(&self, _: TxId) -> bool {
+  fn is_within(&self, _: TxId) -> bool {
     true
   }
   fn is_active(&self, _: TxId) -> bool {

@@ -40,7 +40,7 @@ impl<'a, R> ReadonlyPolicy for TableOpenPolicy<'a, R> {
   fn is_owned(&self, _: TxId) -> bool {
     false
   }
-  fn is_readable(&self, _: TxId) -> bool {
+  fn is_within(&self, _: TxId) -> bool {
     true
   }
   fn is_active(&self, _: TxId) -> bool {
@@ -375,7 +375,7 @@ impl<'a> ReadonlyPolicy for RecoveryPolicy<'a> {
   fn is_owned(&self, _: TxId) -> bool {
     unreachable!()
   }
-  fn is_readable(&self, _: TxId) -> bool {
+  fn is_within(&self, _: TxId) -> bool {
     unreachable!()
   }
   fn is_active(&self, _: TxId) -> bool {
