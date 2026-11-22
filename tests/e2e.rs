@@ -1295,10 +1295,31 @@ fn test_abort_open_table() {
     tx.abort().unwrap();
   }
 
+  {
+    let tx = engine.new_tx().unwrap();
+    match tx.table(TEST_TABLE) {
+      Err(_) => {}
+      Ok(_) => panic!("must error."),
+    };
+  }
+
+  // The aborted metadata record is the oldest record in a fresh database, so a gc
+  // cycle is what could drop its abort marker while the record stays in the leaf.
+  thread::sleep(Duration::from_secs(3));
+  {
+    let tx = engine.new_tx().unwrap();
+    match tx.table(TEST_TABLE) {
+      Err(_) => {}
+      Ok(_) => panic!("must error after gc."),
+    };
+  }
+
+  drop(engine);
+  let engine = build_engine(&dir);
   let tx = engine.new_tx().unwrap();
   match tx.table(TEST_TABLE) {
     Err(_) => {}
-    Ok(_) => panic!("must error."),
+    Ok(_) => panic!("must error after restart."),
   };
 }
 
