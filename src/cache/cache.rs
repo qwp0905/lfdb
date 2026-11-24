@@ -90,32 +90,6 @@ impl BlockCache {
     Ok(slot.for_write())
   }
 
-  /**
-   * Read a block through the unchecked disk-read path.
-   *
-   * This can tolerate an immediate EOF from the underlying file, unlike normal
-   * reads. Use it only while reconstructing storage state before normal cache
-   * invariants are established.
-   */
-  pub unsafe fn read_unchecked(
-    &self,
-    pointer: Pointer,
-    handle: &TableHandleRef,
-  ) -> Result<CachedSlot<'_>> {
-    let table_id = handle.get_id();
-    let guard = match self.core.get_mapping().acquire(table_id, pointer) {
-      Acquired::Hit(block_id, token) => {
-        return Ok(CachedSlot::new(block_id, &self.core, token))
-      }
-      Acquired::Evicted(guard) => guard,
-    };
-
-    let pending = self.core.submit_eviction(&guard)?;
-    let mut new = self.core.acquire_page_with(&guard);
-    unsafe { handle.disk().read_unchecked(pointer, &mut new)? };
-    self.resolve_eviction(pending, guard, new, pointer, handle.clone())
-  }
-
   fn resolve_eviction<'a>(
     &'a self,
     pending: Option<PendingDiskWrite>,
