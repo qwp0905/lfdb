@@ -234,9 +234,10 @@ impl Engine {
           WriteSeq,
           TableHandleRef,
         )| unsafe {
+          // SAFETY: the image is already in the replayed WAL, and redo keeps one image per
+          // (table, pointer), so the block holds no other cached copy to conflict with.
           block_cache
-            .read_unchecked(ptr, &table)?
-            .for_write()
+            .alloc(ptr, &table)?
             .commit_unchecked(&data, write_seq)
         },
       )
