@@ -1,7 +1,7 @@
 use std::{
   convert::identity,
   fs::DirEntry,
-  io::{Error as IOError, ErrorKind, Result as IOResult},
+  io,
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
   thread::sleep,
@@ -21,7 +21,7 @@ use crate::{
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_RETRY: u8 = 10;
 
-pub enum PendingIO<T: 'static = IOResult<()>> {
+pub enum PendingIO<T: 'static = io::Result<()>> {
   Fulfilled(T),
   Scheduled(AsyncTask<T>),
 }
@@ -49,7 +49,7 @@ impl<T> PendingIO<T> {
     }
   }
 }
-impl<T> PendingIO<IOResult<T>> {
+impl<T> PendingIO<io::Result<T>> {
   pub fn wait_flatten(self) -> Result<T> {
     self.wait().map_err(Error::IO)
   }
@@ -120,7 +120,7 @@ impl IOPool {
   fn open_full_with<T, F>(&self, filename: &Path, callback: F) -> AsyncTask<T>
   where
     T: Send + 'static,
-    F: FnOnce(IOResult<IOHandle>) -> T + Send + 'static,
+    F: FnOnce(io::Result<IOHandle>) -> T + Send + 'static,
   {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
@@ -141,7 +141,7 @@ impl IOPool {
     })
   }
 
-  fn open_full(&self, filename: &Path) -> AsyncTask<IOResult<IOHandle>> {
+  fn open_full(&self, filename: &Path) -> AsyncTask<io::Result<IOHandle>> {
     self.open_full_with(filename, identity)
   }
 
@@ -164,11 +164,11 @@ impl IOPool {
   pub fn open_static_sized_with<T, F>(&self, filename: &Path, callback: F) -> AsyncTask<T>
   where
     T: Send + 'static,
-    F: FnOnce(IOResult<IOHandle>) -> T + Send + 'static,
+    F: FnOnce(io::Result<IOHandle>) -> T + Send + 'static,
   {
     self.open_full_with(filename, callback)
   }
-  pub fn open_static_sized(&self, filename: &Path) -> AsyncTask<IOResult<IOHandle>> {
+  pub fn open_static_sized(&self, filename: &Path) -> AsyncTask<io::Result<IOHandle>> {
     self.open_full(filename)
   }
 
@@ -223,7 +223,7 @@ pub struct IOHandle {
   filename: Mutex<PathBuf>,
 }
 impl IOHandle {
-  pub fn read(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
+  pub fn read(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let _pin = self.scheduler.try_pin().expect("read from a closed handle");
     measure!(
       self.metrics.disk_read,
@@ -233,23 +233,6 @@ impl IOHandle {
 
   pub fn sync_dir_async(&self) -> PendingIO {
     self.base_dir.fdatasync()
-  }
-
-  /**
-   * Read a full buffer, but allow an immediate EOF.
-   *
-   * This differs from `read` only in how it treats a zero-byte read: `Ok(0)` is
-   * accepted as an empty range. Any non-zero short read is still reported as
-   * `UnexpectedEof`.
-   */
-  pub unsafe fn read_unchecked(&self, buf: &mut [u8], offset: u64) -> IOResult<()> {
-    let _pin = self.scheduler.try_pin().expect("read from a closed handle");
-    match self.scheduler.backend().pread(buf, offset) {
-      Ok(0) => Ok(()),
-      Ok(n) if n == buf.len() => Ok(()),
-      Ok(_) => Err(IOError::from(ErrorKind::UnexpectedEof)),
-      Err(err) => Err(err),
-    }
   }
 
   pub fn write_async(&self, buf: &'static [u8], offset: u64) -> PendingIO {
@@ -270,7 +253,7 @@ impl IOHandle {
   ) -> PendingIO<R>
   where
     R: Send + 'static,
-    F: FnOnce(IOResult<()>) -> R + Send + 'static,
+    F: FnOnce(io::Result<()>) -> R + Send + 'static,
   {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(callback(Ok(())));
@@ -294,7 +277,7 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let (task, done) = IOTask::new_fsync_with(move |result: IOResult<usize>| {
+    let (task, done) = IOTask::new_fsync_with(move |result: io::Result<usize>| {
       drop(pin);
       result.map(drop)
     });
@@ -317,7 +300,7 @@ impl IOHandle {
   pub fn fallocate_then<T, F>(self, offset: u64, len: u64, callback: F) -> PendingIO<T>
   where
     T: Send + 'static,
-    F: FnOnce(IOResult<()>, Self) -> T + Send + 'static,
+    F: FnOnce(io::Result<()>, Self) -> T + Send + 'static,
   {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(callback(Ok(()), self));
@@ -339,12 +322,12 @@ impl IOHandle {
    * out the operations already in flight and rejects any later ones before the
    * file is removed.
    */
-  pub fn truncate(&self) -> IOResult<()> {
+  pub fn truncate(&self) -> io::Result<()> {
     self.scheduler.close();
     self.base_dir.remove(&self.filename.l())
   }
 
-  pub fn rename(&self, new_filename: PathBuf) -> IOResult<()> {
+  pub fn rename(&self, new_filename: PathBuf) -> io::Result<()> {
     let mut filename = self.filename.l();
     self.base_dir.rename(&filename, &new_filename)?;
     *filename = new_filename;
