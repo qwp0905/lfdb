@@ -20,7 +20,7 @@ use crate::{
   utils::{warn, ChunkQueue, MpscQueue},
 };
 
-use super::{BoundIOTask, TaskType};
+use super::BoundIOTask;
 
 enum Slot<T> {
   Occupied(T),
@@ -59,6 +59,7 @@ pub struct PendingTasks<T> {
 }
 impl<T> PendingTasks<T> {
   fn with_capacity(capacity: usize) -> Self {
+    debug_assert!(capacity > 0);
     let mut slots = Vec::with_capacity(capacity);
     for (i, slot) in slots
       .spare_capacity_mut()
@@ -68,8 +69,8 @@ impl<T> PendingTasks<T> {
     {
       slot.write(Node::vacant(Some(i + 1)));
     }
+    unsafe { slots.set_len(capacity - 1) };
     slots.push(Node::vacant(None));
-    unsafe { slots.set_len(capacity) };
     Self {
       slots: slots.into_boxed_slice(),
       head: (capacity > 0).then_some(0),
@@ -209,37 +210,53 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
-fn as_fd(task: &BoundIOTask) -> types::Fd {
-  types::Fd(task.toward().unwrap().as_raw_fd())
-}
-
 fn to_entry(task: &BoundIOTask) -> squeue::Entry {
-  match task.get_type() {
-    TaskType::Pwrite { offset, buf } => {
-      opcode::Write::new(as_fd(task), buf.as_ptr(), buf.len() as u32)
-        .offset(*offset)
-        .build()
-    }
-    TaskType::Pwritev { offset, bufs } => opcode::Writev::new(
-      as_fd(task),
+  match task {
+    BoundIOTask::Pwrite {
+      offset, buf, file, ..
+    } => opcode::Write::new(types::Fd(file.as_raw_fd()), buf.as_ptr(), buf.len() as u32)
+      .offset(*offset)
+      .build(),
+    BoundIOTask::Pwritev {
+      offset, bufs, file, ..
+    } => opcode::Writev::new(
+      types::Fd(file.as_raw_fd()),
       bufs.as_ptr() as *const libc::iovec,
       bufs.len() as u32,
     )
     .offset(*offset)
     .build(),
-    TaskType::Fsync => opcode::Fsync::new(as_fd(task)).build(),
-    TaskType::Fdatasync => opcode::Fsync::new(as_fd(task))
-      .flags(types::FsyncFlags::DATASYNC)
-      .build(),
-    TaskType::Fallocate { offset, len } => opcode::Fallocate::new(as_fd(task), *len)
+    BoundIOTask::Fsync { file, .. } => {
+      opcode::Fsync::new(types::Fd(file.as_raw_fd())).build()
+    }
+    BoundIOTask::Fdatasync { file, .. } => {
+      opcode::Fsync::new(types::Fd(file.as_raw_fd()))
+        .flags(types::FsyncFlags::DATASYNC)
+        .build()
+    }
+    BoundIOTask::Fallocate {
+      offset, len, file, ..
+    } => opcode::Fallocate::new(types::Fd(file.as_raw_fd()), *len)
       .offset(*offset)
       .build(),
-    TaskType::Open { path, flags } => {
+    BoundIOTask::Open { path, flags, .. } => {
       opcode::OpenAt::new(types::Fd(libc::AT_FDCWD), path.as_ptr())
         .mode(0o666)
         .flags(flags.as_raw())
         .build()
     }
+  }
+}
+
+fn fulfill_task(task: BoundIOTask, result: Result<usize>) {
+  match task {
+    BoundIOTask::Pwrite { fulfiller, .. } | BoundIOTask::Pwritev { fulfiller, .. } => {
+      fulfiller.fulfill(result)
+    }
+    BoundIOTask::Fallocate { fulfiller, .. }
+    | BoundIOTask::Fdatasync { fulfiller, .. }
+    | BoundIOTask::Fsync { fulfiller, .. } => fulfiller.fulfill(result.map(drop)),
+    BoundIOTask::Open { fulfiller, .. } => fulfiller.fulfill(result),
   }
 }
 
@@ -266,7 +283,7 @@ fn drain_completion(
       }
 
       let task = pendings.remove(user_data).unwrap_or_else(|| unreachable!());
-      task.fulfill(result);
+      fulfill_task(task, result);
       continue;
     }
     let Some(waker) = maybe_waker.as_mut() else {
