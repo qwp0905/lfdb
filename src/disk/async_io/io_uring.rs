@@ -555,3 +555,7 @@ impl Drop for AsyncIO {
     self.close();
   }
 }
+
+#[cfg(all(test, not(loom)))]
+#[path = "tests/io_uring.rs"]
+mod tests;
