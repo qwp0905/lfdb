@@ -1,8 +1,9 @@
 use std::{
   fs::File,
   io::{Error, ErrorKind, Read, Result, Write},
-  mem::ManuallyDrop,
+  mem::{replace, ManuallyDrop},
   os::fd::{AsRawFd, FromRawFd, RawFd},
+  ptr::null_mut,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -19,7 +20,143 @@ use crate::{
   utils::{warn, ChunkQueue, MpscQueue},
 };
 
-use super::{super::IOTask, TaskType};
+use super::{BoundIOTask, TaskType};
+
+enum Slot<T> {
+  Occupied(T),
+  Vacant(Option<usize>),
+}
+
+#[repr(align(2))]
+struct Node<T> {
+  slot: Slot<T>,
+  next: *mut Node<T>,
+  prev: *mut Node<T>,
+}
+impl<T> Node<T> {
+  const fn vacant(next: Option<usize>) -> Self {
+    Self {
+      slot: Slot::Vacant(next),
+      next: null_mut(),
+      prev: null_mut(),
+    }
+  }
+
+  const fn occupied(value: T) -> Self {
+    Self {
+      slot: Slot::Occupied(value),
+      next: null_mut(),
+      prev: null_mut(),
+    }
+  }
+}
+
+pub struct PendingTasks<T> {
+  slots: Box<[Node<T>]>,
+  head: Option<usize>,
+  len: usize,
+  overflow: *mut Node<T>,
+}
+impl<T> PendingTasks<T> {
+  fn with_capacity(capacity: usize) -> Self {
+    let mut slots = Vec::with_capacity(capacity);
+    for (i, slot) in slots
+      .spare_capacity_mut()
+      .iter_mut()
+      .take(capacity - 1)
+      .enumerate()
+    {
+      slot.write(Node::vacant(Some(i + 1)));
+    }
+    slots.push(Node::vacant(None));
+    unsafe { slots.set_len(capacity) };
+    Self {
+      slots: slots.into_boxed_slice(),
+      head: (capacity > 0).then_some(0),
+      len: 0,
+      overflow: null_mut(),
+    }
+  }
+
+  fn insert(&mut self, value: T) -> u64 {
+    if let Some(index) = self.head {
+      let Slot::Vacant(next) =
+        replace(&mut self.slots[index].slot, Slot::Occupied(value))
+      else {
+        unreachable!("head points to an occupied slot");
+      };
+      self.head = next;
+      self.len += 1;
+      return (index << 1 | 1) as _;
+    }
+
+    let node = Box::into_raw(Box::new(Node::occupied(value)));
+    if !self.overflow.is_null() {
+      unsafe { (*self.overflow).next = node };
+      unsafe { (*node).prev = self.overflow };
+    };
+    self.overflow = node;
+    self.len += 1;
+    node as _
+  }
+
+  fn get(&self, index: u64) -> Option<&T> {
+    if index & 1 != 0 {
+      let index = index as usize >> 1;
+      let Slot::Occupied(value) = &self.slots[index].slot else {
+        return None;
+      };
+      return Some(value);
+    };
+    unsafe {
+      let Slot::Occupied(value) = &(*(index as *mut Node<T>)).slot else {
+        unreachable!("heap allocated node must be occupied.")
+      };
+      Some(value)
+    }
+  }
+
+  fn remove(&mut self, index: u64) -> Option<T> {
+    if index & 1 != 0 {
+      let index = index as usize >> 1;
+      let Slot::Occupied(value) =
+        replace(&mut self.slots[index].slot, Slot::Vacant(self.head))
+      else {
+        return None;
+      };
+      self.head = Some(index);
+      self.len -= 1;
+      return Some(value);
+    }
+
+    let node = unsafe { Box::from_raw(index as *mut Node<T>) };
+    let prev = node.prev;
+    let next = node.next;
+    if !prev.is_null() {
+      unsafe { (*prev).next = next };
+    } else {
+      self.overflow = next;
+    };
+
+    if !next.is_null() {
+      unsafe { (*next).prev = prev };
+    };
+
+    self.len -= 1;
+    let Slot::Occupied(value) = node.slot else {
+      unreachable!("heap allocated node must be occupied.");
+    };
+    Some(value)
+  }
+}
+impl<T> Drop for PendingTasks<T> {
+  fn drop(&mut self) {
+    let mut overflow = self.overflow;
+    while !overflow.is_null() {
+      overflow = unsafe { Box::from_raw(overflow) }.next;
+    }
+  }
+}
 
 struct EventFd(File);
 impl EventFd {
@@ -72,29 +209,29 @@ fn cvt(ret: i32) -> Result<usize> {
   Ok(ret as usize)
 }
 
-fn as_fd(task: &IOTask) -> types::Fd {
-  types::Fd(task.context().toward().as_raw_fd())
+fn as_fd(task: &BoundIOTask) -> types::Fd {
+  types::Fd(task.toward().unwrap().as_raw_fd())
 }
 
-fn to_entry(task: IOTask) -> squeue::Entry {
-  let mut entry = match task.context().get_type() {
+fn to_entry(task: &BoundIOTask) -> squeue::Entry {
+  match task.get_type() {
     TaskType::Pwrite { offset, buf } => {
-      opcode::Write::new(as_fd(&task), buf.as_ptr(), buf.len() as u32)
+      opcode::Write::new(as_fd(task), buf.as_ptr(), buf.len() as u32)
         .offset(*offset)
         .build()
     }
     TaskType::Pwritev { offset, bufs } => opcode::Writev::new(
-      as_fd(&task),
+      as_fd(task),
       bufs.as_ptr() as *const libc::iovec,
       bufs.len() as u32,
     )
     .offset(*offset)
     .build(),
-    TaskType::Fsync => opcode::Fsync::new(as_fd(&task)).build(),
-    TaskType::Fdatasync => opcode::Fsync::new(as_fd(&task))
+    TaskType::Fsync => opcode::Fsync::new(as_fd(task)).build(),
+    TaskType::Fdatasync => opcode::Fsync::new(as_fd(task))
       .flags(types::FsyncFlags::DATASYNC)
       .build(),
-    TaskType::Fallocate { offset, len } => opcode::Fallocate::new(as_fd(&task), *len)
+    TaskType::Fallocate { offset, len } => opcode::Fallocate::new(as_fd(task), *len)
       .offset(*offset)
       .build(),
     TaskType::Open { path, flags } => {
@@ -103,15 +240,14 @@ fn to_entry(task: IOTask) -> squeue::Entry {
         .flags(flags.as_raw())
         .build()
     }
-  };
-  entry.set_user_data(IOTask::into_raw(task) as u64);
-  entry
+  }
 }
 
 fn drain_completion(
   cq: &mut CompletionQueue,
-  retry: &mut ChunkQueue<IOTask>,
+  retry: &mut ChunkQueue<u64>,
   mut maybe_waker: Option<&EventFd>,
+  pendings: &mut PendingTasks<BoundIOTask>,
 ) -> (usize, bool) {
   cq.sync();
   let mut count = 0;
@@ -121,15 +257,15 @@ fn drain_completion(
     let result = cvt(cqe.result());
     let user_data = cqe.user_data();
     if user_data != POLL {
-      let task = unsafe { IOTask::from_raw((user_data as usize) as *mut ()) };
       if result
         .as_ref()
         .is_err_and(|err| err.kind() == ErrorKind::Interrupted)
       {
-        retry.push(task);
+        retry.push(user_data);
         continue;
       }
 
+      let task = pendings.remove(user_data).unwrap_or_else(|| unreachable!());
       task.fulfill(result);
       continue;
     }
@@ -148,7 +284,8 @@ fn drain_completion(
 fn drain_retry(
   submitter: &Submitter,
   sq: &mut SubmissionQueue,
-  retry: &mut ChunkQueue<IOTask>,
+  retry: &mut ChunkQueue<u64>,
+  pendings: &mut PendingTasks<BoundIOTask>,
 ) -> usize {
   let mut count = 0;
   loop {
@@ -156,11 +293,13 @@ fn drain_retry(
       break;
     };
     sq.sync();
-    let Some(task) = retry.pop() else {
+    let Some(user_data) = retry.pop() else {
       break;
     };
-    let entry = to_entry(task);
-    let _ = unsafe { sq.push(&entry) };
+    let task = pendings.get(user_data).unwrap_or_else(|| unreachable!());
+    let mut entry = to_entry(task);
+    entry.set_user_data(user_data);
+    unsafe { sq.push(&entry).unwrap() };
     count += 1;
   }
   count
@@ -170,6 +309,7 @@ fn drain_input(
   submitter: &Submitter,
   sq: &mut SubmissionQueue,
   input: &mut InputQueue,
+  pendings: &mut PendingTasks<BoundIOTask>,
 ) -> (usize, bool) {
   let mut count = 0;
   while let Some(ctx) = input.peek() {
@@ -183,8 +323,10 @@ fn drain_input(
     let Context::Task(task) = input.pop().unwrap_or_else(|| unreachable!()) else {
       unreachable!()
     };
-    let entry = to_entry(task);
-    let _ = unsafe { sq.push(&entry) };
+    let mut entry = to_entry(&task);
+    let user_data = pendings.insert(task);
+    entry.set_user_data(user_data);
+    unsafe { sq.push(&entry).unwrap() };
     count += 1;
   }
   (count, false)
@@ -194,16 +336,17 @@ fn shutdown_gracefully(
   submitter: Submitter,
   mut sq: SubmissionQueue,
   mut cq: CompletionQueue,
-  mut retry: ChunkQueue<IOTask>,
+  mut retry: ChunkQueue<u64>,
+  mut pendings: PendingTasks<BoundIOTask>,
   mut submitted: usize,
 ) {
   sq.sync();
   while submitted > 0 || !retry.is_empty() {
     cq.sync();
     ignore_ebusy(submitter.submit_and_wait(submitted.min(cq.capacity())));
-    let (count, _) = drain_completion(&mut cq, &mut retry, None);
+    let (count, _) = drain_completion(&mut cq, &mut retry, None, &mut pendings);
     submitted -= count;
-    submitted += drain_retry(&submitter, &mut sq, &mut retry);
+    submitted += drain_retry(&submitter, &mut sq, &mut retry, &mut pendings);
   }
 }
 
@@ -220,7 +363,7 @@ fn register_waker(
     }
   };
   sq.sync();
-  let _ = unsafe { sq.push(wake) };
+  unsafe { sq.push(wake).unwrap() };
   true
 }
 
@@ -247,23 +390,23 @@ fn submit_if_not_empty(submitter: &Submitter, sq: &SubmissionQueue) {
 }
 
 struct InputQueue {
-  queue: Arc<MpscQueue<Context<IOTask>>>,
-  peeked: Option<Context<IOTask>>,
+  queue: Arc<MpscQueue<Context<BoundIOTask>>>,
+  peeked: Option<Context<BoundIOTask>>,
 }
 impl InputQueue {
-  const fn new(queue: Arc<MpscQueue<Context<IOTask>>>) -> Self {
+  const fn new(queue: Arc<MpscQueue<Context<BoundIOTask>>>) -> Self {
     Self {
       queue,
       peeked: None,
     }
   }
-  fn peek(&mut self) -> Option<&Context<IOTask>> {
+  fn peek(&mut self) -> Option<&Context<BoundIOTask>> {
     if self.peeked.is_none() {
       self.peeked = unsafe { self.queue.pop() };
     }
     self.peeked.as_ref()
   }
-  fn pop(&mut self) -> Option<Context<IOTask>> {
+  fn pop(&mut self) -> Option<Context<BoundIOTask>> {
     self.peeked.take().or_else(|| unsafe { self.queue.pop() })
   }
 }
@@ -276,7 +419,7 @@ enum Context<T> {
 const POLL: u64 = 0;
 
 pub struct AsyncIO {
-  queue: Arc<MpscQueue<Context<IOTask>>>,
+  queue: Arc<MpscQueue<Context<BoundIOTask>>>,
   parked: Arc<AtomicBool>,
   waker: EventFd,
   slot: ThreadSlot,
@@ -284,7 +427,7 @@ pub struct AsyncIO {
 impl AsyncIO {
   const fn worker_loop(
     entries: u32,
-    queue: Arc<MpscQueue<Context<IOTask>>>,
+    queue: Arc<MpscQueue<Context<BoundIOTask>>>,
     waker_fd: RawFd,
     parked: Arc<AtomicBool>,
   ) -> impl FnOnce() {
@@ -304,16 +447,19 @@ impl AsyncIO {
       let waker = ManuallyDrop::new(unsafe { EventFd::from_raw_fd(waker_fd) });
       let mut pending = false;
       let mut retry = ChunkQueue::new();
+      let mut pendings = PendingTasks::with_capacity((entries << 1) as _);
 
       loop {
-        let (count, found) = drain_completion(&mut cq, &mut retry, Some(&waker));
+        let (count, found) =
+          drain_completion(&mut cq, &mut retry, Some(&waker), &mut pendings);
         submitted -= count;
         pending &= !found;
-        submitted += drain_retry(&submitter, &mut sq, &mut retry);
-        let (count, terminated) = drain_input(&submitter, &mut sq, &mut input);
+        submitted += drain_retry(&submitter, &mut sq, &mut retry, &mut pendings);
+        let (count, terminated) =
+          drain_input(&submitter, &mut sq, &mut input, &mut pendings);
         submitted += count;
         if terminated {
-          return shutdown_gracefully(submitter, sq, cq, retry, submitted);
+          return shutdown_gracefully(submitter, sq, cq, retry, pendings, submitted);
         }
 
         if !pending {
@@ -365,7 +511,7 @@ impl AsyncIO {
     })
   }
 
-  pub fn submit(&self, task: IOTask) {
+  pub fn submit(&self, task: BoundIOTask) {
     self.queue.push(Context::Task(task));
     if self.parked.swap(false, Ordering::Release) {
       self.waker.wake();
