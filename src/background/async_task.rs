@@ -78,8 +78,8 @@ impl<T, R, F> TaskPayload<T, R, F> {
   }
 }
 // SAFETY: the two handles of a pair touch disjoint parts of the payload. Only the
-// fulfiller takes `function` and reads `context`, only the receiver calls the
-// receiver side of `oneshot`, and `oneshot` synchronizes the hand-off between them.
+// fulfiller takes `function`, only the receiver calls the receiver side of `oneshot`,
+// and `oneshot` synchronizes the hand-off between them.
 unsafe impl<T, R: Send, F: Send> Sync for TaskPayload<T, R, F> {}
 
 struct TaskRefInner(ManuallyDrop<VPtr>);
