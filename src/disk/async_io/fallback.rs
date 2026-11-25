@@ -4,17 +4,17 @@ use std::{io::Result, num::NonZero, thread::available_parallelism};
 
 use crate::background::{SharedWorkThread, ThreadBuilder};
 
-use super::super::{fallocate, into_raw, pwrite, pwritev, IOTask};
+use super::super::{fallocate, into_raw, pwrite, pwritev, BoundIOTask};
 use super::TaskType;
 
-fn handle_task(task: IOTask) {
-  let result = match task.context().get_type() {
-    TaskType::Pwrite { offset, buf } => pwrite(task.context().toward(), buf, *offset),
-    TaskType::Pwritev { offset, bufs } => pwritev(task.context().toward(), bufs, *offset),
-    TaskType::Fsync => task.context().toward().sync_all().map(|_| 0),
-    TaskType::Fdatasync => task.context().toward().sync_data().map(|_| 0),
+fn handle_task(task: BoundIOTask) {
+  let result = match task.get_type() {
+    TaskType::Pwrite { offset, buf } => pwrite(task.toward().unwrap(), buf, *offset),
+    TaskType::Pwritev { offset, bufs } => pwritev(task.toward().unwrap(), bufs, *offset),
+    TaskType::Fsync => task.toward().unwrap().sync_all().map(|_| 0),
+    TaskType::Fdatasync => task.toward().unwrap().sync_data().map(|_| 0),
     TaskType::Fallocate { offset, len } => {
-      fallocate(task.context().toward(), *offset, *len).map(|_| 0)
+      fallocate(task.toward().unwrap(), *offset, *len).map(|_| 0)
     }
     // SAFETY: the bytes come from `into_encoded_bytes` on this platform, unchanged
     // except for the trailing nul that `to_bytes` leaves out.
@@ -27,7 +27,7 @@ fn handle_task(task: IOTask) {
   task.fulfill(result);
 }
 pub struct AsyncIO {
-  thread: SharedWorkThread<IOTask>,
+  thread: SharedWorkThread<BoundIOTask>,
 }
 impl AsyncIO {
   pub fn new(_: u32) -> Result<Self> {
@@ -39,7 +39,7 @@ impl AsyncIO {
     Ok(Self { thread })
   }
 
-  pub fn submit(&self, task: IOTask) {
+  pub fn submit(&self, task: BoundIOTask) {
     self.thread.dispatch(task);
   }
 

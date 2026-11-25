@@ -5,7 +5,7 @@ use std::{
   sync::Arc,
 };
 #[cfg(not(target_os = "linux"))]
-use std::{fs::OpenOptions, io::Result, path::Path};
+use std::{fs::OpenOptions, path::Path};
 
 use crate::background::TaskFulfiller;
 
