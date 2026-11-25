@@ -1,6 +1,13 @@
-use std::{cell::OnceCell, ffi::CString, fs::File, io::IoSlice, sync::Arc};
+use std::{
+  ffi::CString,
+  fs::File,
+  io::{IoSlice, Result},
+  sync::Arc,
+};
 #[cfg(not(target_os = "linux"))]
-use std::{fs::OpenOptions, io::Result, path::Path};
+use std::{fs::OpenOptions, path::Path};
+
+use crate::background::TaskFulfiller;
 
 #[cfg(not(target_os = "linux"))]
 use super::super::direct_io;
@@ -81,46 +88,36 @@ impl OpenFlags {
   }
 }
 
-#[derive(Clone)]
-pub enum TaskType {
+pub enum BoundIOTask {
   Pwrite {
     offset: u64,
     buf: &'static [u8],
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<usize>>,
   },
   Pwritev {
     offset: u64,
     bufs: &'static [IoSlice<'static>],
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<usize>>,
   },
-  Fsync,
-  Fdatasync,
+  Fsync {
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
+  Fdatasync {
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
   Fallocate {
     offset: u64,
     len: u64,
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
   },
   Open {
     path: CString,
     flags: OpenFlags,
+    fulfiller: TaskFulfiller<Result<usize>>,
   },
-}
-
-pub struct IOContext {
-  task_type: TaskType,
-  toward: OnceCell<Arc<File>>,
-}
-impl IOContext {
-  pub const fn new(task_type: TaskType) -> Self {
-    Self {
-      task_type,
-      toward: OnceCell::new(),
-    }
-  }
-  pub const fn get_type(&self) -> &'_ TaskType {
-    &self.task_type
-  }
-  pub fn toward(&self) -> &'_ File {
-    self.toward.get().unwrap()
-  }
-  pub fn bind(&self, file: Arc<File>) {
-    let _ = self.toward.set(file);
-  }
 }

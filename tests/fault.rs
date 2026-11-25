@@ -11,8 +11,8 @@ use std::{
 };
 
 use lfdb::{
-  DefaultDiskBackend, DiskBackend, Engine, EngineBuilder, Error, IOBackend, IOTask,
-  TaskType, VecRef,
+  DefaultDiskBackend, DiskBackend, DiskTask, Engine, EngineBuilder, Error, IOBackend,
+  IOTask, VecRef,
 };
 use log::Log;
 use tempfile::{tempdir_in, TempDir};
@@ -51,13 +51,24 @@ enum Op {
 }
 impl Op {
   fn of(task: &IOTask) -> Self {
-    match task.context().get_type() {
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
-      TaskType::Fsync => Self::Fsync,
-      TaskType::Fdatasync => Self::Fdatasync,
-      TaskType::Fallocate { .. } => Self::Fallocate,
-      TaskType::Open { .. } => unreachable!("open tasks never reach an IOBackend"),
+    match task {
+      IOTask::Pwrite { .. } | IOTask::Pwritev { .. } => Self::Write,
+      IOTask::Fsync { .. } => Self::Fsync,
+      IOTask::Fdatasync { .. } => Self::Fdatasync,
+      IOTask::Fallocate { .. } => Self::Fallocate,
     }
+  }
+}
+
+fn fail(task: IOTask, kind: ErrorKind) {
+  let err = IoError::from(kind);
+  match task {
+    IOTask::Pwrite { fulfiller, .. } | IOTask::Pwritev { fulfiller, .. } => {
+      fulfiller.fulfill(Err(err))
+    }
+    IOTask::Fsync { fulfiller }
+    | IOTask::Fdatasync { fulfiller }
+    | IOTask::Fallocate { fulfiller, .. } => fulfiller.fulfill(Err(err)),
   }
 }
 
@@ -117,7 +128,7 @@ impl IOBackend for FaultIO {
     if !self.controller.should_fail(Op::of(&task)) {
       return self.inner.submit(task);
     }
-    task.fulfill(Err(IoError::from(ErrorKind::Other)));
+    fail(task, ErrorKind::Other);
   }
 
   fn metadata(&self) -> IoResult<Metadata> {
@@ -151,8 +162,8 @@ impl FaultBackend {
   }
 }
 impl DiskBackend for FaultBackend {
-  fn submit_open(&self, task: IOTask) {
-    self.inner.submit_open(task)
+  fn submit(&self, task: DiskTask) {
+    self.inner.submit(task)
   }
 
   unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {

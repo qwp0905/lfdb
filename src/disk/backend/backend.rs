@@ -6,102 +6,42 @@ use std::{
   sync::Arc,
 };
 
-use crate::background::{
-  create_tagged_task, create_tagged_task_with, AsyncTask, TaskFulfiller,
-};
+use crate::background::{create_task, create_task_with, AsyncTask, TaskFulfiller};
 
-use super::{IOContext, OpenFlags, TaskType};
+use super::OpenFlags;
 
 pub const IO_RETRY: u8 = 3;
 
-pub struct IOTask {
-  fulfiller: TaskFulfiller<Result<usize>, IOContext>,
-}
-
-impl IOTask {
-  pub fn fulfill(self, result: Result<usize>) {
-    self.fulfiller.fulfill(result);
-  }
-  pub fn context(&self) -> &IOContext {
-    self.fulfiller.context()
-  }
-  const fn new(fulfiller: TaskFulfiller<Result<usize>, IOContext>) -> Self {
-    Self { fulfiller }
-  }
-  #[cfg(target_os = "linux")]
-  pub(crate) fn into_raw(this: Self) -> *mut () {
-    TaskFulfiller::into_raw(this.fulfiller)
-  }
-  #[cfg(target_os = "linux")]
-  pub(crate) const unsafe fn from_raw(raw: *mut ()) -> Self {
-    Self::new(unsafe { TaskFulfiller::from_raw(raw) })
-  }
-  fn create_with<T: Send + 'static, F: FnOnce(Result<usize>) -> T + Send + 'static>(
-    task_type: TaskType,
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    let (fulfiller, done) = create_tagged_task_with(IOContext::new(task_type), callback);
-    (Self::new(fulfiller), done)
-  }
-  fn create(task_type: TaskType) -> (Self, AsyncTask<Result<usize>>) {
-    let (fulfiller, done) = create_tagged_task(IOContext::new(task_type));
-    (Self::new(fulfiller), done)
-  }
-  pub fn new_pwrite_with<
-    T: Send + 'static,
-    F: FnOnce(Result<usize>) -> T + Send + 'static,
-  >(
+pub enum IOTask {
+  Pwrite {
+    offset: u64,
     buf: &'static [u8],
+    fulfiller: TaskFulfiller<Result<usize>>,
+  },
+  Pwritev {
     offset: u64,
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    Self::create_with(TaskType::Pwrite { offset, buf }, callback)
-  }
-  pub fn new_pwrite(buf: &'static [u8], offset: u64) -> (Self, AsyncTask<Result<usize>>) {
-    Self::create(TaskType::Pwrite { offset, buf })
-  }
-  pub fn new_pwritev_with<
-    T: Send + 'static,
-    F: FnOnce(Result<usize>) -> T + Send + 'static,
-  >(
     bufs: &'static [IoSlice<'static>],
-    offset: u64,
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    Self::create_with(TaskType::Pwritev { offset, bufs }, callback)
-  }
-  pub fn new_fsync_with<
-    T: Send + 'static,
-    F: FnOnce(Result<usize>) -> T + Send + 'static,
-  >(
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    Self::create_with(TaskType::Fsync, callback)
-  }
-  pub fn new_fsync() -> (Self, AsyncTask<Result<usize>>) {
-    Self::create(TaskType::Fsync)
-  }
-  pub fn new_fdatasync_with<
-    T: Send + 'static,
-    F: FnOnce(Result<usize>) -> T + Send + 'static,
-  >(
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    Self::create_with(TaskType::Fdatasync, callback)
-  }
-  pub fn new_fallocate_with<
-    T: Send + 'static,
-    F: FnOnce(Result<usize>) -> T + Send + 'static,
-  >(
+    fulfiller: TaskFulfiller<Result<usize>>,
+  },
+  Fsync {
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
+  Fdatasync {
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
+  Fallocate {
     offset: u64,
     len: u64,
-    callback: F,
-  ) -> (Self, AsyncTask<T>) {
-    Self::create_with(TaskType::Fallocate { offset, len }, callback)
-  }
-  pub fn new_fallocate(offset: u64, len: u64) -> (Self, AsyncTask<Result<usize>>) {
-    Self::create(TaskType::Fallocate { offset, len })
-  }
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
+}
+
+pub enum DiskTask {
+  Open {
+    path: CString,
+    flags: OpenFlags,
+    fulfiller: TaskFulfiller<Result<usize>>,
+  },
 }
 
 /**
@@ -119,7 +59,8 @@ pub trait IOBackend: Send + Sync {
   fn metadata(&self) -> Result<Metadata>;
   fn try_flock(&self) -> Result<bool>;
   fn unlock(&self) -> Result<()>;
-
+}
+impl dyn IOBackend {
   /**
    * Read the entire buffer or fail.
    *
@@ -127,13 +68,115 @@ pub trait IOBackend: Send + Sync {
    * retried a small number of times and then reported as EOF if it still does not
    * fill the buffer.
    */
-  fn pread_exact(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+  pub fn pread_exact(&self, buf: &mut [u8], offset: u64) -> Result<()> {
     for _ in 0..IO_RETRY {
       if buf.len() == self.pread(buf, offset)? {
         return Ok(());
       }
     }
     Err(Error::from(ErrorKind::UnexpectedEof))
+  }
+
+  pub fn pwrite_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
+    &self,
+    buf: &'static [u8],
+    offset: u64,
+    callback: F,
+  ) -> AsyncTask<T> {
+    let (fulfiller, done) = create_task_with(callback);
+    let task = IOTask::Pwrite {
+      offset,
+      buf,
+      fulfiller,
+    };
+    self.submit(task);
+    done
+  }
+  pub fn pwrite(&self, buf: &'static [u8], offset: u64) -> AsyncTask<Result<usize>> {
+    let (fulfiller, done) = create_task();
+    let task = IOTask::Pwrite {
+      offset,
+      buf,
+      fulfiller,
+    };
+    self.submit(task);
+    done
+  }
+  pub fn pwritev_with<
+    T: Send + 'static,
+    F: FnOnce(Result<usize>) -> T + Send + 'static,
+  >(
+    &self,
+    bufs: &'static [IoSlice<'static>],
+    offset: u64,
+    callback: F,
+  ) -> AsyncTask<T> {
+    let (fulfiller, done) = create_task_with(callback);
+    let task = IOTask::Pwritev {
+      offset,
+      bufs,
+      fulfiller,
+    };
+    self.submit(task);
+    done
+  }
+  pub fn fsync_with<T: Send + 'static, F: FnOnce(Result<()>) -> T + Send + 'static>(
+    &self,
+    callback: F,
+  ) -> AsyncTask<T> {
+    let (fulfiller, done) = create_task_with(callback);
+    let task = IOTask::Fsync { fulfiller };
+    self.submit(task);
+    done
+  }
+  pub fn fsync(&self) -> AsyncTask<Result<()>> {
+    let (fulfiller, done) = create_task();
+    let task = IOTask::Fsync { fulfiller };
+    self.submit(task);
+    done
+  }
+  pub fn fdatasync_with<
+    T: Send + 'static,
+    F: FnOnce(Result<()>) -> T + Send + 'static,
+  >(
+    &self,
+    callback: F,
+  ) -> AsyncTask<T> {
+    let (fulfiller, done) = create_task_with(callback);
+    let task = IOTask::Fdatasync { fulfiller };
+    self.submit(task);
+    done
+  }
+  pub fn fallocate(&self, offset: u64, len: u64) -> AsyncTask<Result<()>> {
+    let (fulfiller, done) = create_task();
+    let task = IOTask::Fallocate {
+      offset,
+      len,
+      fulfiller,
+    };
+    self.submit(task);
+    done
+  }
+  pub fn fallocate_with<
+    T: Send + 'static,
+    F: FnOnce(Result<()>) -> T + Send + 'static,
+  >(
+    &self,
+    offset: u64,
+    len: u64,
+    callback: F,
+  ) -> AsyncTask<T> {
+    let (fulfiller, done) = create_task_with(callback);
+    let task = IOTask::Fallocate {
+      offset,
+      len,
+      fulfiller,
+    };
+    self.submit(task);
+    done
   }
 }
 
@@ -147,10 +190,10 @@ pub trait IOBackend: Send + Sync {
  * lets other platforms provide the closest practical behavior.
  */
 pub trait DiskBackend: Send + Sync {
-  fn submit_open(&self, task: IOTask);
+  fn submit(&self, task: DiskTask);
   /**
    * # Safety
-   * `raw` must come from an open task this backend received through `submit_open`,
+   * `raw` must come from an open task this backend received through `submit`,
    * and be adopted only once, since it carries ownership of the opened handle.
    */
   unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend>;
@@ -178,8 +221,13 @@ impl dyn DiskBackend {
 
     let path = CString::new(path.into_os_string().into_encoded_bytes())
       .expect("path must not contains nul string.");
-    let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
-    self.submit_open(task);
+    let (fulfiller, done) = create_task_with(callback);
+    let task = DiskTask::Open {
+      path,
+      flags,
+      fulfiller,
+    };
+    self.submit(task);
     done
   }
   pub fn open_with<T, F>(
@@ -199,8 +247,13 @@ impl dyn DiskBackend {
 
     let path = CString::new(path.into_os_string().into_encoded_bytes())
       .expect("path must not contains nul string.");
-    let (task, done) = IOTask::create_with(TaskType::Open { path, flags }, callback);
-    self.submit_open(task);
+    let (fulfiller, done) = create_task_with(callback);
+    let task = DiskTask::Open {
+      path,
+      flags,
+      fulfiller,
+    };
+    self.submit(task);
     done
   }
 }

@@ -16,19 +16,17 @@ struct TaskVTable {
   fulfill: unsafe fn(NonNull<()>, NonNull<()>),
   try_wait: unsafe fn(NonNull<()>, NonNull<()>),
   try_park: unsafe fn(NonNull<()>) -> bool,
-  context: unsafe fn(NonNull<()>) -> NonNull<()>,
   drop_sender: unsafe fn(NonNull<()>),
   drop_receiver: unsafe fn(NonNull<()>),
   drop_in_place: unsafe fn(NonNull<()>),
 }
 
-struct TaskPayload<T, R, F, C> {
+struct TaskPayload<T, R, F> {
   function: UnsafeCell<ManuallyDrop<F>>,
   oneshot: Oneshot<R>,
-  context: C,
   _marker: PhantomData<fn(T) -> R>,
 }
-impl<T, R, F, C> TaskPayload<T, R, F, C>
+impl<T, R, F> TaskPayload<T, R, F>
 where
   F: FnOnce(T) -> R,
 {
@@ -39,14 +37,12 @@ where
     drop_sender: Self::drop_sender,
     drop_receiver: Self::drop_receiver,
     drop_in_place: Self::drop_in_place,
-    context: Self::context,
   };
 
-  fn new(function: F, context: C) -> Self {
+  fn new(function: F) -> Self {
     Self {
       function: UnsafeCell::new(ManuallyDrop::new(function)),
       oneshot: Oneshot::new(),
-      context,
       _marker: PhantomData,
     }
   }
@@ -58,7 +54,7 @@ where
     unsafe { this.oneshot.fulfill_and_wake(func(value)) };
   }
 }
-impl<T, R, F, C> TaskPayload<T, R, F, C> {
+impl<T, R, F> TaskPayload<T, R, F> {
   unsafe fn drop_receiver(ptr: NonNull<()>) {
     let this = VPtr::get_ref::<Self>(ptr);
     this.oneshot.drop_receiver();
@@ -80,15 +76,11 @@ impl<T, R, F, C> TaskPayload<T, R, F, C> {
     let this = VPtr::get_ref::<Self>(ptr);
     unsafe { ManuallyDrop::drop(&mut (*this.function.get())) };
   }
-  unsafe fn context(ptr: NonNull<()>) -> NonNull<()> {
-    let this = VPtr::get_ref::<Self>(ptr);
-    NonNull::from_ref(&this.context).cast()
-  }
 }
 // SAFETY: the two handles of a pair touch disjoint parts of the payload. Only the
-// fulfiller takes `function` and reads `context`, only the receiver calls the
-// receiver side of `oneshot`, and `oneshot` synchronizes the hand-off between them.
-unsafe impl<T, R: Send, F: Send, C: Send> Sync for TaskPayload<T, R, F, C> {}
+// fulfiller takes `function`, only the receiver calls the receiver side of `oneshot`,
+// and `oneshot` synchronizes the hand-off between them.
+unsafe impl<T, R: Send, F: Send> Sync for TaskPayload<T, R, F> {}
 
 struct TaskRefInner(ManuallyDrop<VPtr>);
 impl TaskRefInner {
@@ -104,11 +96,6 @@ impl TaskRefInner {
     let ptr = self.0.erased();
     unsafe { (vtable.drop_in_place)(ptr) };
   }
-  unsafe fn context(&self) -> NonNull<()> {
-    let vtable = self.0.vtable();
-    let ptr = self.0.erased();
-    unsafe { (vtable.context)(ptr) }
-  }
 }
 impl Drop for TaskRefInner {
   fn drop(&mut self) {
@@ -119,11 +106,11 @@ impl Drop for TaskRefInner {
   }
 }
 
-pub struct TaskFulfiller<T, C = ()> {
+pub struct TaskFulfiller<T> {
   task: ManuallyDrop<TaskRefInner>,
-  _marker: PhantomData<(fn(T), C)>,
+  _marker: PhantomData<fn(T)>,
 }
-impl<T, C> TaskFulfiller<T, C> {
+impl<T> TaskFulfiller<T> {
   const fn new(ptr: VPtr) -> Self {
     Self {
       task: ManuallyDrop::new(TaskRefInner(ManuallyDrop::new(ptr))),
@@ -135,22 +122,8 @@ impl<T, C> TaskFulfiller<T, C> {
     let inner = unsafe { ManuallyDrop::take(&mut this.task) };
     unsafe { inner.fulfill(value) };
   }
-  pub fn context(&self) -> &'_ C {
-    let ptr = unsafe { self.task.context() };
-    unsafe { ptr.cast().as_ref() }
-  }
-
-  #[cfg(target_os = "linux")]
-  pub fn into_raw(this: Self) -> *mut () {
-    let mut this = ManuallyDrop::new(this);
-    VPtr::into_raw(unsafe { ManuallyDrop::take(&mut this.task.0) })
-  }
-  #[cfg(target_os = "linux")]
-  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
-    Self::new(unsafe { VPtr::from_raw(raw) })
-  }
 }
-impl<T, C> Drop for TaskFulfiller<T, C> {
+impl<T> Drop for TaskFulfiller<T> {
   fn drop(&mut self) {
     let inner = unsafe { ManuallyDrop::take(&mut self.task) };
     unsafe { inner.drop_in_place() };
@@ -237,7 +210,7 @@ impl<R> Drop for AsyncTask<R> {
 }
 
 pub fn create_task<T: Send + 'static>() -> (TaskFulfiller<T>, AsyncTask<T>) {
-  create_tagged_task(())
+  create_task_with(identity)
 }
 
 pub fn create_task_with<
@@ -247,25 +220,8 @@ pub fn create_task_with<
 >(
   callback: F,
 ) -> (TaskFulfiller<T>, AsyncTask<R>) {
-  create_tagged_task_with((), callback)
-}
-
-pub fn create_tagged_task<T: Send + 'static, C: Send + 'static>(
-  context: C,
-) -> (TaskFulfiller<T, C>, AsyncTask<T>) {
-  create_tagged_task_with(context, identity)
-}
-pub fn create_tagged_task_with<
-  T: Send + 'static,
-  R: Send + 'static,
-  F: FnOnce(T) -> R + Send + 'static,
-  C: Send + 'static,
->(
-  context: C,
-  callback: F,
-) -> (TaskFulfiller<T, C>, AsyncTask<R>) {
-  let task = TaskPayload::new(callback, context);
-  let (p1, p2) = VPtr::new_pair(task, &TaskPayload::<T, R, F, C>::VTABLE);
+  let task = TaskPayload::new(callback);
+  let (p1, p2) = VPtr::new_pair(task, &TaskPayload::<T, R, F>::VTABLE);
   (TaskFulfiller::new(p1), AsyncTask::new(p2))
 }
 

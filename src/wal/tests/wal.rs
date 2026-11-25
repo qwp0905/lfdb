@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::{
-  background::ThreadBuilder, DefaultDiskBackend, DiskBackend, IOBackend, IOTask, TaskType,
+  background::ThreadBuilder, DefaultDiskBackend, DiskBackend, DiskTask, IOBackend, IOTask,
 };
 
 const TABLE: TableId = 1;
@@ -32,14 +32,25 @@ enum Op {
 }
 impl Op {
   fn of(task: &IOTask, written: bool) -> Self {
-    match task.context().get_type() {
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. } => Self::Write,
-      TaskType::Fdatasync if written => Self::Fdatasync,
-      TaskType::Fdatasync => Self::UnwrittenFdatasync,
-      TaskType::Fsync => Self::Fsync,
-      TaskType::Fallocate { .. } => Self::Fallocate,
-      TaskType::Open { .. } => Self::Open,
+    match task {
+      IOTask::Pwrite { .. } | IOTask::Pwritev { .. } => Self::Write,
+      IOTask::Fdatasync { .. } if written => Self::Fdatasync,
+      IOTask::Fdatasync { .. } => Self::UnwrittenFdatasync,
+      IOTask::Fsync { .. } => Self::Fsync,
+      IOTask::Fallocate { .. } => Self::Fallocate,
     }
+  }
+}
+
+fn fail(task: IOTask, kind: ErrorKind) {
+  let err = IoError::from(kind);
+  match task {
+    IOTask::Pwrite { fulfiller, .. } | IOTask::Pwritev { fulfiller, .. } => {
+      fulfiller.fulfill(Err(err))
+    }
+    IOTask::Fsync { fulfiller }
+    | IOTask::Fdatasync { fulfiller }
+    | IOTask::Fallocate { fulfiller, .. } => fulfiller.fulfill(Err(err)),
   }
 }
 
@@ -100,7 +111,7 @@ impl FaultController {
     };
     // Fulfilled outside the lock because completion callbacks resubmit writes.
     for task in held {
-      task.fulfill(Err(IoError::from(kind)));
+      fail(task, kind);
     }
   }
 
@@ -121,14 +132,13 @@ impl FaultController {
     };
     let (lock, cvar) = &*self.hold;
     let mut state = lock.lock().unwrap();
-    match task.context().get_type() {
-      TaskType::Fdatasync => {
+    match &task {
+      IOTask::Fdatasync { .. } => {
         state.fdatasynced.push(index);
         cvar.notify_all();
         return Some(task);
       }
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. }
-        if state.target == Some(index) => {}
+      IOTask::Pwrite { .. } | IOTask::Pwritev { .. } if state.target == Some(index) => {}
       _ => return Some(task),
     }
     let Some(kind) = state.failure else {
@@ -136,7 +146,7 @@ impl FaultController {
       return None;
     };
     drop(state);
-    task.fulfill(Err(IoError::from(kind)));
+    fail(task, kind);
     None
   }
 }
@@ -152,10 +162,7 @@ struct FaultIO {
 }
 impl IOBackend for FaultIO {
   fn submit(&self, task: IOTask) {
-    if matches!(
-      task.context().get_type(),
-      TaskType::Pwrite { .. } | TaskType::Pwritev { .. }
-    ) {
+    if matches!(task, IOTask::Pwrite { .. } | IOTask::Pwritev { .. }) {
       self.index.get_or_init(|| self.controller.number());
     }
     let index = self.index.get().copied();
@@ -165,7 +172,7 @@ impl IOBackend for FaultIO {
     let Some(kind) = self.controller.take(Op::of(&task, index.is_some())) else {
       return self.inner.submit(task);
     };
-    task.fulfill(Err(IoError::from(kind)));
+    fail(task, kind);
   }
   fn pread(&self, buf: &mut [u8], offset: u64) -> IoResult<usize> {
     self.inner.pread(buf, offset)
@@ -186,12 +193,13 @@ struct FaultBackend {
   controller: FaultController,
 }
 impl DiskBackend for FaultBackend {
-  fn submit_open(&self, task: IOTask) {
+  fn submit(&self, task: DiskTask) {
     self.controller.count_open();
     let Some(kind) = self.controller.take(Op::Open) else {
-      return self.inner.submit_open(task);
+      return self.inner.submit(task);
     };
-    task.fulfill(Err(IoError::from(kind)));
+    let DiskTask::Open { fulfiller, .. } = task;
+    fulfiller.fulfill(Err(IoError::from(kind)));
   }
   unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {
     Box::new(FaultIO {
