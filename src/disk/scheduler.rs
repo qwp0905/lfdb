@@ -336,7 +336,7 @@ fn create_fallocate_callback(
   guard: RecursiveWrite,
   buffered: Vec<WriteRequest>,
   allocated: u64,
-) -> impl FnOnce(Result<usize>) {
+) -> impl FnOnce(Result<()>) {
   move |result| {
     if let Err(err) = result {
       let kind = err.kind();

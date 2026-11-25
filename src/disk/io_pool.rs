@@ -289,9 +289,9 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let callback = move |result: io::Result<usize>| {
+    let callback = move |result: io::Result<()>| {
       drop(pin);
-      result.map(drop)
+      result
     };
     let done = self
       .scheduler
@@ -309,9 +309,9 @@ impl IOHandle {
       return PendingIO::Fulfilled(callback(Ok(()), self));
     };
     let backend = self.scheduler.backend().clone();
-    let callback = move |result: io::Result<usize>| {
+    let callback = move |result: io::Result<()>| {
       drop(pin);
-      callback(result.map(drop), self)
+      callback(result, self)
     };
     let done = backend.fallocate_with(offset, len, callback);
     PendingIO::Scheduled(done)
