@@ -122,16 +122,6 @@ impl<T> TaskFulfiller<T> {
     let inner = unsafe { ManuallyDrop::take(&mut this.task) };
     unsafe { inner.fulfill(value) };
   }
-
-  #[cfg(target_os = "linux")]
-  pub fn into_raw(this: Self) -> *mut () {
-    let mut this = ManuallyDrop::new(this);
-    VPtr::into_raw(unsafe { ManuallyDrop::take(&mut this.task.0) })
-  }
-  #[cfg(target_os = "linux")]
-  pub const unsafe fn from_raw(raw: *mut ()) -> Self {
-    Self::new(unsafe { VPtr::from_raw(raw) })
-  }
 }
 impl<T> Drop for TaskFulfiller<T> {
   fn drop(&mut self) {
