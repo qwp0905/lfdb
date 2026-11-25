@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::{
-  AppendIOHandle, DirHandle, DiskBackend, IOScheduler, IOTask, OpenFlags, ScanIOHandle,
+  AppendIOHandle, DirHandle, DiskBackend, IOScheduler, OpenFlags, ScanIOHandle,
 };
 use crate::{
   background::{AsyncTask, TryWaitError},
@@ -277,11 +277,11 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let (task, done) = IOTask::new_fsync_with(move |result: io::Result<usize>| {
+    let callback = move |result: io::Result<()>| {
       drop(pin);
-      result.map(drop)
-    });
-    self.scheduler.backend().submit(task);
+      result
+    };
+    let done = self.scheduler.backend().fsync_with(callback);
     PendingIO::Scheduled(done)
   }
 
@@ -289,11 +289,14 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let (task, done) = IOTask::new_fallocate_with(offset, len, move |result| {
+    let callback = move |result: io::Result<usize>| {
       drop(pin);
       result.map(drop)
-    });
-    self.scheduler.backend().submit(task);
+    };
+    let done = self
+      .scheduler
+      .backend()
+      .fallocate_with(offset, len, callback);
     PendingIO::Scheduled(done)
   }
 
@@ -305,13 +308,12 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(callback(Ok(()), self));
     };
-
     let backend = self.scheduler.backend().clone();
-    let (task, done) = IOTask::new_fallocate_with(offset, len, move |result| {
+    let callback = move |result: io::Result<usize>| {
       drop(pin);
       callback(result.map(drop), self)
-    });
-    backend.submit(task);
+    };
+    let done = backend.fallocate_with(offset, len, callback);
     PendingIO::Scheduled(done)
   }
 

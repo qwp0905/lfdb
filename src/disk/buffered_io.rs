@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf, sync::Arc};
 
-use super::{DirHandle, IOBackend, IOTask, IO_RETRY};
+use super::{DirHandle, IOBackend, IO_RETRY};
 use crate::{
   error::Result,
   page::{AlignedArray, ALIGN},
@@ -50,9 +50,12 @@ impl AppendIOHandle {
   fn flush_buf(&mut self) -> Result {
     let static_ref = unsafe { create_static_ref::<[u8]>(&*self.buffer) };
     for _ in 0..IO_RETRY {
-      let (task, done) = IOTask::new_pwrite(static_ref, self.file_offset);
-      self.file.submit(task);
-      let bytes = done.wait().unwrap().map_err(Error::IO)?;
+      let bytes = self
+        .file
+        .pwrite(static_ref, self.file_offset)
+        .wait()
+        .unwrap()
+        .map_err(Error::IO)?;
       if bytes == self.buffer.len() {
         return Ok(());
       }
@@ -67,9 +70,7 @@ impl AppendIOHandle {
    */
   pub fn flush_all(&mut self) -> Result {
     self.flush_buf()?;
-    let (task, done) = IOTask::new_fsync();
-    self.file.submit(task);
-    done.wait().unwrap().map_err(Error::IO)?;
+    self.file.fsync().wait().unwrap().map_err(Error::IO)?;
     Ok(())
   }
 }

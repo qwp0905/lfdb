@@ -8,7 +8,7 @@ use std::{
 
 use crossbeam::utils::Backoff;
 
-use super::{max_iov, IOBackend, IOTask, IO_RETRY};
+use super::{max_iov, IOBackend, IO_RETRY};
 use crate::{
   background::{create_task, create_task_with, AsyncTask, TaskFulfiller},
   metrics::MetricsRegistry,
@@ -207,8 +207,7 @@ fn drain_write(mut guard: RecursiveWrite) {
 
   let backend = guard.backend.clone();
   let callback = create_fallocate_callback(guard, buffered, allocated);
-  let (task, _) = IOTask::new_fallocate_with(offset, len, callback);
-  backend.submit(task);
+  backend.fallocate_with(offset, len, callback);
 }
 
 struct BatchedWrite {
@@ -289,24 +288,22 @@ fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
     let static_ref =
       unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
     let callback = create_write_callback(batched, 0);
-    let (task, _) = if static_ref.len() == 1 {
-      IOTask::new_pwrite_with(&static_ref[0], offset, callback)
+    if static_ref.len() == 1 {
+      backend.pwrite_with(&static_ref[0], offset, callback);
     } else {
-      IOTask::new_pwritev_with(static_ref, offset, callback)
+      backend.pwritev_with(static_ref, offset, callback);
     };
-    backend.submit(task);
   }
 
   let offset = start;
   let batched = BatchedWrite::new(offset, bufs, waiting, guard);
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
   let callback = create_write_callback(batched, 0);
-  let (task, _) = if static_ref.len() == 1 {
-    IOTask::new_pwrite_with(&static_ref[0], offset, callback)
+  if static_ref.len() == 1 {
+    backend.pwrite_with(&static_ref[0], offset, callback);
   } else {
-    IOTask::new_pwritev_with(static_ref, offset, callback)
+    backend.pwritev_with(static_ref, offset, callback);
   };
-  backend.submit(task);
 }
 
 fn create_write_callback(
@@ -328,12 +325,11 @@ fn retry_write(mut batched: BatchedWrite, trial: u8) {
   let offset = batched.offset;
   let static_ref = unsafe { create_static_ref::<[IoSlice<'static>]>(batched.get_bufs()) };
   let callback = create_write_callback(batched, trial);
-  let (task, _) = if static_ref.len() == 1 {
-    IOTask::new_pwrite_with(&static_ref[0], offset, callback)
+  if static_ref.len() == 1 {
+    backend.pwrite_with(&static_ref[0], offset, callback);
   } else {
-    IOTask::new_pwritev_with(static_ref, offset, callback)
+    backend.pwritev_with(static_ref, offset, callback);
   };
-  backend.submit(task);
 }
 
 fn create_fallocate_callback(
@@ -446,15 +442,14 @@ fn drain_sync(mut guard: RecursiveSync) {
 
   guard.metrics.disk_sync_batch.record(waiting.len() as f64);
   let backend = guard.backend.clone();
-  let callback = move |r: Result<usize>| {
+  let callback = move |r: Result<()>| {
     let _guard = guard;
     let result = r.as_ref().map(|_| ()).map_err(|err| err.kind());
     for done in waiting {
       done.fulfill(result.map_err(Error::from));
     }
   };
-  let (task, _) = IOTask::new_fdatasync_with(callback);
-  backend.submit(task);
+  backend.fdatasync_with(callback);
 }
 
 /**

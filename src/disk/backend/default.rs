@@ -5,7 +5,7 @@ use std::{
   sync::Arc,
 };
 
-use super::{from_raw, pread, AsyncIO, DiskBackend, IOBackend, IOTask};
+use super::{from_raw, pread, AsyncIO, BoundIOTask, DiskBackend, IOBackend, IOTask};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
@@ -25,7 +25,8 @@ impl IOBackend for DefaultIOBackend {
   }
 
   fn submit(&self, task: IOTask) {
-    task.context().bind(self.file.clone());
+    let (task_type, fulfiller) = task.into_parts();
+    let task = BoundIOTask::new(task_type, Some(self.file.clone()), fulfiller);
     self.async_io.submit(task);
   }
 
@@ -60,6 +61,8 @@ impl DefaultDiskBackend {
 }
 impl DiskBackend for DefaultDiskBackend {
   fn submit_open(&self, task: IOTask) {
+    let (task_type, fulfiller) = task.into_parts();
+    let task = BoundIOTask::new(task_type, None, fulfiller);
     self.async_io.submit(task);
   }
   unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {
