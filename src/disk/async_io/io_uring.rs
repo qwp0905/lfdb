@@ -61,16 +61,12 @@ impl<T> PendingTasks<T> {
   fn with_capacity(capacity: usize) -> Self {
     debug_assert!(capacity > 0);
     let mut slots = Vec::with_capacity(capacity);
-    for (i, slot) in slots
-      .spare_capacity_mut()
-      .iter_mut()
-      .take(capacity - 1)
-      .enumerate()
-    {
+    let spare = slots.spare_capacity_mut();
+    for (i, slot) in spare.iter_mut().take(capacity - 1).enumerate() {
       slot.write(Node::vacant(Some(i + 1)));
     }
-    unsafe { slots.set_len(capacity - 1) };
-    slots.push(Node::vacant(None));
+    spare[capacity - 1].write(Node::vacant(None));
+    unsafe { slots.set_len(capacity) };
     Self {
       slots: slots.into_boxed_slice(),
       head: (capacity > 0).then_some(0),
@@ -93,8 +89,8 @@ impl<T> PendingTasks<T> {
 
     let node = Box::into_raw(Box::new(Node::occupied(value)));
     if !self.overflow.is_null() {
-      unsafe { (*self.overflow).next = node };
-      unsafe { (*node).prev = self.overflow };
+      unsafe { (*self.overflow).prev = node };
+      unsafe { (*node).next = self.overflow };
     };
     self.overflow = node;
     self.len += 1;
