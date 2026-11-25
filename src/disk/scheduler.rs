@@ -216,7 +216,6 @@ struct BatchedWrite {
   waiting: Vec<TaskFulfiller<Result<()>>>,
   measure: Option<Instant>,
   guard: SBox<RecursiveWrite>,
-  error: Option<ErrorKind>,
 }
 impl BatchedWrite {
   fn new(
@@ -231,11 +230,7 @@ impl BatchedWrite {
       waiting,
       measure: guard.metrics.disk_write.start(),
       guard,
-      error: None,
     }
-  }
-  const fn set_error(&mut self, err: ErrorKind) {
-    self.error = Some(err);
   }
 
   const fn get_bufs(&self) -> &[IoSlice<'static>] {
@@ -245,13 +240,17 @@ impl BatchedWrite {
   fn bytes_len(&self) -> usize {
     self.bufs.iter().map(|v| v.len()).sum()
   }
-}
-impl Drop for BatchedWrite {
-  fn drop(&mut self) {
-    self.guard.metrics.disk_write.record(self.measure.take());
-    let result = self.error.take().map(Err).unwrap_or(Ok(()));
-    for done in self.waiting.drain(..) {
-      done.fulfill(result.map_err(Error::from));
+
+  fn reject(self, err: ErrorKind) {
+    self.guard.metrics.disk_write.record(self.measure);
+    for done in self.waiting {
+      done.fulfill(Err(Error::from(err)));
+    }
+  }
+  fn resolve(self) {
+    self.guard.metrics.disk_write.record(self.measure);
+    for done in self.waiting {
+      done.fulfill(Ok(()));
     }
   }
 }
@@ -306,19 +305,16 @@ fn finish_write(guard: RecursiveWrite, buffered: Vec<WriteRequest>) {
   };
 }
 
-fn create_write_callback(
-  mut batched: BatchedWrite,
-  trial: u8,
-) -> impl FnOnce(Result<usize>) {
+fn create_write_callback(batched: BatchedWrite, trial: u8) -> impl FnOnce(Result<usize>) {
   move |result: Result<usize>| match result {
     Ok(c) if c < batched.bytes_len() => retry_write(batched, trial + 1),
-    Ok(_) => {}
-    Err(err) => batched.set_error(err.kind()),
+    Ok(_) => batched.resolve(),
+    Err(err) => batched.reject(err.kind()),
   }
 }
-fn retry_write(mut batched: BatchedWrite, trial: u8) {
+fn retry_write(batched: BatchedWrite, trial: u8) {
   if trial >= IO_RETRY {
-    return batched.set_error(ErrorKind::WriteZero);
+    return batched.reject(ErrorKind::WriteZero);
   };
 
   let backend = batched.guard.backend.clone();
