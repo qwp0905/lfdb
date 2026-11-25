@@ -24,12 +24,10 @@ fn test_pread() -> Result<()> {
   let content = b"Hello, World!";
 
   // Create a test file with content
-  let (task, done) = IOTask::new_pwrite(content, 0);
-  file.submit(task);
+  let done = file.pwrite(content, 0);
   done.wait().unwrap()?;
 
-  let (task, done) = IOTask::new_fsync();
-  file.submit(task);
+  let done = file.fsync();
   done.wait().unwrap()?;
 
   // Test 1: Normal read
@@ -65,15 +63,13 @@ fn test_pwrite() {
 
   // Test 1: Write at the beginning
   let content = b"Hello";
-  let (task, done) = IOTask::new_pwrite(content, 0);
-  file.submit(task);
+  let done = file.pwrite(content, 0);
   let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 5);
 
   // Test 2: Write at specific offset
   let content = b"World";
-  let (task, done) = IOTask::new_pwrite(content, 6);
-  file.submit(task);
+  let done = file.pwrite(content, 6);
   let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 5);
 
@@ -87,8 +83,7 @@ fn test_pwrite() {
 
   // Test 3: Write with empty buffer
   let empty_buf: &[u8] = &[];
-  let (task, done) = IOTask::new_pwrite(empty_buf, 0);
-  file.submit(task);
+  let done = file.pwrite(empty_buf, 0);
   let bytes_written = done.wait().unwrap().unwrap();
   assert_eq!(bytes_written, 0);
 }
@@ -99,27 +94,22 @@ fn test_allocate() -> Result<()> {
   let disk = disk();
   let file = open(&disk, dir.path().join("fallocate.txt"));
 
-  let (task, done) = IOTask::new_fallocate(0, 0);
-  file.submit(task);
+  let done = file.fallocate(0, 0);
   assert!(done.wait().unwrap().is_err());
 
-  let (task, done) = IOTask::new_fallocate(0, 100);
-  file.submit(task);
+  let done = file.fallocate(0, 100);
   done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 100);
 
-  let (task, done) = IOTask::new_fallocate(100, 200);
-  file.submit(task);
+  let done = file.fallocate(100, 200);
   done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 300);
 
-  let (task, done) = IOTask::new_fallocate(500, 10);
-  file.submit(task);
+  let done = file.fallocate(500, 10);
   done.wait().unwrap()?;
   assert_eq!(file.metadata()?.len(), 510);
 
-  let (task, done) = IOTask::new_fallocate(510, 0);
-  file.submit(task);
+  let done = file.fallocate(510, 0);
   assert!(done.wait().unwrap().is_err());
 
   Ok(())
