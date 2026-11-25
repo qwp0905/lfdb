@@ -5,7 +5,9 @@ use std::{
   sync::Arc,
 };
 
-use super::{from_raw, pread, AsyncIO, BoundIOTask, DiskBackend, IOBackend, IOTask};
+use super::{
+  from_raw, pread, AsyncIO, BoundIOTask, DiskBackend, DiskTask, IOBackend, IOTask,
+};
 
 /**
  * The default `IOBackend` implementation is just `std::fs::File`.
@@ -25,8 +27,46 @@ impl IOBackend for DefaultIOBackend {
   }
 
   fn submit(&self, task: IOTask) {
-    let (task_type, fulfiller) = task.into_parts();
-    let task = BoundIOTask::new(task_type, Some(self.file.clone()), fulfiller);
+    let task = match task {
+      IOTask::Pwrite {
+        offset,
+        buf,
+        fulfiller,
+      } => BoundIOTask::Pwrite {
+        offset,
+        buf,
+        file: self.file.clone(),
+        fulfiller,
+      },
+      IOTask::Pwritev {
+        offset,
+        bufs,
+        fulfiller,
+      } => BoundIOTask::Pwritev {
+        offset,
+        bufs,
+        file: self.file.clone(),
+        fulfiller,
+      },
+      IOTask::Fsync { fulfiller } => BoundIOTask::Fsync {
+        file: self.file.clone(),
+        fulfiller,
+      },
+      IOTask::Fdatasync { fulfiller } => BoundIOTask::Fdatasync {
+        file: self.file.clone(),
+        fulfiller,
+      },
+      IOTask::Fallocate {
+        offset,
+        len,
+        fulfiller,
+      } => BoundIOTask::Fallocate {
+        offset,
+        len,
+        file: self.file.clone(),
+        fulfiller,
+      },
+    };
     self.async_io.submit(task);
   }
 
@@ -60,9 +100,18 @@ impl DefaultDiskBackend {
   }
 }
 impl DiskBackend for DefaultDiskBackend {
-  fn submit_open(&self, task: IOTask) {
-    let (task_type, fulfiller) = task.into_parts();
-    let task = BoundIOTask::new(task_type, None, fulfiller);
+  fn submit(&self, task: DiskTask) {
+    let task = match task {
+      DiskTask::Open {
+        path,
+        flags,
+        fulfiller,
+      } => BoundIOTask::Open {
+        path,
+        flags,
+        fulfiller,
+      },
+    };
     self.async_io.submit(task);
   }
   unsafe fn adopt(&self, raw: usize) -> Box<dyn IOBackend> {

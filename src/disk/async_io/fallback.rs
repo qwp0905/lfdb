@@ -5,26 +5,43 @@ use std::{io::Result, num::NonZero, thread::available_parallelism};
 use crate::background::{SharedWorkThread, ThreadBuilder};
 
 use super::super::{fallocate, into_raw, pwrite, pwritev, BoundIOTask};
-use super::TaskType;
 
 fn handle_task(task: BoundIOTask) {
-  let result = match task.get_type() {
-    TaskType::Pwrite { offset, buf } => pwrite(task.toward().unwrap(), buf, *offset),
-    TaskType::Pwritev { offset, bufs } => pwritev(task.toward().unwrap(), bufs, *offset),
-    TaskType::Fsync => task.toward().unwrap().sync_all().map(|_| 0),
-    TaskType::Fdatasync => task.toward().unwrap().sync_data().map(|_| 0),
-    TaskType::Fallocate { offset, len } => {
-      fallocate(task.toward().unwrap(), *offset, *len).map(|_| 0)
-    }
+  match task {
+    BoundIOTask::Pwrite {
+      offset,
+      buf,
+      fulfiller,
+      file,
+    } => fulfiller.fulfill(pwrite(&file, buf, offset)),
+    BoundIOTask::Pwritev {
+      offset,
+      bufs,
+      fulfiller,
+      file,
+    } => fulfiller.fulfill(pwritev(&file, bufs, offset)),
+    BoundIOTask::Fsync { file, fulfiller } => fulfiller.fulfill(file.sync_all()),
+    BoundIOTask::Fdatasync { file, fulfiller } => fulfiller.fulfill(file.sync_data()),
+    BoundIOTask::Fallocate {
+      offset,
+      len,
+      file,
+      fulfiller,
+    } => fulfiller.fulfill(fallocate(&file, offset, len)),
     // SAFETY: the bytes come from `into_encoded_bytes` on this platform, unchanged
     // except for the trailing nul that `to_bytes` leaves out.
-    TaskType::Open { path, flags } => flags
-      .open(Path::new(unsafe {
-        OsStr::from_encoded_bytes_unchecked(path.to_bytes())
-      }))
-      .map(into_raw),
+    BoundIOTask::Open {
+      path,
+      flags,
+      fulfiller,
+    } => fulfiller.fulfill(
+      flags
+        .open(Path::new(unsafe {
+          OsStr::from_encoded_bytes_unchecked(path.to_bytes())
+        }))
+        .map(into_raw),
+    ),
   };
-  task.fulfill(result);
 }
 pub struct AsyncIO {
   thread: SharedWorkThread<BoundIOTask>,

@@ -88,52 +88,36 @@ impl OpenFlags {
   }
 }
 
-#[derive(Clone)]
-pub enum TaskType {
+pub enum BoundIOTask {
   Pwrite {
     offset: u64,
     buf: &'static [u8],
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<usize>>,
   },
   Pwritev {
     offset: u64,
     bufs: &'static [IoSlice<'static>],
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<usize>>,
   },
-  Fsync,
-  Fdatasync,
+  Fsync {
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
+  Fdatasync {
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
+  },
   Fallocate {
     offset: u64,
     len: u64,
+    file: Arc<File>,
+    fulfiller: TaskFulfiller<Result<()>>,
   },
   Open {
     path: CString,
     flags: OpenFlags,
-  },
-}
-
-pub struct BoundIOTask {
-  task_type: TaskType,
-  toward: Option<Arc<File>>,
-  fulfiller: TaskFulfiller<Result<usize>>,
-}
-impl BoundIOTask {
-  pub const fn new(
-    task_type: TaskType,
-    toward: Option<Arc<File>>,
     fulfiller: TaskFulfiller<Result<usize>>,
-  ) -> Self {
-    Self {
-      task_type,
-      toward,
-      fulfiller,
-    }
-  }
-  pub fn toward(&self) -> Option<&File> {
-    self.toward.as_deref()
-  }
-  pub const fn get_type(&self) -> &TaskType {
-    &self.task_type
-  }
-  pub fn fulfill(self, result: Result<usize>) {
-    self.fulfiller.fulfill(result);
-  }
+  },
 }
