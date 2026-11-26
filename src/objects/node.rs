@@ -24,7 +24,7 @@ impl<'a> TypedObject for BTreeNodeView<'a> {
 
 impl<'a> Viewable<'a> for BTreeNodeView<'a> {
   fn read_from(
-    page: &'a crate::page::Page,
+    page: crate::page::Page<'a>,
     scanner: &mut PageScanner<'a>,
   ) -> Result<Self> {
     match scanner.read()? {

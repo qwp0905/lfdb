@@ -99,7 +99,7 @@ pub fn fill_stack_from<Policy: ReadonlyPolicy>(
   while let BTreeNodeView::Internal(node) = policy
     .fetch_slot(ptr, table)?
     .for_read()
-    .as_ref()
+    .as_page()
     .view::<BTreeNodeView>()?
   {
     match node.find(key)? {

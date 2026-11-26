@@ -6,12 +6,12 @@ use super::*;
 fn test_writer() {
   let alloc = PageAllocator::<PAGE_SIZE>::new(10);
   let mut page = alloc.allocate();
-  let mut wt = page.writer();
+  let mut wt = page.as_page_mut().writer();
   wt.write(&[1, 2, 3, 5, 6]).unwrap();
 
   assert_eq!(wt.finalize(), 5);
 
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
 
   assert_eq!(scanner.read().unwrap(), 1);
   assert_eq!(scanner.read().unwrap(), 2);
@@ -29,12 +29,12 @@ fn test_read_write() {
   let test_data = [1, 2, 3, 4];
 
   // Write test
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write(&test_data).unwrap();
   assert_eq!(writer.finalize(), 4);
 
   // Read test
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   for &expected in test_data.iter() {
     assert_eq!(scanner.read().unwrap(), expected);
   }
@@ -47,11 +47,11 @@ fn test_read_n() {
   let test_data = [1, 2, 3, 4, 5];
 
   // Write test
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write(&test_data).unwrap();
 
   // Read test using read_n
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   let read_data = scanner.read_n(test_data.len()).unwrap();
   assert_eq!(read_data, &test_data);
 }
@@ -63,7 +63,7 @@ fn test_write_overflow() {
   let mut page = alloc.allocate();
   let test_data = [1, 2, 3, 4, 5, 6]; // Data larger than SMALL_SIZE
 
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   assert!(writer.write(&test_data).is_err()); // Expect EOF error
 }
 
@@ -72,7 +72,7 @@ fn test_read_n_overflow() {
   const SMALL_SIZE: usize = 4;
   let alloc: PageAllocator<SMALL_SIZE> = PageAllocator::new(10);
   let page = alloc.allocate();
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
 
   // Request size larger than page size
   assert!(scanner.read_n(SMALL_SIZE + 1).is_err());
@@ -85,19 +85,19 @@ fn test_sequential_operations() {
 
   // First write operation (starts from offset 0)
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[1, 2, 3]).unwrap();
   }
 
   // Second write operation overwrites from the beginning
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[4, 5]).unwrap();
     writer.write(&[6]).unwrap();
   }
 
   // Scanner always reads from offset 0
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   assert_eq!(scanner.read().unwrap(), 4);
   assert_eq!(scanner.read().unwrap(), 5);
   assert_eq!(scanner.read().unwrap(), 6);
@@ -111,17 +111,17 @@ fn test_writer_fresh_start() {
 
   // First write operation
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[1, 2, 3]).unwrap();
   }
 
   // New writer only resets offset to 0
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[7, 8]).unwrap();
   }
 
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   assert_eq!(scanner.read().unwrap(), 7);
   assert_eq!(scanner.read().unwrap(), 8);
   assert_eq!(scanner.read().unwrap(), 3); // Previous data remains in unwritten portion
@@ -134,19 +134,19 @@ fn test_scanner_fresh_start() {
 
   // Write data
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[1, 2, 3]).unwrap();
   }
 
   // First scanner
   {
-    let mut scanner = page.scanner();
+    let mut scanner = page.as_page().scanner();
     assert_eq!(scanner.read().unwrap(), 1);
     assert_eq!(scanner.read().unwrap(), 2);
   }
 
   // New scanner starts reading from the beginning
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   assert_eq!(scanner.read().unwrap(), 1);
   assert_eq!(scanner.read().unwrap(), 2);
   assert_eq!(scanner.read().unwrap(), 3);
@@ -160,13 +160,13 @@ fn test_interleaved_operations() {
 
   // First write
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&test_data).unwrap();
   }
 
   // First read
   {
-    let mut scanner = page.scanner();
+    let mut scanner = page.as_page().scanner();
     for &expected in test_data.iter() {
       assert_eq!(scanner.read().unwrap(), expected);
     }
@@ -174,12 +174,12 @@ fn test_interleaved_operations() {
 
   // Second write (only resets offset to 0)
   {
-    let mut writer = page.writer();
+    let mut writer = page.as_page_mut().writer();
     writer.write(&[4, 5]).unwrap();
   }
 
   // Final verification (overwritten portion changes, rest remains as previous data)
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   assert_eq!(scanner.read().unwrap(), 4);
   assert_eq!(scanner.read().unwrap(), 5);
   assert_eq!(scanner.read().unwrap(), 3); // Third byte remains unchanged
@@ -192,17 +192,17 @@ fn test_page_copy() {
   let test_data = [1, 2, 3, 4, 5];
 
   // Write data to original page
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write(&test_data).unwrap();
 
   // Create copy and verify data
-  let copied = page.copy_range(0..5);
+  let copied = page.as_page().copy_range(0..5);
   for (i, e) in copied.iter().enumerate() {
     assert_eq!(e, &test_data[i]);
   }
 
   // Modify original, verify copy remains unchanged
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write(&[9, 9]).unwrap();
 
   for (i, e) in copied.iter().enumerate() {
@@ -218,43 +218,41 @@ fn test_read_u64() {
   let test_value = 42u64;
 
   // Write value
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write_u64(test_value).unwrap();
 
   // Read and verify usize value
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   let read_value = scanner.read_u64().unwrap();
   assert_eq!(read_value, test_value);
 }
 
 #[test]
-fn test_as_ref() {
+fn test_as_slice() {
   const SIZE: usize = 4;
   let alloc: PageAllocator<SIZE> = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let test_data = [1, 2, 3, 4];
 
-  let mut writer = page.writer();
+  let mut writer = page.as_page_mut().writer();
   writer.write(&test_data).unwrap();
 
-  // Verify AsRef implementation
-  let slice = page.as_slice();
+  let slice = page.as_page().as_slice();
   assert_eq!(slice, &test_data);
 }
 
 #[test]
-fn test_as_mut() {
+fn test_into_mut_slice() {
   const SIZE: usize = 4;
   let alloc: PageAllocator<SIZE> = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let test_data = [1, 2, 3, 4];
 
-  // Modify through AsMut
-  let slice = page.as_mut_slice();
+  let slice = page.as_page_mut().into_mut_slice();
   slice.copy_from_slice(&test_data);
 
   // Verify changes
-  let mut scanner = page.scanner();
+  let mut scanner = page.as_page().scanner();
   for &expected in test_data.iter() {
     assert_eq!(scanner.read().unwrap(), expected);
   }

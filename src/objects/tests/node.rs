@@ -16,9 +16,16 @@ fn test_serialize_internal() {
     next,
     DEFAULT_BIAS,
   ));
-  page.serialize_from(&node).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&node)
+    .expect("serialize error");
 
-  let d = match page.view::<BTreeNodeView>().expect("deserialize error") {
+  let d = match page
+    .as_page()
+    .view::<BTreeNodeView>()
+    .expect("deserialize error")
+  {
     BTreeNodeView::Internal(node) => node,
     BTreeNodeView::Leaf(_) => panic!("must be internal"),
   };
@@ -46,9 +53,13 @@ fn test_serialize_leaf() {
   leaf.set_next(vec![11, 2, 3, 3], 200);
 
   let node = BTreeNode::Leaf(leaf);
-  page.serialize_from(&node).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&node)
+    .expect("serialize error");
 
   let d = page
+    .as_page()
     .view::<BTreeNodeView>()
     .expect("desiralize error")
     .into_leaf()
@@ -61,12 +72,12 @@ fn test_serialize_leaf() {
   while let Some(e) = iter.try_next().unwrap() {
     let (k, (o, v, d), _) = &entries[i];
     i += 1;
-    assert_eq!(page.range(e.range), k);
+    assert_eq!(page.as_page().range(e.range), k);
     assert_eq!(e.record.owner, *o);
     assert_eq!(e.record.version, *v);
     assert!(matches!(
       e.record.data,
-      RecordDataView::Data(range) if d == page.range(range.clone())
+      RecordDataView::Data(range) if d == page.as_page().range(range.clone())
     ))
   }
 
@@ -86,9 +97,16 @@ fn test_serialize_internal_with_keys_and_right() {
     next.clone(),
     DEFAULT_BIAS,
   ));
-  page.serialize_from(&node).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&node)
+    .expect("serialize error");
 
-  let d = match page.view::<BTreeNodeView>().expect("desiralize error") {
+  let d = match page
+    .as_page()
+    .view::<BTreeNodeView>()
+    .expect("desiralize error")
+  {
     BTreeNodeView::Internal(node) => node,
     BTreeNodeView::Leaf(_) => panic!("must be internal"),
   };

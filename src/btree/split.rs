@@ -27,7 +27,7 @@ fn apply_split<Policy: WritablePolicy + Sync>(
   let mut ptr = current;
   loop {
     let slot = policy.fetch_slot(ptr, table)?.for_write();
-    let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+    let mut node = slot.as_page().deserialize::<BTreeNode>()?;
     let internal = node.as_internal_mut()?;
     if let Err(p) = internal.insert_or_next(&evicted_key, evicted_ptr) {
       ptr = p;
@@ -62,7 +62,7 @@ fn update_header<Policy: WritablePolicy + Sync>(
   old_height: usize,
 ) -> Result<Option<UpdateFailed>> {
   let slot = policy.fetch_slot(HEADER_POINTER, table)?.for_write();
-  let mut header: TreeHeader = slot.as_ref().deserialize()?;
+  let mut header: TreeHeader = slot.as_page().deserialize()?;
   let current_height = header.get_height() as usize;
   let root = header.get_root();
   if old_height != current_height {
@@ -112,7 +112,7 @@ pub fn propagate_split<Policy: WritablePolicy + Sync>(
     let mut ptr = failed.root;
     while stack.len() < failed.diff {
       let slot = policy.fetch_slot(ptr, table)?.for_read();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
+      let node = slot.as_page().view::<BTreeNodeView>()?.into_internal()?;
       match node.find(&split_key)? {
         Ok(i) => stack.push(replace(&mut ptr, i)),
         Err(i) => ptr = i,

@@ -1,6 +1,6 @@
 use crate::{
   error::{Error, Result},
-  page::{Page, PageScanner, PageWriter, PAGE_SIZE},
+  page::{Page, PageMut, PageScanner, PageWriter, PAGE_SIZE},
 };
 
 /**
@@ -40,7 +40,7 @@ pub trait TypedObject {
  */
 pub trait Deserializable: Sized + TypedObject {
   fn read_from(reader: &mut PageScanner) -> Result<Self>;
-  fn deserialize(value: &Page<PAGE_SIZE>) -> Result<Self> {
+  fn deserialize(value: Page<PAGE_SIZE>) -> Result<Self> {
     let mut reader = value.scanner();
 
     let expected = Self::TYPE.byte();
@@ -54,7 +54,7 @@ pub trait Deserializable: Sized + TypedObject {
 }
 
 pub trait Serializable: Sized + TypedObject {
-  fn serialize_at(&self, page: &mut Page<PAGE_SIZE>) -> Result<usize> {
+  fn serialize_at(&self, page: PageMut<PAGE_SIZE>) -> Result<usize> {
     let mut writer = page.writer();
     writer.write(&[Self::TYPE.byte()])?;
     self.write_at(&mut writer)?;
@@ -62,15 +62,15 @@ pub trait Serializable: Sized + TypedObject {
   }
   fn write_at(&self, writer: &mut PageWriter) -> Result;
 }
-impl Page<PAGE_SIZE> {
-  pub fn deserialize<T>(&self) -> Result<T>
+impl<'a> Page<'a, PAGE_SIZE> {
+  pub fn deserialize<T>(self) -> Result<T>
   where
     T: Deserializable,
   {
     T::deserialize(self)
   }
 
-  pub fn view<'a, T>(&'a self) -> Result<T>
+  pub fn view<T>(self) -> Result<T>
   where
     T: Viewable<'a>,
   {
@@ -79,10 +79,10 @@ impl Page<PAGE_SIZE> {
 }
 
 pub trait SerializeFrom<T: Serializable> {
-  fn serialize_from(&mut self, target: &T) -> Result<usize>;
+  fn serialize_from(self, target: &T) -> Result<usize>;
 }
-impl<T: Serializable> SerializeFrom<T> for Page<PAGE_SIZE> {
-  fn serialize_from(&mut self, target: &T) -> Result<usize> {
+impl<'a, T: Serializable> SerializeFrom<T> for PageMut<'a, PAGE_SIZE> {
+  fn serialize_from(self, target: &T) -> Result<usize> {
     target.serialize_at(self)
   }
 }
@@ -95,7 +95,7 @@ impl<T: Serializable> SerializeFrom<T> for Page<PAGE_SIZE> {
  * them into an owned object.
  */
 pub trait Viewable<'a>: Sized + TypedObject {
-  fn view(page: &'a Page<PAGE_SIZE>) -> Result<Self> {
+  fn view(page: Page<'a, PAGE_SIZE>) -> Result<Self> {
     let mut scanner = page.scanner();
 
     let expected = Self::TYPE.byte();
@@ -107,5 +107,5 @@ pub trait Viewable<'a>: Sized + TypedObject {
     Self::read_from(page, &mut scanner)
   }
 
-  fn read_from(page: &'a Page<PAGE_SIZE>, scanner: &mut PageScanner<'a>) -> Result<Self>;
+  fn read_from(page: Page<'a, PAGE_SIZE>, scanner: &mut PageScanner<'a>) -> Result<Self>;
 }

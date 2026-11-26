@@ -16,7 +16,7 @@ enum Type {
  * Byte-vector view used by cursor reads.
  *
  * `VecRef` avoids copying when the bytes already live inside a cached page: it
- * keeps an `ReadonlySlot` reference to the page and exposes the requested range as a
+ * keeps a shared reference to that page and exposes the requested range as a
  * slice. When bytes must be materialized elsewhere, it stores the copied aligned
  * buffer but presents the same `[u8]` interface.
  *
@@ -33,7 +33,7 @@ impl VecRef {
   }
   pub fn as_slice(&self) -> &[u8] {
     match &self.0 {
-      Type::Refed(slot, range) => slot.range(range.clone()),
+      Type::Refed(slot, range) => slot.as_page().range(range.clone()),
       Type::Copied(data) => data.as_slice(),
     }
   }

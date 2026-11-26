@@ -123,7 +123,7 @@ pub fn drain_snapshot_once<Policy: WritablePolicy + Sync>(
 
   'outer: loop {
     let slot = policy.fetch_slot(ptr, table)?.for_write();
-    let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+    let mut node = slot.as_page().deserialize::<BTreeNode>()?;
     let leaf = node.as_leaf_mut()?;
     let mut modified = false;
     match apply_snapshot_once(policy, leaf, &key, ptr, record, table)? {
@@ -190,7 +190,7 @@ fn apply_snapshot_at_entry<Policy: WritablePolicy + Sync>(
   let mut ptr = entry_ptr;
   loop {
     let slot = policy.fetch_slot(ptr, table)?.for_write();
-    let mut entry: DataEntry = slot.as_ref().deserialize()?;
+    let mut entry: DataEntry = slot.as_page().deserialize()?;
     if entry.is_available(&record) {
       entry.attach_back(record);
       policy.commit_write(slot, &entry, table)?;

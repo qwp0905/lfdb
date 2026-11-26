@@ -1,5 +1,6 @@
 use std::{
   marker::PhantomData,
+  mem::transmute,
   ops::Range,
   slice::{from_raw_parts, from_raw_parts_mut},
 };
@@ -13,68 +14,96 @@ use crate::{
 pub const PAGE_SIZE: usize = 4 << 10; // 4 kb
 
 /**
- * Fixed-size disk block backed by aligned heap memory.
+ * Read-only view of one fixed-size disk block.
  *
- * `Page` has two responsibilities: it represents one disk block used by the
- * storage layer, and it guarantees the memory alignment required by direct I/O.
- * The buffer is allocated manually with `ALIGN` alignment and freed with the
- * same layout in `Drop`.
+ * The buffer is owned elsewhere, and `'a` ties the view to that owner. Any number
+ * of views may exist at once, so a view never grants write access.
  *
- * `ALIGN` is fixed to 512 bytes for direct I/O. `T` is additionally kept as a
- * power-of-two engine block size; this is an engine storage policy, not a
+ * Buffers are aligned to `ALIGN`, fixed to 512 bytes for direct I/O. `N` is kept
+ * as a power-of-two engine block size; this is an engine storage policy, not a
  * requirement of `Layout` itself.
  */
-#[derive(Debug)]
-pub struct Page<const T: usize = PAGE_SIZE>(*mut u8, PhantomData<[u8; T]>);
+#[derive(Debug, Clone, Copy)]
+pub struct Page<'a, const N: usize = PAGE_SIZE>(*const u8, PhantomData<&'a [u8; N]>);
+impl<'a, const N: usize> Page<'a, N> {
+  pub const unsafe fn new(ptr: *const u8) -> Self {
+    Self(ptr, PhantomData)
+  }
+  pub const fn as_ptr(&self) -> *const u8 {
+    self.0
+  }
+  /**
+   * # Safety
+   * No other access may overlap the written range while it is written.
+   */
+  pub const unsafe fn copy_from_unchecked(&self, data: &[u8], offset: usize) {
+    let ptr = self.0.add(offset).cast_mut();
+    data.as_ptr().copy_to_nonoverlapping(ptr, data.len());
+  }
+  pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
+    self.range(range).to_vec()
+  }
+  pub const fn as_slice(&self) -> &'a [u8] {
+    unsafe { from_raw_parts(self.0, N) }
+  }
+  pub const fn scanner(&self) -> PageScanner<'a, N> {
+    PageScanner::new(self.0)
+  }
+  pub const fn range(&self, range: Range<usize>) -> &'a [u8] {
+    unsafe { from_raw_parts(self.0.add(range.start), range.end - range.start) }
+  }
 
-impl<const T: usize> Page<T> {
-  #[inline]
-  pub const fn new(ptr: *mut u8) -> Self {
+  /**
+   * # Safety
+   * The owner of the buffer must outlive every use of the returned view.
+   */
+  pub const unsafe fn into_static(self) -> Page<'static, N> {
+    unsafe { transmute::<Self, Page<'static, N>>(self) }
+  }
+}
+
+/**
+ * Unique write view of one block. Like `&mut [u8]` it is never copied;
+ * `reborrow` lends it for a shorter lifetime.
+ */
+#[derive(Debug)]
+pub struct PageMut<'a, const N: usize>(*mut u8, PhantomData<&'a mut [u8; N]>);
+impl<'a, const N: usize> PageMut<'a, N> {
+  pub const unsafe fn new(ptr: *mut u8) -> Self {
     Self(ptr, PhantomData)
   }
   pub const fn as_ptr(&self) -> *mut u8 {
     self.0
   }
-  #[inline]
-  pub const fn copy_from(&mut self, data: &[u8], offset: usize) {
+  pub const fn copy_from(&'a mut self, data: &[u8], offset: usize) {
     let len = data.len();
     self.range_mut(offset..(offset + len)).copy_from_slice(data);
   }
-  pub const unsafe fn copy_from_unchecked(&self, data: &[u8], offset: usize) {
-    let ptr = self.0.add(offset);
-    data.as_ptr().copy_to_nonoverlapping(ptr, data.len());
+  pub const fn into_mut_slice(self) -> &'a mut [u8] {
+    unsafe { from_raw_parts_mut(self.0, N) }
   }
-  #[inline]
-  pub fn copy_range(&self, range: Range<usize>) -> Vec<u8> {
-    self.range(range).to_vec()
-  }
-  pub const fn as_slice(&self) -> &[u8] {
-    unsafe { from_raw_parts(self.0, T) }
-  }
-  pub const fn as_mut_slice(&mut self) -> &mut [u8] {
-    unsafe { from_raw_parts_mut(self.0, T) }
-  }
-  #[inline]
-  pub const fn scanner(&self) -> PageScanner<'_, T> {
-    PageScanner::new(self.0)
-  }
-  #[inline]
-  pub const fn writer(&mut self) -> PageWriter<'_, T> {
-    PageWriter::new(self.0)
-  }
-  #[inline]
-  pub const fn range(&self, range: Range<usize>) -> &[u8] {
+  pub const fn range(&'a self, range: Range<usize>) -> &'a [u8] {
     unsafe { from_raw_parts(self.0.add(range.start), range.end - range.start) }
   }
-  pub const fn range_mut(&mut self, range: Range<usize>) -> &mut [u8] {
+  pub const fn range_mut(&'a mut self, range: Range<usize>) -> &'a mut [u8] {
     unsafe { from_raw_parts_mut(self.0.add(range.start), range.end - range.start) }
+  }
+  pub const fn writer(self) -> PageWriter<'a, N> {
+    PageWriter::new(self.0)
+  }
+  pub const fn reborrow(&mut self) -> PageMut<'_, N> {
+    unsafe { PageMut::new(self.0) }
   }
 }
 
-// Page is an owned byte buffer. Moving it across threads is safe, and shared
-// references only expose immutable byte access; mutation still requires `&mut`.
-unsafe impl<const T: usize> Send for Page<T> {}
-unsafe impl<const T: usize> Sync for Page<T> {}
+/**
+ * Both views behave like the references they stand for: `Page` like `&[u8]` and
+ * `PageMut` like `&mut [u8]`, so they cross threads under the same rules.
+ */
+unsafe impl<'a, const N: usize> Send for Page<'a, N> {}
+unsafe impl<'a, const N: usize> Sync for Page<'a, N> {}
+unsafe impl<'a, const N: usize> Send for PageMut<'a, N> {}
+unsafe impl<'a, const N: usize> Sync for PageMut<'a, N> {}
 
 /**
  * Sequential reader over a `Page`.
@@ -82,15 +111,14 @@ unsafe impl<const T: usize> Sync for Page<T> {}
  * This wraps `OffsetReader` with the page size and converts out-of-bounds reads
  * into the engine's `Error::Corrupted`.
  */
-pub struct PageScanner<'a, const T: usize = PAGE_SIZE>(OffsetReader<'a>);
-impl<'a, const T: usize> PageScanner<'a, T> {
+pub struct PageScanner<'a, const N: usize = PAGE_SIZE>(OffsetReader<'a>);
+impl<'a, const N: usize> PageScanner<'a, N> {
   const OUT_OF_BOUNDS: Error = Error::Corrupted("page read out of bounds");
 
-  const fn new(inner: *mut u8) -> Self {
-    Self(unsafe { OffsetReader::from_ptr(inner, T) })
+  const fn new(inner: *const u8) -> Self {
+    Self(unsafe { OffsetReader::from_ptr(inner, N) })
   }
 
-  #[inline(always)]
   pub const fn advance(&mut self, n: usize) -> Result<usize> {
     match self.0.advance(n) {
       Some(offset) => Ok(offset),
@@ -98,7 +126,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn read(&mut self) -> Result<u8> {
     match self.0.read_byte() {
       Some(v) => Ok(v),
@@ -106,7 +133,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn read_n(&mut self, n: usize) -> Result<&'a [u8]> {
     match self.0.read(n) {
       Some(v) => Ok(v),
@@ -114,14 +140,13 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn read_u64(&mut self) -> Result<u64> {
     match self.0.read_u64() {
       Some(v) => Ok(v),
       None => Err(Self::OUT_OF_BOUNDS),
     }
   }
-  #[inline(always)]
+
   pub const fn read_u32(&mut self) -> Result<u32> {
     match self.0.read_u32() {
       Some(v) => Ok(v),
@@ -129,7 +154,6 @@ impl<'a, const T: usize> PageScanner<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn read_u16(&mut self) -> Result<u16> {
     match self.0.read_u16() {
       Some(v) => Ok(v),
@@ -144,15 +168,14 @@ impl<'a, const T: usize> PageScanner<'a, T> {
  * This wraps `OffsetWriter` with the page size and converts out-of-bounds
  * writes into the engine's `Error::Corrupted`.
  */
-pub struct PageWriter<'a, const T: usize = PAGE_SIZE>(OffsetWriter<'a>);
-impl<'a, const T: usize> PageWriter<'a, T> {
+pub struct PageWriter<'a, const N: usize = PAGE_SIZE>(OffsetWriter<'a>);
+impl<'a, const N: usize> PageWriter<'a, N> {
   const OVERFLOW: Error = Error::Corrupted("page write overflow");
 
   const fn new(inner: *mut u8) -> Self {
-    Self(unsafe { OffsetWriter::from_ptr(inner, T) })
+    Self(unsafe { OffsetWriter::from_ptr(inner, N) })
   }
 
-  #[inline(always)]
   pub const fn write(&mut self, bytes: &[u8]) -> Result<()> {
     match self.0.write(bytes) {
       true => Ok(()),
@@ -160,21 +183,20 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn write_u64(&mut self, value: u64) -> Result {
     match self.0.write_u64(value) {
       true => Ok(()),
       false => Err(Self::OVERFLOW),
     }
   }
-  #[inline(always)]
+
   pub const fn write_u32(&mut self, value: u32) -> Result {
     match self.0.write_u32(value) {
       true => Ok(()),
       false => Err(Self::OVERFLOW),
     }
   }
-  #[inline(always)]
+
   pub const fn write_u16(&mut self, value: u16) -> Result {
     match self.0.write_u16(value) {
       true => Ok(()),
@@ -182,7 +204,6 @@ impl<'a, const T: usize> PageWriter<'a, T> {
     }
   }
 
-  #[inline(always)]
   pub const fn finalize(self) -> usize {
     self.0.written_bytes()
   }

@@ -112,7 +112,7 @@ impl<Policy: ReadonlyPolicy> BTreeIndex<Policy> {
       .0
       .fetch_slot(ptr, table)?
       .for_read()
-      .as_ref()
+      .as_page()
       .view::<BTreeNodeView>()?
     {
       match node.find(key)? {
@@ -172,7 +172,7 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
         .0
         .fetch_slot(HEADER_POINTER, table)?
         .for_read()
-        .as_ref()
+        .as_page()
         .deserialize::<TreeHeader>()?;
 
       (header.get_root(), header.get_height() as usize)
@@ -182,7 +182,7 @@ impl<Policy: WritablePolicy + Sync> BTreeIndex<Policy> {
     let mut stack = vec![];
     while stack.len() < diff {
       let slot = self.0.fetch_slot(ptr, table)?.for_read();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.into_internal()?;
+      let node = slot.as_page().view::<BTreeNodeView>()?.into_internal()?;
       match node.find(&split_key)? {
         Ok(i) => stack.push(replace(&mut ptr, i)),
         Err(i) => ptr = i,

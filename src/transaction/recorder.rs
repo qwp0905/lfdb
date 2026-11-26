@@ -37,8 +37,8 @@ impl PageRecorder {
     T: Serializable,
   {
     let ptr = slot.get_pointer();
-    slot.commit_with(|page| {
-      let byte_len = page.serialize_from(data)?;
+    slot.commit_with(|mut page| {
+      let byte_len = page.reborrow().serialize_from(data)?;
       self.wal.append_insert(
         tx_id,
         table_id,

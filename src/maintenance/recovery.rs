@@ -212,7 +212,7 @@ impl TableRecovery {
       .block_cache
       .read(ptr, &self.table)?
       .for_read()
-      .as_ref()
+      .as_page()
       .view::<BTreeNodeView>()?
     {
       BTreeNodeView::Internal(node) => {
@@ -257,7 +257,7 @@ impl TableRecovery {
         .block_cache
         .read(ptr, &self.table)?
         .for_read()
-        .as_ref()
+        .as_page()
         .view::<DataEntryView>()?
         .get_next();
     }
@@ -311,7 +311,7 @@ impl TableRecovery {
     }
 
     let slot = self.block_cache.read(split_ptr, &self.table)?.for_read();
-    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+    let node = slot.as_page().view::<BTreeNodeView>()?.into_leaf()?;
 
     let key = node.top()?.to_vec();
     index.recovery_half_split(key, split_ptr, level, &self.table)?;
@@ -489,7 +489,7 @@ fn init_table(
       let header = block_cache
         .read(HEADER_POINTER, &table)?
         .for_read()
-        .as_ref()
+        .as_page()
         .deserialize::<TreeHeader>()?;
       (header.get_root(), header.get_height())
     };

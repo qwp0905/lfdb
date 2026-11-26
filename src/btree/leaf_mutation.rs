@@ -33,7 +33,7 @@ fn copy_old_record<Policy: WritablePolicy + Sync>(
   table: &TableHandleRef,
 ) -> Result {
   let slot = policy.fetch_slot(entry_ptr, table)?.for_write();
-  let mut entry = slot.as_ref().deserialize::<DataEntry>()?;
+  let mut entry = slot.as_page().deserialize::<DataEntry>()?;
   if entry.is_available(&old) {
     entry.attach_front(old);
     policy.commit_write(slot, &entry, table)?;
@@ -144,7 +144,7 @@ fn complete_leaf<Policy: CreatablePolicy + Sync>(
   loop {
     let mut guards = Vec::new();
     let slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
-    let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+    let mut node = slot.as_page().deserialize::<BTreeNode>()?;
     let leaf = node.as_leaf_mut()?;
     match complete_leaf_once(policy, leaf, &key, operation, entry_ptr, table)? {
       CompleteLeafOnce::Move(p, op) => {
@@ -433,7 +433,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
   let mut guards = Vec::new();
 
   let slot = policy.fetch_slot(leaf_ptr, table)?.for_write();
-  let leaf = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+  let leaf = slot.as_page().view::<BTreeNodeView>()?.into_leaf()?;
   let KeyPair(key, op, create) = must_apply;
 
   let maybe_owned = match try_append_at_leaf_init(policy, leaf, table, &key, op, create)?
@@ -452,7 +452,7 @@ pub fn append_or_reserve_at_leaf<'a, Policy: CreatablePolicy + Sync>(
       })
     }
     TryAppendAtLeafInit::CopyOld(g, ep, old, l, op) => {
-      let cmd = CopyOld::new(g, ep, old.into_owned_with(slot.as_ref()), op);
+      let cmd = CopyOld::new(g, ep, old.into_owned_with(slot.as_page()), op);
       copy_old.push((key, cmd));
       MaybeOwned::Borrowed(l)
     }
