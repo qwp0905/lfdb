@@ -11,9 +11,12 @@ fn test_entry_with_data_roundtrip() {
     VersionRecord::new(1, 100, RecordData::Data(vec![10, 20, 30])),
     None,
   );
-  page.serialize_from(&entry).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&entry)
+    .expect("serialize error");
 
-  let decoded: DataEntryView = page.view().expect("deserialize error");
+  let decoded: DataEntryView = page.as_page().view().expect("deserialize error");
 
   let mut records = Vec::new();
   let mut iter = decoded.get_versions();
@@ -25,7 +28,7 @@ fn test_entry_with_data_roundtrip() {
   assert_eq!(records[0].version, 100);
   match &records[0].data {
     RecordDataView::Data(range) => {
-      assert_eq!(page.range(range.clone()), &vec![10, 20, 30])
+      assert_eq!(page.as_page().range(range.clone()), &vec![10, 20, 30])
     }
     RecordDataView::Tombstone => panic!("expected Data"),
     RecordDataView::Blob(_, _, _) => panic!("expected Data"),
@@ -37,9 +40,12 @@ fn test_entry_with_tombstone_roundtrip() {
   let alloc = PageAllocator::new(10);
   let mut page = alloc.allocate();
   let entry = DataEntry::init(VersionRecord::new(2, 200, RecordData::Tombstone), None);
-  page.serialize_from(&entry).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&entry)
+    .expect("serialize error");
 
-  let decoded: DataEntryView = page.view().expect("deserialize error");
+  let decoded: DataEntryView = page.as_page().view().expect("deserialize error");
 
   let mut records = Vec::new();
   let mut iter = decoded.get_versions();
@@ -61,9 +67,12 @@ fn test_entry_with_chunked_roundtrip() {
   let owner = 2;
   let entry =
     DataEntry::init(VersionRecord::new(2, 200, RecordData::Blob(1, 2, 3)), None);
-  page.serialize_from(&entry).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&entry)
+    .expect("serialize error");
 
-  let decoded: DataEntryView = page.view().expect("deserialize error");
+  let decoded: DataEntryView = page.as_page().view().expect("deserialize error");
   assert_eq!(decoded.len(), 1);
 
   let mut records = Vec::new();
@@ -92,9 +101,12 @@ fn test_entry_with_next_roundtrip() {
     VersionRecord::new(1, 10, RecordData::Data(vec![1])),
     Some(42),
   );
-  page.serialize_from(&entry).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&entry)
+    .expect("serialize error");
 
-  let decoded: DataEntry = page.deserialize().expect("deserialize error");
+  let decoded: DataEntry = page.as_page().deserialize().expect("deserialize error");
   assert_eq!(decoded.get_next(), Some(42));
 }
 
@@ -106,8 +118,11 @@ fn test_entry_multiple_versions_roundtrip() {
     DataEntry::init(VersionRecord::new(3, 300, RecordData::Data(vec![3])), None);
   entry.attach_front(VersionRecord::new(2, 200, RecordData::Tombstone));
   entry.attach_front(VersionRecord::new(1, 100, RecordData::Data(vec![1, 2])));
-  page.serialize_from(&entry).expect("serialize error");
+  page
+    .as_page_mut()
+    .serialize_from(&entry)
+    .expect("serialize error");
 
-  let decoded: DataEntry = page.deserialize().expect("deserialize error");
+  let decoded: DataEntry = page.as_page().deserialize().expect("deserialize error");
   assert_eq!(decoded.get_next(), None);
 }

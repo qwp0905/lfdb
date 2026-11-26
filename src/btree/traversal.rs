@@ -18,7 +18,7 @@ pub fn read_header<Policy: ReadonlyPolicy>(
   policy
     .fetch_slot(HEADER_POINTER, table)?
     .for_read()
-    .as_ref()
+    .as_page()
     .deserialize()
 }
 
@@ -30,7 +30,7 @@ pub fn find_record_in_entry<Policy: ReadonlyPolicy>(
   let mut next = Some(entry_ptr);
   while let Some(ptr) = next.take() {
     let slot = policy.fetch_slot(ptr, table)?.for_read();
-    let entry = slot.as_ref().view::<DataEntryView>()?;
+    let entry = slot.as_page().view::<DataEntryView>()?;
 
     if let Some(record) =
       entry.find(|record| policy.is_visible(record.owner, record.version))?
@@ -56,7 +56,7 @@ pub fn find_record_in_tree<Policy: ReadonlyPolicy>(
   let mut ptr = read_header(policy, table)?.get_root();
   loop {
     let slot = policy.fetch_slot(ptr, table)?.for_read();
-    match slot.as_ref().view::<BTreeNodeView>()? {
+    match slot.as_page().view::<BTreeNodeView>()? {
       BTreeNodeView::Internal(node) => ptr = node.find(key)?.unwrap_or_else(|i| i),
       BTreeNodeView::Leaf(node) => match node.find(key)? {
         NodeFindResult::NotFound(_) => return Ok(FindRecordInTree::NotFound),

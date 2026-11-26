@@ -209,13 +209,13 @@ impl InternalNode {
  * into the page and compares keys directly against page byte ranges.
  */
 pub struct InternalNodeView<'a> {
-  page: &'a Page,
+  page: Page<'a>,
   len: usize,
   offset: usize,
   right: Option<(Pointer, Range<usize>)>,
 }
 impl<'a> InternalNodeView<'a> {
-  pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner) -> Result<Self> {
+  pub fn from_scanner(page: Page<'a>, scanner: &mut PageScanner) -> Result<Self> {
     let mut right = None;
     if scanner.read()? == 1 {
       let ptr = scanner.read_u64()?;
@@ -232,7 +232,7 @@ impl<'a> InternalNodeView<'a> {
   }
 
   const fn new(
-    page: &'a Page,
+    page: Page<'a>,
     len: usize,
     offset: usize,
     right: Option<(Pointer, Range<usize>)>,

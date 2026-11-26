@@ -6,7 +6,7 @@ use super::{BlobLen, BlobMetadata, BlobOffset, BLOB_SIZE, BLOB_THRESHOLD};
 use crate::{
   disk::{IOHandle, PendingIO},
   page::AlignedBuf,
-  utils::create_static_ref,
+  utils::{create_static_ref, just_drop},
   Error, Result,
 };
 
@@ -74,15 +74,17 @@ impl BlobHandle {
     Ok(buf)
   }
 
-  pub fn write(&self, data: &AlignedBuf, offset: BlobOffset) -> Result {
+  pub fn write(&self, data: AlignedBuf, offset: BlobOffset) -> Result {
     // Blob segments are preallocated fixed-size files, so blob writes use the
     // write-only path. Submit the aligned physical slice required by direct IO.
     //
-    // SAFETY: `write_only` requires a `'static` slice because the IO worker may run
-    // later. This method immediately waits for completion, so the borrowed
-    // `AlignedBuf` cannot be dropped before the worker finishes using the slice.
+    // SAFETY: the callback owns `data` until the write completes, so the slice stays
+    // valid for as long as the IO worker reads it.
     let static_ref = unsafe { create_static_ref::<[u8]>(data.get_aligned_slice()) };
-    self.io.write_async(static_ref, offset).wait_flatten()
+    self
+      .io
+      .write_async_with(static_ref, offset, just_drop(data))
+      .wait_flatten()
   }
   pub fn sync(&self) -> PendingIO {
     self.io.fdatasync_async()

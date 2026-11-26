@@ -7,7 +7,7 @@ use crate::{
   background::EventBus,
   disk::{DefaultDiskBackend, IOPool},
   error::Error,
-  page::Page,
+  page::PageMut,
   table::TableMapper,
   wal::{DurabilityGuard, WALConfig, RESERVED_TX},
 };
@@ -19,7 +19,7 @@ fn append<'a>(
   wal: &'a WriteAheadLog,
   table: &TableHandleRef,
   pointer: Pointer,
-  page: &Page<PAGE_SIZE>,
+  page: PageMut<PAGE_SIZE>,
 ) -> Result<DurabilityGuard<'a>> {
   wal.append_insert(
     RESERVED_TX,
@@ -67,8 +67,8 @@ impl Fixture {
     let cache = BlockCache::open(config, wal.clone(), metrics);
 
     let pointer = table.free().alloc();
-    cache.alloc(pointer, &table)?.commit_with(|page| {
-      page.copy_from(&ORIGINAL, 0);
+    cache.alloc(pointer, &table)?.commit_with(|mut page| {
+      page.reborrow().copy_from(&ORIGINAL, 0);
       append(&wal, &table, pointer, page)
     })?;
     cache
@@ -86,8 +86,8 @@ impl Fixture {
 
   fn write(&self, data: &[u8], fail: bool) -> Result {
     let slot = self.cache.read(self.pointer, &self.table)?.for_write();
-    slot.commit_with(|page| {
-      page.copy_from(data, 0);
+    slot.commit_with(|mut page| {
+      page.reborrow().copy_from(data, 0);
       if fail {
         return Err(Error::Corrupted("injected failure"));
       }
@@ -97,7 +97,7 @@ impl Fixture {
 
   fn content(&self) -> Result<Vec<u8>> {
     let slot = self.cache.read(self.pointer, &self.table)?.for_read();
-    Ok(slot.as_ref().range(0..ORIGINAL.len()).to_vec())
+    Ok(slot.as_page().range(0..ORIGINAL.len()).to_vec())
   }
 
   fn flusher(&self) -> Result<CacheFlusher> {

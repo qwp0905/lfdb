@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
   BlockId, CachedBlock, DirtyTableRef, DirtyTables, EvictionGuard, MappingTable,
-  MappingToken, PendingDirty, PendingDiskWrite,
+  MappingToken, PendingDirty,
 };
 
 /**
@@ -65,10 +65,7 @@ impl BlockCacheCore {
     &self.cached_blocks[block_id]
   }
 
-  pub fn submit_eviction(
-    &self,
-    guard: &EvictionGuard,
-  ) -> Result<Option<PendingDiskWrite>> {
+  pub fn submit_eviction(&self, guard: &EvictionGuard) -> Result<Option<PendingIO>> {
     if !guard.is_evicted() {
       return Ok(None);
     }
@@ -82,7 +79,7 @@ impl BlockCacheCore {
 
   pub fn resolve_eviction(
     &self,
-    pending: Option<PendingDiskWrite>,
+    pending: Option<PendingIO>,
     guard: &EvictionGuard,
     new: PageRef<PAGE_SIZE>,
     pointer: Pointer,
@@ -96,7 +93,7 @@ impl BlockCacheCore {
     }
 
     if let Some(pending) = pending {
-      pending.finalize()?;
+      pending.wait_flatten()?;
       self.mark_dirty_table(block.handle());
       block.clear_dirty();
     }

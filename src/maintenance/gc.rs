@@ -193,7 +193,7 @@ impl GcWorker {
     let mut found = false;
     let mut need_trim = false;
     let slot = self.block_cache.read(ptr, table)?.for_read();
-    let entry = slot.as_ref().view::<DataEntryView>()?;
+    let entry = slot.as_page().view::<DataEntryView>()?;
 
     let mut iter = entry.get_versions();
     while let Some(record) = iter.try_next()? {
@@ -239,7 +239,7 @@ impl GcWorker {
 
     let mut max_found = None;
     let slot = self.block_cache.read(pointer, table)?.for_write();
-    let mut entry: DataEntry = slot.as_ref().deserialize()?;
+    let mut entry: DataEntry = slot.as_page().deserialize()?;
     let mut new_versions = VecDeque::new();
     let tail = entry.get_next();
 
@@ -283,7 +283,7 @@ impl GcWorker {
       .block_cache
       .read(pointer, table)?
       .for_read()
-      .as_ref()
+      .as_page()
       .view::<DataEntryView>()?
       .get_next();
     table.free().dealloc(pointer);
@@ -317,7 +317,7 @@ impl GcWorker {
       .block_cache
       .read(HEADER_POINTER, table)?
       .for_read()
-      .as_ref()
+      .as_page()
       .deserialize::<TreeHeader>()?
       .get_root();
 
@@ -325,7 +325,7 @@ impl GcWorker {
       .block_cache
       .read(ptr, table)?
       .for_read()
-      .as_ref()
+      .as_page()
       .view()?
     {
       ptr = node.first_child()?;
@@ -353,7 +353,7 @@ impl GcWorker {
       {
         let slot = self.block_cache.read(ptr, table)?.for_write();
 
-        let mut node = slot.as_ref().deserialize::<BTreeNode>()?;
+        let mut node = slot.as_page().deserialize::<BTreeNode>()?;
         let leaf = node.as_leaf_mut()?;
 
         for entry in leaf.entries_mut().filter(|e| candidates.remove(&e.key)) {
@@ -435,7 +435,7 @@ impl GcWorker {
         .block_cache
         .read(inner.pointer, &task.table)?
         .for_read();
-      let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+      let node = slot.as_page().view::<BTreeNodeView>()?.into_leaf()?;
       let mut iter = node.get_entries();
       while let Some(e) = iter.try_next()? {
         current.min_version = current.min_version.min(e.record.version);
@@ -465,7 +465,7 @@ impl GcWorker {
           continue;
         };
         if e.record.version < min_version {
-          release_candidates.insert(slot.as_ref().copy_range(e.range));
+          release_candidates.insert(slot.as_page().copy_range(e.range));
           continue;
         }
 

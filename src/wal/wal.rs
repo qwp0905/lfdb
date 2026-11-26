@@ -262,7 +262,7 @@ impl WriteAheadLog {
 
     let pointer = buffer.get_pointer() + 1;
     let mut new_page = self.allocator.allocate();
-    new_page.copy_from(remain, 0);
+    new_page.as_page_mut().copy_from(remain, 0);
 
     let new_buffer =
       LogBuffer::initialized(pointer, new_page, write_seq, overflow.get_len());

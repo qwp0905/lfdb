@@ -3,9 +3,9 @@ use std::ops::Range;
 use super::{BlockCacheCore, BlockId, BlockLatch, MappingToken};
 use crate::{
   disk::Pointer,
-  page::{Page, PageRef, VecRef, PAGE_SIZE},
+  page::{Page, PageMut, PageRef, VecRef, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{create_static_ref, SBox},
+  utils::{just_drop, SBox},
   wal::{DurabilityGuard, WriteSeq},
   Result,
 };
@@ -73,10 +73,8 @@ impl ReadonlySlot {
   pub fn create_ref(&self, range: Range<usize>) -> VecRef {
     VecRef::refed(self.page.clone(), range)
   }
-}
-impl AsRef<Page<PAGE_SIZE>> for ReadonlySlot {
-  fn as_ref(&self) -> &Page<PAGE_SIZE> {
-    &self.page
+  pub fn as_page(&self) -> Page<'_, PAGE_SIZE> {
+    self.page.as_page()
   }
 }
 
@@ -126,15 +124,16 @@ impl<'a> WritableSlot<'a> {
         mut latch, _token, ..
       } => {
         let mut shadow = self.core.allocate_page();
-        shadow.copy_from(data, 0);
+        shadow.as_page_mut().copy_from(data, 0);
         latch.apply(shadow, write_seq);
       }
       WriteTarget::Temp { mut page, table } => {
-        page.copy_from(data, 0);
-        let static_ref = unsafe { create_static_ref::<Page<PAGE_SIZE>>(&page) };
+        page.as_page_mut().copy_from(data, 0);
+        // SAFETY: the callback owns `page` until the write completes.
+        let static_ref = unsafe { page.as_page().into_static() };
         table
           .disk()
-          .write_async(self.pointer, static_ref)
+          .write_async_with(self.pointer, static_ref, just_drop(page))
           .wait_flatten()?;
         self.core.mark_dirty_table(&table);
       }
@@ -144,7 +143,7 @@ impl<'a> WritableSlot<'a> {
 
   pub fn commit_with<F>(self, f: F) -> Result
   where
-    F: FnOnce(&mut Page<PAGE_SIZE>) -> Result<DurabilityGuard<'a>>,
+    F: FnOnce(PageMut<PAGE_SIZE>) -> Result<DurabilityGuard<'a>>,
   {
     // The guard has to outlive the install. Once it drops, a checkpoint boundary can
     // pass this record, so a page that is not dirty by then would be left out of
@@ -154,29 +153,29 @@ impl<'a> WritableSlot<'a> {
         mut latch, _token, ..
       } => {
         let mut shadow = self.core.allocate_page();
-        let guard = f(&mut shadow)?;
+        let guard = f(shadow.as_page_mut())?;
         latch.apply(shadow, guard.get_write_seq());
         Ok(())
       }
       WriteTarget::Temp { mut page, table } => {
-        let guard = f(&mut page)?;
+        let guard = f(page.as_page_mut())?;
         self.core.ensure_durability(guard.get_write_seq())?;
-        let static_ref = unsafe { create_static_ref::<Page<PAGE_SIZE>>(&page) };
+        // SAFETY: the callback owns `page` until the write completes.
+        let static_ref = unsafe { page.as_page().into_static() };
         table
           .disk()
-          .write_async(self.pointer, static_ref)
+          .write_async_with(self.pointer, static_ref, just_drop(page))
           .wait_flatten()?;
         self.core.mark_dirty_table(&table);
         Ok(())
       }
     }
   }
-}
-impl<'a> AsRef<Page<PAGE_SIZE>> for WritableSlot<'a> {
-  fn as_ref(&self) -> &Page<PAGE_SIZE> {
+
+  pub fn as_page(&self) -> Page<'_, PAGE_SIZE> {
     match &self.target {
-      WriteTarget::Cached { page, .. } => page,
-      WriteTarget::Temp { page, .. } => page,
+      WriteTarget::Cached { page, .. } => page.as_page(),
+      WriteTarget::Temp { page, .. } => page.as_page(),
     }
   }
 }

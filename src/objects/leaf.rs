@@ -255,7 +255,7 @@ pub enum NodeFindResult {
  */
 #[derive(Debug)]
 pub struct LeafNodeView<'a> {
-  page: &'a Page,
+  page: Page<'a>,
   offset: usize,
   len: usize,
   bias: SplitBias,
@@ -263,7 +263,7 @@ pub struct LeafNodeView<'a> {
 }
 impl<'a> LeafNodeView<'a> {
   const fn new(
-    page: &'a Page,
+    page: Page<'a>,
     offset: usize,
     len: usize,
     next: Option<(Pointer, Range<usize>)>,
@@ -277,7 +277,7 @@ impl<'a> LeafNodeView<'a> {
       bias,
     }
   }
-  pub fn from_scanner(page: &'a Page, scanner: &mut PageScanner<'a>) -> Result<Self> {
+  pub fn from_scanner(page: Page<'a>, scanner: &mut PageScanner<'a>) -> Result<Self> {
     let mut next = None;
     if scanner.read()? == 1 {
       let ptr = scanner.read_u64()?;
@@ -407,7 +407,7 @@ impl LeafEntryView {
  */
 pub struct LeafNodeIter<'a> {
   scanner: PageScanner<'a>,
-  page: &'a Page,
+  page: Page<'a>,
   start: &'a Bound<StaticKey>,
   end: &'a Bound<StaticKey>,
   pos: usize,

@@ -30,7 +30,7 @@ impl DataEntry {
     Self { next, versions }
   }
 
-  pub fn take_versions<'a>(&'a mut self) -> impl Iterator<Item = VersionRecord> + 'a {
+  pub fn take_versions(&mut self) -> impl Iterator<Item = VersionRecord> + '_ {
     self.versions.drain(..)
   }
   pub fn set_versions(&mut self, new_versions: VecDeque<VersionRecord>) {
@@ -96,7 +96,7 @@ impl Deserializable for DataEntry {
  * when the page contents need to be materialized for mutation and serialization.
  */
 pub struct DataEntryView<'a> {
-  page: &'a Page,
+  page: Page<'a>,
   next: Option<Pointer>,
   offset: usize,
   len: usize,
@@ -138,7 +138,7 @@ impl<'a> TypedObject for DataEntryView<'a> {
   const TYPE: SerializeType = DataEntry::TYPE;
 }
 impl<'a> Viewable<'a> for DataEntryView<'a> {
-  fn read_from(page: &'a Page, scanner: &mut PageScanner<'a>) -> crate::Result<Self> {
+  fn read_from(page: Page<'a>, scanner: &mut PageScanner<'a>) -> crate::Result<Self> {
     let next = scanner.read_u64()?;
     let len = scanner.read_u16()? as usize;
     let offset = scanner.advance(0)?;

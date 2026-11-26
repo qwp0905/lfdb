@@ -159,7 +159,7 @@ impl VersionRecordView {
     }
   }
 
-  pub fn into_owned_with(self, page: &Page) -> VersionRecord {
+  pub fn into_owned_with(self, page: Page) -> VersionRecord {
     VersionRecord::new(
       self.owner,
       self.version,

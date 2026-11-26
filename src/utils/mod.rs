@@ -44,3 +44,6 @@ mod batch;
 pub use batch::*;
 
 pub mod loom;
+
+mod drop;
+pub use drop::*;

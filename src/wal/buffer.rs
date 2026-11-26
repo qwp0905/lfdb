@@ -182,7 +182,8 @@ impl LogBuffer {
     self.write_seq_offset
   }
   pub fn append_at(&self, record: &[u8], ticket: &AppendTicket) {
-    unsafe { self.entry.copy_from_unchecked(record, ticket.get_offset()) };
+    let page = self.entry.as_page();
+    unsafe { page.copy_from_unchecked(record, ticket.get_offset()) };
     self.append_completion.complete(ticket.get_order());
   }
 
@@ -211,11 +212,15 @@ impl LogBuffer {
       }
       self.max_offset.set(max_offset);
 
-      page.copy_from(self.entry.range(0..max_offset), 0);
+      page
+        .as_page_mut()
+        .copy_from(self.entry.as_page().range(0..max_offset), 0);
 
+      // SAFETY: the callback owns `page` until the write completes.
+      let static_ref = unsafe { page.as_page().into_static() };
       upstream
         .segment
-        .submit_write(self.pointer, page, create_cb(waiting));
+        .submit_write(self.pointer, static_ref, create_cb(waiting, page));
       let Some(next) = occupied.release() else {
         return batched;
       };
@@ -241,8 +246,10 @@ impl LogBuffer {
 
 const fn create_cb(
   waiting: Vec<TaskFulfiller<io::Result<()>>>,
+  page: PageRef<WAL_BLOCK_SIZE>,
 ) -> impl FnOnce(io::Result<()>) {
   move |result| {
+    drop(page);
     let result = result.map_err(|err| err.kind());
     for done in waiting {
       done.fulfill(result.map_err(io::Error::from));

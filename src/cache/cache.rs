@@ -2,11 +2,11 @@ use std::{collections::VecDeque, sync::Arc};
 
 use super::{
   Acquired, BlockCacheCore, BlockId, CachedBlock, CachedSlot, DirtyTables, EvictionGuard,
-  MappingTable, PendingDiskWrite, WritableSlot,
+  MappingTable, WritableSlot,
 };
 use crate::{
   background::Select,
-  disk::Pointer,
+  disk::{PendingIO, Pointer},
   metrics::{measure, MetricsRegistry},
   page::{PageAllocator, PageRef, PAGE_SIZE},
   table::TableHandleRef,
@@ -92,7 +92,7 @@ impl BlockCache {
 
   fn resolve_eviction<'a>(
     &'a self,
-    pending: Option<PendingDiskWrite>,
+    pending: Option<PendingIO>,
     guard: EvictionGuard<'a>,
     new: PageRef<PAGE_SIZE>,
     pointer: Pointer,
@@ -120,7 +120,7 @@ impl BlockCache {
 
     let pending = self.core.submit_eviction(&guard)?;
     let mut new = self.core.acquire_page_with(&guard);
-    handle.disk().read(pointer, &mut new)?;
+    handle.disk().read(pointer, new.as_page_mut())?;
     self.resolve_eviction(pending, guard, new, pointer, handle.clone())
   }
 

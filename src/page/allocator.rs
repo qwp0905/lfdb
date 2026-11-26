@@ -1,13 +1,8 @@
-use std::{
-  alloc::Layout,
-  mem::ManuallyDrop,
-  ops::{Deref, DerefMut},
-  sync::Arc,
-};
+use std::{alloc::Layout, mem::ManuallyDrop, sync::Arc};
 
 use crossbeam::{queue::ArrayQueue, utils::Backoff};
 
-use super::{HeapBuffer, Page, ALIGN};
+use super::{HeapBuffer, Page, PageMut, ALIGN};
 
 struct GlobalQueue<const N: usize>(ManuallyDrop<ArrayQueue<HeapBuffer>>);
 impl<const N: usize> GlobalQueue<N> {
@@ -31,34 +26,30 @@ impl<const N: usize> Drop for GlobalQueue<N> {
   }
 }
 pub struct PageRef<const N: usize> {
-  page: Page<N>,
+  buf: HeapBuffer,
   global: Arc<GlobalQueue<N>>,
 }
 impl<const N: usize> PageRef<N> {
   const fn new(buf: HeapBuffer, global: Arc<GlobalQueue<N>>) -> Self {
-    Self {
-      page: Page::new(buf.as_raw()),
-      global,
-    }
+    Self { buf, global }
+  }
+
+  pub const fn as_page(&self) -> Page<'_, N> {
+    unsafe { Page::new(self.buf.as_raw()) }
+  }
+  pub const fn as_page_mut(&mut self) -> PageMut<'_, N> {
+    unsafe { PageMut::new(self.buf.as_raw()) }
   }
 }
 impl<const N: usize> Drop for PageRef<N> {
   fn drop(&mut self) {
-    let buf = unsafe { HeapBuffer::from_raw(self.page.as_ptr()) };
-    self.global.store(buf);
+    self.global.store(self.buf);
   }
 }
-impl<const N: usize> Deref for PageRef<N> {
-  type Target = Page<N>;
-  fn deref(&self) -> &Self::Target {
-    &self.page
-  }
-}
-impl<const N: usize> DerefMut for PageRef<N> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.page
-  }
-}
+/**
+ * SAFETY: shared access only creates read-only views; writing needs `&mut self`.
+ */
+unsafe impl<const N: usize> Sync for PageRef<N> {}
 
 pub struct PageAllocator<const N: usize> {
   global: Arc<GlobalQueue<N>>,

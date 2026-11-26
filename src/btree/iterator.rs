@@ -79,7 +79,7 @@ impl<Policy: ReadonlyPolicy> BTreeIterCore<Policy> {
     let mut ptr = self.get_root()?;
     loop {
       let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
-      let BTreeNodeView::Internal(node) = slot.as_ref().view::<BTreeNodeView>()? else {
+      let BTreeNodeView::Internal(node) = slot.as_page().view::<BTreeNodeView>()? else {
         return Ok(ptr);
       };
       ptr = match start {
@@ -97,7 +97,7 @@ impl<Policy: ReadonlyPolicy> BTreeIterCore<Policy> {
     buffered: &mut VecDeque<BufferedEntry>,
   ) -> Result<Option<Pointer>> {
     let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
-    let node = slot.as_ref().view::<BTreeNodeView>()?.into_leaf()?;
+    let node = slot.as_page().view::<BTreeNodeView>()?.into_leaf()?;
 
     let mut iter = node.range_entries(start, end);
     while let Some(e) = iter.try_next()? {
@@ -137,7 +137,7 @@ impl<Policy: ReadonlyPolicy> BTreeIterCore<Policy> {
 
       let node = frame
         .slot
-        .as_ref()
+        .as_page()
         .view::<BTreeNodeView>()?
         .into_internal()?;
       let ptr = node.nth_child(frame.pos)?;
@@ -155,7 +155,7 @@ impl<Policy: ReadonlyPolicy> BTreeIterCore<Policy> {
     let mut upper = None;
     loop {
       let slot = self.policy.fetch_slot(ptr, &self.table)?.for_read();
-      match slot.as_ref().view::<BTreeNodeView>()? {
+      match slot.as_page().view::<BTreeNodeView>()? {
         BTreeNodeView::Internal(node) => {
           let (pos, p) = match end {
             Bound::Included(k) => match node.find_pos(k)? {
