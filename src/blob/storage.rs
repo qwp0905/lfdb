@@ -133,43 +133,50 @@ impl BlobStorage {
 
   fn try_append(
     &self,
-    buf: &AlignedBuf,
-    permit: &mut Option<Permit<'_>>,
-  ) -> Result<Option<BlobAppendGuard<'_>>> {
+    buf: AlignedBuf,
+    permit: Option<Permit<'_>>,
+  ) -> std::result::Result<Result<BlobAppendGuard<'_>>, AlignedBuf> {
     let size = buf.size() as BlobOffset;
+    let len = buf.len() as BlobLen;
     for handle in self.writable_handles() {
       let (offset, sealing) = match handle.reserve(size) {
         BlobReserved::Ok(offset) => (offset, None),
         BlobReserved::Last(offset) => (offset, Some((handle.clone(), self))),
         BlobReserved::Eof => continue,
       };
-      drop(permit.take());
-      handle.write(buf, offset)?;
+      drop(permit);
       // Blob payloads are outside the WAL durability boundary. Sync the blob bytes
       // before returning a reference that may be persisted into the tree.
-      handle.sync().wait_flatten()?;
-      return Ok(Some(BlobAppendGuard::new(
+      if let Err(err) = handle
+        .write(buf, offset)
+        .and_then(|_| handle.sync().wait_flatten())
+      {
+        return Ok(Err(err));
+      }
+      return Ok(Ok(BlobAppendGuard::new(
         handle.metadata().get_id(),
         offset,
-        buf.len() as BlobLen,
+        len,
         sealing,
       )));
     }
-    Ok(None)
+    Err(buf)
   }
 
   pub fn append(&self, buf: Vec<u8>) -> Result<BlobAppendGuard<'_>> {
-    let buf = AlignedBuf::from_vec(buf);
+    let mut buf = AlignedBuf::from_vec(buf);
     loop {
-      if let Some(guard) = self.try_append(&buf, &mut None)? {
-        return Ok(guard);
+      match self.try_append(buf, None) {
+        Ok(result) => return result,
+        Err(err) => buf = err,
       }
 
       // Only creating a segment is gated, so the reservation is retried once the
       // permit is held in case another appender has already created one.
-      let mut permit = Some(self.append_gate.acquire());
-      if let Some(guard) = self.try_append(&buf, &mut permit)? {
-        return Ok(guard);
+      let permit = Some(self.append_gate.acquire());
+      match self.try_append(buf, permit) {
+        Ok(result) => return result,
+        Err(err) => buf = err,
       }
 
       let (new, pending) = self.open_new_handle()?;

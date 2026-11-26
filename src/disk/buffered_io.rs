@@ -3,7 +3,7 @@ use std::{io, path::PathBuf, sync::Arc};
 use super::{DirHandle, IOBackend, IO_RETRY};
 use crate::{
   error::Result,
-  page::{AlignedArray, ALIGN},
+  page::{AlignedArray, AlignedBuf, ALIGN},
   utils::create_static_ref,
   Error,
 };
@@ -17,15 +17,15 @@ use crate::{
  */
 pub struct AppendIOHandle {
   file: Box<dyn IOBackend>,
-  buffer: AlignedArray,
+  buffer: Option<AlignedBuf>,
   buffer_offset: usize,
   file_offset: u64,
 }
 impl AppendIOHandle {
-  pub const fn new(file: Box<dyn IOBackend>) -> Self {
+  pub fn new(file: Box<dyn IOBackend>) -> Self {
     Self {
       file,
-      buffer: AlignedArray::new(),
+      buffer: Some(AlignedBuf::new(ALIGN)),
       buffer_offset: 0,
       file_offset: 0,
     }
@@ -41,22 +41,26 @@ impl AppendIOHandle {
 
       let end = (self.buffer_offset + buf.len()).min(ALIGN);
       let bytes = end - self.buffer_offset;
-      self.buffer[self.buffer_offset..end].copy_from_slice(&buf[..bytes]);
+      self.buffer.as_mut().unwrap().as_mut_slice()[self.buffer_offset..end]
+        .copy_from_slice(&buf[..bytes]);
       self.buffer_offset = end;
       buf = &buf[bytes..];
     }
     Ok(())
   }
   fn flush_buf(&mut self) -> Result {
-    let static_ref = unsafe { create_static_ref::<[u8]>(&*self.buffer) };
     for _ in 0..IO_RETRY {
-      let bytes = self
+      let buffer = self.buffer.take().unwrap();
+      let len = buffer.len();
+      // SAFETY: the callback owns `buffer` until the write completes.
+      let static_ref = unsafe { create_static_ref::<[u8]>(buffer.as_slice()) };
+      let (result, buffer) = self
         .file
-        .pwrite(static_ref, self.file_offset)
+        .pwrite_with(static_ref, self.file_offset, move |result| (result, buffer))
         .wait()
-        .unwrap()
-        .map_err(Error::IO)?;
-      if bytes == self.buffer.len() {
+        .unwrap();
+      self.buffer = Some(buffer);
+      if result.map_err(Error::IO)? == len {
         return Ok(());
       }
     }

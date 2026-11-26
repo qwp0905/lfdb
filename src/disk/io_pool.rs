@@ -14,7 +14,7 @@ use super::{
 use crate::{
   background::{AsyncTask, TryWaitError},
   metrics::{measure, MetricsRegistry},
-  utils::{error, ShortenedMutex},
+  utils::{error, just_drop, ShortenedMutex},
   Error, Result,
 };
 
@@ -124,8 +124,8 @@ impl IOPool {
   {
     // Direct IO bypasses the OS page cache for predictable latency.
     // To compensate for the lack of OS write buffering, writes are
-    // accumulated and sorted in the eager_buffering layer, then
-    // flushed as a single pwritev call per contiguous block.
+    // accumulated and sorted in the IO scheduler, then flushed as a
+    // single pwritev call per contiguous range.
     let flags = OpenFlags::full();
     let metrics = self.metrics.clone();
     let base_dir = self.base_dir.clone();
@@ -277,11 +277,7 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let callback = move |result: io::Result<()>| {
-      drop(pin);
-      result
-    };
-    let done = self.scheduler.backend().fsync_with(callback);
+    let done = self.scheduler.backend().fsync_with(just_drop(pin));
     PendingIO::Scheduled(done)
   }
 
@@ -289,14 +285,10 @@ impl IOHandle {
     let Some(pin) = self.scheduler.try_pin_owned() else {
       return PendingIO::Fulfilled(Ok(()));
     };
-    let callback = move |result: io::Result<()>| {
-      drop(pin);
-      result
-    };
     let done = self
       .scheduler
       .backend()
-      .fallocate_with(offset, len, callback);
+      .fallocate_with(offset, len, just_drop(pin));
     PendingIO::Scheduled(done)
   }
 

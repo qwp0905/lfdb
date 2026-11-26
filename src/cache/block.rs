@@ -7,9 +7,9 @@ use std::{
 use crate::{
   background::TryWaitError,
   disk::{PendingIO, Pointer},
-  page::{Page, PageRef, PAGE_SIZE},
+  page::{PageRef, PAGE_SIZE},
   table::TableHandleRef,
-  utils::{create_static_ref, SBox, ShortenedMutex, ShortenedRwLock},
+  utils::{just_drop, SBox, ShortenedMutex, ShortenedRwLock},
   wal::{AtomicWriteSeq, WriteSeq},
   Error, Result,
 };
@@ -29,48 +29,6 @@ impl<'a> BlockLatch<'a> {
   pub fn apply(&mut self, page: PageRef<PAGE_SIZE>, write_seq: WriteSeq) {
     self.metadata.store_page(page);
     self.dirty.store(write_seq, Ordering::Relaxed);
-  }
-}
-
-struct PendingDiskWriteInner {
-  pending: PendingIO,
-  page: SBox<PageRef<PAGE_SIZE>>,
-}
-impl PendingDiskWriteInner {
-  const fn new(pending: PendingIO, page: SBox<PageRef<PAGE_SIZE>>) -> Self {
-    Self { pending, page }
-  }
-}
-
-pub struct PendingDiskWrite(ManuallyDrop<PendingDiskWriteInner>);
-impl PendingDiskWrite {
-  const fn new(pending: PendingIO, page: SBox<PageRef<PAGE_SIZE>>) -> Self {
-    Self(ManuallyDrop::new(PendingDiskWriteInner::new(pending, page)))
-  }
-  pub fn finalize(self) -> Result {
-    let mut this = ManuallyDrop::new(self);
-    let inner = unsafe { ManuallyDrop::take(&mut this.0) };
-    inner.pending.wait_flatten()
-  }
-
-  pub fn try_finalize(self) -> std::result::Result<Result, TryWaitError<Self>> {
-    let mut this = ManuallyDrop::new(self);
-    let inner = unsafe { ManuallyDrop::take(&mut this.0) };
-    inner
-      .pending
-      .try_wait()
-      .map(|v| v.map_err(Error::IO))
-      .map_err(|err| err.map_empty(|pending| Self::new(pending, inner.page)))
-  }
-
-  pub fn try_park(&self) -> bool {
-    self.0.pending.try_park()
-  }
-}
-impl Drop for PendingDiskWrite {
-  fn drop(&mut self) {
-    let inner = unsafe { ManuallyDrop::take(&mut self.0) };
-    let _ = inner.pending.wait();
   }
 }
 
@@ -117,25 +75,15 @@ impl<'a> Drop for DirtySnapshot<'a> {
 }
 
 pub struct PendingDirty<'a> {
-  pending: ManuallyDrop<PendingDiskWrite>,
+  pending: ManuallyDrop<PendingIO>,
   block: &'a CachedBlock,
   write_seq: WriteSeq,
 }
 impl<'a> PendingDirty<'a> {
-  pub fn finalize(self) -> Result {
-    let mut this = ManuallyDrop::new(self);
-    let pending = unsafe { ManuallyDrop::take(&mut this.pending) };
-    let Err(err) = pending.finalize() else {
-      return Ok(());
-    };
-    this.block.rollback_dirty(this.write_seq);
-    Err(err)
-  }
-
   pub fn try_finalize(self) -> std::result::Result<Result, TryWaitError<Self>> {
     let mut this = ManuallyDrop::new(self);
     let pending = unsafe { ManuallyDrop::take(&mut this.pending) };
-    let result = match pending.try_finalize() {
+    let result = match pending.try_wait() {
       Ok(result) => result,
       Err(TryWaitError::Disconnected) => {
         this.block.rollback_dirty(this.write_seq);
@@ -153,7 +101,7 @@ impl<'a> PendingDirty<'a> {
       return Ok(Ok(()));
     };
     this.block.rollback_dirty(this.write_seq);
-    Ok(Err(err))
+    Ok(Err(Error::IO(err)))
   }
 
   pub fn try_park(&self) -> bool {
@@ -233,19 +181,15 @@ impl CachedBlock {
     unsafe { &self.metadata_ref().handle }
   }
 
-  fn submit_page(&self, page: SBox<PageRef<PAGE_SIZE>>) -> PendingDiskWrite {
+  fn submit_page(&self, page: SBox<PageRef<PAGE_SIZE>>) -> PendingIO {
     let metadata = unsafe { self.metadata_ref() };
-    // SAFETY: `write_async` needs a `'static` page because the IO worker may run
-    // after this function returns. `PendingDiskWrite` keeps an `SBox` clone of the
-    // loaded page, and `finalize(self)` waits for the async write before that clone
-    // is dropped. Therefore the submitted page remains alive until the worker is
-    // done with the slice.
-    let static_ref = unsafe { create_static_ref::<Page>(&**page) };
-    let pending = metadata
+    // SAFETY: the callback owns `page` until the write completes, so the view stays
+    // valid for as long as the IO worker reads it.
+    let static_ref = unsafe { page.as_page().into_static() };
+    metadata
       .handle
       .disk()
-      .write_async(metadata.pointer, static_ref);
-    PendingDiskWrite::new(pending, page)
+      .write_async_with(metadata.pointer, static_ref, just_drop(page))
   }
 
   pub fn flush_dirty(&self, boundary: WriteSeq) -> Option<DirtySnapshot<'_>> {
@@ -262,7 +206,7 @@ impl CachedBlock {
   /**
    * Write the current page to disk.
    */
-  pub fn submit_flush(&self) -> PendingDiskWrite {
+  pub fn submit_flush(&self) -> PendingIO {
     let page = self.load_page();
     self.submit_page(page)
   }

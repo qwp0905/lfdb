@@ -1,14 +1,19 @@
+use std::io;
+
 use super::{IOHandle, PendingIO, Pointer};
-use crate::{error::Result, page::Page, Error};
+use crate::{
+  error::Result,
+  page::{Page, PageMut},
+  Error,
+};
 
 /**
  * Block-addressed wrapper around `IOHandle`.
  *
  * `IOHandle` works with byte offsets and `std::io::Error`. This wrapper maps a
  * logical block pointer to a byte offset (`pointer * N`) and converts IO errors
- * into the engine error type. Its synchronous `write` method also closes the
- * lifetime gap around the async write path by waiting before the borrowed page
- * can go out of scope.
+ * into the engine error type. Writes take a `'static` page view; the caller that
+ * owns the buffer keeps it alive in the completion callback.
  */
 pub struct BlockIOHandle<const N: usize> {
   handle: IOHandle,
@@ -27,23 +32,26 @@ impl<const N: usize> BlockIOHandle<N> {
     Self { handle }
   }
 
-  pub fn read(&self, pointer: Pointer, page: &mut Page<N>) -> Result {
+  pub fn read(&self, pointer: Pointer, page: PageMut<N>) -> Result {
     self
       .handle
-      .read(page.as_mut_slice(), Self::cvt(pointer))
+      .read(page.into_mut_slice(), Self::cvt(pointer))
       .map_err(Error::IO)
   }
 
-  /**
-   * Submit an asynchronous block write.
-   *
-   * The page must remain valid until the returned `AsyncIO` completes. Callers
-   * that cannot provide that lifetime should use `write`, which waits before
-   * returning.
-   */
-  pub fn write_async(&self, pointer: Pointer, page: &'static Page<N>) -> PendingIO {
+  pub fn write_async_with<
+    T: Send + 'static,
+    F: FnOnce(io::Result<()>) -> T + Send + 'static,
+  >(
+    &self,
+    pointer: Pointer,
+    page: Page<'static, N>,
+    callback: F,
+  ) -> PendingIO<T> {
     let slice = page.as_slice();
-    self.handle.write_async(slice, Self::cvt(pointer))
+    self
+      .handle
+      .write_async_with(slice, Self::cvt(pointer), callback)
   }
 
   #[inline]
