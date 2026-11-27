@@ -7,7 +7,7 @@
 pub use crossbeam::utils::Backoff;
 #[cfg(not(loom))]
 pub use std::sync::atomic::{
-  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize,
+  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize,
 };
 #[cfg(not(loom))]
 pub use std::{thread, thread_local};
@@ -16,7 +16,7 @@ pub use std::{thread, thread_local};
 pub use ::loom::cell::UnsafeCell;
 #[cfg(loom)]
 pub use ::loom::sync::atomic::{
-  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize,
+  fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize,
 };
 #[cfg(loom)]
 pub use ::loom::{thread, thread_local};

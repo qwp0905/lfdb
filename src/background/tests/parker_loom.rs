@@ -13,9 +13,11 @@ use super::*;
 /**
  * Weakest queue the parker may rely on: a pop that returns a value synchronizes
  * with its push, while a pop that finds nothing synchronizes with nobody.
+ * Both returned handles keep the entry alive, as the pusher's share and the
+ * pop guard do in `MsQueue`.
  */
 struct WeakQueue<T> {
-  items: Mutex<VecDeque<T>>,
+  items: Mutex<VecDeque<Arc<T>>>,
   len: AtomicUsize,
 }
 impl<T> Default for WeakQueue<T> {
@@ -27,13 +29,24 @@ impl<T> Default for WeakQueue<T> {
   }
 }
 impl<T> WakerQueue<T> for WeakQueue<T> {
-  fn push(&self, value: T) {
+  type PushRef<'a>
+    = Arc<T>
+  where
+    Self: 'a;
+  type PopRef<'a>
+    = Arc<T>
+  where
+    Self: 'a;
+
+  fn push(&self, value: T) -> Self::PushRef<'_> {
+    let value = Arc::new(value);
     let mut items = self.items.lock().unwrap();
-    items.push_back(value);
+    items.push_back(value.clone());
     self.len.fetch_add(1, Ordering::Relaxed);
+    value
   }
 
-  fn pop(&self) -> Option<T> {
+  fn pop(&self) -> Option<Self::PopRef<'_>> {
     if self.len.load(Ordering::Relaxed) == 0 {
       return None;
     }
@@ -44,7 +57,7 @@ impl<T> WakerQueue<T> for WeakQueue<T> {
   }
 }
 
-type Parker = ThreadParker<WeakQueue<SBox<Waker>>>;
+type Parker = ThreadParker<WeakQueue<Waker>>;
 
 fn model(f: impl Fn() + Sync + Send + 'static) {
   let mut builder = loom::model::Builder::new();
